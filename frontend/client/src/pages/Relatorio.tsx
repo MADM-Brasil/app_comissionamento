@@ -73,34 +73,56 @@ function getWeekNumber(date: Date): string {
   return `${date.getFullYear()}-S${week}`;
 }
 
+/**
+ * Retorna o intervalo de datas padrão com base na granularidade:
+ * - daily   → semana atual (segunda a domingo)
+ * - weekly  → mês atual
+ * - monthly → últimos 12 meses
+ */
 function getDefaultDateRange(granularity: Granularity): { start: string; end: string } {
   const today = new Date();
-  const y = today.getFullYear();
-  const m = today.getMonth();
-  let start: Date, end: Date;
+  let start: Date, end: Date = new Date(today);
+  end.setHours(23, 59, 59, 999);
 
   switch (granularity) {
-    case "daily":
-      start = new Date(y, m, 1);
+    case "daily": {
+      // Semana atual (segunda a domingo)
+      const day = today.getDay();
+      const diff = day === 0 ? -6 : 1 - day; // se domingo (0), vai para segunda (-6)
+      start = new Date(today);
+      start.setDate(today.getDate() + diff);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(start);
+      end.setDate(start.getDate() + 6);
+      end.setHours(23, 59, 59, 999);
+      break;
+    }
+    case "weekly": {
+      // Mês atual (primeiro ao último dia)
+      start = new Date(today.getFullYear(), today.getMonth(), 1);
+      end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+      end.setHours(23, 59, 59, 999);
+      break;
+    }
+    case "monthly": {
+      // Últimos 12 meses (a partir do primeiro dia do mês atual, 12 meses atrás)
+      start = new Date(today.getFullYear() - 1, today.getMonth(), 1);
       end = today;
       break;
-    case "weekly":
-      start = new Date(y, m - 2, 1);
+    }
+    default: {
+      start = new Date(today.getFullYear(), 0, 1);
       end = today;
-      break;
-    case "monthly":
-      start = new Date(y, 0, 1);
-      end = today;
-      break;
-    default:
-      start = new Date(y, 0, 1);
-      end = today;
+    }
   }
 
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
   return { start: fmt(start), end: fmt(end) };
 }
 
+/**
+ * Agrupa dados diários em semanais ou mensais.
+ */
 function aggregateDailyData(
   dailyData: { date: string; [key: string]: any }[],
   granularity: Granularity
@@ -144,7 +166,7 @@ export default function Relatorio() {
     if (!hasPermission("canAccessReports")) navigate("/");
   }, [hasPermission, navigate]);
 
-  // Granularidade padrão = DIÁRIO
+  // ===== ESTADOS =====
   const [granularity, setGranularity] = useState<Granularity>("daily");
   const [selectedMetrics, setSelectedMetrics] = useState<MetricKey[]>(["emitidos", "assinados", "ganhos"]);
   const [metaPeriodType, setMetaPeriodType] = useState<MetaPeriodType>("daily");
@@ -152,8 +174,10 @@ export default function Relatorio() {
     equipe: string; colaborador: string; colaboradorId?: number; produto: string;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
-  const [startDate, setStartDate] = useState(() => getDefaultDateRange("daily").start);
-  const [endDate, setEndDate] = useState(() => getDefaultDateRange("daily").end);
+  // Datas – inicializadas conforme a granularidade
+  const defaultRange = getDefaultDateRange("daily");
+  const [startDate, setStartDate] = useState(defaultRange.start);
+  const [endDate, setEndDate] = useState(defaultRange.end);
   const [manuallySetDates, setManuallySetDates] = useState(false);
 
   const [rawDailyData, setRawDailyData] = useState<Record<MetricKey, MetricDataPoint[]>>({
@@ -170,7 +194,7 @@ export default function Relatorio() {
   const lastDatesRef = useRef({ start: startDate, end: endDate });
 
   // ============================================================
-  // CARREGA COLABORADORES (com grupos e equipes)
+  // CARREGA COLABORADORES
   // ============================================================
   const [collaborators, setCollaboratorsLocal] = useState<any[]>([]);
   useEffect(() => {
@@ -181,9 +205,6 @@ export default function Relatorio() {
       .catch(err => console.error("Erro ao carregar colaboradores:", err));
   }, [startDate]);
 
-  // ============================================================
-  // FILTRO DE COLABORADORES (exclui grupos e equipes indesejadas)
-  // ============================================================
   const validCollaboratorNames = useMemo(() => {
     return collaborators
       .filter(c => !isExcludedGroup(c.grupo) && !isExcludedTeam(c.equipeNome))
@@ -191,7 +212,7 @@ export default function Relatorio() {
   }, [collaborators]);
 
   // ============================================================
-  // REQUISIÇÃO de métricas (dados brutos) + FILTRAGEM
+  // REQUISIÇÃO DE MÉTRICAS
   // ============================================================
   const fetchData = useCallback(async () => {
     if (!startDate || !endDate) return;
@@ -228,7 +249,6 @@ export default function Relatorio() {
         fetchMetric("emitidos"), fetchMetric("assinados"), fetchMetric("protocolados"), fetchMetric("ganhos"), fetchMetric("perdidos"),
       ]);
 
-      // Filtra os pontos de dados cujo colaborador não está na lista de válidos
       const filterByValidColabs = (data: MetricDataPoint[]) =>
         data.filter(point => !point.colaborador || validCollaboratorNames.includes(point.colaborador));
 
@@ -247,7 +267,7 @@ export default function Relatorio() {
     }
   }, [startDate, endDate, filters, validCollaboratorNames]);
 
-  // Carregamento inicial e quando filtros/datas mudarem
+  // ===== ATUALIZAÇÃO QUANDO FILTROS/DATAS MUDAM =====
   useEffect(() => {
     if (!startDate || !endDate) return;
 
@@ -269,7 +289,7 @@ export default function Relatorio() {
     });
   }, [startDate, endDate, filters, fetchData]);
 
-  // ========== ATUALIZAÇÃO PERIÓDICA (polling a cada 60 segundos) ==========
+  // ===== POLLING A CADA 60s =====
   useEffect(() => {
     if (!initialLoadDone.current || !startDate || !endDate) return;
 
@@ -288,14 +308,11 @@ export default function Relatorio() {
     };
 
     const intervalId = setInterval(refresh, 60000);
-
-    return () => {
-      clearInterval(intervalId);
-    };
+    return () => clearInterval(intervalId);
   }, [startDate, endDate, fetchData, refreshing]);
 
   // ============================================================
-  // AGREGAÇÃO DIÁRIA (dados limpos)
+  // AGREGAÇÃO E CÁLCULOS
   // ============================================================
   const dailyAggregated = useMemo(() => {
     const dateMap = new Map<string, Record<MetricKey, number>>();
@@ -314,9 +331,6 @@ export default function Relatorio() {
 
   const chartData = useMemo(() => aggregateDailyData(dailyAggregated, granularity), [dailyAggregated, granularity]);
 
-  // ============================================================
-  // TOTAIS (apenas métricas selecionadas)
-  // ============================================================
   const totals = useMemo(() => {
     const result: Partial<Record<MetricKey, number>> = {};
     for (const metric of selectedMetrics) {
@@ -325,21 +339,6 @@ export default function Relatorio() {
     return result;
   }, [chartData, selectedMetrics]);
 
-  // ============================================================
-  // PERÍODOS DENTRO DO INTERVALO
-  // ============================================================
-  const periodCounts = useMemo(() => {
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    const days = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-    const weeks = days / 7;
-    const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth()) + 1;
-    return { days, weeks, months };
-  }, [startDate, endDate]);
-
-  // ============================================================
-  // METAS TOTAIS (usando pesos individuais dos colaboradores válidos)
-  // ============================================================
   const pesoAssKey = metaPeriodType === 'daily' ? 'metaDiarioAssinados'
     : metaPeriodType === 'weekly' ? 'metaSemanalAssinados'
     : 'metaMensalAssinados';
@@ -360,9 +359,6 @@ export default function Relatorio() {
       .reduce((sum, c) => sum + (Number(c[pesoGanKey]) || 0), 0);
   }, [collaborators, validCollaboratorNames, pesoGanKey, isSpecialProduct]);
 
-  // ============================================================
-  // CÁLCULO DE METAS BATIDAS (por colaborador, apenas assessores)
-  // ============================================================
   const totalMetasBatidas = useMemo(() => {
     const colabTotals = new Map<string, { assinados: number; ganhos: number }>();
     rawDailyData.assinados.forEach(item => {
@@ -463,19 +459,40 @@ export default function Relatorio() {
     if (startDate === endDate && granularity !== "daily") setGranularity("daily");
   }, [startDate, endDate, granularity]);
 
+  // ===== QUANDO A GRANULARIDADE MUDA, RESETA AS DATAS (SE NÃO FOR MANUAL) =====
   const handleGranularityChange = (newGranularity: Granularity) => {
     setGranularity(newGranularity);
     if (!manuallySetDates) {
       const { start, end } = getDefaultDateRange(newGranularity);
       setStartDate(start);
       setEndDate(end);
+      // Não resetamos manuallySetDates para false, pois se o usuário já tinha definido datas manualmente, ele não quer perder.
+      // Se ele nunca definiu, permanece false.
     }
+  };
+
+  // ===== QUANDO O USUÁRIO MUDA AS DATAS MANUALMENTE =====
+  const handleDateChange = (type: 'start' | 'end', value: string) => {
+    setManuallySetDates(true);
+    if (type === 'start') setStartDate(value);
+    else setEndDate(value);
+  };
+
+  // ===== BOTÃO PARA RESETAR DATAS AO CICLO ATUAL =====
+  const resetDatesToCycle = () => {
+    const { start, end } = getDefaultDateRange(granularity);
+    setStartDate(start);
+    setEndDate(end);
+    setManuallySetDates(false);
   };
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
 
+  // Label do ciclo para exibição
+  const cycleLabel = granularity === 'daily' ? 'Semana atual' : granularity === 'weekly' ? 'Mês atual' : 'Últimos 12 meses';
+
   return (
-    <DashboardLayout title="Relatório Avançado" subtitle="Analise o desempenho por período personalizado">
+    <DashboardLayout title="Relatório Avançado" subtitle={`Analise o desempenho por período personalizado — ${cycleLabel}`}>
       {/* Indicador de atualização em tempo real */}
       <div className="flex items-center justify-end gap-2 mb-2">
         {refreshing && (
@@ -511,7 +528,7 @@ export default function Relatorio() {
               <input
                 type="date"
                 value={startDate}
-                onChange={(e) => { setStartDate(e.target.value); setManuallySetDates(true); }}
+                onChange={(e) => handleDateChange('start', e.target.value)}
                 className="bg-transparent text-sm border-none focus:ring-0 p-0"
                 aria-label="Data inicial"
                 title="Data inicial do relatório"
@@ -520,11 +537,19 @@ export default function Relatorio() {
               <input
                 type="date"
                 value={endDate}
-                onChange={(e) => { setEndDate(e.target.value); setManuallySetDates(true); }}
+                onChange={(e) => handleDateChange('end', e.target.value)}
                 className="bg-transparent text-sm border-none focus:ring-0 p-0"
                 aria-label="Data final"
                 title="Data final do relatório"
               />
+              <button
+                type="button"
+                onClick={resetDatesToCycle}
+                className="text-xs text-[#09175b] font-medium hover:underline ml-1"
+                title="Resetar para o ciclo atual"
+              >
+                Resetar ciclo
+              </button>
             </div>
             <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
               <Layers className="w-4 h-4 text-gray-500" aria-hidden="true" />
@@ -535,9 +560,9 @@ export default function Relatorio() {
                 aria-label="Agrupar dados por período"
                 title="Agrupamento dos dados (diário, semanal ou mensal)"
               >
-                <option value="daily">Diário</option>
-                <option value="weekly">Semanal</option>
-                <option value="monthly">Mensal</option>
+                <option value="daily">Diário (semana atual)</option>
+                <option value="weekly">Semanal (mês atual)</option>
+                <option value="monthly">Mensal (12 meses)</option>
               </select>
             </div>
             <div className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2">
@@ -646,7 +671,9 @@ export default function Relatorio() {
 
           {/* Gráficos */}
           <div className="madm-card p-5 mb-6 animate-fade-in-up">
-            <h3 className="text-sm font-bold text-[#09175b] mb-4">Evolução {granularity === "daily" ? "Diária" : granularity === "weekly" ? "Semanal" : "Mensal"}</h3>
+            <h3 className="text-sm font-bold text-[#09175b] mb-4">
+              Evolução {granularity === "daily" ? "Diária (Semana atual)" : granularity === "weekly" ? "Semanal (Mês atual)" : "Mensal (12 meses)"}
+            </h3>
             <ResponsiveContainer width="100%" height={300}>
               <BarChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
