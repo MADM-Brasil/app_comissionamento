@@ -17,7 +17,7 @@ router.get('/test', (req, res) => {
 });
 
 // ============================================================
-// ROTA PARA VERIFICAR SESSÃO ATIVA (NOVA)
+// ROTA PARA VERIFICAR SESSÃO ATIVA
 // ============================================================
 router.get('/me', (req, res) => {
   if (req.session.user) {
@@ -56,23 +56,23 @@ router.post('/login', async (req, res) => {
   console.log(`🔐 Tentativa de login: email=${email}, periodo=${periodo}, rememberMe=${rememberMe}`);
 
   try {
+    // Leitura usa as views
     const result = await db.query(
       `SELECT 
-          c.internal_id,
-          c.id_crm,
-          c.colaborador,
-          a.email,
+          a.id_assessor,
+          c.email,
+          c.nome,
           a.senha_colaborador_hash,
-          c.equipe,
-          c.grupo,
+          c.nome_equipe,
+          c.cargo,
           c.status,
           c.periodo
-       FROM app_comissionamento.metricas_assessores a
-           INNER JOIN madm.colaboradores c 
-               ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.e_mail))
+       FROM app_comissionamento.view_app_metricas_assessores a
+       INNER JOIN core.view_app_colaboradores c 
+           ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
        WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
          AND c.periodo = $2
-         AND TRIM(c.grupo) = ANY($3)`,
+         AND TRIM(c.cargo) = ANY($3)`,
       [email, periodo, gruposPermitidos]
     );
 
@@ -82,7 +82,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
 
-    console.log(`👤 Usuário encontrado: ${user.colaborador}, grupo="${user.grupo}", status=${user.status}`);
+    console.log(`👤 Usuário encontrado: ${user.nome}, cargo="${user.cargo}", status=${user.status}`);
 
     const match = await bcrypt.compare(password, user.senha_colaborador_hash);
     if (!match) {
@@ -95,11 +95,11 @@ router.post('/login', async (req, res) => {
     // ============================================================
     if (rememberMe) {
       req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias
-      req.session.cookie.expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // <-- ADICIONAR
-    console.log('🔑 Sessão estendida para 30 dias (rememberMe ativo)');
-      } else {
+      req.session.cookie.expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      console.log('🔑 Sessão estendida para 30 dias (rememberMe ativo)');
+    } else {
       req.session.cookie.maxAge = 24 * 60 * 60 * 1000; // 1 dia
-      req.session.cookie.expires = new Date(Date.now() + 24 * 60 * 60 * 1000); // <-- ADICIONAR
+      req.session.cookie.expires = new Date(Date.now() + 24 * 60 * 60 * 1000);
       console.log('🔑 Sessão padrão de 1 dia (rememberMe desativado)');
     }
 
@@ -107,25 +107,24 @@ router.post('/login', async (req, res) => {
     // DADOS TEMPORÁRIOS PARA 2FA
     // ============================================================
     req.session.tempUser = {
-      internal_id: user.internal_id,
-      id_crm: user.id_crm,
-      nome: user.colaborador,
+      id_assessor: user.id_assessor,
       email: user.email,
-      equipe: user.equipe,
-      grupo: user.grupo,
+      nome: user.nome,
+      nome_equipe: user.nome_equipe,
+      cargo: user.cargo,
       status: user.status,
       periodo: user.periodo
     };
 
-    // ENVIA CÓDIGO 2FA (sempre – o rememberMe apenas estende a sessão)
-    const sendResult = await twoFactorService.sendCode(user.email, user.colaborador);
+    // ENVIA CÓDIGO 2FA
+    const sendResult = await twoFactorService.sendCode(user.email, user.nome);
     if (!sendResult.success) {
       console.log(`❌ Falha ao enviar código 2FA: ${sendResult.error}`);
       return res.status(500).json({ success: false, error: sendResult.error });
     }
 
     console.log(`✅ Código 2FA enviado para ${email}`);
-    return res.json({ success: true, requiresTwoFactor: true, tempToken: user.colaborador });
+    return res.json({ success: true, requiresTwoFactor: true, tempToken: user.nome });
   } catch (err) {
     console.error('Erro em /login:', err);
     if (!res.headersSent) {
@@ -160,11 +159,11 @@ router.post('/verify-2fa', async (req, res) => {
       success: true,
       accessToken,
       user: {
-        id: user.internal_id,
+        id: user.id_assessor,
         name: user.nome,
         email: user.email,
-        equipe: user.equipe,
-        grupo: user.grupo,
+        equipe: user.nome_equipe,
+        grupo: user.cargo,
         status: user.status,
         periodo: user.periodo
       }
@@ -216,16 +215,17 @@ router.post('/forgot-password', async (req, res) => {
   ];
 
   try {
+    // Leitura usa as views
     const result = await db.query(
       `SELECT 
-          c.colaborador,
+          c.nome,
           a.email
-       FROM app_comissionamento.metricas_assessores a
-           INNER JOIN madm.colaboradores c 
-               ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.e_mail))
+       FROM app_comissionamento.view_app_metricas_assessores a
+       INNER JOIN core.view_app_colaboradores c 
+           ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
        WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
          AND c.periodo = $2
-         AND TRIM(c.grupo) = ANY($3)`,
+         AND TRIM(c.cargo) = ANY($3)`,
       [email, periodo, gruposPermitidos]
     );
 
@@ -234,7 +234,7 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     const user = result.rows[0];
-    const userId = user.colaborador;
+    const userId = user.nome;
     const userEmail = user.email;
 
     const sendResult = await twoFactorService.sendPasswordResetCode(userEmail, userId);
@@ -288,7 +288,7 @@ router.post('/verify-reset-code', async (req, res) => {
   }
 });
 
-// 3. Redefine a senha usando o e‑mail armazenado na sessão
+// 3. Redefine a senha – UPDATE 
 router.post('/reset-password', async (req, res) => {
   const { resetToken, newPassword } = req.body;
 
@@ -306,6 +306,7 @@ router.post('/reset-password', async (req, res) => {
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
+    // UPDATE na tabela original (não na view)
     const updateResult = await db.query(
       `UPDATE app_comissionamento.metricas_assessores
        SET senha_colaborador_hash = $1,

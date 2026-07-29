@@ -10,25 +10,40 @@ import {
   getFilterRestrictions,
 } from '@/lib/accessControl';
 
-export function useAccessControl() {
-  const currentUser = useAppStore((state) => state.currentUser);
+/**
+ * Normaliza o objeto do usuário para garantir que a propriedade 'cargo' exista,
+ * independentemente de o store ainda enviar o campo como 'grupo'.
+ */
+function normalizeUser(raw: any) {
+  if (!raw) return raw;
+  // Se a view nova já traz 'cargo', nada a fazer.
+  if (raw.cargo !== undefined) return raw;
+  // Senão, mapeia 'grupo' → 'cargo' (compatibilidade com código legado).
+  if (raw.grupo !== undefined) {
+    return { ...raw, cargo: raw.grupo };
+  }
+  return raw;
+}
 
-  // 🐛 Log para depuração – ajuda a identificar se o grupo está vindo corretamente
+export function useAccessControl() {
+  const currentUserRaw = useAppStore((state) => state.currentUser);
+  const currentUser = normalizeUser(currentUserRaw);
+
   if (process.env.NODE_ENV === 'development') {
-    console.log('🔐 [useAccessControl] currentUser:', currentUser?.grupo);
+    console.log('🔐 [useAccessControl] currentUser:', currentUser);
   }
 
   const getAccessLevel = () => {
     if (!currentUser) return LEVELS.ASSESSOR;
-    // fallback adicional: se grupo estiver ausente, assume Assessor
-    const level = getLevel(currentUser.grupo);
-    console.log(`🔐 getAccessLevel: grupo="${currentUser.grupo}", nível=${level}`);
+    const level = getLevel(currentUser.cargo);
+    console.log(`🔐 getAccessLevel: cargo="${currentUser.cargo}", nível=${level}`);
     return level;
   };
 
   const hasPermission = (permission: string) => {
     if (!currentUser) return false;
-    const result = checkPermission(currentUser, permission);
+    // A função checkPermission agora espera um keyof Permissions; podemos afirmar que a string é válida.
+    const result = checkPermission(currentUser, permission as any);
     console.log(`🔐 hasPermission(${permission}): ${result}`);
     return result;
   };

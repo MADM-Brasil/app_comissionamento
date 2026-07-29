@@ -32,7 +32,7 @@ import { cn } from "@/lib/utils";
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3007/api";
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO (para tabela de leads)
+// CONSTANTES DE EXCLUSÃO (para tabela de leads) – agora baseadas em cargo
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
@@ -42,7 +42,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS = [
+const EXCLUDED_CARGOS = [
   "Supervisor", "Coordenador", "Administrativo"
 ];
 
@@ -50,16 +50,16 @@ const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
-const isExcludedGroup = (group: string) =>
-  EXCLUDED_GROUPS.some(g => normalize(g) === normalize(group));
+const isExcludedCargo = (cargo: string) =>
+  EXCLUDED_CARGOS.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: Collaborator) => {
-  const grupo = normalize(c.grupo);
+  const cargo = normalize(c.cargo);                     // ⬅️ usa cargo
   const equipe = normalize(c.equipeNome);
-  return grupo === 'desativado' || equipe.includes('desativado');
+  return cargo === 'desativado' || equipe.includes('desativado');
 };
 
-// Mapeamento produto -> grupo (usado para filtragem local)
+// Mapeamento produto -> cargo (usado para filtragem local)
 const productToGroup: Record<string, string | string[] | undefined> = {
   "Todos": undefined,
   "Auxilio Acidente": "Elite",
@@ -155,7 +155,7 @@ async function fetchLeadsByStage(params: {
   end: string;
   equipe?: string;
   colaborador?: string;
-  colaboradorId?: number;
+  colaboradorId?: string | number;    // ← aceita string também
   produto?: string;
 }): Promise<{ colaborador: string; etapa_lead: string; total: number }[]> {
   const searchParams = new URLSearchParams();
@@ -163,7 +163,7 @@ async function fetchLeadsByStage(params: {
   searchParams.append('end', params.end);
   if (params.equipe) searchParams.append('equipe', params.equipe);
   if (params.colaborador) searchParams.append('colaborador', params.colaborador);
-  if (params.colaboradorId) searchParams.append('colaboradorId', String(params.colaboradorId));
+  if (params.colaboradorId !== undefined) searchParams.append('colaboradorId', String(params.colaboradorId));
   if (params.produto && params.produto !== 'Todos') searchParams.append('produto', params.produto);
 
   const url = `${API_BASE}/metrics/leads/stages?${searchParams.toString()}`;
@@ -188,10 +188,11 @@ export default function Funil() {
 
   const { hasPermission } = useAccessControl();
 
+  // 👇 colaboradorId agora é string | number | undefined
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
-    colaboradorId?: number;
+    colaboradorId?: string | number;
     produto: string;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
@@ -329,7 +330,7 @@ export default function Funil() {
   const handleFilterChange = (newFilters: {
     equipe: string;
     colaborador: string;
-    colaboradorId?: number;
+    colaboradorId?: string | number;   // ← compatível com FilterBar
     produto: string;
   }) => {
     setFilters(newFilters);
@@ -351,9 +352,9 @@ export default function Funil() {
       const group = productToGroup[filters.produto];
       if (group) {
         if (Array.isArray(group)) {
-          filtered = filtered.filter(c => group.includes(c.grupo));
+          filtered = filtered.filter(c => group.includes(c.cargo));  // ⬅️ cargo
         } else {
-          filtered = filtered.filter(c => c.grupo === group);
+          filtered = filtered.filter(c => c.cargo === group);         // ⬅️ cargo
         }
       }
     }
@@ -404,7 +405,7 @@ export default function Funil() {
 
   const activeCollaboratorNames = useMemo(() => {
     return rawCollaborators
-      .filter(c => !isDesativado(c) && !isExcludedTeam(c.equipeNome) && !isExcludedGroup(c.grupo))
+      .filter(c => !isDesativado(c) && !isExcludedTeam(c.equipeNome) && !isExcludedCargo(c.cargo))  // ⬅️ cargo
       .map(c => c.name);
   }, [rawCollaborators]);
 

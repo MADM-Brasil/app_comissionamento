@@ -4,7 +4,7 @@ import { Period } from '@/contexts/period';
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
 
 // ============================================================
-// FUNÇÕES EXISTENTES (métricas de desempenho)
+// MÉTRICAS DE DESEMPENHO (EMITIDOS, ASSINADOS, ETC.)
 // ============================================================
 
 export async function fetchEmitidos(
@@ -116,106 +116,14 @@ export async function fetchWeeklyPerformance(
 }
 
 // ============================================================
-// NOVAS FUNÇÕES PARA COMISSIONAMENTO POR PERÍODO
+// RECALCULAR PESOS HIERÁRQUICOS (usado em Configuration)
 // ============================================================
-
-export interface CollaboratorWeights {
-  pesoDiarioAssinados: number;
-  pesoDiarioGanhos: number;
-  pesoSemanalAssinados: number;
-  pesoSemanalGanhos: number;
-  pesoMensalAssinados: number;
-  pesoMensalGanhos: number;
-  bonusPorCiclo: number;
-}
-
-/**
- * Busca os pesos e bônus de um colaborador específico.
- * @param collaboratorId - ID do colaborador
- * @returns Objeto com os pesos e bônus
- */
-export async function fetchCollaboratorWeights(collaboratorId: number): Promise<CollaboratorWeights> {
-  const url = new URL(`${API_BASE}/commission/weights/${collaboratorId}`);
-  const res = await fetch(url.toString(), { credentials: 'include' });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Erro ao carregar pesos do colaborador');
-  return data.data;
-}
-
-/**
- * Atualiza os pesos e bônus de um colaborador.
- * @param collaboratorId - ID do colaborador
- * @param weights - Novos valores de pesos e bônus
- */
-export async function updateCollaboratorWeights(
-  collaboratorId: number,
-  weights: Partial<CollaboratorWeights>
-): Promise<void> {
-  const token = localStorage.getItem('csrfToken');
-  const headers: HeadersInit = { 'Content-Type': 'application/json' };
-  if (token) headers['x-csrf-token'] = token;
-
-  const url = new URL(`${API_BASE}/commission/weights/${collaboratorId}`);
-  const res = await fetch(url.toString(), {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(weights),
-    credentials: 'include',
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Erro ao atualizar pesos do colaborador');
-}
-
-/**
- * Busca a configuração global de bônus (valores padrão usados quando não há específico por colaborador).
- */
-export async function fetchBonusConfig(): Promise<{ bonusBase: number; pesoDiarioAssinados: number; pesoDiarioGanhos: number; pesoSemanalAssinados: number; pesoSemanalGanhos: number; pesoMensalAssinados: number; pesoMensalGanhos: number }> {
-  const url = new URL(`${API_BASE}/commission/config`);
-  const res = await fetch(url.toString(), { credentials: 'include' });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Erro ao carregar configuração de bônus');
-  return data.data;
-}
-
-/**
- * Atualiza a configuração global de bônus (apenas para administradores).
- */
-export async function updateBonusConfig(config: Partial<{
-  bonusBase: number;
-  pesoDiarioAssinados: number;
-  pesoDiarioGanhos: number;
-  pesoSemanalAssinados: number;
-  pesoSemanalGanhos: number;
-  pesoMensalAssinados: number;
-  pesoMensalGanhos: number;
-}>): Promise<void> {
-  const token = localStorage.getItem('csrfToken');
-  const headers: HeadersInit = { 'Content-Type': 'application/json' };
-  if (token) headers['x-csrf-token'] = token;
-
-  const url = new URL(`${API_BASE}/commission/config`);
-  const res = await fetch(url.toString(), {
-    method: 'PUT',
-    headers,
-    body: JSON.stringify(config),
-    credentials: 'include',
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Erro ao atualizar configuração de bônus');
-}
-
-/**
- * Dispara o recálculo automático dos pesos de supervisores e coordenadores
- * com base nos pesos dos assessores (soma da equipe ou global).
- * @returns Mensagem de sucesso
- */
 export async function recalculateHierarchyWeights(): Promise<{ message: string }> {
   const token = localStorage.getItem('csrfToken');
   const headers: HeadersInit = { 'Content-Type': 'application/json' };
   if (token) headers['x-csrf-token'] = token;
 
-  const url = new URL(`${API_BASE}/commission/recalculate-hierarchy`);
-  const res = await fetch(url.toString(), {
+  const res = await fetch(`${API_BASE}/commission/recalculate-hierarchy`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -226,18 +134,4 @@ export async function recalculateHierarchyWeights(): Promise<{ message: string }
     throw new Error(data.error || 'Erro ao recalcular pesos hierárquicos');
   }
   return data;
-}
-
-/**
- * Busca os colaboradores com seus pesos já calculados (incluindo os dinâmicos para supervisores/coordenadores).
- * Útil para obter a lista já processada pelo backend.
- */
-export async function fetchCollaboratorsWithWeights(params?: { equipe?: string; grupo?: string }): Promise<any[]> {
-  const url = new URL(`${API_BASE}/collaborators/with-weights`);
-  if (params?.equipe) url.searchParams.append('equipe', params.equipe);
-  if (params?.grupo) url.searchParams.append('grupo', params.grupo);
-  const res = await fetch(url.toString(), { credentials: 'include' });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Erro ao carregar colaboradores com pesos');
-  return data.data;
 }

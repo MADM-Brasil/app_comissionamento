@@ -18,7 +18,7 @@ type PeriodoMeta = 'diario' | 'semanal' | 'mensal';
 // ========== FUNÇÃO AUXILIAR PARA FORMATAÇÃO DE INTEIROS ==========
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
-// Equipes e grupos que não devem aparecer nos cálculos de comissão
+// Equipes e cargos que não devem aparecer nos cálculos de comissão
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
@@ -27,19 +27,39 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS = [
-  "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
-  "Marketing","Gerência","Contrato", "Dr. Felipe Marx","Administrativo"
+// Renomeado para EXCLUDED_CARGOS – agora filtramos pelo campo 'cargo' da view
+const EXCLUDED_CARGOS = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  
+  // Supervisão
+  "supervisor",
+  
+  // Coordenador
+  "coordenador",
+  
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 
 function isSpecialGroupColaborador(colaborador: any): boolean {
   const produto = (colaborador.produto || '').toLowerCase();
-  const grupo = (colaborador.grupo || '').toLowerCase();
+  const cargo = (colaborador.cargo || '').toLowerCase();           // ← ajustado
   return produto === 'quinquenio' || produto === 'concomitante' ||
-         grupo === 'quinquenio' || grupo === 'concomitante';
+         cargo === 'quinquenio' || cargo === 'concomitante';
 }
 
 function obterMetaPorPeriodo(colaborador: any, periodo: PeriodoMeta) {
@@ -108,8 +128,12 @@ export default function Comissoes() {
 
   const { currentUser } = useAccessControl();
 
+  // 👇 Aqui: colaboradorId agora é string | number
   const [filters, setFilters] = useState<{
-    equipe: string; colaborador: string; colaboradorId?: number; produto: string;
+    equipe: string;
+    colaborador: string;
+    colaboradorId?: string | number;
+    produto: string;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
   const [loading, setLoading] = useState(true);
@@ -141,7 +165,6 @@ export default function Comissoes() {
 
   // ========== FUNÇÃO DE RECARGA ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
-    // Evita múltiplas execuções simultâneas
     if (isLoadingRef.current) {
       console.log('ℹ️ Comissoes: já está carregando, ignorando');
       return;
@@ -155,7 +178,6 @@ export default function Comissoes() {
       filters.colaborador !== lastFiltersRef.current.colaborador ||
       filters.produto !== lastFiltersRef.current.produto;
 
-    // Se nada mudou e já carregou, não recarrega
     if (initialLoadDone.current && !datesChanged && !filtersChanged) {
       console.log('ℹ️ Comissoes: dados já carregados, pulando recarga');
       return;
@@ -169,7 +191,7 @@ export default function Comissoes() {
     try {
       const equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
       const colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
-      const colaboradorIdApi = filters.colaboradorId;
+      const colaboradorIdApi = filters.colaboradorId;   // string | number | undefined
       const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
 
       await Promise.all([
@@ -195,7 +217,10 @@ export default function Comissoes() {
 
   // ========== HANDLER DO FILTERBAR ==========
   const handleFilterChange = (newFilters: {
-    equipe: string; colaborador: string; colaboradorId?: number; produto: string;
+    equipe: string;
+    colaborador: string;
+    colaboradorId?: string | number;   // 👈 mesmo tipo
+    produto: string;
   }) => {
     setFilters(newFilters);
     if (!isFirstFilterApplied) {
@@ -205,7 +230,6 @@ export default function Comissoes() {
 
   // ========== CARREGAMENTO INICIAL – SÓ ACONTECE APÓS O PRIMEIRO FILTRO ==========
   useEffect(() => {
-    // Se o primeiro filtro ainda não foi aplicado, não carrega
     if (!isFirstFilterApplied) {
       console.log('ℹ️ Comissoes: aguardando primeiro filtro');
       return;
@@ -224,13 +248,11 @@ export default function Comissoes() {
       filters.colaborador !== lastFiltersRef.current.colaborador ||
       filters.produto !== lastFiltersRef.current.produto;
 
-    // Se já carregou e nada mudou, não recarrega
     if (initialLoadDone.current && !datesChanged && !filtersChanged) {
       setLoading(false);
       return;
     }
 
-    // Timeout de segurança para evitar loading infinito
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
       if (loading) {
@@ -247,7 +269,8 @@ export default function Comissoes() {
   const filteredColabs = useMemo(() => {
     let filtered = storeColabs.filter(c => {
       if (EXCLUDED_TEAMS.some(team => normalizeText(c.equipeNome) === normalizeText(team))) return false;
-      if (EXCLUDED_GROUPS.some(group => normalizeText(c.grupo) === normalizeText(group))) return false;
+      // FILTRO POR CARGO (antes era 'grupo')
+      if (EXCLUDED_CARGOS.some(cargo => normalizeText(c.cargo) === normalizeText(cargo))) return false;
 
       if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
@@ -290,7 +313,7 @@ export default function Comissoes() {
         metaAssinados,
         metaGanhos,
         avatar: col.avatar || col.name.charAt(0).toUpperCase(),
-        group: col.grupo,
+        cargo: col.cargo,                     // ← alterado de 'group' para 'cargo'
         periodDetails,
         isSpecial,
       };
@@ -340,7 +363,6 @@ export default function Comissoes() {
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
 
-  // Se o primeiro filtro ainda não foi aplicado, exibe um loader
   if (!isFirstFilterApplied) {
     return (
       <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">

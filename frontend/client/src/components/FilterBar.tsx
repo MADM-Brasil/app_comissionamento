@@ -7,7 +7,12 @@ import { cn } from "@/lib/utils";
 import { fetchCollaborators, fetchEquipes } from "@/lib/api";
 
 interface FilterBarProps {
-  onFilterChange: (filters: { equipe: string; colaborador: string; colaboradorId?: number; produto: string }) => void;
+  onFilterChange: (filters: {
+    equipe: string;
+    colaborador: string;
+    colaboradorId?: string | number;
+    produto: string;
+  }) => void;
   showColaboradorFilter?: boolean;
   className?: string;
   initialEquipe?: string;
@@ -142,7 +147,7 @@ export default function FilterBar({
     if (!currentUser) return;
     if (hasAppliedRestrictions) return;
 
-    console.log('🔒 FilterBar: aplicando restrições de acesso para', currentUser.grupo);
+    console.log('🔒 FilterBar: aplicando restrições de acesso para', currentUser.cargo);
 
     if (isAssessor) {
       if (currentUser.equipe) setSelectedEquipe(currentUser.equipe);
@@ -180,7 +185,8 @@ export default function FilterBar({
     if (!isReady || !collaborators.length) return [];
     let filtered = [...collaborators];
     filtered = filtered.filter((c) => !isExcludedTeam(c.equipeNome));
-    filtered = filtered.filter((c) => normalize(c.grupo) !== 'administrativo');
+    // uso cargo (não grupo) para excluir
+    filtered = filtered.filter((c) => normalize(c.cargo) !== 'administrativo');
 
     let effectiveEquipe = selectedEquipe;
     if ((isAssessor || isSupervisor) && currentUser?.equipe) {
@@ -192,7 +198,7 @@ export default function FilterBar({
     }
 
     if (isAssessor && currentUser) {
-      filtered = filtered.filter((c) => c.email === currentUser.e_mail);
+      filtered = filtered.filter((c) => c.email === currentUser.email);
     }
 
     if (searchTerm) {
@@ -203,9 +209,6 @@ export default function FilterBar({
     }
     return filtered;
   }, [collaborators, selectedEquipe, isAssessor, isSupervisor, currentUser, searchTerm, isReady]);
-
-  // ❌ REMOVIDO: useEffect que alterava equipe ao selecionar colaborador
-  // (mantém o filtro de equipe sempre onde o usuário escolheu, inclusive "todas")
 
   // ========== NOTIFICAR O PARENT ==========
   const onFilterChangeRef = useRef(onFilterChange);
@@ -228,7 +231,7 @@ export default function FilterBar({
 
     const colaboradorId =
       finalColaborador !== "todos"
-        ? collaborators.find((c) => c.name === finalColaborador)?.id
+        ? collaborators.find((c) => c.name === finalColaborador)?.id    // agora id é string
         : undefined;
 
     onFilterChangeRef.current({

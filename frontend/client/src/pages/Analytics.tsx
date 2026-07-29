@@ -40,20 +40,38 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS = [
-  "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
-  "Marketing", "Gerência", "Contrato", "Dr. Felipe Marx", "Administrativo",
-  "administrativo"
+const EXCLUDED_CARGOS = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  
+  // Supervisão
+  "supervisor",
+  
+  // Coordenador
+  "coordenador",
+  
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 function isExcludedTeam(teamName: string): boolean {
   return EXCLUDED_TEAMS.includes(teamName);
 }
 
-function isExcludedGroup(group: string): boolean {
-  const normalized = (group || '').trim().toLowerCase();
-  return EXCLUDED_GROUPS.some(g => g.toLowerCase() === normalized);
+function isExcludedCargo(cargo: string): boolean {
+  const normalized = (cargo || '').trim().toLowerCase();
+  return EXCLUDED_CARGOS.some(g => g.toLowerCase() === normalized);
 }
 
 // ========== Utilitários de datas ==========
@@ -234,8 +252,8 @@ export default function Analytics() {
   useEffect(() => {
     if (!currentUserData) return;
     const teamExcluded = isExcludedTeam(currentUserData.equipeNome);
-    const groupExcluded = isExcludedGroup(currentUserData.grupo);
-    setIsExcluded(teamExcluded || groupExcluded);
+    const cargoExcluded = isExcludedCargo(currentUserData.cargo);
+    setIsExcluded(teamExcluded || cargoExcluded);
   }, [currentUserData]);
 
   // ========== Função de recarga dos dados (com verificação de necessidade) ==========
@@ -582,9 +600,9 @@ export default function Analytics() {
 
   const baseCollaborators = useMemo(() => {
     return filteredCollaborators.filter(c => {
-      const g = (c.grupo || '').trim().toLowerCase();
-      if (g === 'supervisor' || g === 'coordenador' || g === 'administrativo') return false;
-      if (g === 'desativado') return false;
+      const cargo = (c.cargo || '').trim().toLowerCase();
+      if (cargo === 'supervisor' || cargo === 'coordenador' || cargo === 'administrativo') return false;
+      if (cargo === 'desativado') return false;
       return true;
     });
   }, [filteredCollaborators]);

@@ -4,7 +4,6 @@ import db from '../services/db.js';
 
 const router = express.Router();
 
-// Middleware de autenticação (mesmo padrão do server.js)
 function requireAuth(req, res, next) {
   if (!req.session.isAuthenticated || !req.session.userId) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
@@ -12,15 +11,14 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// Obtém o colaborador a partir do e-mail da sessão
 async function getColaboradorFromSession(req) {
-  const email = req.session.userId;   // userId é o e_mail
+  const email = req.session.userId;
   if (!email) return null;
 
   const result = await db.query(
-    `SELECT internal_id, colaborador, equipe, grupo, status
-     FROM madm.colaboradores
-     WHERE e_mail = $1
+    `SELECT nome, email, nome_equipe, cargo, status
+     FROM core.view_app_colaboradores
+     WHERE email = $1
      LIMIT 1`,
     [email]
   );
@@ -30,8 +28,55 @@ async function getColaboradorFromSession(req) {
 router.use(requireAuth);
 
 // ============================================================
-// GET /api/user/data
+// NOVA ROTA: métricas dos assessores (pesos e bônus por mês)
 // ============================================================
+router.get('/metricas-assessores', async (req, res) => {
+  try {
+    const { mes, email, colaborador_id } = req.query;
+    if (!mes) {
+      return res.status(400).json({ success: false, error: 'Parâmetro "mes" (YYYY-MM) é obrigatório' });
+    }
+
+    let query = `
+      SELECT 
+        id_assessor,
+        email,
+        data_metrica,
+        comissao_bonus,
+        peso_meta_assinados_diario,
+        peso_meta_ganho_diario,
+        peso_meta_assinados_semanal,
+        peso_meta_ganho_semanal,
+        peso_meta_assinados_mensal,
+        peso_meta_ganho_mensal
+      FROM app_comissionamento.view_app_metricas_assessores
+      WHERE TO_CHAR(data_metrica::date, 'YYYY-MM') = $1
+    `;
+    const params = [mes];
+    let paramIdx = 2;
+
+    if (email) {
+      query += ` AND LOWER(TRIM(email)) = LOWER(TRIM($${paramIdx}))`;
+      params.push(email);
+      paramIdx++;
+    }
+    if (colaborador_id) {
+      query += ` AND id_assessor::text = $${paramIdx}`;
+      params.push(colaborador_id);
+      paramIdx++;
+    }
+
+    query += ' ORDER BY email';
+
+    const result = await db.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Erro em /metricas-assessores:', err);
+    res.status(500).json({ success: false, error: 'Erro interno' });
+  }
+});
+
+// GET /api/user/data
 router.get('/data', async (req, res) => {
   try {
     const user = await getColaboradorFromSession(req);
@@ -52,18 +97,18 @@ router.get('/data', async (req, res) => {
 
     const query = `
       SELECT
-        (SELECT COUNT(*) FROM madm.emitidos_e_assinados 
+        (SELECT COUNT(*) FROM madm.view_app_emitidos_e_assinados 
          WHERE consultor_responsavel_emissao = $1 AND data_envio BETWEEN $2 AND $3) as emitidos,
-        (SELECT COUNT(*) FROM madm.emitidos_e_assinados 
+        (SELECT COUNT(*) FROM madm.view_app_emitidos_e_assinados 
          WHERE consultor_responsavel_assinatura = $1 AND data_assinatura BETWEEN $2 AND $3) as assinados,
-        (SELECT COUNT(*) FROM madm.kommo_leads 
+        (SELECT COUNT(*) FROM madm.view_app_kommo_leads 
          WHERE lead_usuario_responsavel = $1 AND data_ganho BETWEEN $2 AND $3 
            AND etapa_lead IN ('PROTOCOLADO', 'AG PROTOCOLO', 'Venda ganha')) as ganhos,
-        (SELECT COUNT(*) FROM madm.kommo_leads 
+        (SELECT COUNT(*) FROM madm.view_app_kommo_leads 
          WHERE lead_usuario_responsavel = $1 AND data_ganho BETWEEN $2 AND $3 
            AND etapa_lead = 'Venda perdida') as perdidos
     `;
-    const result = await db.query(query, [user.colaborador, startDate, endDate]);
+    const result = await db.query(query, [user.nome, startDate, endDate]);
     const data = result.rows[0] || { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0 };
     res.json(data);
   } catch (err) {
@@ -72,9 +117,7 @@ router.get('/data', async (req, res) => {
   }
 });
 
-// ============================================================
-// GET /api/user/meta (metas globais)
-// ============================================================
+// GET /api/user/meta
 router.get('/meta', async (req, res) => {
   try {
     let pesoAssinados = 3;
@@ -105,29 +148,27 @@ router.get('/meta', async (req, res) => {
   }
 });
 
-// ============================================================
-// GET /api/user/team – membros da equipe do utilizador logado
-// ============================================================
+// GET /api/user/team
 router.get('/team', async (req, res) => {
   try {
     const user = await getColaboradorFromSession(req);
-    if (!user || !user.equipe) {
+    if (!user || !user.nome_equipe) {
       return res.status(400).json({ error: 'Usuário não pertence a nenhuma equipe' });
     }
 
     const result = await db.query(
       `SELECT 
-         internal_id as id,
-         colaborador as nome,
-         equipe,
-         grupo as cargo,
+         email as id,
+         nome,
+         nome_equipe as equipe,
+         cargo,
          status,
-         meta_assinados as meta_individual,
+         NULL as meta_individual,
          NULL as comissao_percentual,
          CURRENT_DATE as ultima_atualizacao
-       FROM madm.colaboradores
-       WHERE equipe = $1 AND status = 'ativo'`,
-      [user.equipe]
+       FROM core.view_app_colaboradores
+       WHERE nome_equipe = $1 AND status = 'ativo'`,
+      [user.nome_equipe]
     );
     res.json(result.rows);
   } catch (err) {
@@ -136,9 +177,7 @@ router.get('/team', async (req, res) => {
   }
 });
 
-// ============================================================
-// GET /api/user/config – configurações do assessor logado
-// ============================================================
+// GET /api/user/config
 router.get('/config', async (req, res) => {
   try {
     const user = await getColaboradorFromSession(req);
@@ -148,7 +187,6 @@ router.get('/config', async (req, res) => {
 
     const result = await db.query(
       `SELECT 
-         comissao_colaborador,
          comissao_bonus,
          peso_meta_assinados_diario,
          peso_meta_ganho_diario,
@@ -156,9 +194,9 @@ router.get('/config', async (req, res) => {
          peso_meta_ganho_semanal,
          peso_meta_assinados_mensal,
          peso_meta_ganho_mensal
-       FROM app_comissionamento.metricas_assessores
-       WHERE id_assessor::integer = $1`,
-      [user.internal_id]
+       FROM app_comissionamento.view_app_metricas_assessores
+       WHERE email = $1`,
+      [user.email]
     );
 
     if (result.rows.length > 0) {
@@ -166,7 +204,6 @@ router.get('/config', async (req, res) => {
     } else {
       return res.json({
         success: true,
-        comissao_colaborador: 0,
         comissao_bonus: 0,
         peso_meta_assinados_diario: 3,
         peso_meta_ganho_diario: 3,
@@ -182,9 +219,7 @@ router.get('/config', async (req, res) => {
   }
 });
 
-// ============================================================
-// POST /api/user/config – salva configurações
-// ============================================================
+// POST /api/user/config
 router.post('/config', async (req, res) => {
   try {
     const user = await getColaboradorFromSession(req);
@@ -193,7 +228,6 @@ router.post('/config', async (req, res) => {
     }
 
     const {
-      comissao_colaborador,
       comissao_bonus,
       peso_meta_assinados_diario,
       peso_meta_ganho_diario,
@@ -204,7 +238,6 @@ router.post('/config', async (req, res) => {
     } = req.body;
 
     const campos = [
-      comissao_colaborador,
       comissao_bonus,
       peso_meta_assinados_diario,
       peso_meta_ganho_diario,
@@ -221,24 +254,23 @@ router.post('/config', async (req, res) => {
       });
     }
 
+    // UPDATE na tabela original, não na view
     const query = `
       UPDATE app_comissionamento.metricas_assessores
       SET
-        comissao_colaborador = $1,
-        comissao_bonus = $2,
-        peso_meta_assinados_diario = $3,
-        peso_meta_ganho_diario = $4,
-        peso_meta_assinados_semanal = $5,
-        peso_meta_ganho_semanal = $6,
-        peso_meta_assinados_mensal = $7,
-        peso_meta_ganho_mensal = $8,
+        comissao_bonus = $1,
+        peso_meta_assinados_diario = $2,
+        peso_meta_ganho_diario = $3,
+        peso_meta_assinados_semanal = $4,
+        peso_meta_ganho_semanal = $5,
+        peso_meta_assinados_mensal = $6,
+        peso_meta_ganho_mensal = $7,
         updated_at = NOW()
-      WHERE id_assessor::integer = $9
+      WHERE email = $8
       RETURNING id_assessor
     `;
 
     const values = [
-      comissao_colaborador,
       comissao_bonus,
       peso_meta_assinados_diario,
       peso_meta_ganho_diario,
@@ -246,7 +278,7 @@ router.post('/config', async (req, res) => {
       peso_meta_ganho_semanal,
       peso_meta_assinados_mensal,
       peso_meta_ganho_mensal,
-      user.internal_id,
+      user.email,
     ];
 
     const result = await db.query(query, values);
@@ -262,9 +294,7 @@ router.post('/config', async (req, res) => {
   }
 });
 
-// ============================================================
 // POST /api/user/extract (placeholder)
-// ============================================================
 router.post('/extract', async (req, res) => {
   res.json({ success: true, message: 'Extração não armazenada (sem tabela no banco)' });
 });

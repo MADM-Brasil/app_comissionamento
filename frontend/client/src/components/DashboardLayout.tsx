@@ -90,13 +90,11 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
   };
 
-  // Usa 'nome' no lugar de 'name' e define avatar como primeira letra
+  // Usa 'nome' e 'cargo' da view core.view_app_colaboradores
   const displayName = currentUser?.nome || "Carregando...";
-  const displayRole = currentUser?.grupo || currentUser?.role || "Colaborador";
+  const displayRole = currentUser?.cargo || "Colaborador";   // ⬅️ cargo em vez de grupo
   const displayAvatar = currentUser?.avatar || displayName.charAt(0).toUpperCase();
-  // A propriedade 'rank' não existe em User; se no futuro for adicionada, poderá ser usada.
-  // Por enquanto, exibimos vazio.
-  const displayRank = "";
+  const displayRank = ""; // rank ainda não existe no modelo, pode ser adicionado depois
 
   const shouldShowPeriodFilter = !HIDE_PERIOD_FILTER_PATHS.includes(location);
   const isCustomPeriod = period === 'Custom';

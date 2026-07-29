@@ -1,17 +1,14 @@
 // src/lib/auth.ts
 import { useAppStore } from "@/lib/dataStore";
 
-// ============================================================
-// BASE URL: deve terminar com /api
-// ============================================================
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
 
 export interface UserData {
-  id: number;
-  name: string;
+  id: string;               // e‑mail (identificador único)
+  nome: string;
   email: string;
-  equipe: string;
-  grupo: string;
+  equipe: string;           // nome_equipe
+  cargo: string;            // cargo/grupo
   status: string;
   periodo: string;
 }
@@ -109,10 +106,14 @@ export async function verify2FA(tempToken: string, code: string) {
 
   const data = await handleApiResponse(response, 'Código inválido');
 
-  // Sessão mantida via cookie; não armazenamos accessToken
-  // Apenas atualizamos o estado global com o usuário retornado
   if (data.user) {
-    useAppStore.getState().setCurrentUser(data.user);
+    // Garante que o objeto tenha o campo 'cargo' (mesmo que a API envie 'grupo' por compatibilidade)
+    const normalizedUser = {
+      ...data.user,
+      cargo: data.user.cargo || data.user.grupo,   // fallback seguro
+      id: data.user.id || data.user.email || '',
+    };
+    useAppStore.getState().setCurrentUser(normalizedUser);
 
     // Dispara o carregamento de dados em segundo plano (não bloqueia o redirecionamento)
     const { loadCollaboratorsAndMetrics, loadRawMetrics } = useAppStore.getState();
@@ -142,6 +143,35 @@ export async function resendCode() {
   });
 
   return handleApiResponse(response, 'Erro ao reenviar código');
+}
+
+// ============================================================
+// VERIFICA SE A SESSÃO JÁ ESTÁ ATIVA (rota /auth/me)
+// ============================================================
+export async function fetchCurrentUser(): Promise<UserData | null> {
+  await ensureCsrfToken();
+  try {
+    const response = await fetch(`${API_BASE}/auth/me`, {
+      method: 'GET',
+      headers: { 'x-csrf-token': getCsrfToken() },
+      credentials: 'include',
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data.success && data.user) {
+      const normalizedUser = {
+        ...data.user,
+        cargo: data.user.cargo || data.user.grupo,
+        id: data.user.id || data.user.email || '',
+      };
+      useAppStore.getState().setCurrentUser(normalizedUser);
+      return normalizedUser;
+    }
+    return null;
+  } catch (e) {
+    console.error('Erro ao verificar sessão:', e);
+    return null;
+  }
 }
 
 // ============================================================

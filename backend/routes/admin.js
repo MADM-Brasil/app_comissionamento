@@ -41,7 +41,6 @@ router.post('/update-assessor-metrics', [
       meta_semanal_ganhos,
       meta_mensal_assinados,
       meta_mensal_ganhos,
-      comissao_colaborador,
       comissao_bonus,
     } = req.body;
 
@@ -49,6 +48,7 @@ router.post('/update-assessor-metrics', [
       return res.status(400).json({ success: false, error: 'email e data_metrica são obrigatórios' });
     }
 
+    // UPDATE permanece na tabela original
     const updateQuery = `
       UPDATE app_comissionamento.metricas_assessores
       SET
@@ -58,11 +58,10 @@ router.post('/update-assessor-metrics', [
         peso_meta_ganho_semanal = COALESCE($4, peso_meta_ganho_semanal),
         peso_meta_assinados_mensal = COALESCE($5, peso_meta_assinados_mensal),
         peso_meta_ganho_mensal = COALESCE($6, peso_meta_ganho_mensal),
-        comissao_colaborador = COALESCE($7, comissao_colaborador),
-        comissao_bonus = COALESCE($8, comissao_bonus),
+        comissao_bonus = COALESCE($7, comissao_bonus),
         updated_at = NOW()
-      WHERE email = $9
-        AND data_metrica::date = $10::date
+      WHERE email = $8
+        AND data_metrica::date = $9::date
       RETURNING id_assessor
     `;
 
@@ -73,7 +72,6 @@ router.post('/update-assessor-metrics', [
       meta_semanal_ganhos ?? null,
       meta_mensal_assinados ?? null,
       meta_mensal_ganhos ?? null,
-      comissao_colaborador ?? null,
       comissao_bonus ?? null,
       email,
       data_metrica,
@@ -128,6 +126,7 @@ router.post('/update-all-assessors-metrics', async (req, res) => {
     const dataMetricaIndex = params.length + 1;
     params.push(data_metrica);
 
+    // UPDATE global usa a tabela original
     await db.query(
       `UPDATE app_comissionamento.metricas_assessores
        SET ${setClauses.join(', ')}
@@ -174,13 +173,14 @@ router.post('/update-team-metrics', async (req, res) => {
     const dataMetricaIndex = params.length + 1;
     const equipeIndex = dataMetricaIndex + 1;
 
+    // UPDATE por equipe: alvo é a tabela original, mas o JOIN usa a view de colaboradores para obter equipe
     const query = `
       UPDATE app_comissionamento.metricas_assessores a
       SET ${setClauses.join(', ')}
-      FROM madm.colaboradores c
-      WHERE a.id_assessor::integer = c.internal_id
+      FROM core.view_app_colaboradores c
+      WHERE a.email = c.email
         AND a.data_metrica::date = $${dataMetricaIndex}::date
-        AND c.equipe = $${equipeIndex}
+        AND c.nome_equipe = $${equipeIndex}
     `;
 
     console.log('🔍 [update-team-metrics] Query:', query);
@@ -202,7 +202,7 @@ router.post('/update-team-metrics', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/admin/global-metrics
+// GET /api/admin/global-metrics (LEITURA – usa VIEW)
 // ============================================================
 router.get('/global-metrics', async (req, res) => {
   try {
@@ -215,7 +215,7 @@ router.get('/global-metrics', async (req, res) => {
          COALESCE(peso_meta_assinados_mensal, 10) AS peso_mensal_assinados,
          COALESCE(peso_meta_ganho_mensal, 10) AS peso_mensal_ganhos,
          COALESCE(comissao_bonus, 150) AS bonus
-       FROM app_comissionamento.metricas_assessores
+       FROM app_comissionamento.view_app_metricas_assessores
        LIMIT 1`
     );
 
@@ -242,7 +242,7 @@ router.get('/global-metrics', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/admin/equipe-metrics?nome=EquipeX
+// GET /api/admin/equipe-metrics?nome=EquipeX (LEITURA – usa VIEW)
 // ============================================================
 router.get('/equipe-metrics', async (req, res) => {
   const { nome } = req.query;
@@ -258,9 +258,9 @@ router.get('/equipe-metrics', async (req, res) => {
          COALESCE(a.peso_meta_assinados_mensal, 10) AS peso_mensal_assinados,
          COALESCE(a.peso_meta_ganho_mensal, 10) AS peso_mensal_ganhos,
          COALESCE(a.comissao_bonus, 150) AS bonus
-       FROM app_comissionamento.metricas_assessores a
-       INNER JOIN madm.colaboradores c ON a.id_assessor::integer = c.internal_id
-       WHERE c.equipe = $1
+       FROM app_comissionamento.view_app_metricas_assessores a
+       INNER JOIN core.view_app_colaboradores c ON a.email = c.email
+       WHERE c.nome_equipe = $1
        LIMIT 1`,
       [nome]
     );
@@ -288,14 +288,14 @@ router.get('/equipe-metrics', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/admin/months
+// GET /api/admin/months (LEITURA – usa VIEW)
 // ============================================================
 router.get('/months', async (req, res) => {
   console.log('📅 Rota /api/admin/months foi chamada. Sessão:', req.session.isAuthenticated);
   try {
     const result = await db.query(
       `SELECT DISTINCT data_metrica 
-       FROM app_comissionamento.metricas_assessores 
+       FROM app_comissionamento.view_app_metricas_assessores 
        ORDER BY data_metrica DESC`
     );
     const months = result.rows.map(r => {
@@ -314,7 +314,7 @@ router.get('/months', async (req, res) => {
 });
 
 // ============================================================
-// POST /api/admin/generate-next-month
+// POST /api/admin/generate-next-month (ESCRITA na tabela original)
 // ============================================================
 router.post('/generate-next-month', async (req, res) => {
   try {
@@ -324,6 +324,7 @@ router.post('/generate-next-month', async (req, res) => {
     const primeiroProximoMes = new Date(ano, mes + 1, 1);
     const dataMetrica = primeiroProximoMes.toISOString().slice(0, 10);
 
+    // Verifica se já existem registros (pode usar a view para consulta, mas aqui é só verificação)
     const check = await db.query(
       `SELECT COUNT(*) as total FROM app_comissionamento.metricas_assessores WHERE data_metrica::date = $1::date`,
       [dataMetrica]
@@ -332,12 +333,12 @@ router.post('/generate-next-month', async (req, res) => {
       return res.status(409).json({ success: false, error: 'Registros para o próximo mês já existem.' });
     }
 
+    // Inserção na tabela original, selecionando do último mês existente
     await db.query(`
       INSERT INTO app_comissionamento.metricas_assessores (
         id_assessor,
         email,
         senha_colaborador_hash,
-        comissao_colaborador,
         comissao_bonus,
         peso_meta_assinados_diario,
         peso_meta_ganho_diario,
@@ -352,7 +353,6 @@ router.post('/generate-next-month', async (req, res) => {
         id_assessor,
         email,
         senha_colaborador_hash,
-        comissao_colaborador,
         comissao_bonus,
         peso_meta_assinados_diario,
         peso_meta_ganho_diario,
@@ -362,8 +362,8 @@ router.post('/generate-next-month', async (req, res) => {
         peso_meta_ganho_mensal,
         $1::date,
         NOW()
-      FROM app_comissionamento.metricas_assessores
-      WHERE data_metrica::date = (SELECT MAX(data_metrica::date) FROM app_comissionamento.metricas_assessores)
+      FROM app_comissionamento.view_app_metricas_assessores
+      WHERE data_metrica::date = (SELECT MAX(data_metrica::date) FROM app_comissionamento.view_app_metricas_assessores)
     `, [dataMetrica]);
 
     res.json({ success: true, message: `Registros para ${dataMetrica} criados com sucesso.` });

@@ -1,10 +1,8 @@
-// backend/routes/colaboradores.js
 import express from 'express';
 import db from '../services/db.js';
 
 const router = express.Router();
 
-// Middleware de autenticação – verifica isAuthenticated e userId
 function requireAuth(req, res, next) {
   if (!req.session.isAuthenticated || !req.session.userId) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
@@ -19,14 +17,15 @@ function getCurrentPeriod() {
   return `${year}-${month}`;
 }
 
-function mapGrupoToProduto(grupo) {
+// Mapeamento de cargo para produto (mantido)
+function mapGrupoToProduto(cargo) {
   const mapping = {
     'Elite': 'Auxilio Acidente',
     'Quinquenio': 'Quinquenio',
     'Quinquênio ': 'Quinquenio',
     'Concomitante': 'Concomitante',
   };
-  return mapping[grupo] || '';
+  return mapping[cargo] || '';
 }
 
 const EXCLUDED_TEAMS = [
@@ -38,9 +37,7 @@ function normalize(str) {
   return (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// ============================================================
-// Função de correspondência: tenta várias combinações
-// ============================================================
+// Função de correspondência: tenta várias combinações de e‑mail
 function findMetricByEmail(email, metricsMap) {
   const clean = normalize(email);
   if (!clean) return null;
@@ -70,21 +67,20 @@ function findMetricByEmail(email, metricsMap) {
   return null;
 }
 
-// ============================================================
-// Rota GET /api/collaborators
-// ============================================================
+// GET /api/collaborators
 router.get('/collaborators', requireAuth, async (req, res) => {
   const periodo = req.query.mes || getCurrentPeriod();
   console.log(`📅 Buscando colaboradores para o período: ${periodo}`);
 
   try {
+    // Consulta base na view de colaboradores
     const todosColabs = await db.query(`
-      SELECT internal_id, id_crm, colaborador, e_mail, id_equipe, equipe, grupo, status, periodo
-      FROM madm.colaboradores
+      SELECT email, nome, nome_equipe, cargo, status, periodo
+      FROM core.view_app_colaboradores
       WHERE periodo = $1
-        AND equipe IS NOT NULL AND TRIM(equipe) != ''
+        AND nome_equipe IS NOT NULL AND TRIM(nome_equipe) != ''
         AND LOWER(status) != 'desativado'
-        AND LOWER(grupo) != 'desativado'
+        AND LOWER(cargo) != 'desativado'
     `, [periodo]);
     const colabsArray = todosColabs.rows;
 
@@ -92,6 +88,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       return res.json({ success: true, data: [] });
     }
 
+    // Métricas da view de métricas assessores
     const metricas = await db.query(`
       SELECT email, data_metrica,
              COALESCE(peso_meta_assinados_diario, 3)   AS meta_diario_assinados,
@@ -100,9 +97,9 @@ router.get('/collaborators', requireAuth, async (req, res) => {
              COALESCE(peso_meta_ganho_semanal, 3)      AS meta_semanal_ganhos,
              COALESCE(peso_meta_assinados_mensal, 10)  AS meta_mensal_assinados,
              COALESCE(peso_meta_ganho_mensal, 10)      AS meta_mensal_ganhos,
-             COALESCE(comissao_colaborador, 0)         AS comissao,
+             COALESCE(comissao_bonus, 0)               AS comissao,
              COALESCE(comissao_bonus, 0)               AS bonus_comissao
-      FROM app_comissionamento.metricas_assessores
+      FROM app_comissionamento.view_app_metricas_assessores
       WHERE TO_CHAR(data_metrica::date, 'YYYY-MM') = $1
     `, [periodo]);
 
@@ -119,14 +116,14 @@ router.get('/collaborators', requireAuth, async (req, res) => {
 
     const colaboradores = [];
     for (const colab of colabsArray) {
-      const equipeNome = (colab.equipe || '').trim();
+      const equipeNome = (colab.nome_equipe || '').trim();
       if (EXCLUDED_TEAMS.includes(equipeNome)) continue;
 
-      const emailColab = normalize(colab.e_mail);
+      const emailColab = normalize(colab.email);
       let metrica = findMetricByEmail(emailColab, metricsByEmail);
 
       if (!metrica) {
-        const nomeColab = normalize(colab.colaborador);
+        const nomeColab = normalize(colab.nome);
         for (const [key, m] of metricsByEmail.entries()) {
           if (key === nomeColab || key.includes(nomeColab) || nomeColab.includes(key)) {
             metrica = m;
@@ -136,15 +133,15 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       }
 
       colaboradores.push({
-        id: colab.internal_id,
-        name: colab.colaborador,
-        email: colab.e_mail,
-        equipeId: colab.id_equipe ? String(colab.id_equipe) : '',
+        id: colab.email,
+        name: colab.nome,
+        email: colab.email,
+        equipeId: '',  // id_equipe não disponível na view
         equipeNome,
-        grupo: colab.grupo || '',
+        grupo: colab.cargo || '',
         status: colab.status || 'ativo',
         periodo: colab.periodo || periodo,
-        avatar: (colab.colaborador || '?').charAt(0).toUpperCase(),
+        avatar: (colab.nome || '?').charAt(0).toUpperCase(),
         emitidos: 0,
         assinados: 0,
         ganhos: 0,
@@ -161,7 +158,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         metaGanhos: 3,
         bonusPorCiclo: 0,
         bonusRecebido: 0,
-        produto: mapGrupoToProduto(colab.grupo || ''),
+        produto: mapGrupoToProduto(colab.cargo || ''),
       });
     }
 
@@ -173,9 +170,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
   }
 });
 
-// ============================================================
-// Rota GET /api/equipes
-// ============================================================
+// GET /api/equipes
 router.get('/equipes', requireAuth, async (req, res) => {
   const gruposPermitidos = [
     'Elite', 'Supervisor', 'Análise de segurado', 'Concomitante',
@@ -185,10 +180,10 @@ router.get('/equipes', requireAuth, async (req, res) => {
 
   try {
     const result = await db.query(
-      `SELECT id_equipe, equipe
-       FROM madm.colaboradores
-       WHERE periodo = $1 AND grupo = ANY($2) AND id_equipe IS NOT NULL
-         AND equipe IS NOT NULL AND TRIM(equipe) != ''`,
+      `SELECT DISTINCT nome_equipe AS equipe
+       FROM core.view_app_colaboradores
+       WHERE periodo = $1 AND cargo = ANY($2)
+         AND nome_equipe IS NOT NULL AND TRIM(nome_equipe) != ''`,
       [periodo, gruposPermitidos]
     );
 
@@ -196,14 +191,14 @@ router.get('/equipes', requireAuth, async (req, res) => {
     for (const row of result.rows) {
       const nome = (row.equipe || '').trim();
       if (!teamsMap.has(nome)) {
-        teamsMap.set(nome, row.id_equipe);
+        teamsMap.set(nome, nome);  // id não disponível, usa o próprio nome
       }
     }
 
     const equipes = Array.from(teamsMap.entries())
-      .map(([nome, id]) => ({ id: String(id), nome }))
+      .map(([nome, id]) => ({ id, nome }))
       .filter(eq => !EXCLUDED_TEAMS.includes(eq.nome))
-      .sort((a, b) => parseInt(a.id) - parseInt(b.id));
+      .sort((a, b) => a.nome.localeCompare(b.nome));
 
     res.json({ success: true, data: equipes });
   } catch (err) {

@@ -26,7 +26,7 @@ import {
 } from "@/lib/api";
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO
+// CONSTANTES DE EXCLUSÃO – agora baseadas no campo cargo
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
@@ -36,15 +36,33 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS_FOR_DISPLAY = [
-  "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
-  "Marketing", "Gerência", "Contrato", "Dr. Felipe Marx", "Administrativo",
-  "administrativo"
+const EXCLUDED_CARGOS_FOR_DISPLAY = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  
+  // Supervisão
+  "supervisor",
+  
+  // Coordenador
+  "coordenador",
+  
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 // ============================================================
-// CONFIGURAÇÃO DE PESOS (MESMA DA PÁGINA RANKING)
+// CONFIGURAÇÃO DE PESOS
 // ============================================================
 const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', number> = {
   ganhos: 4,
@@ -53,7 +71,6 @@ const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', numb
   emitidos: 2,
 };
 
-// ========== METAS GLOBAIS (visão geral) ==========
 const GLOBAL_META = {
   diario: { assinados: 100, ganhos: 100 },
   semanal: { assinados: 500, ganhos: 500 },
@@ -64,17 +81,17 @@ const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
-const isExcludedGroupForDisplay = (group: string) =>
-  EXCLUDED_GROUPS_FOR_DISPLAY.some(g => normalize(g) === normalize(group));
+const isExcludedCargoForDisplay = (cargo: string) =>
+  EXCLUDED_CARGOS_FOR_DISPLAY.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: any) => {
-  const grupo = normalize(c.grupo);
+  const cargo = normalize(c.cargo);
   const equipe = normalize(c.equipeNome);
-  return grupo === 'desativado' || equipe.includes('desativado');
+  return cargo === 'desativado' || equipe.includes('desativado');
 };
 
 // ============================================================
-// FUNÇÃO DE PONTUAÇÃO PONDERADA
+// PONTUAÇÃO PONDERADA
 // ============================================================
 function calculateWeightedScore(
   item: { ganhos: number; assinados: number; protocolados: number; emitidos: number }
@@ -87,7 +104,7 @@ function calculateWeightedScore(
   return score;
 }
 
-// ========== UTILITÁRIOS DE DATAS COM UTC ==========
+// ========== UTILITÁRIOS DE DATAS UTC ==========
 function parseUTCDate(dateStr: string): Date {
   if (!dateStr) return new Date(NaN);
   if (dateStr.includes('T') || dateStr.includes('Z')) {
@@ -277,7 +294,7 @@ export default function Home() {
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
-    colaboradorId?: number;
+    colaboradorId?: string | number;   // aceita ambos
     produto: string;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
   const [loading, setLoading] = useState(true);
@@ -374,11 +391,11 @@ export default function Home() {
     }
   }, [currentStartDate, currentEndDate, allCollaborators.length]);
 
-  // ========== CÁLCULO DO RANKING GLOBAL ==========
+  // ========== CÁLCULO DO RANKING GLOBAL (agora usa cargo) ==========
   const globalRanking = useMemo(() => {
     const eligible = allCollaborators.filter(c => {
       if (isDesativado(c)) return false;
-      if (isExcludedGroupForDisplay(c.grupo)) return false;
+      if (isExcludedCargoForDisplay(c.cargo)) return false;
       if (isExcludedTeam(c.equipeNome)) return false;
       return true;
     });
@@ -458,7 +475,6 @@ export default function Home() {
       filters.colaborador !== lastFiltersRef.current.colaborador ||
       filters.produto !== lastFiltersRef.current.produto;
 
-    // Se nada mudou e já carregou, não recarrega (exceto se rawMetrics estiver vazio)
     const metricsEmpty = rawMetrics.assinados === 0 && rawMetrics.emitidos === 0 && rawMetrics.ganhos === 0;
     if (initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
       return;
@@ -497,7 +513,7 @@ export default function Home() {
     const selectedColab = filters.colaboradorId
       ? collaborators.find(c => c.id === filters.colaboradorId)
       : null;
-    const isSupervisor = selectedColab?.grupo?.toLowerCase() === 'supervisor';
+    const isSupervisor = selectedColab?.cargo?.toLowerCase() === 'supervisor';   // ajustado para cargo
 
     if (isSupervisor && selectedColab) {
       equipeApi = selectedColab.equipeNome;
@@ -515,7 +531,6 @@ export default function Home() {
     reloadData(false);
   }, [currentStartDate, currentEndDate, filters, reloadData]);
 
-  // Carrega ranking inicial se necessário
   useEffect(() => {
     if (currentStartDate && currentEndDate && allCollaborators.length === 0) {
       loadRankingData();
@@ -538,8 +553,8 @@ export default function Home() {
   const displayCollaborators = useMemo(() => {
     return filteredCollaborators.filter(c => {
       if (isDesativado(c)) return false;
-      const g = (c.grupo || '').trim().toLowerCase();
-      return g !== 'supervisor' && g !== 'coordenador' && g !== 'administrativo';
+      const cargo = (c.cargo || '').trim().toLowerCase();   // ajustado
+      return cargo !== 'supervisor' && cargo !== 'coordenador' && cargo !== 'administrativo';
     });
   }, [filteredCollaborators]);
 
@@ -786,7 +801,7 @@ export default function Home() {
     fetchDailyData();
   }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
 
-  const handleFilterChange = (newFilters: { equipe: string; colaborador: string; colaboradorId?: number; produto: string }) => {
+  const handleFilterChange = (newFilters: { equipe: string; colaborador: string; colaboradorId?: string | number; produto: string }) => {
     setFilters(newFilters);
   };
 

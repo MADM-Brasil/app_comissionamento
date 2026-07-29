@@ -30,7 +30,7 @@ const WEIGHTS: Record<SortMetric, number> = {
 };
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO
+// CONSTANTES DE EXCLUSÃO – agora baseadas em cargo
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
@@ -40,11 +40,29 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS = [
-  "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
-  "Marketing", "Gerência", "Contrato", "Dr. Felipe Marx", "Administrativo",
-  "administrativo"
+const EXCLUDED_CARGOS = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  
+  // Supervisão
+  "supervisor",
+  
+  // Coordenador
+  "coordenador",
+  
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 type RankingType = "colaborador" | "equipe";
@@ -82,13 +100,13 @@ const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
-const isExcludedGroup = (group: string) =>
-  EXCLUDED_GROUPS.some(g => normalize(g) === normalize(group));
+const isExcludedCargo = (cargo: string) =>
+  EXCLUDED_CARGOS.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: any) => {
-  const grupo = normalize(c.grupo);
+  const cargo = normalize(c.cargo);                     // ⬅️ usa cargo
   const equipe = normalize(c.equipeNome);
-  return grupo === 'desativado' || equipe.includes('desativado');
+  return cargo === 'desativado' || equipe.includes('desativado');
 };
 
 const teamToProductMapping: Record<string, string> = {
@@ -360,7 +378,7 @@ export default function Ranking() {
   const rankingCollaborators = useMemo(() => {
     let filtered = allCollaborators.filter(c => {
       if (isDesativado(c)) return false;
-      if (isExcludedGroup(c.grupo)) return false;
+      if (isExcludedCargo(c.cargo)) return false;   // ⬅️ usa cargo
       if (isExcludedTeam(c.equipeNome)) return false;
       return true;
     });
@@ -369,9 +387,9 @@ export default function Ranking() {
       const group = productToGroup[selectedProduct];
       if (group) {
         if (Array.isArray(group)) {
-          filtered = filtered.filter(c => group.includes(c.grupo));
+          filtered = filtered.filter(c => group.includes(c.cargo));   // ⬅️ usa cargo
         } else {
-          filtered = filtered.filter(c => c.grupo === group);
+          filtered = filtered.filter(c => c.cargo === group);         // ⬅️ usa cargo
         }
       }
     }
