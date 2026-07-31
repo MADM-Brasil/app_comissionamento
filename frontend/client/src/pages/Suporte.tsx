@@ -71,6 +71,17 @@ interface TicketMovimentacao {
   criado_em: string;
 }
 
+interface TicketSuporte {
+  id_ticket_suporte: number;
+  assunto: string;
+  descricao: string;
+  solicitante_nome: string;
+  equipe_nome: string;
+  status: string;
+  observacao_sales_ops?: string;
+  criado_em: string;
+}
+
 // ---------------------- Helpers ----------------------
 const formatPhoneDisplay = (phone: string): string => {
   const numbers = phone.replace(/\D/g, "");
@@ -158,7 +169,7 @@ export default function Suporte() {
   );
 }
 
-// ---------------------- Aba Movimentação (mantida igual) ----------------------
+// ---------------------- Aba Movimentação ----------------------
 function MovimentacaoTab() {
   const {
     currentUser,
@@ -359,7 +370,7 @@ function MovimentacaoTab() {
   );
 }
 
-// ---------------------- Aba Reportar (mantida igual) ----------------------
+// ---------------------- Aba Reportar ----------------------
 function ReportarTab() {
   const [assunto, setAssunto] = useState("");
   const [descricao, setDescricao] = useState("");
@@ -388,7 +399,17 @@ function ReportarTab() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => { if (e.target.files) setFiles(Array.from(e.target.files)); };
   const removeFile = (index: number) => { setFiles(prev => prev.filter((_, i) => i !== index)); };
-  const exportReports = () => { /* ... */ };
+  const exportReports = () => {
+    if (reports.length === 0) return;
+    const headers = ["Data", "Assunto", "Status", "Solicitante", "Equipe"];
+    const rows = reports.map(r => [new Date(r.data).toLocaleString("pt-BR"), `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`].join(";"));
+    const csv = [headers.join(";"), ...rows].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `reportes_${new Date().toISOString().split("T")[0]}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
   const clearReports = () => { if (confirm("Limpar?")) { setReports([]); setMessage({ text: "Limpos.", type: "success" }); } };
   const updateAllReportsStatus = () => { setReports(prev => prev.map(r => ({ ...r, status: r.status === "ENVIADO" ? "CONCLUÍDO" : r.status, ultimaAtualizacao: new Date().toISOString() }))); setMessage({ text: "Status atualizados.", type: "success" }); };
   const filteredReports = reports.filter(r => filterStatus === "todos" || r.status === filterStatus);
@@ -424,9 +445,40 @@ function ReportarTab() {
   );
 }
 
-// ---------------------- Visão SalesOps (apenas Movimentações) ----------------------
+// ---------------------- Visão SalesOps com sub-tabs ----------------------
 function SalesOpsTab() {
-  return <MovimentacoesSuporteTab />;
+  const [subTab, setSubTab] = useState<"movimentacoes" | "reportes">("movimentacoes");
+
+  return (
+    <div className="space-y-4">
+      {/* Sub-navegação */}
+      <div className="flex gap-2 border-b border-gray-200 pb-2">
+        <button
+          type="button"
+          onClick={() => setSubTab("movimentacoes")}
+          className={cn(
+            "px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors",
+            subTab === "movimentacoes" ? "bg-white text-[#09175b] border-b-2 border-[#09175b]" : "text-gray-500 hover:text-gray-700"
+          )}
+        >
+          Movimentações
+        </button>
+        <button
+          type="button"
+          onClick={() => setSubTab("reportes")}
+          className={cn(
+            "px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors",
+            subTab === "reportes" ? "bg-white text-[#09175b] border-b-2 border-[#09175b]" : "text-gray-500 hover:text-gray-700"
+          )}
+        >
+          Reportes
+        </button>
+      </div>
+
+      {subTab === "movimentacoes" && <MovimentacoesSuporteTab />}
+      {subTab === "reportes" && <ReportesSuporteTab />}
+    </div>
+  );
 }
 
 // ---------------------- Tabela de movimentações com edição inline ----------------------
@@ -480,7 +532,6 @@ function MovimentacoesSuporteTab() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erro ao atualizar');
 
-      // Atualiza estado local
       setTickets(prev => prev.map(t => t.id_ticket_movimentacao === id ? { ...t, status_mapeamento: editForm.status_mapeamento, observacao_sales_ops: editForm.observacao_sales_ops } : t));
       setMessage({ text: "Ticket atualizado com sucesso.", type: "success" });
       cancelEdit();
@@ -585,6 +636,179 @@ function MovimentacoesSuporteTab() {
                         {isEditing ? (
                           <div className="flex items-center gap-1">
                             <button onClick={() => saveEdit(ticket.id_ticket_movimentacao)} disabled={saving} className="p-1 rounded hover:bg-green-50" title="Salvar"><Save className="w-3.5 h-3.5 text-green-600" /></button>
+                            <button onClick={cancelEdit} className="p-1 rounded hover:bg-red-50" title="Cancelar"><X className="w-3.5 h-3.5 text-red-500" /></button>
+                          </div>
+                        ) : (
+                          <button onClick={() => startEdit(ticket)} className="p-1 rounded hover:bg-gray-100" title="Editar"><Edit2 className="w-3.5 h-3.5 text-gray-500" /></button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------- Tabela de reportes com edição inline ----------------------
+function ReportesSuporteTab() {
+  const [tickets, setTickets] = useState<TicketSuporte[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
+  const [filterStatus, setFilterStatus] = useState<string>("todos");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState<{ status: string; observacao_sales_ops: string }>({ status: '', observacao_sales_ops: '' });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const carregarReportes = async () => {
+      try {
+        // Endpoint hipotético – o backend pode expor uma rota que retorna todos os tickets de suporte
+        const res = await fetch(`${API_BASE}/suporte/tickets-suporte?todos=1`, { credentials: 'include' });
+        const data = await res.json();
+        if (data.success) setTickets(data.data);
+        else setMessage({ text: "Erro ao carregar reportes", type: "error" });
+      } catch (err) {
+        setMessage({ text: "Erro ao carregar reportes", type: "error" });
+      } finally {
+        setLoading(false);
+      }
+    };
+    carregarReportes();
+  }, []);
+
+  const startEdit = (ticket: TicketSuporte) => {
+    setEditingId(ticket.id_ticket_suporte);
+    setEditForm({
+      status: ticket.status || 'ENVIADO',
+      observacao_sales_ops: ticket.observacao_sales_ops || '',
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditForm({ status: '', observacao_sales_ops: '' });
+  };
+
+  const saveEdit = async (id: number) => {
+    setSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${id}`, {
+        method: 'PATCH',
+        headers: getCsrfHeaders(),
+        credentials: 'include',
+        body: JSON.stringify(editForm),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao atualizar');
+
+      setTickets(prev => prev.map(t => t.id_ticket_suporte === id ? { ...t, status: editForm.status, observacao_sales_ops: editForm.observacao_sales_ops } : t));
+      setMessage({ text: "Reporte atualizado com sucesso.", type: "success" });
+      cancelEdit();
+    } catch (err: any) {
+      setMessage({ text: err.message, type: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const filteredTickets = tickets.filter(t => filterStatus === "todos" || t.status === filterStatus);
+
+  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#09175b]" /></div>;
+
+  return (
+    <div className="space-y-4">
+      {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}>{message.text}</div>}
+      <div className="madm-card p-5">
+        <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
+          <h2 className="text-lg font-bold text-[#09175b]">Reportes (Suporte)</h2>
+          <div className="flex gap-2">
+            <select
+              value={filterStatus}
+              onChange={e => setFilterStatus(e.target.value)}
+              className="px-2 py-1 border rounded text-sm"
+              title="Filtrar por status"
+              aria-label="Filtrar reportes por status"
+            >
+              <option value="todos">Todos</option>
+              <option value="ENVIADO">Enviado</option>
+              <option value="SUSPEITO">Suspeito</option>
+              <option value="CONCLUÍDO">Concluído</option>
+              <option value="ERRO">Erro</option>
+              <option value="BLOQUEADO">Bloqueado</option>
+              <option value="REVISÃO">Revisão</option>
+            </select>
+          </div>
+        </div>
+        {filteredTickets.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">Nenhum reporte encontrado</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-left text-gray-500 border-b">
+                <tr>
+                  <th className="pb-2">ID</th>
+                  <th className="pb-2">Data</th>
+                  <th className="pb-2">Solicitante</th>
+                  <th className="pb-2">Equipe</th>
+                  <th className="pb-2">Assunto</th>
+                  <th className="pb-2">Status</th>
+                  <th className="pb-2">Obs. SalesOps</th>
+                  <th className="pb-2">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredTickets.map(ticket => {
+                  const isEditing = editingId === ticket.id_ticket_suporte;
+                  const statusInfo = getStatusInfo(ticket.status || 'ENVIADO');
+                  return (
+                    <tr key={ticket.id_ticket_suporte} className="border-b border-gray-100 hover:bg-gray-50">
+                      <td className="py-2">{ticket.id_ticket_suporte}</td>
+                      <td className="py-2 whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
+                      <td className="py-2">{ticket.solicitante_nome}</td>
+                      <td className="py-2">{ticket.equipe_nome}</td>
+                      <td className="py-2">{ticket.assunto}</td>
+                      <td className="py-2">
+                        {isEditing ? (
+                          <select
+                            value={editForm.status}
+                            onChange={e => setEditForm(prev => ({ ...prev, status: e.target.value }))}
+                            className="px-2 py-1 border rounded text-xs"
+                          >
+                            <option value="ENVIADO">Enviado</option>
+                            <option value="SUSPEITO">Suspeito</option>
+                            <option value="CONCLUÍDO">Concluído</option>
+                            <option value="ERRO">Erro</option>
+                            <option value="BLOQUEADO">Bloqueado</option>
+                            <option value="REVISÃO">Revisão</option>
+                          </select>
+                        ) : (
+                          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", statusInfo.className)}>
+                            {statusInfo.icon} {statusInfo.label}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 max-w-[150px]">
+                        {isEditing ? (
+                          <textarea
+                            value={editForm.observacao_sales_ops}
+                            onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
+                            rows={2}
+                            className="w-full px-2 py-1 border rounded text-xs resize-none"
+                            placeholder="Nova observação"
+                          />
+                        ) : (
+                          <span className="truncate block" title={ticket.observacao_sales_ops}>{ticket.observacao_sales_ops || "—"}</span>
+                        )}
+                      </td>
+                      <td className="py-2">
+                        {isEditing ? (
+                          <div className="flex items-center gap-1">
+                            <button onClick={() => saveEdit(ticket.id_ticket_suporte)} disabled={saving} className="p-1 rounded hover:bg-green-50" title="Salvar"><Save className="w-3.5 h-3.5 text-green-600" /></button>
                             <button onClick={cancelEdit} className="p-1 rounded hover:bg-red-50" title="Cancelar"><X className="w-3.5 h-3.5 text-red-500" /></button>
                           </div>
                         ) : (
