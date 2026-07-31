@@ -26,7 +26,7 @@ import {
 } from "@/lib/api";
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO – agora baseadas no campo cargo
+// CONSTANTES DE EXCLUSÃO (já adaptadas para cargo)
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
@@ -44,13 +44,10 @@ const EXCLUDED_CARGOS_FOR_DISPLAY = [
   "gestor de projetos",
   "analista",
   "analista de discadora",
-  
   // Supervisão
   "supervisor",
-  
   // Coordenador
   "coordenador",
-  
   // Administrativo
   "salesops",
   "ceo",
@@ -465,7 +462,7 @@ export default function Home() {
     return aboveUser.score - (globalRanking[currentIndex]?.score || 0);
   }, [aboveUser, currentIndex, globalRanking]);
 
-  // ========== FUNÇÃO DE RECARGA ==========
+  // ========== FUNÇÃO DE RECARGA (agora manual) ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
     const datesChanged =
       currentStartDate !== lastDatesRef.current.start ||
@@ -476,7 +473,7 @@ export default function Home() {
       filters.produto !== lastFiltersRef.current.produto;
 
     const metricsEmpty = rawMetrics.assinados === 0 && rawMetrics.emitidos === 0 && rawMetrics.ganhos === 0;
-    if (initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
+    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
       return;
     }
 
@@ -524,13 +521,15 @@ export default function Home() {
     return { equipeApi, colaboradorApi, colaboradorIdApi };
   }, [filters, collaborators]);
 
-  // ========== CARREGAMENTO INICIAL ==========
+  // ========== CARREGAMENTO INICIAL (uma única vez) ==========
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
+    if (initialLoadDone.current) return;
     setLoading(true);
     reloadData(false);
-  }, [currentStartDate, currentEndDate, filters, reloadData]);
+  }, [currentStartDate, currentEndDate, reloadData]);
 
+  // Carrega ranking inicial se necessário
   useEffect(() => {
     if (currentStartDate && currentEndDate && allCollaborators.length === 0) {
       loadRankingData();
@@ -628,7 +627,7 @@ export default function Home() {
     return { comissaoTotal: totalComissao, metaBatida: metasBatidasUser, bonusPorCiclo: bonusPorCicloUser };
   }, [currentUserData, isSpecialGroup, period, globalConfig, authUser]);
 
-  // ========== GRÁFICOS ==========
+  // ========== GRÁFICOS (carregados uma vez, sem polling) ==========
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
     const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
@@ -803,6 +802,7 @@ export default function Home() {
 
   const handleFilterChange = (newFilters: { equipe: string; colaborador: string; colaboradorId?: string | number; produto: string }) => {
     setFilters(newFilters);
+    // Não recarrega automaticamente – usuário deverá clicar em "Atualizar"
   };
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
@@ -843,18 +843,6 @@ export default function Home() {
 
   return (
     <DashboardLayout title={`Olá, ${firstName}! 👋`} subtitle="Aqui está o resumo do seu desempenho de hoje!">
-      {/* Indicador de atualização */}
-      <div className="flex items-center justify-end gap-2 mb-2">
-        {refreshing && (
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Atualizando dados...</span>
-          </div>
-        )}
-        <span className="text-[10px] text-gray-400">
-          Atualizado {new Date().toLocaleTimeString()}
-        </span>
-      </div>
 
       <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
 
@@ -870,6 +858,29 @@ export default function Home() {
           Nenhum colaborador disponível no momento. Verifique sua conexão ou contate o suporte.
         </div>
       )}
+
+            {/* Indicador de atualização em tempo real */}
+            <div className="flex items-center justify-end gap-2 mb-2">
+              {refreshing && (
+                <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Atualizando dados...</span>
+                </div>
+              )}
+              <span className="text-[10px] text-gray-400">
+                Atualizado {new Date().toLocaleTimeString()}
+              </span>
+              {/* Botão de atualização manual */}
+              <button
+                onClick={() => reloadData(true)}
+                disabled={refreshing}
+                className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
+                aria-label="Atualizar dados manualmente"
+              >
+                <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+                Atualizar
+              </button>
+            </div>
 
       {collaborators.length > 0 && (
         <>

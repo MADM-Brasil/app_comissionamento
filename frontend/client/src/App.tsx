@@ -12,7 +12,6 @@ import Comissoes from "./pages/Comissoes";
 import Funil from "./pages/Funil";
 import Analytics from "./pages/Analytics";
 import Ranking from "./pages/Ranking";
-import Relatorio from "./pages/Relatorio";
 import Notificacoes from "./pages/Notificacoes";
 import Configuration from "./pages/Configuration";
 import Suporte from "./pages/Suporte";
@@ -119,13 +118,6 @@ function Router() {
         <PeriodProvider>
           <ProtectedRoute>
             <Suporte />
-          </ProtectedRoute>
-        </PeriodProvider>
-      </Route>
-      <Route path="/relatorio">
-        <PeriodProvider>
-          <ProtectedRoute>
-            <Relatorio />
           </ProtectedRoute>
         </PeriodProvider>
       </Route>

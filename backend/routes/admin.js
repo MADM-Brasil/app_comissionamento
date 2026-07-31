@@ -324,7 +324,7 @@ router.post('/generate-next-month', async (req, res) => {
     const primeiroProximoMes = new Date(ano, mes + 1, 1);
     const dataMetrica = primeiroProximoMes.toISOString().slice(0, 10);
 
-    // Verifica se já existem registros (pode usar a view para consulta, mas aqui é só verificação)
+    // Verifica se já existem registros para o próximo mês
     const check = await db.query(
       `SELECT COUNT(*) as total FROM app_comissionamento.metricas_assessores WHERE data_metrica::date = $1::date`,
       [dataMetrica]
@@ -333,12 +333,13 @@ router.post('/generate-next-month', async (req, res) => {
       return res.status(409).json({ success: false, error: 'Registros para o próximo mês já existem.' });
     }
 
-    // Inserção na tabela original, selecionando do último mês existente
+    // Inserção na tabela original, copiando do último mês e excluindo Desativado
     await db.query(`
       INSERT INTO app_comissionamento.metricas_assessores (
         id_assessor,
         email,
         senha_colaborador_hash,
+        colaborador,
         comissao_bonus,
         peso_meta_assinados_diario,
         peso_meta_ganho_diario,
@@ -346,6 +347,8 @@ router.post('/generate-next-month', async (req, res) => {
         peso_meta_ganho_semanal,
         peso_meta_assinados_mensal,
         peso_meta_ganho_mensal,
+        peso_meta_protocolados_mensal,
+        classificacao_operacional,
         data_metrica,
         updated_at
       )
@@ -353,6 +356,7 @@ router.post('/generate-next-month', async (req, res) => {
         id_assessor,
         email,
         senha_colaborador_hash,
+        colaborador,
         comissao_bonus,
         peso_meta_assinados_diario,
         peso_meta_ganho_diario,
@@ -360,10 +364,15 @@ router.post('/generate-next-month', async (req, res) => {
         peso_meta_ganho_semanal,
         peso_meta_assinados_mensal,
         peso_meta_ganho_mensal,
+        peso_meta_protocolados_mensal,
+        classificacao_operacional,
         $1::date,
         NOW()
-      FROM app_comissionamento.view_app_metricas_assessores
-      WHERE data_metrica::date = (SELECT MAX(data_metrica::date) FROM app_comissionamento.view_app_metricas_assessores)
+      FROM app_comissionamento.metricas_assessores
+      WHERE data_metrica::date = (
+        SELECT MAX(data_metrica::date) FROM app_comissionamento.metricas_assessores
+      )
+        AND (classificacao_operacional IS NULL OR classificacao_operacional != 'Desativado')
     `, [dataMetrica]);
 
     res.json({ success: true, message: `Registros para ${dataMetrica} criados com sucesso.` });

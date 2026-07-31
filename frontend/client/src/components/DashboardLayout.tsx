@@ -28,7 +28,6 @@ const navItems = [
   { path: "/funil", label: "Funil de Vendas", icon: GitBranch },
   { path: "/analytics", label: "Analytics", icon: BarChart3 },
   { path: "/ranking", label: "Ranking", icon: Trophy },
-  //{ path: "/relatorio", label: "Relatório", icon: FileCheck }, ajustar para união sistema do Kleber
   //{ path: "/suporte", label: "Suporte", icon: Headphones },
   //{ path: "/notificacoes", label: "Notificações", icon: Bell },
   { path: "/configuration", label: "Configurações", icon: Settings },

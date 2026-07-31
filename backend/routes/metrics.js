@@ -311,7 +311,8 @@ router.get('/ganhos', requireAuth, async (req, res) => {
     if (produto && produto !== 'Todos') {
       const productVariants = {
         'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
+        'Quinquenio': ['Quinquenio', 'Quinquênio'],
+        'Concomitante': ['Concomitante', 'concomitante']
       };
       if (productVariants[produto]) {
         const variants = productVariants[produto];
