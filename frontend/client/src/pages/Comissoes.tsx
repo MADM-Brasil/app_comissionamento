@@ -18,7 +18,7 @@ type PeriodoMeta = 'diario' | 'semanal' | 'mensal';
 // ========== FUNÇÃO AUXILIAR PARA FORMATAÇÃO DE INTEIROS ==========
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
-// Equipes e grupos que não devem aparecer nos cálculos de comissão
+// Equipes e cargos que não devem aparecer nos cálculos de comissão
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
@@ -27,19 +27,35 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS = [
-  "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
-  "Marketing","Gerência","Contrato", "Dr. Felipe Marx","Administrativo"
+const EXCLUDED_CARGOS = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  // Supervisão
+  "supervisor",
+  // Coordenador
+  "coordenador",
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 
 function isSpecialGroupColaborador(colaborador: any): boolean {
   const produto = (colaborador.produto || '').toLowerCase();
-  const grupo = (colaborador.grupo || '').toLowerCase();
+  const cargo = (colaborador.cargo || '').toLowerCase();
   return produto === 'quinquenio' || produto === 'concomitante' ||
-         grupo === 'quinquenio' || grupo === 'concomitante';
+         cargo === 'quinquenio' || cargo === 'concomitante';
 }
 
 function obterMetaPorPeriodo(colaborador: any, periodo: PeriodoMeta) {
@@ -108,15 +124,19 @@ export default function Comissoes() {
 
   const { currentUser } = useAccessControl();
 
+  // Filtros – colaboradorId agora aceita string | number
   const [filters, setFilters] = useState<{
-    equipe: string; colaborador: string; colaboradorId?: number; produto: string;
+    equipe: string;
+    colaborador: string;
+    colaboradorId?: string | number;
+    produto: string;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // ===== CONTROLE PARA EVITAR CARREGAMENTO COM FILTROS INICIAIS VAZIOS =====
+  // Controle para evitar carregamento antes do primeiro filtro
   const [isFirstFilterApplied, setIsFirstFilterApplied] = useState(false);
 
   const initialLoadDone = useRef(false);
@@ -139,9 +159,8 @@ export default function Comissoes() {
     };
   }, [isFirstFilterApplied]);
 
-  // ========== FUNÇÃO DE RECARGA ==========
+  // ========== FUNÇÃO DE RECARGA (chamada manual ou inicial) ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
-    // Evita múltiplas execuções simultâneas
     if (isLoadingRef.current) {
       console.log('ℹ️ Comissoes: já está carregando, ignorando');
       return;
@@ -155,9 +174,9 @@ export default function Comissoes() {
       filters.colaborador !== lastFiltersRef.current.colaborador ||
       filters.produto !== lastFiltersRef.current.produto;
 
-    // Se nada mudou e já carregou, não recarrega
-    if (initialLoadDone.current && !datesChanged && !filtersChanged) {
-      console.log('ℹ️ Comissoes: dados já carregados, pulando recarga');
+    // Só recarrega se algo mudou ou se for forçado (showRefreshing = true)
+    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged) {
+      console.log('ℹ️ Comissoes: dados já carregados e sem alterações, pulando recarga');
       return;
     }
 
@@ -195,7 +214,10 @@ export default function Comissoes() {
 
   // ========== HANDLER DO FILTERBAR ==========
   const handleFilterChange = (newFilters: {
-    equipe: string; colaborador: string; colaboradorId?: number; produto: string;
+    equipe: string;
+    colaborador: string;
+    colaboradorId?: string | number;
+    produto: string;
   }) => {
     setFilters(newFilters);
     if (!isFirstFilterApplied) {
@@ -203,9 +225,8 @@ export default function Comissoes() {
     }
   };
 
-  // ========== CARREGAMENTO INICIAL – SÓ ACONTECE APÓS O PRIMEIRO FILTRO ==========
+  // ========== CARREGAMENTO INICIAL (apenas na montagem e após primeiro filtro) ==========
   useEffect(() => {
-    // Se o primeiro filtro ainda não foi aplicado, não carrega
     if (!isFirstFilterApplied) {
       console.log('ℹ️ Comissoes: aguardando primeiro filtro');
       return;
@@ -216,21 +237,13 @@ export default function Comissoes() {
       return;
     }
 
-    const datesChanged =
-      currentStartDate !== lastDatesRef.current.start ||
-      currentEndDate !== lastDatesRef.current.end;
-    const filtersChanged =
-      filters.equipe !== lastFiltersRef.current.equipe ||
-      filters.colaborador !== lastFiltersRef.current.colaborador ||
-      filters.produto !== lastFiltersRef.current.produto;
-
-    // Se já carregou e nada mudou, não recarrega
-    if (initialLoadDone.current && !datesChanged && !filtersChanged) {
+    // Só carrega se for a primeira vez (initialLoadDone false)
+    if (initialLoadDone.current) {
       setLoading(false);
       return;
     }
 
-    // Timeout de segurança para evitar loading infinito
+    // Timeout de segurança
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
       if (loading) {
@@ -241,13 +254,14 @@ export default function Comissoes() {
 
     setLoading(true);
     reloadData(false);
-  }, [currentStartDate, currentEndDate, filters, reloadData, isFirstFilterApplied, loading]);
+  }, [isFirstFilterApplied, currentStartDate, currentEndDate, reloadData, loading]);
 
   // ========== DADOS FILTRADOS E CÁLCULOS ==========
   const filteredColabs = useMemo(() => {
     let filtered = storeColabs.filter(c => {
       if (EXCLUDED_TEAMS.some(team => normalizeText(c.equipeNome) === normalizeText(team))) return false;
-      if (EXCLUDED_GROUPS.some(group => normalizeText(c.grupo) === normalizeText(group))) return false;
+      // FILTRO POR CARGO (antes era 'grupo')
+      if (EXCLUDED_CARGOS.some(cargo => normalizeText(c.cargo) === normalizeText(cargo))) return false;
 
       if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
@@ -290,7 +304,7 @@ export default function Comissoes() {
         metaAssinados,
         metaGanhos,
         avatar: col.avatar || col.name.charAt(0).toUpperCase(),
-        group: col.grupo,
+        cargo: col.cargo,                     // ← alterado de 'group' para 'cargo'
         periodDetails,
         isSpecial,
       };
@@ -340,31 +354,9 @@ export default function Comissoes() {
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
 
-  // Se o primeiro filtro ainda não foi aplicado, exibe um loader
-  if (!isFirstFilterApplied) {
-    return (
-      <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">
-        <div className="flex justify-center items-center py-12">
-          <Loader2 className="w-8 h-8 animate-spin text-[#09175b]" />
-          <span className="ml-2 text-gray-500">Aguardando configuração dos filtros...</span>
-        </div>
-      </DashboardLayout>
-    );
-  }
-
+  // ========== RENDER ==========
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">
-      <div className="flex items-center justify-end gap-2 mb-2">
-        {refreshing && (
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Atualizando dados...</span>
-          </div>
-        )}
-        <span className="text-[10px] text-gray-400">
-          Atualizado {new Date().toLocaleTimeString()}
-        </span>
-      </div>
 
       <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
 
@@ -375,14 +367,36 @@ export default function Comissoes() {
         </div>
       )}
 
+      <div className="flex items-center justify-end gap-2 mb-2">
+        {refreshing && (
+          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            <span>Atualizando dados...</span>
+          </div>
+        )}
+        <span className="text-[10px] text-gray-400">
+          Atualizado {new Date().toLocaleTimeString()}
+        </span>
+        {/* Botão de atualização manual */}
+        <button
+          onClick={() => reloadData(true)}
+          disabled={refreshing}
+          className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
+          aria-label="Atualizar dados manualmente"
+        >
+          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+          Atualizar
+        </button>
+      </div>
+
       {error && (
         <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-center text-red-700 text-sm mb-4">
           <p>{error}</p>
           <button
-            onClick={() => window.location.reload()}
+            onClick={() => reloadData(true)}
             className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700 transition-colors"
           >
-            Recarregar
+            Tentar novamente
           </button>
         </div>
       )}
@@ -434,6 +448,7 @@ export default function Comissoes() {
               );
             })}
           </div>
+
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
             <div className="madm-card p-5 animate-fade-in-up" style={{ animationDelay: "320ms" }}>

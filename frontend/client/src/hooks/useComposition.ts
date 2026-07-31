@@ -56,7 +56,6 @@ export function useComposition<
   });
 
   const onKeyDown = usePersistFn((e: React.KeyboardEvent<T>) => {
-    // 在 composition 状态下，阻止 ESC 和 Enter（非 shift+Enter）事件的冒泡
     if (
       c.current &&
       (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey))

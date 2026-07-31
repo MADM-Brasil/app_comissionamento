@@ -1,5 +1,4 @@
-// main.js - Sistema MADM Comissionamento (Atualizado com 2FA, Calculator e Controle de Acesso)
-// Sessão agora salva na tabela app_comissionamento.sessoes_app
+// main.js - Sistema MADM Comissionamento 
 
 import { Calculator } from './calculator.js';
 import { ExtractBD } from './services/extractBD.js';
@@ -42,7 +41,7 @@ app.use(session({
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// ─── ESTADO GLOBAL DA APLICAÇÃO (mantido para o front‑end) ───
+// ─── ESTADO GLOBAL DA APLICAÇÃO ───
 let currentUser = null;
 let selectedDate = new Date().toISOString().split('T')[0];
 let twoFactorTimer = null;
@@ -160,6 +159,7 @@ function toggleMainContent(show) {
 
 async function loadUserConfigurations(userId) {
     try {
+        // Configurações permanecem na tabela original (sem view)
         const res = await pool.query(
             'SELECT * FROM app_comissionamento.configuracoes_usuario WHERE usuario_id = $1',
             [userId]
@@ -202,7 +202,7 @@ function applyAccessRestrictions() {
         elements.userAccessLevel.title = `Grupo: ${uiConfig.group}`;
     }
     if (elements.userInfoGrupo) {
-        elements.userInfoGrupo.textContent = currentUser.grupo || 'N/A';
+        elements.userInfoGrupo.textContent = currentUser.cargo || 'N/A';
     }
 }
 
@@ -221,8 +221,11 @@ async function handleLogin(event) {
     }
 
     try {
+        // Usuário autenticado pela view core.view_app_colaboradores
         const userRes = await pool.query(
-            'SELECT id, nome, email, equipe, grupo, status FROM madm.colaboradores WHERE email = $1',
+            `SELECT email, nome, nome_equipe, cargo, status, periodo
+             FROM core.view_app_colaboradores
+             WHERE email = $1`,
             [email]
         );
         if (userRes.rows.length === 0) {
@@ -234,7 +237,7 @@ async function handleLogin(event) {
         // (ideal: verificar senha com bcrypt)
         // if (!bcrypt.compareSync(password, user.senha)) ...
 
-        const accessLevel = accessControl.getAccessLevel(user.grupo);
+        const accessLevel = accessControl.getAccessLevel(user.cargo);
         if (accessLevel === 0) {
             showLoginStatus('Acesso negado. Usuário sem permissão.', 'error');
             return;
@@ -247,8 +250,8 @@ async function handleLogin(event) {
             return;
         }
 
-        // Salvar dados na sessão (agora com pool)
-        req.session.userId = user.id;
+        // Salvar dados na sessão
+        req.session.userId = user.email;           // identificador único = e-mail
         req.session.tempToken = twoFactorResult.tempToken;
         req.session.ip = req.ip;
         req.session.userAgent = req.headers['user-agent'];
@@ -259,7 +262,15 @@ async function handleLogin(event) {
                 return;
             }
 
-            currentUser = user;
+            currentUser = {
+                id: user.email,            // ID agora é o e-mail
+                nome: user.nome,
+                email: user.email,
+                equipe: user.nome_equipe,
+                cargo: user.cargo,
+                status: user.status,
+                periodo: user.periodo
+            };
             showPanel(elements.loginPanel, false);
             showPanel(elements.twoFactorVerifyPanel, true);
             startTwoFactorTimer();
@@ -334,9 +345,6 @@ async function verifyTwoFactor() {
         await loadUserConfigurations(userId);
         await loadUserDashboard();
         applyAccessRestrictions();
-
-        // Opcional: marcar sessão como autenticada no servidor
-        // (poderia enviar uma requisição, mas não é necessário)
     } else {
         alert(verification.error);
         if (verification.error.includes('Muitas tentativas')) {
@@ -389,7 +397,7 @@ function checkPageAccess() {
     }
 
     const currentPath = window.location.pathname;
-    const userLevel = accessControl.getAccessLevel(currentUser.grupo);
+    const userLevel = accessControl.getAccessLevel(currentUser.cargo);
 
     if (currentPath.includes('equipes.html')) {
         if (userLevel === 1) {
@@ -436,17 +444,62 @@ async function loadUserDashboard() {
     if (!currentUser || !isAuthenticated) return;
 
     try {
-        const userDataRes = await pool.query(
-            'SELECT * FROM madm.metricas WHERE colaborador_id = $1 AND data = $2',
-            [currentUser.id, selectedDate]
+        // Emitidos – view_app_emitidos_e_assinados
+        const emitidosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_emitidos_e_assinados
+             WHERE consultor_responsavel_emissao = $1
+               AND data_envio::date = $2`,
+            [currentUser.nome, selectedDate]
         );
-        const userData = userDataRes.rows[0] || {};
+        const emitidos = emitidosRes.rows[0].total;
 
-        if (elements.emitidosValue) elements.emitidosValue.textContent = userData.emitidos || 0;
-        if (elements.assinadosValue) elements.assinadosValue.textContent = userData.assinados || 0;
-        if (elements.ganhosValue) elements.ganhosValue.textContent = userData.ganhos || 0;
-        if (elements.perdidosValue) elements.perdidosValue.textContent = userData.perdidos || 0;
+        // Assinados – view_app_emitidos_e_assinados com status 'signed'
+        const assinadosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_emitidos_e_assinados
+             WHERE consultor_responsavel_assinatura = $1
+               AND data_assinatura::date = $2
+               AND status = 'signed'`,
+            [currentUser.nome, selectedDate]
+        );
+        const assinados = assinadosRes.rows[0].total;
 
+        // Ganhos – view_app_kommo_leads com filtros de funil e etapas
+        const ganhosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_kommo_leads
+             WHERE lead_usuario_responsavel = $1
+               AND data_ganho::date = $2
+               AND funil_vendas = ANY($3)
+               AND etapa_lead = ANY($4)`,
+            [currentUser.nome, selectedDate,
+             ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO'],
+             ['Venda ganha', 'PROTOCOLADO', 'AG PROTOCOLO', 'ANALISE DE PRONTUÁRIO', 'ENTRADA', 'E-MAIL NÃO RESPONDIDO', 'E-MAIL RESPONDIDO', 'AÇÃO DO CLIENTE', 'ASSINATURA DO ADV', 'AG PRONTUÁRIO', 'PENDÊNCIA PRO', 'VALIDAÇÃO SUPERVISOR', 'protocolado']
+            ]
+        );
+        const ganhos = ganhosRes.rows[0].total;
+
+        // Perdidos
+        const perdidosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_kommo_leads
+             WHERE lead_usuario_responsavel = $1
+               AND data_ganho::date = $2
+               AND funil_vendas = ANY($3)
+               AND etapa_lead = 'Venda perdida'`,
+            [currentUser.nome, selectedDate,
+             ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO']
+            ]
+        );
+        const perdidos = perdidosRes.rows[0].total;
+
+        if (elements.emitidosValue) elements.emitidosValue.textContent = emitidos;
+        if (elements.assinadosValue) elements.assinadosValue.textContent = assinados;
+        if (elements.ganhosValue) elements.ganhosValue.textContent = ganhos;
+        if (elements.perdidosValue) elements.perdidosValue.textContent = perdidos;
+
+        // Meta – sem view fornecida, mantém tabela original
         const metaRes = await pool.query(
             'SELECT * FROM app_comissionamento.metas WHERE usuario_id = $1',
             [currentUser.id]
@@ -454,8 +507,6 @@ async function loadUserDashboard() {
         const metaConfig = metaRes.rows[0] || {};
         const metaQuantidade = metaConfig.meta_quantidade || 10;
         const metaPercentual = metaConfig.meta_percentual || 70;
-        const ganhos = userData.ganhos || 0;
-        const assinados = userData.assinados || 0;
 
         const bateuMeta = calculator.checkGoal(ganhos, assinados, metaQuantidade, metaPercentual);
         const metasBatidas = bateuMeta ? 1 : 0;
@@ -469,19 +520,19 @@ async function loadUserDashboard() {
         const qtdParaMeta = calculator.calculateRemainingToGoal(ganhos, metaQuantidade);
         if (elements.QTDAtMeta) elements.QTDAtMeta.textContent = Math.max(0, qtdParaMeta);
 
-        const comissaoPercentual = userData.comissao_percentual || currentConfig?.comissaoPercentualPadrao || 5;
+        // Comissão – usando configuração padrão (view de métricas assessores não tem campo comissao_colaborador)
+        const comissaoPercentual = currentConfig?.comissaoPercentualPadrao || 5;
         const comissao = calculator.calculateCommission(assinados, comissaoPercentual);
         const bonus = calculator.calculateBonus(metasBatidas, ganhos, metaQuantidade);
 
         if (elements.comissaoValue) elements.comissaoValue.textContent = formatCurrency(comissao);
         if (elements.bonusValue) elements.bonusValue.textContent = formatCurrency(bonus);
 
-        // Métricas extras
         const totalScore = calculator.calculateTotalScore(ganhos, assinados);
         const successRate = calculator.calculateSuccessRate(ganhos, assinados);
         updateExtraMetrics(totalScore, successRate, bateuMeta);
 
-        // Extração de dados para relatório (mantida)
+        // Extração (agora usando as views)
         await extractBD.extractUserData(currentUser.id, selectedDate);
 
     } catch (error) {
@@ -539,11 +590,21 @@ async function loadTeamMembers() {
     if (!permissions.canViewTeam) return;
 
     try {
+        // Usar view de colaboradores
         const teamRes = await pool.query(
-            'SELECT * FROM madm.colaboradores WHERE equipe = $1 AND status = $2',
-            [currentUser.equipe, 'ativo']
+            `SELECT email, nome, nome_equipe, cargo, status, periodo
+             FROM core.view_app_colaboradores
+             WHERE nome_equipe = $1 AND LOWER(status) = 'ativo'`,
+            [currentUser.equipe]
         );
-        const teamMembers = teamRes.rows;
+        const teamMembers = teamRes.rows.map(m => ({
+            id: m.email,
+            nome: m.nome,
+            equipe: m.nome_equipe,
+            cargo: m.cargo,
+            status: m.status,
+            periodo: m.periodo
+        }));
 
         const filteredMembers = accessControl.filterTeamData(teamMembers, currentUser);
         const rankedMembers = calculator.calculateRanking(filteredMembers);
@@ -627,19 +688,45 @@ async function viewUserDetails(userId) {
         return;
     }
 
-    const userDataRes = await pool.query(
-        'SELECT * FROM madm.metricas WHERE colaborador_id = $1 AND data = $2',
-        [userId, selectedDate]
-    );
-    const userData = userDataRes.rows[0] || {};
-    const metaRes = await pool.query(
-        'SELECT * FROM app_comissionamento.metas WHERE usuario_id = $1',
+    // Para detalhes, buscar métricas do dia via views (simplificado, sem tabela de métricas individuais)
+    // Usamos a mesma lógica do dashboard, mas com nome do colaborador.
+    // Precisamos do nome do colaborador a partir do userId (que agora é email).
+    const colabRes = await pool.query(
+        `SELECT nome FROM core.view_app_colaboradores WHERE email = $1`,
         [userId]
     );
-    const metaConfig = metaRes.rows[0] || {};
+    if (colabRes.rows.length === 0) return alert('Colaborador não encontrado.');
+    const nomeColab = colabRes.rows[0].nome;
 
-    const ganhos = userData.ganhos || 0;
-    const assinados = userData.assinados || 0;
+    const emitidosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_emitidos_e_assinados WHERE consultor_responsavel_emissao = $1 AND data_envio::date = $2`,
+        [nomeColab, selectedDate]
+    );
+    const assinadosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_emitidos_e_assinados WHERE consultor_responsavel_assinatura = $1 AND data_assinatura::date = $2 AND status = 'signed'`,
+        [nomeColab, selectedDate]
+    );
+    const ganhosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_kommo_leads WHERE lead_usuario_responsavel = $1 AND data_ganho::date = $2 AND funil_vendas = ANY($3) AND etapa_lead = ANY($4)`,
+        [nomeColab, selectedDate,
+         ['AUDITORIA DE GANHO','JURIDICO AUDITORIA DE GANHO','NOVO - AUDITORIA DE GANHO','PRO'],
+         ['Venda ganha','PROTOCOLADO','AG PROTOCOLO','ANALISE DE PRONTUÁRIO','ENTRADA','E-MAIL NÃO RESPONDIDO','E-MAIL RESPONDIDO','AÇÃO DO CLIENTE','ASSINATURA DO ADV','AG PRONTUÁRIO','PENDÊNCIA PRO','VALIDAÇÃO SUPERVISOR','protocolado']
+        ]
+    );
+    const perdidosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_kommo_leads WHERE lead_usuario_responsavel = $1 AND data_ganho::date = $2 AND funil_vendas = ANY($3) AND etapa_lead = 'Venda perdida'`,
+        [nomeColab, selectedDate,
+         ['AUDITORIA DE GANHO','JURIDICO AUDITORIA DE GANHO','NOVO - AUDITORIA DE GANHO','PRO']
+        ]
+    );
+
+    const emitidos = emitidosRes.rows[0].total;
+    const assinados = assinadosRes.rows[0].total;
+    const ganhos = ganhosRes.rows[0].total;
+    const perdidos = perdidosRes.rows[0].total;
+
+    const metaRes = await pool.query('SELECT * FROM app_comissionamento.metas WHERE usuario_id = $1', [userId]);
+    const metaConfig = metaRes.rows[0] || {};
     const metaQuantidade = metaConfig.meta_quantidade || 10;
     const diasRestantes = 30 - new Date(selectedDate).getDate();
     const projection = calculator.calculateProjection(ganhos, assinados, diasRestantes, metaQuantidade);
@@ -647,10 +734,10 @@ async function viewUserDetails(userId) {
     alert(`Detalhes do colaborador:
     
 📊 Métricas:
-• Emitidos: ${userData.emitidos || 0}
-• Assinados: ${userData.assinados || 0}
-• Ganhos: ${userData.ganhos || 0}
-• Perdidos: ${userData.perdidos || 0}
+• Emitidos: ${emitidos}
+• Assinados: ${assinados}
+• Ganhos: ${ganhos}
+• Perdidos: ${perdidos}
 
 🎯 Meta:
 • Quantidade: ${metaQuantidade}
@@ -663,8 +750,8 @@ async function viewUserDetails(userId) {
 • Meta Projetada: ${projection.projecaoMeta ? '✅ SIM' : '❌ NÃO'}
 
 💰 Financeiro:
-• Comissão: ${formatCurrency(calculator.calculateCommission(assinados, userData.comissao_percentual || 5))}
-• Bônus: ${formatCurrency(calculator.calculateBonus(calculator.checkGoal(ganhos, assinados, metaQuantidade) ? 1 : 0, ganhos, metaQuantidade))}`);
+• Comissão: ${formatCurrency(calculator.calculateCommission(assinados, 5))}
+• Bônus: ${formatCurrency(calculator.calculateBonus(calculator.checkGoal(ganhos, assinados, metaQuantidade, metaConfig?.meta_percentual || 70) ? 1 : 0, ganhos, metaQuantidade))}`);
 }
 
 async function exportTeamData() {
@@ -675,10 +762,14 @@ async function exportTeamData() {
     }
 
     const members = await pool.query(
-        'SELECT * FROM madm.colaboradores WHERE equipe = $1 AND status = $2',
-        [currentUser.equipe, 'ativo']
+        `SELECT email, nome, nome_equipe, cargo, status, periodo
+         FROM core.view_app_colaboradores
+         WHERE nome_equipe = $1 AND LOWER(status) = 'ativo'`,
+        [currentUser.equipe]
     );
-    const filteredMembers = accessControl.filterTeamData(members.rows, currentUser);
+    const filteredMembers = accessControl.filterTeamData(members.rows.map(m => ({
+        id: m.email, nome: m.nome, equipe: m.nome_equipe, cargo: m.cargo, status: m.status
+    })), currentUser);
     const rankedMembers = calculator.calculateRanking(filteredMembers);
     const csv = convertToCSV(rankedMembers);
     downloadCSV(csv, `equipe_${currentUser.equipe}_${selectedDate}.csv`);
@@ -744,7 +835,9 @@ async function updateCalculatorConfig(newConfig) {
     try {
         calculator.updateConfig(newConfig);
         await pool.query(
-            'INSERT INTO app_comissionamento.configuracoes_usuario (usuario_id, peso_ganhos, peso_assinados, bonus_base, comissao_percentual_padrao, bonus_extra_por_meta) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (usuario_id) DO UPDATE SET peso_ganhos=$2, peso_assinados=$3, bonus_base=$4, comissao_percentual_padrao=$5, bonus_extra_por_meta=$6',
+            `INSERT INTO app_comissionamento.configuracoes_usuario (usuario_id, peso_ganhos, peso_assinados, bonus_base, comissao_percentual_padrao, bonus_extra_por_meta)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (usuario_id) DO UPDATE SET peso_ganhos=$2, peso_assinados=$3, bonus_base=$4, comissao_percentual_padrao=$5, bonus_extra_por_meta=$6`,
             [currentUser.id, newConfig.pesoGanhos, newConfig.pesoAssinados, newConfig.bonusBase, newConfig.comissaoPercentualPadrao, newConfig.bonusExtraPorMeta]
         );
         await loadUserDashboard();
@@ -758,7 +851,6 @@ async function updateCalculatorConfig(newConfig) {
 // ==================== FUNÇÕES DE LOGOUT ====================
 
 function logout() {
-    // Destruir sessão no servidor
     fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
         .catch(() => {})
         .finally(() => {
@@ -783,7 +875,6 @@ function logout() {
             showPanel(elements.loginPanel, true);
             showPanel(elements.twoFactorVerifyPanel, false);
 
-            // Limpar campos
             const usernameInput = document.getElementById('username');
             const passwordInput = document.getElementById('password');
             const codeInput = document.getElementById('twoFactorCode');
@@ -807,7 +898,7 @@ function navigateToTeamPage(e) {
         return;
     }
 
-    const userLevel = accessControl.getAccessLevel(currentUser.grupo);
+    const userLevel = accessControl.getAccessLevel(currentUser.cargo);
     if (userLevel === 1) {
         alert('Acesso Negado: Usuários do tipo ASSESSOR não têm permissão para acessar a página de equipes.');
         return;

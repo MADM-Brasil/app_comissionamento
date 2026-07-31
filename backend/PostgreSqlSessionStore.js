@@ -29,11 +29,12 @@ export class PostgreSqlSessionStore extends session.Store {
 
   async cleanupExpiredSessions() {
     try {
+      // Mantido na tabela original (UPDATE)
       const query = `
         UPDATE app_comissionamento.sessoes_app
         SET status_sessao = 'EXPIRADA',
             encerrada_em = NOW(),
-            motivo_encerramento = 'EXPIRACAO',   -- valor permitido pela constraint
+            motivo_encerramento = 'EXPIRACAO',
             duracao_segundos = EXTRACT(EPOCH FROM (NOW() - login_em))::bigint
         WHERE status_sessao = 'ATIVA'
           AND expira_em <= NOW()
@@ -49,9 +50,10 @@ export class PostgreSqlSessionStore extends session.Store {
   }
 
   get(sid, callback) {
+    // Apenas leitura usa a VIEW
     const query = `
       SELECT dados_sessao, expira_em, status_sessao
-      FROM app_comissionamento.sessoes_app
+      FROM app_comissionamento.view_app_sessoes
       WHERE sid = $1
         AND status_sessao = 'ATIVA'
         AND expira_em > NOW()
@@ -87,6 +89,7 @@ export class PostgreSqlSessionStore extends session.Store {
     const ip = sessionData.ip || null;
     const userAgent = sessionData.userAgent || null;
 
+    // Escrita permanece na tabela original
     const query = `
       INSERT INTO app_comissionamento.sessoes_app
         (sid, usuario_id, dados_sessao, ip_address, user_agent,
@@ -106,12 +109,13 @@ export class PostgreSqlSessionStore extends session.Store {
   }
 
   destroy(sid, callback) {
+    // Destruição permanece na tabela original
     const query = `
       UPDATE app_comissionamento.sessoes_app
       SET status_sessao = 'LOGOUT',
           logout_em = NOW(),
           encerrada_em = NOW(),
-          motivo_encerramento = 'LOGOUT_USUARIO',   -- ✅ valor permitido
+          motivo_encerramento = 'LOGOUT_USUARIO',
           duracao_segundos = EXTRACT(EPOCH FROM (NOW() - login_em))::bigint
       WHERE sid = $1
     `;
@@ -134,6 +138,7 @@ export class PostgreSqlSessionStore extends session.Store {
     } else {
       expiraEm = new Date(Date.now() + 24 * 60 * 60 * 1000);
     }
+    // Atualização permanece na tabela original
     const query = `
       UPDATE app_comissionamento.sessoes_app
       SET ultima_atividade_em = NOW(),

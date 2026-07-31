@@ -121,7 +121,9 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password, rememberMe } = req.body;
     const userResult = await pool.query(
-      'SELECT e_mail, colaborador AS nome, e_mail AS email, equipe, grupo, status FROM madm.colaboradores WHERE e_mail = $1',
+      `SELECT email, nome, nome_equipe, cargo, status, periodo
+       FROM core.view_app_colaboradores
+       WHERE email = $1`,
       [email]
     );
     if (userResult.rows.length === 0) {
@@ -135,7 +137,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     req.session.cookie.maxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-    req.session.userId = user.e_mail;
+    req.session.userId = user.email;
     req.session.tempToken = twoFactorResult.tempToken;
     req.session.ip = req.ip;
     req.session.userAgent = req.headers['user-agent'];
@@ -166,7 +168,9 @@ app.post('/api/auth/verify-2fa', async (req, res) => {
     req.session.isAuthenticated = true;
 
     const userResult = await pool.query(
-      'SELECT e_mail, colaborador AS nome, e_mail AS email, equipe, grupo, status FROM madm.colaboradores WHERE e_mail = $1',
+      `SELECT email, nome, nome_equipe, cargo, status, periodo
+       FROM core.view_app_colaboradores
+       WHERE email = $1`,
       [userId]
     );
     const user = userResult.rows[0];
@@ -186,7 +190,7 @@ app.post('/api/auth/resend-code', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.status(401).json({ success: false, error: 'Sessão não encontrada' });
     const userResult = await pool.query(
-      'SELECT e_mail AS email, colaborador AS nome FROM madm.colaboradores WHERE e_mail = $1',
+      `SELECT email, nome FROM core.view_app_colaboradores WHERE email = $1`,
       [userId]
     );
     if (userResult.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
@@ -222,7 +226,9 @@ app.get('/api/auth/me', (req, res) => {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
   }
   pool.query(
-    'SELECT e_mail, colaborador AS nome, e_mail AS email, equipe, grupo, status FROM madm.colaboradores WHERE e_mail = $1',
+    `SELECT email, nome, nome_equipe, cargo, status, periodo
+     FROM core.view_app_colaboradores
+     WHERE email = $1`,
     [req.session.userId]
   ).then(result => {
     if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
@@ -240,17 +246,47 @@ app.use((req, res, next) => {
   return res.status(401).json({ success: false, error: 'Não autenticado' });
 });
 
+// ========== NOVA ROTA: métricas dos assessores (acessível como /api/metricas-assessores) ==========
+app.get('/api/metricas-assessores', async (req, res) => {
+  try {
+    const { mes, email, colaborador_id } = req.query;
+    if (!mes) return res.status(400).json({ success: false, error: 'Parâmetro "mes" (YYYY-MM) é obrigatório' });
+
+    let query = `
+      SELECT id_assessor, email, data_metrica,
+             comissao_bonus,
+             peso_meta_assinados_diario, peso_meta_ganho_diario,
+             peso_meta_assinados_semanal, peso_meta_ganho_semanal,
+             peso_meta_assinados_mensal, peso_meta_ganho_mensal
+      FROM app_comissionamento.view_app_metricas_assessores
+      WHERE TO_CHAR(data_metrica::date, 'YYYY-MM') = $1
+    `;
+    const params = [mes];
+    let paramIdx = 2;
+    if (email) { query += ` AND LOWER(TRIM(email)) = LOWER(TRIM($${paramIdx}))`; params.push(email); paramIdx++; }
+    if (colaborador_id) { query += ` AND id_assessor::text = $${paramIdx}`; params.push(colaborador_id); paramIdx++; }
+    query += ' ORDER BY email';
+
+    const result = await pool.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Erro em /api/metricas-assessores:', err);
+    res.status(500).json({ success: false, error: 'Erro interno' });
+  }
+});
+
 // ========== ROTAS PROTEGIDAS ==========
 app.use('/api', colaboradoresRoutes);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/admin', adminRoutes);
 app.use('/api/user', userRouter);
 app.use('/api/suporte', suporteRouter);
+
 app.get('/api/admin/months', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT DISTINCT data_metrica::date 
-       FROM app_comissionamento.metricas_assessores 
+       FROM app_comissionamento.view_app_metricas_assessores 
        ORDER BY data_metrica DESC`
     );
     const months = result.rows.map(r => {

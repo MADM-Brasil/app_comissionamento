@@ -142,7 +142,7 @@ export interface MetricParams {
   start: string;
   end: string;
   colaborador?: string;
-  colaboradorId?: number;
+  colaboradorId?: string | number;
   equipe?: string;
   produto?: string;
   granularity?: 'daily' | 'weekly' | 'monthly';

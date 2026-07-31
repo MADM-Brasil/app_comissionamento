@@ -12,6 +12,7 @@ function capitalize(s: string): string {
 /**
  * Retorna os pesos efetivos e o bônus para um determinado período,
  * considerando o nível do usuário logado (assessor, supervisor, coordenador/admin).
+ * Agora usa o campo 'cargo' para determinar o nível de acesso.
  */
 export function getEffectiveWeights(
   currentUser: any,
@@ -19,7 +20,7 @@ export function getEffectiveWeights(
   period: Periodo
 ): { pesoAssinados: number; pesoGanhos: number; bonus: number } {
   try {
-    const level = getAccessLevel(currentUser?.grupo);
+    const level = getAccessLevel(currentUser?.cargo);  // ← ajustado para 'cargo'
     const { collaborators, globalConfig } = useAppStore.getState();
 
     if (!collaborators || collaborators.length === 0) {
@@ -46,7 +47,7 @@ export function getEffectiveWeights(
       return { pesoAssinados: pesoAssinados || 1, pesoGanhos: pesoGanhos || 1, bonus: bonus || 150 };
     }
 
-    // SUPERVISOR -> soma da sua equipe
+    // SUPERVISOR -> soma da sua equipe (campo 'equipe' mantido do User normalizado)
     if (level === LEVELS.SUPERVISAO && currentUser?.equipe) {
       const equipe = collaborators.filter(
         c => c.equipeNome === currentUser.equipe && c.status === 'ativo'

@@ -26,7 +26,7 @@ import {
 } from "@/lib/api";
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO
+// CONSTANTES DE EXCLUSÃO (já adaptadas para cargo)
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
@@ -36,15 +36,30 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS_FOR_DISPLAY = [
-  "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
-  "Marketing", "Gerência", "Contrato", "Dr. Felipe Marx", "Administrativo",
-  "administrativo"
+const EXCLUDED_CARGOS_FOR_DISPLAY = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  // Supervisão
+  "supervisor",
+  // Coordenador
+  "coordenador",
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 // ============================================================
-// CONFIGURAÇÃO DE PESOS (MESMA DA PÁGINA RANKING)
+// CONFIGURAÇÃO DE PESOS
 // ============================================================
 const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', number> = {
   ganhos: 4,
@@ -53,7 +68,6 @@ const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', numb
   emitidos: 2,
 };
 
-// ========== METAS GLOBAIS (visão geral) ==========
 const GLOBAL_META = {
   diario: { assinados: 100, ganhos: 100 },
   semanal: { assinados: 500, ganhos: 500 },
@@ -64,17 +78,17 @@ const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
-const isExcludedGroupForDisplay = (group: string) =>
-  EXCLUDED_GROUPS_FOR_DISPLAY.some(g => normalize(g) === normalize(group));
+const isExcludedCargoForDisplay = (cargo: string) =>
+  EXCLUDED_CARGOS_FOR_DISPLAY.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: any) => {
-  const grupo = normalize(c.grupo);
+  const cargo = normalize(c.cargo);
   const equipe = normalize(c.equipeNome);
-  return grupo === 'desativado' || equipe.includes('desativado');
+  return cargo === 'desativado' || equipe.includes('desativado');
 };
 
 // ============================================================
-// FUNÇÃO DE PONTUAÇÃO PONDERADA
+// PONTUAÇÃO PONDERADA
 // ============================================================
 function calculateWeightedScore(
   item: { ganhos: number; assinados: number; protocolados: number; emitidos: number }
@@ -87,7 +101,7 @@ function calculateWeightedScore(
   return score;
 }
 
-// ========== UTILITÁRIOS DE DATAS COM UTC ==========
+// ========== UTILITÁRIOS DE DATAS UTC ==========
 function parseUTCDate(dateStr: string): Date {
   if (!dateStr) return new Date(NaN);
   if (dateStr.includes('T') || dateStr.includes('Z')) {
@@ -277,7 +291,7 @@ export default function Home() {
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
-    colaboradorId?: number;
+    colaboradorId?: string | number;   // aceita ambos
     produto: string;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
   const [loading, setLoading] = useState(true);
@@ -374,11 +388,11 @@ export default function Home() {
     }
   }, [currentStartDate, currentEndDate, allCollaborators.length]);
 
-  // ========== CÁLCULO DO RANKING GLOBAL ==========
+  // ========== CÁLCULO DO RANKING GLOBAL (agora usa cargo) ==========
   const globalRanking = useMemo(() => {
     const eligible = allCollaborators.filter(c => {
       if (isDesativado(c)) return false;
-      if (isExcludedGroupForDisplay(c.grupo)) return false;
+      if (isExcludedCargoForDisplay(c.cargo)) return false;
       if (isExcludedTeam(c.equipeNome)) return false;
       return true;
     });
@@ -448,7 +462,7 @@ export default function Home() {
     return aboveUser.score - (globalRanking[currentIndex]?.score || 0);
   }, [aboveUser, currentIndex, globalRanking]);
 
-  // ========== FUNÇÃO DE RECARGA ==========
+  // ========== FUNÇÃO DE RECARGA (agora manual) ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
     const datesChanged =
       currentStartDate !== lastDatesRef.current.start ||
@@ -458,9 +472,8 @@ export default function Home() {
       filters.colaborador !== lastFiltersRef.current.colaborador ||
       filters.produto !== lastFiltersRef.current.produto;
 
-    // Se nada mudou e já carregou, não recarrega (exceto se rawMetrics estiver vazio)
     const metricsEmpty = rawMetrics.assinados === 0 && rawMetrics.emitidos === 0 && rawMetrics.ganhos === 0;
-    if (initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
+    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
       return;
     }
 
@@ -497,7 +510,7 @@ export default function Home() {
     const selectedColab = filters.colaboradorId
       ? collaborators.find(c => c.id === filters.colaboradorId)
       : null;
-    const isSupervisor = selectedColab?.grupo?.toLowerCase() === 'supervisor';
+    const isSupervisor = selectedColab?.cargo?.toLowerCase() === 'supervisor';   // ajustado para cargo
 
     if (isSupervisor && selectedColab) {
       equipeApi = selectedColab.equipeNome;
@@ -508,12 +521,13 @@ export default function Home() {
     return { equipeApi, colaboradorApi, colaboradorIdApi };
   }, [filters, collaborators]);
 
-  // ========== CARREGAMENTO INICIAL ==========
+  // ========== CARREGAMENTO INICIAL (uma única vez) ==========
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
+    if (initialLoadDone.current) return;
     setLoading(true);
     reloadData(false);
-  }, [currentStartDate, currentEndDate, filters, reloadData]);
+  }, [currentStartDate, currentEndDate, reloadData]);
 
   // Carrega ranking inicial se necessário
   useEffect(() => {
@@ -538,8 +552,8 @@ export default function Home() {
   const displayCollaborators = useMemo(() => {
     return filteredCollaborators.filter(c => {
       if (isDesativado(c)) return false;
-      const g = (c.grupo || '').trim().toLowerCase();
-      return g !== 'supervisor' && g !== 'coordenador' && g !== 'administrativo';
+      const cargo = (c.cargo || '').trim().toLowerCase();   // ajustado
+      return cargo !== 'supervisor' && cargo !== 'coordenador' && cargo !== 'administrativo';
     });
   }, [filteredCollaborators]);
 
@@ -613,7 +627,7 @@ export default function Home() {
     return { comissaoTotal: totalComissao, metaBatida: metasBatidasUser, bonusPorCiclo: bonusPorCicloUser };
   }, [currentUserData, isSpecialGroup, period, globalConfig, authUser]);
 
-  // ========== GRÁFICOS ==========
+  // ========== GRÁFICOS (carregados uma vez, sem polling) ==========
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
     const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
@@ -786,8 +800,9 @@ export default function Home() {
     fetchDailyData();
   }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
 
-  const handleFilterChange = (newFilters: { equipe: string; colaborador: string; colaboradorId?: number; produto: string }) => {
+  const handleFilterChange = (newFilters: { equipe: string; colaborador: string; colaboradorId?: string | number; produto: string }) => {
     setFilters(newFilters);
+    // Não recarrega automaticamente – usuário deverá clicar em "Atualizar"
   };
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
@@ -828,18 +843,6 @@ export default function Home() {
 
   return (
     <DashboardLayout title={`Olá, ${firstName}! 👋`} subtitle="Aqui está o resumo do seu desempenho de hoje!">
-      {/* Indicador de atualização */}
-      <div className="flex items-center justify-end gap-2 mb-2">
-        {refreshing && (
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Atualizando dados...</span>
-          </div>
-        )}
-        <span className="text-[10px] text-gray-400">
-          Atualizado {new Date().toLocaleTimeString()}
-        </span>
-      </div>
 
       <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
 
@@ -855,6 +858,29 @@ export default function Home() {
           Nenhum colaborador disponível no momento. Verifique sua conexão ou contate o suporte.
         </div>
       )}
+
+            {/* Indicador de atualização em tempo real */}
+            <div className="flex items-center justify-end gap-2 mb-2">
+              {refreshing && (
+                <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  <span>Atualizando dados...</span>
+                </div>
+              )}
+              <span className="text-[10px] text-gray-400">
+                Atualizado {new Date().toLocaleTimeString()}
+              </span>
+              {/* Botão de atualização manual */}
+              <button
+                onClick={() => reloadData(true)}
+                disabled={refreshing}
+                className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
+                aria-label="Atualizar dados manualmente"
+              >
+                <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+                Atualizar
+              </button>
+            </div>
 
       {collaborators.length > 0 && (
         <>

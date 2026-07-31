@@ -10,22 +10,19 @@ import {
 import { useAppStore, formatCurrency } from "@/lib/dataStore";
 import { fetchCollaborators, fetchEquipes, API_BASE } from "@/lib/api";
 import { recalculateHierarchyWeights } from "@/lib/metrics";
-import { useAccessControl } from "@/hooks/useAccessControl";
+import { useAccessControl } from "@/hooks/useAccessControl"; 
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 const EXCLUDED_TEAMS = [
-  'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
-  'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
-  'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
-  'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro'
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia'
 ];
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
 type CicloPeriodo = 'diario' | 'semanal' | 'mensal';
 
-// ========== FUNÇÃO AUXILIAR PARA FORMATAÇÃO DE INTEIROS ==========
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
 function formatMonthYear(dateStr: string): string {
@@ -64,12 +61,12 @@ export default function Configuration() {
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedEquipe, setSelectedEquipe] = useState("Todas");
   const [selectedPeriod, setSelectedPeriod] = useState<CicloPeriodo>('mensal');
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<{ assinados?: number; ganhos?: number }>({});
-  const [editingBonusId, setEditingBonusId] = useState<number | null>(null);
+  const [editingBonusId, setEditingBonusId] = useState<string | null>(null);
   const [editBonusValue, setEditBonusValue] = useState<number>(0);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [savingId, setSavingId] = useState<number | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [savingId, setSavingId] = useState<string | null>(null);
   const [recalculating, setRecalculating] = useState(false);
 
   const [teamSelected, setTeamSelected] = useState<string>("");
@@ -145,7 +142,6 @@ export default function Configuration() {
   const loadCollaboratorsForMonth = async (month: string) => {
     if (!month || !/^\d{4}-\d{2}-\d{2}$/.test(month)) return;
     
-    // Verifica cache
     if (collaboratorsCache.current.has(month)) {
       const cached = collaboratorsCache.current.get(month)!;
       setCollaborators(cached);
@@ -157,7 +153,7 @@ export default function Configuration() {
       const collabs = await fetchCollaborators(mesParam);
       const uniqueMap = new Map();
       collabs.forEach((c: any) => {
-        const key = c.id || c.internal_id || c.email;
+        const key = c.id || c.email;
         if (!uniqueMap.has(key)) uniqueMap.set(key, c);
       });
       const uniqueCollabs = Array.from(uniqueMap.values());
@@ -195,15 +191,6 @@ export default function Configuration() {
     loadBaseData();
   }, [setEquipeConfigs]);
 
-  // ========== CARREGAR MÉTRICAS APENAS SE DATAS MUDAREM ==========
-  const lastMetricsLoad = useRef({ start: '', end: '' });
-  useEffect(() => {
-    if (!currentStartDate || !currentEndDate) return;
-    if (lastMetricsLoad.current.start === currentStartDate && lastMetricsLoad.current.end === currentEndDate) return;
-    lastMetricsLoad.current = { start: currentStartDate, end: currentEndDate };
-    loadMetricsForPeriod({ equipeNome: undefined, colaboradorNome: undefined, produto: undefined });
-  }, [currentStartDate, currentEndDate, loadMetricsForPeriod]);
-
   // ========== LISTAS ==========
   const filteredEquipeConfigs = useMemo(() => equipeConfigs.filter(e => !isExcludedTeam(e.nome)), [equipeConfigs]);
   const equipeNomes = useMemo(() => ["Todas", ...filteredEquipeConfigs.map(e => e.nome)], [filteredEquipeConfigs]);
@@ -215,7 +202,7 @@ export default function Configuration() {
       if (selectedEquipe !== "Todas" && c.equipeNome !== selectedEquipe) return false;
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
-        return c.name.toLowerCase().includes(term) || c.email.toLowerCase().includes(term);
+        return c.name.toLowerCase().includes(term) || (c.email || '').toLowerCase().includes(term);
       }
       return true;
     });
@@ -248,18 +235,14 @@ export default function Configuration() {
     const equipeConfig = filteredEquipeConfigs.find(e => e.nome === collab.equipeNome);
     return equipeConfig?.bonus || Number(globalConfig.valorBonus);
   };
-  const toggleExpand = (id: number) => setExpandedId(prev => (prev === id ? null : id));
+  const toggleExpand = (id: string) => setExpandedId(prev => (prev === id ? null : id));
 
   const isIndividualEditable = (collab: any) => {
     if (isAdminOnly) return isEditable;
-    return isEditable && collab.grupo !== 'Supervisor' && collab.grupo !== 'Coordenador' && collab.grupo !== 'Administrativo';
+    return isEditable && collab.cargo !== 'Supervisor' && collab.cargo !== 'Coordenador' && collab.cargo !== 'Administrativo';
   };
 
-  const getCollaboratorEmail = (collab: any): string => {
-    const email = collab.email || collab.e_mail || collab.colaborador || collab.name || '';
-    return email.trim().toLowerCase();
-  };
-
+  // ========== CSRF ==========
   const getCsrfHeaders = async (): Promise<HeadersInit> => {
     let token = localStorage.getItem('csrfToken');
     if (!token || token === 'null' || token === 'undefined') {
@@ -316,7 +299,6 @@ export default function Configuration() {
       const data = await res.json();
       if (data.success) {
         toast.success(`Metas ${selectedPeriod} globais aplicadas!`);
-        // Invalidar cache do mês para recarregar
         collaboratorsCache.current.delete(selectedMonth);
         await loadCollaboratorsForMonth(selectedMonth);
       } else toast.error(data.error || 'Erro ao salvar');
@@ -353,26 +335,22 @@ export default function Configuration() {
     }
   };
 
-  const saveEdit = async (id: number) => {
+  const saveEdit = async (id: string) => {
     if (editForm.assinados === undefined || editForm.ganhos === undefined || !isEditable) return;
     const collab = collaborators.find(c => c.id === id);
     if (!collab) return;
     setSavingId(id);
     
-    const email = getCollaboratorEmail(collab);
     const payload = {
-      userId: id,
-      email: email,
-      nome: collab.name,
-      meta_diario_assinados: selectedPeriod === 'diario' ? Number(editForm.assinados) : Number(collab.metaDiarioAssinados),
-      meta_diario_ganhos: selectedPeriod === 'diario' ? Number(editForm.ganhos) : Number(collab.metaDiarioGanhos),
-      meta_semanal_assinados: selectedPeriod === 'semanal' ? Number(editForm.assinados) : Number(collab.metaSemanalAssinados),
-      meta_semanal_ganhos: selectedPeriod === 'semanal' ? Number(editForm.ganhos) : Number(collab.metaSemanalGanhos),
-      meta_mensal_assinados: selectedPeriod === 'mensal' ? Number(editForm.assinados) : Number(collab.metaMensalAssinados),
-      meta_mensal_ganhos: selectedPeriod === 'mensal' ? Number(editForm.ganhos) : Number(collab.metaMensalGanhos),
-      comissao_colaborador: Number(collab.comissao) || 0,
-      comissao_bonus: Number(collab.bonusComissao) || 0,
+      email: collab.email || collab.id,
       data_metrica: selectedMonth,
+      meta_diario_assinados: selectedPeriod === 'diario' ? Number(editForm.assinados) : undefined,
+      meta_diario_ganhos: selectedPeriod === 'diario' ? Number(editForm.ganhos) : undefined,
+      meta_semanal_assinados: selectedPeriod === 'semanal' ? Number(editForm.assinados) : undefined,
+      meta_semanal_ganhos: selectedPeriod === 'semanal' ? Number(editForm.ganhos) : undefined,
+      meta_mensal_assinados: selectedPeriod === 'mensal' ? Number(editForm.assinados) : undefined,
+      meta_mensal_ganhos: selectedPeriod === 'mensal' ? Number(editForm.ganhos) : undefined,
+      comissao_bonus: Number(collab.bonusComissao) || 0,
     };
     
     console.log('📤 [saveEdit] Payload enviado:', payload);
@@ -404,26 +382,16 @@ export default function Configuration() {
     }
   };
 
-  const saveBonusEdit = async (id: number) => {
+  const saveBonusEdit = async (id: string) => {
     if (!isBonusEditable) return;
     const collab = collaborators.find(c => c.id === id);
     if (!collab) return;
     setSavingId(id);
     
-    const email = getCollaboratorEmail(collab);
     const payload = {
-      userId: id,
-      email: email,
-      nome: collab.name,
-      meta_diario_assinados: Number(collab.metaDiarioAssinados),
-      meta_diario_ganhos: Number(collab.metaDiarioGanhos),
-      meta_semanal_assinados: Number(collab.metaSemanalAssinados),
-      meta_semanal_ganhos: Number(collab.metaSemanalGanhos),
-      meta_mensal_assinados: Number(collab.metaMensalAssinados),
-      meta_mensal_ganhos: Number(collab.metaMensalGanhos),
-      comissao_colaborador: Number(collab.comissao) || 0,
-      comissao_bonus: Number(editBonusValue),
+      email: collab.email || collab.id,
       data_metrica: selectedMonth,
+      comissao_bonus: Number(editBonusValue),
     };
     
     console.log('📤 [saveBonusEdit] Payload enviado:', payload);

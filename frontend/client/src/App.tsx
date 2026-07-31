@@ -1,9 +1,9 @@
 // src/App.tsx
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Route, Switch, Redirect } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { PeriodProvider } from '@/contexts/period';
@@ -12,7 +12,6 @@ import Comissoes from "./pages/Comissoes";
 import Funil from "./pages/Funil";
 import Analytics from "./pages/Analytics";
 import Ranking from "./pages/Ranking";
-import Relatorio from "./pages/Relatorio";
 import Notificacoes from "./pages/Notificacoes";
 import Configuration from "./pages/Configuration";
 import Suporte from "./pages/Suporte";
@@ -23,15 +22,40 @@ import ForgotPassword from "./pages/ResetPassword/ForgotPassword";
 import ResetPassword from "./pages/ResetPassword/ResetPassword";
 import { API_BASE } from "@/lib/api";
 import { useAppStore } from "@/lib/dataStore";
+import { fetchCurrentUser } from "@/lib/auth";
 import { Loader2 } from "lucide-react";
+
+/** Redireciona usuário autenticado para Home ao acessar páginas públicas */
+function PublicRoute({ children }: { children: React.ReactNode }) {
+  const currentUser = useAppStore((s) => s.currentUser);
+  if (currentUser?.email) return <Redirect to="/" />;
+  return <>{children}</>;
+}
 
 function Router() {
   return (
     <Switch>
-      <Route path="/login" component={Login} />
-      <Route path="/verify-2fa" component={Verify2FA} />
-      <Route path="/forgot-password" component={ForgotPassword} />
-      <Route path="/reset-password" component={ResetPassword} />
+      <Route path="/login">
+        <PublicRoute>
+          <Login />
+        </PublicRoute>
+      </Route>
+      <Route path="/verify-2fa">
+        <PublicRoute>
+          <Verify2FA />
+        </PublicRoute>
+      </Route>
+      <Route path="/forgot-password">
+        <PublicRoute>
+          <ForgotPassword />
+        </PublicRoute>
+      </Route>
+      <Route path="/reset-password">
+        <PublicRoute>
+          <ResetPassword />
+        </PublicRoute>
+      </Route>
+
       <Route path="/404" component={NotFound} />
 
       <Route path="/">
@@ -97,30 +121,17 @@ function Router() {
           </ProtectedRoute>
         </PeriodProvider>
       </Route>
-      <Route path="/relatorio">
-        <PeriodProvider>
-          <ProtectedRoute>
-            <Relatorio />
-          </ProtectedRoute>
-        </PeriodProvider>
-      </Route>
       <Route component={NotFound} />
     </Switch>
   );
 }
 
 export default function App() {
-  const {
-    currentUser,
-    setCurrentUser,
-    loadCollaboratorsAndMetrics,
-    loadRawMetrics,
-    collaborators,
-  } = useAppStore();
-
+  const { currentUser, collaborators, loadCollaboratorsAndMetrics, loadRawMetrics } = useAppStore();
   const [appLoading, setAppLoading] = useState(true);
+  const initDone = useRef(false);
 
-  // Busca token CSRF
+  // 1. Token CSRF
   useEffect(() => {
     fetch(`${API_BASE}/csrf-token`, { credentials: 'include' })
       .then(res => res.json())
@@ -132,85 +143,67 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // ============================================================
-  // INICIALIZAÇÃO: verifica sessão via /auth/me
-  // ============================================================
+  // 2. Restaura sessão apenas uma vez
   useEffect(() => {
-    let isMounted = true;
-    const init = async () => {
-      try {
-        console.log('🔐 Verificando sessão via /auth/me...');
-        const res = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
+    if (initDone.current) return;
+    initDone.current = true;
 
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && data.user) {
-            console.log('✅ Sessão restaurada para:', data.user.nome);
-            setCurrentUser(data.user);
-          } else {
-            console.log('ℹ️ Sessão não encontrada ou inválida');
-          }
-        } else {
-          console.log('ℹ️ /auth/me retornou status', res.status);
+    const restore = async () => {
+      try {
+        const existing = useAppStore.getState().currentUser;
+        if (existing?.email) {
+          setAppLoading(false);
+          return;
         }
+        await fetchCurrentUser();   // já atualiza a store se houver sessão
       } catch (err) {
-        console.error('Erro ao verificar sessão:', err);
+        console.error('Erro ao restaurar sessão:', err);
       } finally {
-        if (isMounted) setAppLoading(false);
+        setAppLoading(false);
       }
     };
 
-    init();
+    restore();
 
+    // Timeout de segurança
     const timer = setTimeout(() => {
-      if (isMounted && appLoading) {
-        console.warn('⏱️ Timeout de segurança: forçando fim do carregamento');
+      if (appLoading) {
+        console.warn('⏱️ Timeout de inicialização – forçando fim do carregamento');
         setAppLoading(false);
       }
     }, 5000);
 
-    return () => {
-      isMounted = false;
-      clearTimeout(timer);
-    };
-  }, []);
+    return () => clearTimeout(timer);
+  }, [appLoading]);
 
-  // ============================================================
-  // CARREGAMENTO DE DADOS EM SEGUNDO PLANO
-  // ============================================================
+  // 3. Carrega dados em segundo plano quando usuário autenticado
+  const dataLoaded = useRef(false);
   useEffect(() => {
     if (!currentUser) return;
-
-    if (collaborators.length === 0) {
-      console.log('⏳ [App] Disparando carregamento de dados em segundo plano...');
-      loadCollaboratorsAndMetrics().catch(err =>
-        console.error('Erro ao carregar métricas:', err)
-      );
-      loadRawMetrics().catch(err =>
-        console.error('Erro ao carregar raw metrics:', err)
-      );
+    if (dataLoaded.current) return;
+    if (collaborators.length > 0) {
+      dataLoaded.current = true;
+      return;
     }
+
+    dataLoaded.current = true; // evita múltiplas chamadas
+    loadCollaboratorsAndMetrics().catch(err => console.error('Erro ao carregar métricas:', err));
+    loadRawMetrics().catch(err => console.error('Erro ao carregar raw metrics:', err));
   }, [currentUser, collaborators.length, loadCollaboratorsAndMetrics, loadRawMetrics]);
 
-  // ============================================================
-  // HEARTBEAT – mantém sessão ativa a cada 5 minutos
-  // ============================================================
+  // 4. Heartbeat
   useEffect(() => {
     if (!currentUser) return;
-    const interval = setInterval(async () => {
-      try {
-        await fetch(`${API_BASE}/auth/ping`, {
-          credentials: 'include',
-          headers: { 'x-csrf-token': localStorage.getItem('csrfToken') || '' },
-        });
-      } catch (_) { /* ignore */ }
+    const interval = setInterval(() => {
+      fetch(`${API_BASE}/auth/ping`, {
+        credentials: 'include',
+        headers: { 'x-csrf-token': localStorage.getItem('csrfToken') || '' },
+      }).catch(() => {});
     }, 5 * 60 * 1000);
     return () => clearInterval(interval);
   }, [currentUser]);
 
-  // ============================================================
-  // ATUALIZA TOKEN CSRF APÓS LOGIN
-  // ============================================================
+  // 5. Atualiza CSRF após login
   useEffect(() => {
     if (!currentUser) return;
     fetch(`${API_BASE}/csrf-token`, { credentials: 'include' })
@@ -223,9 +216,6 @@ export default function App() {
       .catch(() => {});
   }, [currentUser]);
 
-  // ============================================================
-  // RENDER
-  // ============================================================
   if (appLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">

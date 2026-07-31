@@ -32,7 +32,7 @@ import { cn } from "@/lib/utils";
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3007/api";
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO (para tabela de leads)
+// CONSTANTES DE EXCLUSÃO – agora baseadas em cargo
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
@@ -42,24 +42,42 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales','Financeiro'
 ];
 
-const EXCLUDED_GROUPS = [
-  "Supervisor", "Coordenador", "Administrativo"
+const EXCLUDED_CARGOS = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  // Supervisão
+  "supervisor",
+  // Coordenador
+  "coordenador",
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
-const isExcludedGroup = (group: string) =>
-  EXCLUDED_GROUPS.some(g => normalize(g) === normalize(group));
+const isExcludedCargo = (cargo: string) =>
+  EXCLUDED_CARGOS.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: Collaborator) => {
-  const grupo = normalize(c.grupo);
+  const cargo = normalize(c.cargo);
   const equipe = normalize(c.equipeNome);
-  return grupo === 'desativado' || equipe.includes('desativado');
+  return cargo === 'desativado' || equipe.includes('desativado');
 };
 
-// Mapeamento produto -> grupo (usado para filtragem local)
+// Mapeamento produto -> cargo (usado para filtragem local)
 const productToGroup: Record<string, string | string[] | undefined> = {
   "Todos": undefined,
   "Auxilio Acidente": "Elite",
@@ -155,7 +173,7 @@ async function fetchLeadsByStage(params: {
   end: string;
   equipe?: string;
   colaborador?: string;
-  colaboradorId?: number;
+  colaboradorId?: string | number;
   produto?: string;
 }): Promise<{ colaborador: string; etapa_lead: string; total: number }[]> {
   const searchParams = new URLSearchParams();
@@ -163,7 +181,7 @@ async function fetchLeadsByStage(params: {
   searchParams.append('end', params.end);
   if (params.equipe) searchParams.append('equipe', params.equipe);
   if (params.colaborador) searchParams.append('colaborador', params.colaborador);
-  if (params.colaboradorId) searchParams.append('colaboradorId', String(params.colaboradorId));
+  if (params.colaboradorId !== undefined) searchParams.append('colaboradorId', String(params.colaboradorId));
   if (params.produto && params.produto !== 'Todos') searchParams.append('produto', params.produto);
 
   const url = `${API_BASE}/metrics/leads/stages?${searchParams.toString()}`;
@@ -188,10 +206,11 @@ export default function Funil() {
 
   const { hasPermission } = useAccessControl();
 
+  // 👇 colaboradorId agora é string | number | undefined
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
-    colaboradorId?: number;
+    colaboradorId?: string | number;
     produto: string;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
@@ -223,7 +242,7 @@ export default function Funil() {
     };
   }, [isFirstFilterApplied]);
 
-  // ========== Função de recarga (com verificação de necessidade) ==========
+  // ========== Função de recarga (somente manual ou inicial) ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
     const datesChanged =
       currentStartDate !== lastDatesRef.current.start ||
@@ -233,9 +252,9 @@ export default function Funil() {
       filters.colaborador !== lastFiltersRef.current.colaborador ||
       filters.produto !== lastFiltersRef.current.produto;
 
-    // Se nada mudou e já carregou, não recarrega (exceto se rawMetrics estiver vazio)
+    // Se nada mudou e já carregou, não recarrega (exceto se rawMetrics estiver vazio ou for forçado)
     const metricsEmpty = rawMetrics.assinados === 0 && rawMetrics.emitidos === 0 && rawMetrics.ganhos === 0;
-    if (initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
+    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
       return;
     }
 
@@ -270,7 +289,7 @@ export default function Funil() {
       const now = Date.now();
       const shouldFetchLeads = datesChanged || filtersChanged || 
         (leadsStageData.length === 0) || 
-        (now - lastFetchLeads.current) > LEADS_CACHE_TTL;
+        (now - lastFetchLeads.current) > LEADS_CACHE_TTL || showRefreshing;
 
       if (shouldFetchLeads) {
         setLoadingLeads(true);
@@ -304,38 +323,37 @@ export default function Funil() {
     }
   }, [filters, period, currentStartDate, currentEndDate, rawMetrics, loadMetricsForPeriod, loadRawMetrics, loadWeeklyPerformanceData, leadsStageData.length]);
 
-  // ========== CARREGAMENTO INICIAL – SÓ ACONTECE APÓS O PRIMEIRO FILTRO ==========
+  // ========== CARREGAMENTO INICIAL (apenas após primeiro filtro e na montagem) ==========
   useEffect(() => {
-    if (!currentStartDate || !currentEndDate) return;
+    if (!isFirstFilterApplied) return;
 
-    const datesChanged =
-      currentStartDate !== lastDatesRef.current.start ||
-      currentEndDate !== lastDatesRef.current.end;
-    const filtersChanged =
-      filters.equipe !== lastFiltersRef.current.equipe ||
-      filters.colaborador !== lastFiltersRef.current.colaborador ||
-      filters.produto !== lastFiltersRef.current.produto;
+    if (!currentStartDate || !currentEndDate) {
+      setLoading(false);
+      return;
+    }
 
-    const shouldLoad = isFirstFilterApplied || initialLoadDone.current;
-    if (!shouldLoad) return;
-
-    if (initialLoadDone.current && !datesChanged && !filtersChanged) return;
+    // Só carrega se for a primeira vez
+    if (initialLoadDone.current) {
+      setLoading(false);
+      return;
+    }
 
     setLoading(true);
     reloadData(false);
-  }, [currentStartDate, currentEndDate, filters, reloadData, isFirstFilterApplied]);
+  }, [isFirstFilterApplied, currentStartDate, currentEndDate, reloadData]);
 
   // ========== HANDLER DO FILTERBAR ==========
   const handleFilterChange = (newFilters: {
     equipe: string;
     colaborador: string;
-    colaboradorId?: number;
+    colaboradorId?: string | number;
     produto: string;
   }) => {
     setFilters(newFilters);
     if (!isFirstFilterApplied) {
       setIsFirstFilterApplied(true);
     }
+    // Não recarrega automaticamente – usuário deve clicar em "Atualizar"
   };
 
   // Filtragem local para exibição
@@ -351,9 +369,9 @@ export default function Funil() {
       const group = productToGroup[filters.produto];
       if (group) {
         if (Array.isArray(group)) {
-          filtered = filtered.filter(c => group.includes(c.grupo));
+          filtered = filtered.filter(c => group.includes(c.cargo));
         } else {
-          filtered = filtered.filter(c => c.grupo === group);
+          filtered = filtered.filter(c => c.cargo === group);
         }
       }
     }
@@ -404,7 +422,7 @@ export default function Funil() {
 
   const activeCollaboratorNames = useMemo(() => {
     return rawCollaborators
-      .filter(c => !isDesativado(c) && !isExcludedTeam(c.equipeNome) && !isExcludedGroup(c.grupo))
+      .filter(c => !isDesativado(c) && !isExcludedTeam(c.equipeNome) && !isExcludedCargo(c.cargo))
       .map(c => c.name);
   }, [rawCollaborators]);
 
@@ -446,32 +464,10 @@ export default function Funil() {
 
   const isFirstLeadLoad = loadingLeads && leadsStageData.length === 0;
 
-  // Se o primeiro filtro ainda não foi aplicado, exibe um loader
-  if (!isFirstFilterApplied) {
-    return (
-      <DashboardLayout title="Funil de Vendas" subtitle="Acompanhe a jornada das oportunidades — da emissão ao resultado final">
-        <div className="flex justify-center items-center py-12">
-          <Loader2 className="w-8 h-8 animate-spin text-[#09175b]" />
-          <span className="ml-2 text-gray-500">Aguardando configuração dos filtros...</span>
-        </div>
-      </DashboardLayout>
-    );
-  }
-
+  // ========== RENDER ==========
   return (
     <DashboardLayout title="Funil de Vendas" subtitle="Acompanhe a jornada das oportunidades — da emissão ao resultado final">
-      {/* Indicador de atualização em tempo real */}
-      <div className="flex items-center justify-end gap-2 mb-2">
-        {refreshing && (
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Atualizando dados...</span>
-          </div>
-        )}
-        <span className="text-[10px] text-gray-400">
-          Atualizado {new Date().toLocaleTimeString()}
-        </span>
-      </div>
+
 
       <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
 
@@ -487,6 +483,29 @@ export default function Funil() {
           Nenhum colaborador disponível no momento. Verifique sua conexão ou contate o suporte.
         </div>
       )}
+
+            {/* Indicador de atualização em tempo real */}
+      <div className="flex items-center justify-end gap-2 mb-2">
+        {refreshing && (
+          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            <span>Atualizando dados...</span>
+          </div>
+        )}
+        <span className="text-[10px] text-gray-400">
+          Atualizado {new Date().toLocaleTimeString()}
+        </span>
+        {/* Botão de atualização manual */}
+        <button
+          onClick={() => reloadData(true)}
+          disabled={refreshing}
+          className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
+          aria-label="Atualizar dados manualmente"
+        >
+          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+          Atualizar
+        </button>
+      </div>
 
       {rawCollaborators.length > 0 && (
         <>

@@ -30,21 +30,37 @@ const WEIGHTS: Record<SortMetric, number> = {
 };
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO
+// CONSTANTES DE EXCLUSÃO – agora baseadas em cargo
 // ============================================================
 const EXCLUDED_TEAMS = [
-  'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
-  'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
-  'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
-  'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro'
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia'
 ];
 
-const EXCLUDED_GROUPS = [
-  "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
-  "Marketing", "Gerência", "Contrato", "Dr. Felipe Marx", "Administrativo",
-  "administrativo"
+const EXCLUDED_CARGOS = [
+  // Nenhum acesso (NONE)
+  "desativado",
+  "assistente",
+  "analista juridico",
+  "gestor de projetos",
+  "analista",
+  "analista de discadora",
+  
+  // Supervisão
+  "supervisor",
+  
+  // Coordenador
+  "coordenador",
+  
+  // Administrativo
+  "salesops",
+  "ceo",
+  "analista de crm",
+  "desenvolvedor",
+  "diretora",
+  "analista de dados",
+  "desenvolvedor make",
 ];
 
 type RankingType = "colaborador" | "equipe";
@@ -62,7 +78,7 @@ interface RankingItem {
   trend: "up" | "down" | "same";
   isCurrentUser?: boolean;
   equipe?: string;
-  id?: number;
+  id?: string;                // agora é o email (string)
 }
 
 interface TeamRankingItem {
@@ -82,13 +98,13 @@ const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
-const isExcludedGroup = (group: string) =>
-  EXCLUDED_GROUPS.some(g => normalize(g) === normalize(group));
+const isExcludedCargo = (cargo: string) =>
+  EXCLUDED_CARGOS.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: any) => {
-  const grupo = normalize(c.grupo);
+  const cargo = normalize(c.cargo);                     // ⬅️ usa cargo
   const equipe = normalize(c.equipeNome);
-  return grupo === 'desativado' || equipe.includes('desativado');
+  return cargo === 'desativado' || equipe.includes('desativado');
 };
 
 const teamToProductMapping: Record<string, string> = {
@@ -154,7 +170,6 @@ function compareByScore(
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
-// Número máximo de itens exibidos na tabela
 const MAX_DISPLAY_ITEMS = 20;
 
 export default function Ranking() {
@@ -184,7 +199,7 @@ export default function Ranking() {
   const lastFetchTime = useRef<number>(0);
   const CACHE_TTL = 60000; // 1 minuto
 
-  // ========== FUNÇÃO PARA CARREGAR DADOS (com cache) ==========
+  // ========== FUNÇÃO PARA CARREGAR DADOS (com cache) – agora sem recarga automática ==========
   const loadAllData = useCallback(async (showRefreshing = false) => {
     const datesChanged =
       currentStartDate !== lastDatesRef.current.start ||
@@ -194,17 +209,16 @@ export default function Ranking() {
       selectedTeam !== lastFiltersRef.current.team ||
       rankingType !== lastFiltersRef.current.type;
 
-    // Se nada mudou e já carregou, não recarrega
-    if (initialLoadDone.current && !datesChanged && !filtersChanged) {
+    // Não recarrega automaticamente – apenas se forçado (showRefreshing)
+    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged) {
       return;
     }
 
     if (showRefreshing) setRefreshing(true);
     try {
       const now = Date.now();
-      // Só busca dados se cache expirado ou mudança de datas/filtros
       const shouldFetch = (now - lastFetchTime.current) > CACHE_TTL || 
-                          datesChanged || filtersChanged || allCollaborators.length === 0;
+                          datesChanged || filtersChanged || allCollaborators.length === 0 || showRefreshing;
 
       if (shouldFetch) {
         const collabs = await fetchCollaborators();
@@ -267,7 +281,7 @@ export default function Ranking() {
     }
   }, [currentStartDate, currentEndDate, selectedProduct, selectedTeam, rankingType, allCollaborators.length]);
 
-  // ========== CARREGAMENTO INICIAL ==========
+  // ========== CARREGAMENTO INICIAL (apenas uma vez) ==========
   useEffect(() => {
     isMountedRef.current = true;
     if (!currentStartDate || !currentEndDate) {
@@ -275,21 +289,11 @@ export default function Ranking() {
       return;
     }
 
-    const datesChanged =
-      currentStartDate !== lastDatesRef.current.start ||
-      currentEndDate !== lastDatesRef.current.end;
-    const filtersChanged =
-      selectedProduct !== lastFiltersRef.current.product ||
-      selectedTeam !== lastFiltersRef.current.team ||
-      rankingType !== lastFiltersRef.current.type;
-
-    if (initialLoadDone.current && !datesChanged && !filtersChanged) {
+    // Só carrega se for a primeira montagem (initialLoadDone.current false)
+    if (initialLoadDone.current) {
       setLoading(false);
       return;
     }
-
-    lastDatesRef.current = { start: currentStartDate, end: currentEndDate };
-    lastFiltersRef.current = { product: selectedProduct, team: selectedTeam, type: rankingType };
 
     if (timeoutIdRef.current) clearTimeout(timeoutIdRef.current);
     timeoutIdRef.current = setTimeout(() => {
@@ -311,22 +315,9 @@ export default function Ranking() {
       isMountedRef.current = false;
       if (timeoutIdRef.current) clearTimeout(timeoutIdRef.current);
     };
-  }, [currentStartDate, currentEndDate, selectedProduct, selectedTeam, rankingType, loadAllData, loading]);
+  }, [currentStartDate, currentEndDate, loadAllData, loading]);
 
-  // ========== POLLING ==========
-  useEffect(() => {
-    if (!initialLoadDone.current || !currentStartDate || !currentEndDate) return;
-
-    const refresh = async () => {
-      if (refreshing) return;
-      if (document.visibilityState === 'visible' && isMountedRef.current) {
-        await loadAllData(true);
-      }
-    };
-
-    const intervalId = setInterval(refresh, 300000);
-    return () => clearInterval(intervalId);
-  }, [currentStartDate, currentEndDate, loadAllData, refreshing]);
+  // ❌ Removido polling (useEffect com setInterval). Agora o usuário deve clicar em "Atualizar".
 
   // ========== FILTROS ==========
   const productToGroup: Record<string, string | string[] | undefined> = {
@@ -360,7 +351,7 @@ export default function Ranking() {
   const rankingCollaborators = useMemo(() => {
     let filtered = allCollaborators.filter(c => {
       if (isDesativado(c)) return false;
-      if (isExcludedGroup(c.grupo)) return false;
+      if (isExcludedCargo(c.cargo)) return false;   // ⬅️ usa cargo
       if (isExcludedTeam(c.equipeNome)) return false;
       return true;
     });
@@ -369,9 +360,9 @@ export default function Ranking() {
       const group = productToGroup[selectedProduct];
       if (group) {
         if (Array.isArray(group)) {
-          filtered = filtered.filter(c => group.includes(c.grupo));
+          filtered = filtered.filter(c => group.includes(c.cargo));   // ⬅️ usa cargo
         } else {
-          filtered = filtered.filter(c => c.grupo === group);
+          filtered = filtered.filter(c => c.cargo === group);         // ⬅️ usa cargo
         }
       }
     }
@@ -388,7 +379,7 @@ export default function Ranking() {
     let items: RankingItem[] = rankingCollaborators.map((colab) => {
       const metrics = metricsData[colab.name] || { emitidos: 0, assinados: 0, protocolados: 0, ganhos: 0, perdidos: 0 };
       const base = {
-        id: colab.id,
+        id: colab.id,                       // email (string)
         name: colab.name,
         emitidos: metrics.emitidos || 0,
         assinados: metrics.assinados || 0,
@@ -444,13 +435,8 @@ export default function Ranking() {
     return teamItems.map((item, idx) => ({ ...item, position: idx + 1 }));
   }, [rankingCollaborators, metricsData, activeSortMetrics]);
 
-  // Ranking completo (todos os itens ordenados)
   const fullRanking = rankingType === "colaborador" ? individualRanking : teamRanking;
-  
-  // Ranking a ser exibido na tabela (apenas os TOP 20)
   const displayRanking = fullRanking.slice(0, MAX_DISPLAY_ITEMS);
-  
-  // Top 3 (extraído do fullRanking, independente do limite)
   const top3 = fullRanking.slice(0, 3);
 
   const myIndividualRank = useMemo(
@@ -462,6 +448,7 @@ export default function Ranking() {
     return teamRanking.find((team) => team.name === currentUser.equipe);
   }, [rankingType, teamRanking, currentUser]);
 
+  // currentUserData: busca pelo email (id) ou nome
   const currentUserData = allCollaborators.find(c => c.id === currentUser?.id || c.name === currentUser?.nome);
   const myEmitidos = metricsData[currentUserData?.name]?.emitidos || 0;
   const myAssinados = metricsData[currentUserData?.name]?.assinados || 0;
@@ -535,6 +522,16 @@ export default function Ranking() {
         <span className="text-[10px] text-gray-400">
           Atualizado {new Date().toLocaleTimeString()}
         </span>
+        {/* Botão de atualização manual */}
+        <button
+          onClick={() => loadAllData(true)}
+          disabled={refreshing}
+          className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
+          aria-label="Atualizar dados manualmente"
+        >
+          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+          Atualizar
+        </button>
       </div>
 
       {/* Banner */}

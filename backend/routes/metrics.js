@@ -1,10 +1,8 @@
-// backend/routes/metrics.js
 import express from 'express';
 import db from '../services/db.js';
 
 const router = express.Router();
 
-// Middleware de autenticação corrigido
 function requireAuth(req, res, next) {
   if (!req.session.isAuthenticated || !req.session.userId) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
@@ -12,16 +10,10 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// ============================================================
-// AUXILIARES
-// ============================================================
+// Auxiliares
 async function getColaboradorNomeFromId(colaboradorId) {
-  if (!colaboradorId) return null;
-  const result = await db.query(
-    `SELECT colaborador FROM madm.colaboradores WHERE internal_id = $1 LIMIT 1`,
-    [colaboradorId]
-  );
-  return result.rows[0]?.colaborador || null;
+  // Na view não há internal_id, então se for usado id, retornamos null; mantido para compatibilidade
+  return null;
 }
 
 async function resolveColaboradorNome(req) {
@@ -35,14 +27,14 @@ async function resolveColaboradorNome(req) {
 
 function mapGranularity(granularity) {
   const map = { daily: 'day', weekly: 'week', monthly: 'month' };
-  return map[granularity] || null;   // valor seguro
+  return map[granularity] || null;
 }
 
 function normalize(str) {
   return (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// ==================== EMITIDOS ====================
+// --- EMITIDOS ---
 router.get('/emitidos', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity } = req.query;
@@ -50,32 +42,34 @@ router.get('/emitidos', requireAuth, async (req, res) => {
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
 
+    // view_app_emitidos_e_assinados não possui equipe_responsavel_emissao; faremos JOIN com colaboradores
     let query = `
       SELECT 
-        consultor_responsavel_emissao as colaborador,
-        equipe_responsavel_emissao as equipe,
-        COUNT(DISTINCT internal_id)::int as total
+        e.consultor_responsavel_emissao as colaborador,
+        COALESCE(c.nome_equipe, '') as equipe,
+        COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          consultor_responsavel_emissao as colaborador,
-          equipe_responsavel_emissao as equipe,
-          (DATE_TRUNC('${gran}', data_envio) AT TIME ZONE 'UTC')::date as periodo,
-          COUNT(DISTINCT internal_id)::int as total
+          e.consultor_responsavel_emissao as colaborador,
+          COALESCE(c.nome_equipe, '') as equipe,
+          (DATE_TRUNC('${gran}', e.data_envio) AT TIME ZONE 'UTC')::date as periodo,
+          COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.emitidos_e_assinados
-      WHERE (data_envio AT TIME ZONE 'UTC')::date >= $1 AND (data_envio AT TIME ZONE 'UTC')::date < $2
-        AND consultor_responsavel_emissao IS NOT NULL
-        AND consultor_responsavel_emissao != ''
+      FROM madm.view_app_emitidos_e_assinados e
+      LEFT JOIN core.view_app_colaboradores c ON e.consultor_responsavel_emissao = c.nome
+      WHERE (e.data_envio AT TIME ZONE 'UTC')::date >= $1 AND (e.data_envio AT TIME ZONE 'UTC')::date < $2
+        AND e.consultor_responsavel_emissao IS NOT NULL
+        AND e.consultor_responsavel_emissao != ''
     `;
     const params = [start, end];
     let idx = 3;
 
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(equipe_responsavel_emissao)) = LOWER(TRIM($${idx}))`;
+      query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
     if (produto && produto !== 'Todos') {
@@ -86,17 +80,17 @@ router.get('/emitidos', requireAuth, async (req, res) => {
       if (productVariants[produto]) {
         const variants = productVariants[produto];
         const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND produto IN (${placeholders})`;
+        query += ` AND e.produto IN (${placeholders})`;
         params.push(...variants); idx += variants.length;
       } else {
-        query += ` AND produto = $${idx}`;
+        query += ` AND e.produto = $${idx}`;
         params.push(produto); idx++;
       }
     }
     if (gran) {
-      query += ` GROUP BY consultor_responsavel_emissao, equipe_responsavel_emissao, DATE_TRUNC('${gran}', data_envio) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY e.consultor_responsavel_emissao, c.nome_equipe, DATE_TRUNC('${gran}', e.data_envio) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY consultor_responsavel_emissao, equipe_responsavel_emissao ORDER BY colaborador`;
+      query += ` GROUP BY e.consultor_responsavel_emissao, c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -116,7 +110,7 @@ router.get('/emitidos', requireAuth, async (req, res) => {
   }
 });
 
-// ==================== ASSINADOS ====================
+// --- ASSINADOS ---
 router.get('/assinados', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity } = req.query;
@@ -128,7 +122,7 @@ router.get('/assinados', requireAuth, async (req, res) => {
       SELECT 
         consultor_responsavel_assinatura as colaborador,
         equipe_responsavel_assinatura as equipe,
-        COUNT(DISTINCT internal_id)::int as total
+        COUNT(*)::int as total
     `;
     if (gran) {
       query = `
@@ -136,11 +130,11 @@ router.get('/assinados', requireAuth, async (req, res) => {
           consultor_responsavel_assinatura as colaborador,
           equipe_responsavel_assinatura as equipe,
           (DATE_TRUNC('${gran}', data_assinatura) AT TIME ZONE 'UTC')::date as periodo,
-          COUNT(DISTINCT internal_id)::int as total
+          COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.emitidos_e_assinados
+      FROM madm.view_app_emitidos_e_assinados
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
         AND status = 'signed'
         AND consultor_responsavel_assinatura IS NOT NULL
@@ -191,39 +185,34 @@ router.get('/assinados', requireAuth, async (req, res) => {
   }
 });
 
-// ==================== PROTOCOLADOS ====================
+// --- PROTOCOLADOS ---
 router.get('/protocolados', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
-    const periodo = start.substring(0, 7);
-    const colaboradorSubquery = `(
-      SELECT DISTINCT ON (colaborador) colaborador, equipe
-      FROM madm.colaboradores
-      WHERE periodo = '${periodo}'
-    )`;
 
     let query = `
       SELECT 
         l.lead_usuario_responsavel as colaborador,
-        COALESCE(c.equipe, '') as equipe,
-        COUNT(DISTINCT l.id)::int as total
+        COALESCE(c.nome_equipe, '') as equipe,
+        COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
           l.lead_usuario_responsavel as colaborador,
-          COALESCE(c.equipe, '') as equipe,
+          COALESCE(c.nome_equipe, '') as equipe,
           (DATE_TRUNC('${gran}', l.data_protocolo_juridico_auditoria) AT TIME ZONE 'UTC')::date as periodo,
-          COUNT(DISTINCT l.id)::int as total
+          COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.kommo_leads l
-      LEFT JOIN ${colaboradorSubquery} c ON l.lead_usuario_responsavel = c.colaborador
-      WHERE (l.data_protocolo_juridico_auditoria AT TIME ZONE 'UTC')::date >= $1 AND (l.data_protocolo_juridico_auditoria AT TIME ZONE 'UTC')::date < $2
+      FROM madm.view_app_kommo_leads l
+      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
+      WHERE (l.data_protocolo_juridico_auditoria AT TIME ZONE 'UTC')::date >= $1
+        AND (l.data_protocolo_juridico_auditoria AT TIME ZONE 'UTC')::date < $2
         AND l.lead_usuario_responsavel IS NOT NULL
         AND l.lead_usuario_responsavel != ''
     `;
@@ -231,7 +220,7 @@ router.get('/protocolados', requireAuth, async (req, res) => {
     let idx = 3;
 
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(c.equipe)) = LOWER(TRIM($${idx}))`;
+      query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
     if (produto && produto !== 'Todos') {
@@ -250,9 +239,9 @@ router.get('/protocolados', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe, DATE_TRUNC('${gran}', l.data_protocolo_juridico_auditoria) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_protocolo_juridico_auditoria) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe ORDER BY colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -272,19 +261,13 @@ router.get('/protocolados', requireAuth, async (req, res) => {
   }
 });
 
-// ==================== GANHOS ====================
+// --- GANHOS ---
 router.get('/ganhos', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
-    const periodo = start.substring(0, 7);
-    const colaboradorSubquery = `(
-      SELECT DISTINCT ON (colaborador) colaborador, equipe
-      FROM madm.colaboradores
-      WHERE periodo = '${periodo}'
-    )`;
 
     const funis = ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO'];
     const etapas = [
@@ -297,21 +280,21 @@ router.get('/ganhos', requireAuth, async (req, res) => {
     let query = `
       SELECT 
         l.lead_usuario_responsavel as colaborador,
-        COALESCE(c.equipe, '') as equipe,
-        COUNT(DISTINCT l.id)::int as total
+        COALESCE(c.nome_equipe, '') as equipe,
+        COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
           l.lead_usuario_responsavel as colaborador,
-          COALESCE(c.equipe, '') as equipe,
+          COALESCE(c.nome_equipe, '') as equipe,
           (DATE_TRUNC('${gran}', l.data_ganho) AT TIME ZONE 'UTC')::date as periodo,
-          COUNT(DISTINCT l.id)::int as total
+          COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.kommo_leads l
-      LEFT JOIN ${colaboradorSubquery} c ON l.lead_usuario_responsavel = c.colaborador
+      FROM madm.view_app_kommo_leads l
+      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
       WHERE (l.data_ganho AT TIME ZONE 'UTC')::date >= $1 AND (l.data_ganho AT TIME ZONE 'UTC')::date < $2
         AND l.funil_vendas = ANY($3)
         AND l.etapa_lead = ANY($4)
@@ -322,13 +305,14 @@ router.get('/ganhos', requireAuth, async (req, res) => {
     let idx = 5;
 
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(c.equipe)) = LOWER(TRIM($${idx}))`;
+      query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
     if (produto && produto !== 'Todos') {
       const productVariants = {
         'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
+        'Quinquenio': ['Quinquenio', 'Quinquênio'],
+        'Concomitante': ['Concomitante', 'concomitante']
       };
       if (productVariants[produto]) {
         const variants = productVariants[produto];
@@ -341,9 +325,9 @@ router.get('/ganhos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe ORDER BY colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -363,40 +347,34 @@ router.get('/ganhos', requireAuth, async (req, res) => {
   }
 });
 
-// ==================== PERDIDOS ====================
+// --- PERDIDOS ---
 router.get('/perdidos', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
-    const periodo = start.substring(0, 7);
-    const colaboradorSubquery = `(
-      SELECT DISTINCT ON (colaborador) colaborador, equipe
-      FROM madm.colaboradores
-      WHERE periodo = '${periodo}'
-    )`;
 
     const funis = ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO'];
 
     let query = `
       SELECT 
         l.lead_usuario_responsavel as colaborador,
-        COALESCE(c.equipe, '') as equipe,
-        COUNT(DISTINCT l.id)::int as total
+        COALESCE(c.nome_equipe, '') as equipe,
+        COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
           l.lead_usuario_responsavel as colaborador,
-          COALESCE(c.equipe, '') as equipe,
+          COALESCE(c.nome_equipe, '') as equipe,
           (DATE_TRUNC('${gran}', l.data_ganho) AT TIME ZONE 'UTC')::date as periodo,
-          COUNT(DISTINCT l.id)::int as total
+          COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.kommo_leads l
-      LEFT JOIN ${colaboradorSubquery} c ON l.lead_usuario_responsavel = c.colaborador
+      FROM madm.view_app_kommo_leads l
+      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
       WHERE (l.data_ganho AT TIME ZONE 'UTC')::date >= $1 AND (l.data_ganho AT TIME ZONE 'UTC')::date < $2
         AND l.funil_vendas = ANY($3)
         AND l.etapa_lead = 'Venda perdida'
@@ -407,7 +385,7 @@ router.get('/perdidos', requireAuth, async (req, res) => {
     let idx = 4;
 
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(c.equipe)) = LOWER(TRIM($${idx}))`;
+      query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
     if (produto && produto !== 'Todos') {
@@ -426,9 +404,9 @@ router.get('/perdidos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe ORDER BY colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -448,39 +426,32 @@ router.get('/perdidos', requireAuth, async (req, res) => {
   }
 });
 
-// ==================== LEADS RECEBIDOS ====================
+// --- LEADS RECEBIDOS ---
 router.get('/leads-recebidos', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
-    const periodo = start.substring(0, 7);
-    const colaboradorSubquery = `(
-      SELECT DISTINCT ON (colaborador) colaborador, equipe
-      FROM madm.colaboradores
-      WHERE periodo = '${periodo}'
-    )`;
 
     let query = `
       SELECT 
         l.lead_usuario_responsavel as colaborador,
-        COALESCE(c.equipe, '') as equipe,
-        (l.data_qualificacao AT TIME ZONE 'UTC')::date as data,
-        COUNT(DISTINCT l.id)::int as total
+        COALESCE(c.nome_equipe, '') as equipe,
+        COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
           l.lead_usuario_responsavel as colaborador,
-          COALESCE(c.equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', l.data_qualificacao) AT TIME ZONE 'UTC')::date as data,
-          COUNT(DISTINCT l.id)::int as total
+          COALESCE(c.nome_equipe, '') as equipe,
+          (DATE_TRUNC('${gran}', l.data_qualificacao) AT TIME ZONE 'UTC')::date as periodo,
+          COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.kommo_leads l
-      LEFT JOIN ${colaboradorSubquery} c ON l.lead_usuario_responsavel = c.colaborador
+      FROM madm.view_app_kommo_leads l
+      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
       WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1 AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
         AND l.lead_usuario_responsavel IS NOT NULL
         AND l.lead_usuario_responsavel != ''
@@ -489,7 +460,7 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
     let idx = 3;
 
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(c.equipe)) = LOWER(TRIM($${idx}))`;
+      query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
     if (produto && produto !== 'Todos') {
@@ -508,9 +479,9 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe, DATE_TRUNC('${gran}', l.data_qualificacao) ORDER BY data, colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_qualificacao) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.equipe, (l.data_qualificacao AT TIME ZONE 'UTC')::date ORDER BY data, colaborador`;
+      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -530,26 +501,20 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
   }
 });
 
-// ==================== LEADS POR ETAPA ====================
+// --- LEADS POR ETAPA ---
 router.get('/leads/stages', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
-    const periodo = start.substring(0, 7);
-    const colaboradorSubquery = `(
-      SELECT DISTINCT ON (colaborador) colaborador, equipe
-      FROM madm.colaboradores
-      WHERE periodo = '${periodo}'
-    )`;
 
     let query = `
       SELECT 
         l.lead_usuario_responsavel as colaborador,
         l.etapa_lead,
-        COUNT(DISTINCT l.id)::int as total
-      FROM madm.kommo_leads l
-      LEFT JOIN ${colaboradorSubquery} c ON l.lead_usuario_responsavel = c.colaborador
+        COUNT(*)::int as total
+      FROM madm.view_app_kommo_leads l
+      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
       WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1 AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
         AND l.lead_usuario_responsavel IS NOT NULL
         AND l.lead_usuario_responsavel != ''
@@ -558,7 +523,7 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
     let idx = 3;
 
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(c.equipe)) = LOWER(TRIM($${idx}))`;
+      query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
     if (produto && produto !== 'Todos') {
@@ -576,7 +541,7 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
         params.push(produto); idx++;
       }
     }
-    query += ` GROUP BY l.lead_usuario_responsavel, l.etapa_lead ORDER BY colaborador`;
+    query += ` GROUP BY l.lead_usuario_responsavel, l.etapa_lead, c.nome_equipe ORDER BY colaborador`;
 
     const result = await db.query(query, params);
     let rows = result.rows;
@@ -595,7 +560,7 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
   }
 });
 
-// ==================== PERFORMANCE SEMANAL ====================
+// --- PERFORMANCE SEMANAL ---
 router.get('/weekly', requireAuth, async (req, res) => {
   try {
     let { start, end } = req.query;
@@ -603,8 +568,8 @@ router.get('/weekly', requireAuth, async (req, res) => {
     const query = `
       SELECT 
         (DATE_TRUNC('week', data_assinatura) AT TIME ZONE 'UTC')::date as semana,
-        COUNT(DISTINCT internal_id)::int as vendas
-      FROM madm.emitidos_e_assinados
+        COUNT(*)::int as vendas
+      FROM madm.view_app_emitidos_e_assinados
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
         AND status = 'signed'
         AND consultor_responsavel_assinatura IS NOT NULL

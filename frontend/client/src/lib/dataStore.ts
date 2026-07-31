@@ -16,20 +16,45 @@ import {
 } from './api';
 
 // ============================================================
-// TIPOS COMPLETOS
+// TIPOS ATUALIZADOS – id agora é string (e-mail)
 // ============================================================
 export interface KpiItem { value: number; target: number; unit: string; label: string; }
 export interface KpiData { comissaoMes: KpiItem; vendasFechadas: KpiItem; protocolados: KpiItem; taxaConversao: KpiItem; }
 export interface EquipeConfig { id: string; nome: string; pesoAssinados: number; pesoGanhos: number; pesoequipeAssinados: number; pesoequipeGanhos: number; bonus: number; }
 export interface Collaborator {
-  id: number; name: string; email: string; equipeId: string; equipeNome: string; avatar: string;
-  emitidos: number; assinados: number; protocolados: number; ganhos: number; perdidos: number;
-  metaAssinados: number; metaGanhos: number; bonusPorCiclo: number; bonusRecebido: number;
-  status: "ativo" | "inativo"; produto: string; grupo: string;
-  metaDiarioAssinados?: number; metaDiarioGanhos?: number; metaSemanalAssinados?: number; metaSemanalGanhos?: number;
-  metaMensalAssinados?: number; metaMensalGanhos?: number; comissao?: number; bonusComissao?: number;
-  pesoDiarioAssinados: number; pesoDiarioGanhos: number; pesoSemanalAssinados: number; pesoSemanalGanhos: number;
-  pesoMensalAssinados: number; pesoMensalGanhos: number;
+  id: string;                      // agora é o e-mail
+  name: string;
+  email: string;
+  equipeId: string;
+  equipeNome: string;
+  avatar: string;
+  emitidos: number;
+  assinados: number;
+  protocolados: number;
+  ganhos: number;
+  perdidos: number;
+  metaAssinados: number;
+  metaGanhos: number;
+  bonusPorCiclo: number;
+  bonusRecebido: number;
+  status: "ativo" | "inativo";
+  produto: string;
+  cargo: string;                  // campo novo, substitui 'grupo'
+  grupo?: string;                 // mantido para compatibilidade
+  metaDiarioAssinados?: number;
+  metaDiarioGanhos?: number;
+  metaSemanalAssinados?: number;
+  metaSemanalGanhos?: number;
+  metaMensalAssinados?: number;
+  metaMensalGanhos?: number;
+  comissao?: number;
+  bonusComissao?: number;
+  pesoDiarioAssinados: number;
+  pesoDiarioGanhos: number;
+  pesoSemanalAssinados: number;
+  pesoSemanalGanhos: number;
+  pesoMensalAssinados: number;
+  pesoMensalGanhos: number;
 }
 export interface GlobalConfig {
   pesoMetaAssinados: number; pesoMetaGanhos: number; pesoMetaequipeAssinados: number; pesoMetaequipeGanhos: number;
@@ -38,18 +63,26 @@ export interface GlobalConfig {
   pesoDiarioAssinados: number; pesoDiarioGanhos: number; pesoSemanalAssinados: number; pesoSemanalGanhos: number;
   pesoMensalAssinados: number; pesoMensalGanhos: number;
 }
-export interface DailyData { id: string; colaboradorId: number; date: string; emitidos: number; assinados: number; ganhos: number; perdidos: number; }
+export interface DailyData {
+  id: string;                     // `${colaboradorId}-${date}`, colaboradorId agora é string
+  colaboradorId: string;
+  date: string;
+  emitidos: number;
+  assinados: number;
+  ganhos: number;
+  perdidos: number;
+}
 export interface Meta3x3 { assinados: number; ganhos: number; metaBatida: number; valorPorMeta: number; totalGanho: number; pesoMetaAssinados: number; pesoMetaGanhos: number; pesoMetaequipeAssinados: number; pesoMetaequipeGanhos: number; produto: string; metaDiaria: number; metaSemanal: number; metaMensal: number; }
 export interface BonusData { active: boolean; label: string; description: string; threshold: number; current: number; bonusValue: number; }
 export interface WeeklyPerformance { day: string; vendas: number; meta: number; }
 export interface DailyProduction { date: string; vendas: number; leads: number; }
 export interface User {
-  id: number; 
+  id: string;                    // e-mail
   e_mail: string;
   nome: string;
   email: string;
   equipe: string;
-  grupo: string;
+  cargo: string;
   status: string;
   periodo?: string;
   avatar?: string;
@@ -58,7 +91,7 @@ export interface User {
   totalRanking?: number;
 }
 export interface RankingItem { position: number; name: string; emitidos: number; assinados: number; ganhos: number; avatar: string; trend: 'up' | 'down' | 'same'; isCurrentUser?: boolean; }
-export interface CommissionItem { id: number; colaboradorId: number; cliente: string; produto: string; valor: number; status: 'pago' | 'pendente' | 'processando'; data: string; comissao: number; }
+export interface CommissionItem { id: number; colaboradorId: string; cliente: string; produto: string; valor: number; status: 'pago' | 'pendente' | 'processando'; data: string; comissao: number; }
 export interface CommissionSummary { totalAcumulado: number; pendente: number; pago: number; processando: number; mediaVenda: number; }
 export interface FunnelStage { stage: string; count: number; color: string; icon: string; description: string; }
 export interface ConversionRate { stage: string; value: number; }
@@ -73,16 +106,16 @@ export interface RawMetrics { emitidos: number; assinados: number; protocolados:
 // ============================================================
 // FUNÇÕES AUXILIARES
 // ============================================================
-function normalizeGroup(group: string | undefined): string {
-  return (group || '').trim().toLowerCase();
+function normalizeGroup(cargo: string | undefined): string {
+  return (cargo || '').trim().toLowerCase();
 }
 
 function applyHierarchyTotals(collaborators: Collaborator[]): Collaborator[] {
   if (!collaborators.length) return collaborators;
   const updated = collaborators.map(c => ({ ...c }));
-  const supervisors = updated.filter(c => normalizeGroup(c.grupo) === 'supervisor');
+  const supervisors = updated.filter(c => normalizeGroup(c.cargo) === 'supervisor');
   const coordAdmins = updated.filter(c =>
-    ['coordenador', 'administrativo'].includes(normalizeGroup(c.grupo))
+    ['coordenador', 'administrativo'].includes(normalizeGroup(c.cargo))
   );
   const sumMetrics = (list: Collaborator[]) => ({
     emitidos: list.reduce((s, c) => s + (c.emitidos || 0), 0),
@@ -93,7 +126,7 @@ function applyHierarchyTotals(collaborators: Collaborator[]): Collaborator[] {
   });
   for (const sup of supervisors) {
     const team = updated.filter(
-      c => c.equipeNome === sup.equipeNome && c.id !== sup.id && normalizeGroup(c.grupo) !== 'supervisor'
+      c => c.equipeNome === sup.equipeNome && c.id !== sup.id && normalizeGroup(c.cargo) !== 'supervisor'
     );
     const sums = sumMetrics(team);
     sup.emitidos = sums.emitidos;
@@ -197,7 +230,7 @@ const initialInsightCards: InsightCard[] = [];
 const initialRawMetrics: RawMetrics = { emitidos: 0, assinados: 0, protocolados: 0, ganhos: 0, perdidos: 0 };
 
 // ============================================================
-// INTERFACE DA STORE
+// INTERFACE DA STORE (tipos atualizados para ID string, colaboradorId aceita string|number)
 // ============================================================
 interface AppStore {
   currentUser: User | null;
@@ -221,33 +254,34 @@ interface AppStore {
   addNotification: (notification: Notification) => void; setInsightCards: (data: InsightCard[]) => void;
   markNotificationRead: (id: number) => void; markAllNotificationsRead: () => void; getUnreadCount: () => number;
   setCollaborators: (data: Collaborator[]) => void; setGlobalConfig: (data: GlobalConfig) => void; setDailyData: (data: DailyData[]) => void;
-  addDailyData: (data: DailyData) => void; updateDailyData: (colaboradorId: number, date: string, tipo: string, quantidade: number) => void;
-  updateCollaboratorMeta: (id: number, metaAssinados: number, metaGanhos: number) => void;
-  updateCollaboratorBonus: (id: number, bonusPorCiclo: number) => void;
-  updateCollaboratorCycleMeta: (id: number, periodo: 'diario' | 'semanal' | 'mensal', assinados: number, ganhos: number) => void;
+  addDailyData: (data: DailyData) => void; updateDailyData: (colaboradorId: string, date: string, tipo: string, quantidade: number) => void;
+  updateCollaboratorMeta: (id: string, metaAssinados: number, metaGanhos: number) => void;
+  updateCollaboratorBonus: (id: string, bonusPorCiclo: number) => void;
+  updateCollaboratorCycleMeta: (id: string, periodo: 'diario' | 'semanal' | 'mensal', assinados: number, ganhos: number) => void;
   updateGlobalConfig: (config: Partial<GlobalConfig>) => void;
   setCurrentUser: (user: User | null) => void;
   setEquipeConfigs: (data: EquipeConfig[]) => void; updateEquipeConfig: (equipeId: string, config: Partial<EquipeConfig>) => void;
   getEquipeConfigByNome: (nome: string) => EquipeConfig | undefined; getEquipeConfigById: (id: string) => EquipeConfig | undefined;
-  getCollaboratorById: (id: number) => Collaborator | undefined;
-  getCollaboratorTotals: (colaboradorId: number) => { emitidos: number; assinados: number; ganhos: number; perdidos: number };
-  getCollaboratorDailyByDate: (colaboradorId: number, date: string) => DailyData | undefined;
+  getCollaboratorById: (id: string) => Collaborator | undefined;
+  getCollaboratorTotals: (colaboradorId: string) => { emitidos: number; assinados: number; ganhos: number; perdidos: number };
+  getCollaboratorDailyByDate: (colaboradorId: string, date: string) => DailyData | undefined;
   getCurrentUserData: () => Collaborator | undefined;
   getEquipeBonusForCollaborator: (colaborador: Collaborator) => number;
   getEquipePesoAssinadosForCollaborator: (colaborador: Collaborator) => number;
   getEquipePesoGanhosForCollaborator: (colaborador: Collaborator) => number;
-  updateCollaboratorTotals: (colaboradorId: number) => void;
+  updateCollaboratorTotals: (colaboradorId: string) => void;
   setPeriod: (period: Period) => void; setCustomDateRange: (start: string, end: string) => void; updateCurrentDates: () => void;
   loadCollaborators: () => Promise<void>; loadEquipeConfigs: () => Promise<void>;
-  loadCollaboratorsAndMetrics: (equipeNome?: string, colaboradorNome?: string, colaboradorId?: number, produto?: string) => Promise<void>;
-  loadMetricsForPeriod: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: number; produto?: string }) => Promise<void>;
+  // *** ATENÇÃO: colaboradorId agora aceita string | number | undefined para corrigir o erro ***
+  loadCollaboratorsAndMetrics: (equipeNome?: string, colaboradorNome?: string, colaboradorId?: string | number, produto?: string) => Promise<void>;
+  loadMetricsForPeriod: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string }) => Promise<void>;
   loadWeeklyPerformanceData: () => Promise<void>;
   loadLeadsByStage: (equipeNome?: string, colaboradorNome?: string, produto?: string) => Promise<{ colaborador: string; etapa_lead: string; total: number }[]>;
   updateKpiFromMetrics: () => void;
-  updateCollaboratorWeights: (id: number, weights: Partial<Pick<Collaborator, 'pesoDiarioAssinados' | 'pesoDiarioGanhos' | 'pesoSemanalAssinados' | 'pesoSemanalGanhos' | 'pesoMensalAssinados' | 'pesoMensalGanhos' | 'bonusPorCiclo'>>) => void;
+  updateCollaboratorWeights: (id: string, weights: Partial<Pick<Collaborator, 'pesoDiarioAssinados' | 'pesoDiarioGanhos' | 'pesoSemanalAssinados' | 'pesoSemanalGanhos' | 'pesoMensalAssinados' | 'pesoMensalGanhos' | 'bonusPorCiclo'>>) => void;
   recalculateHierarchyWeights: () => Promise<void>;
   getCollaboratorsWithHierarchy: () => Collaborator[];
-  loadRawMetrics: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: number; produto?: string }) => Promise<void>;
+  loadRawMetrics: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string }) => Promise<void>;
   updateKpiFromRawMetrics: () => void;
 }
 
@@ -357,16 +391,16 @@ export const useAppStore = create<AppStore>()(
           return;
         }
         const normalized: User = {
-          id: user.id || 0,
+          id: user.id || user.email || '',
           e_mail: user.e_mail || '',
           nome: user.nome || '',
           email: user.email || user.e_mail || '',
           equipe: user.equipe || '',
-          grupo: user.grupo || '',
+          cargo: user.cargo || '',
           status: user.status || '',
           periodo: user.periodo || '',
           avatar: user.avatar,
-          role: user.role || user.grupo,
+          role: user.role || user.cargo,
           rank: user.rank,
           totalRanking: user.totalRanking,
         };
@@ -379,7 +413,9 @@ export const useAppStore = create<AppStore>()(
       })),
       getEquipeConfigByNome: (nome) => get().equipeConfigs.find(e => e.nome === nome),
       getEquipeConfigById: (id) => get().equipeConfigs.find(e => e.id === id),
+
       addDailyData: (data) => set((state) => ({ dailyData: [...state.dailyData, data] })),
+
       updateDailyData: (colaboradorId, date, tipo, quantidade) => {
         const id = `${colaboradorId}-${date}`;
         const existing = get().dailyData.find(d => d.id === id);
@@ -391,6 +427,7 @@ export const useAppStore = create<AppStore>()(
         }
         get().updateCollaboratorTotals(colaboradorId);
       },
+
       updateCollaboratorTotals: (colaboradorId) => {
         const userDailyData = get().dailyData.filter(d => d.colaboradorId === colaboradorId);
         const totals = userDailyData.reduce((acc, day) => ({
@@ -401,6 +438,7 @@ export const useAppStore = create<AppStore>()(
         }), { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0 });
         set((state) => ({ collaborators: state.collaborators.map(c => c.id === colaboradorId ? { ...c, ...totals } : c) }));
       },
+
       setMeta3x3: (data) => {
         const totalGanho = data.ganhos * data.valorPorMeta;
         const metaBatida = Math.floor(Math.min(data.assinados / data.pesoMetaAssinados, data.ganhos / data.pesoMetaGanhos));
@@ -452,8 +490,8 @@ export const useAppStore = create<AppStore>()(
       },
       getCollaboratorDailyByDate: (colaboradorId, date) => get().dailyData.find(d => d.id === `${colaboradorId}-${date}`),
       getCurrentUserData: () => {
-        const userEmail = get().currentUser?.e_mail;
-        return userEmail ? get().collaborators.find(c => c.email === userEmail) : undefined;
+        const userEmail = get().currentUser?.email;
+        return userEmail ? get().collaborators.find(c => c.email === userEmail || c.id === userEmail) : undefined;
       },
       addNotification: (notification) => set((state) => ({ notifications: [notification, ...state.notifications] })),
       markNotificationRead: (id) => set((state) => ({ notifications: state.notifications.map(n => n.id === id ? { ...n, read: true } : n) })),
@@ -475,7 +513,7 @@ export const useAppStore = create<AppStore>()(
           const collabs: any[] = await fetchCollaborators();
           const unique = collabs.filter((c, i, self) => self.findIndex(t => t.id === c.id) === i);
           const baseCollaborators: Collaborator[] = unique.map((c: any) => ({
-            id: c.id,
+            id: c.id,                        // agora string
             name: c.name,
             email: c.email,
             equipeId: c.equipeId ?? '',
@@ -492,7 +530,8 @@ export const useAppStore = create<AppStore>()(
             bonusRecebido: c.bonusRecebido || 0,
             status: (c.status || 'ativo').toLowerCase() as "ativo" | "inativo",
             produto: c.produto || '',
-            grupo: c.grupo || '',
+            cargo: c.grupo || '',           // API retorna 'grupo', mapeamos para 'cargo'
+            grupo: c.grupo || '',            // compatibilidade
             metaDiarioAssinados: c.metaDiarioAssinados ?? 3,
             metaDiarioGanhos: c.metaDiarioGanhos ?? 3,
             metaSemanalAssinados: c.metaSemanalAssinados ?? 15,
@@ -517,7 +556,7 @@ export const useAppStore = create<AppStore>()(
               if (data.success && Array.isArray(data.data)) {
                 const metricsMap = new Map();
                 data.data.forEach((item: any) => {
-                  metricsMap.set(item.colaborador_id || item.id, {
+                  metricsMap.set(item.email || item.id, {
                     comissao_bonus: item.comissao_bonus,
                     peso_meta_assinados_diario: item.peso_meta_assinados_diario,
                     peso_meta_ganho_diario: item.peso_meta_ganho_diario,
@@ -576,6 +615,7 @@ export const useAppStore = create<AppStore>()(
           if (collaborators.length === 0) await get().loadCollaborators();
 
           const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
+          // Agora colaboradorId pode ser string|number; a API aceita ambos
           const apiParams = { start, end, equipe: equipeNome, colaborador: colaboradorNome, colaboradorId, produto };
           const [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
             fetchEmitidos(apiParams),
@@ -610,7 +650,7 @@ export const useAppStore = create<AppStore>()(
           }));
 
           updated.forEach(c => {
-            if (c.grupo === 'Quinquenio' || c.grupo === 'Concomitante') {
+            if (c.cargo === 'Quinquenio' || c.cargo === 'Concomitante') {
               c.ganhos = 0;
             }
           });
@@ -746,8 +786,8 @@ export const useAppStore = create<AppStore>()(
 
       recalculateHierarchyWeights: async () => {
         const { collaborators, updateCollaboratorWeights } = get();
-        const supervisors = collaborators.filter(c => c.grupo === 'Supervisor');
-        const coordAdmins = collaborators.filter(c => c.grupo === 'Coordenador' || c.grupo === 'Administrativo');
+        const supervisors = collaborators.filter(c => normalizeGroup(c.cargo) === 'supervisor');
+        const coordAdmins = collaborators.filter(c => normalizeGroup(c.cargo) === 'coordenador' || normalizeGroup(c.cargo) === 'administrativo');
 
         const sumWeights = (list: Collaborator[], periodo: 'diario' | 'semanal' | 'mensal') => {
           const pesoAssinadosKey = `peso${periodo.charAt(0).toUpperCase() + periodo.slice(1)}Assinados` as keyof Collaborator;
@@ -799,7 +839,6 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: 'madm-storage',
-      // currentUser NÃO é persistido – a restauração é feita por /auth/me
       partialize: (state) => ({
         equipeConfigs: state.equipeConfigs,
         globalConfig: state.globalConfig,
