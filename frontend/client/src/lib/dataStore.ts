@@ -230,7 +230,7 @@ const initialInsightCards: InsightCard[] = [];
 const initialRawMetrics: RawMetrics = { emitidos: 0, assinados: 0, protocolados: 0, ganhos: 0, perdidos: 0 };
 
 // ============================================================
-// INTERFACE DA STORE (tipos atualizados para ID string, colaboradorId aceita string|number)
+// INTERFACE DA STORE
 // ============================================================
 interface AppStore {
   currentUser: User | null;
@@ -272,7 +272,6 @@ interface AppStore {
   updateCollaboratorTotals: (colaboradorId: string) => void;
   setPeriod: (period: Period) => void; setCustomDateRange: (start: string, end: string) => void; updateCurrentDates: () => void;
   loadCollaborators: () => Promise<void>; loadEquipeConfigs: () => Promise<void>;
-  // *** ATENÇÃO: colaboradorId agora aceita string | number | undefined para corrigir o erro ***
   loadCollaboratorsAndMetrics: (equipeNome?: string, colaboradorNome?: string, colaboradorId?: string | number, produto?: string) => Promise<void>;
   loadMetricsForPeriod: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string }) => Promise<void>;
   loadWeeklyPerformanceData: () => Promise<void>;
@@ -396,7 +395,7 @@ export const useAppStore = create<AppStore>()(
           nome: user.nome || '',
           email: user.email || user.e_mail || '',
           equipe: user.equipe || '',
-          cargo: user.cargo || '',
+          cargo: user.cargo || user.cargo || '',
           status: user.status || '',
           periodo: user.periodo || '',
           avatar: user.avatar,
@@ -507,13 +506,22 @@ export const useAppStore = create<AppStore>()(
       setNotifications: (data) => set({ notifications: data }),
       setInsightCards: (data) => set({ insightCards: data }),
 
-      // ========== CARREGAMENTOS ==========
+      // ========== CARREGAMENTOS (CORRIGIDOS) ==========
       loadCollaborators: async () => {
         try {
+          console.log('🔄 [loadCollaborators] Iniciando...');
           const collabs: any[] = await fetchCollaborators();
-          const unique = collabs.filter((c, i, self) => self.findIndex(t => t.id === c.id) === i);
-          const baseCollaborators: Collaborator[] = unique.map((c: any) => ({
-            id: c.id,                        // agora string
+          console.log('📦 [loadCollaborators] Resposta da API:', collabs?.length, 'itens');
+
+          if (!collabs || collabs.length === 0) {
+            console.warn('⚠️ [loadCollaborators] Nenhum colaborador retornado pela API');
+            set({ collaborators: [] });
+            return;
+          }
+
+          // REMOVIDO: filtro unique que causava o problema (todos os ids undefined)
+          const baseCollaborators: Collaborator[] = collabs.map((c: any) => ({
+            id: c.id || c.email,
             name: c.name,
             email: c.email,
             equipeId: c.equipeId ?? '',
@@ -530,8 +538,8 @@ export const useAppStore = create<AppStore>()(
             bonusRecebido: c.bonusRecebido || 0,
             status: (c.status || 'ativo').toLowerCase() as "ativo" | "inativo",
             produto: c.produto || '',
-            cargo: c.grupo || '',           // API retorna 'grupo', mapeamos para 'cargo'
-            grupo: c.grupo || '',            // compatibilidade
+            cargo: c.cargo || c.grupo || '',
+            grupo: c.grupo || c.cargo || '',
             metaDiarioAssinados: c.metaDiarioAssinados ?? 3,
             metaDiarioGanhos: c.metaDiarioGanhos ?? 3,
             metaSemanalAssinados: c.metaSemanalAssinados ?? 15,
@@ -548,27 +556,24 @@ export const useAppStore = create<AppStore>()(
             pesoMensalGanhos: c.pesoMensalGanhos ?? 60,
           }));
 
+          console.log('✅ [loadCollaborators] Mapeados:', baseCollaborators.length);
+
+          // Tentar carregar métricas do mês atual para pesos e bônus
           const mesRef = get().currentStartDate?.substring(0, 7) || new Date().toISOString().slice(0, 7);
           try {
             const res = await fetch(`${API_BASE}/metricas-assessores?mes=${mesRef}`, { credentials: 'include' });
             if (res.ok) {
               const data = await res.json();
               if (data.success && Array.isArray(data.data)) {
-                const metricsMap = new Map();
+                const metricsMap = new Map<string, any>();
                 data.data.forEach((item: any) => {
-                  metricsMap.set(item.email || item.id, {
-                    comissao_bonus: item.comissao_bonus,
-                    peso_meta_assinados_diario: item.peso_meta_assinados_diario,
-                    peso_meta_ganho_diario: item.peso_meta_ganho_diario,
-                    peso_meta_assinados_semanal: item.peso_meta_assinados_semanal,
-                    peso_meta_ganho_semanal: item.peso_meta_ganho_semanal,
-                    peso_meta_assinados_mensal: item.peso_meta_assinados_mensal,
-                    peso_meta_ganho_mensal: item.peso_meta_ganho_mensal,
-                  });
+                  const key = (item.email || '').trim().toLowerCase();
+                  if (key) metricsMap.set(key, item);
                 });
-                for (let i = 0; i < baseCollaborators.length; i++) {
-                  const colab = baseCollaborators[i];
-                  const metrics = metricsMap.get(colab.id);
+
+                for (const colab of baseCollaborators) {
+                  const key = (colab.email || '').trim().toLowerCase();
+                  const metrics = metricsMap.get(key);
                   if (metrics) {
                     colab.bonusPorCiclo = metrics.comissao_bonus ?? colab.bonusPorCiclo;
                     colab.bonusComissao = metrics.comissao_bonus ?? colab.bonusComissao;
@@ -587,15 +592,16 @@ export const useAppStore = create<AppStore>()(
           }
 
           set({ collaborators: baseCollaborators });
+          console.log('💾 [loadCollaborators] Estado atualizado com sucesso');
         } catch (err) {
-          console.error('Erro ao carregar colaboradores:', err);
+          console.error('❌ [loadCollaborators] Erro:', err);
         }
       },
 
       loadEquipeConfigs: async () => {
         try {
           const equipes: any[] = await fetchEquipes();
-          set({ equipeConfigs: equipes.map((eq: any) => ({ id: eq.id?.toString() || `equipe_${Math.random()}`, nome: eq.nome || 'Equipe sem nome', pesoAssinados: 3, pesoGanhos: 3, pesoequipeAssinados: 0, pesoequipeGanhos: 0, bonus: 100 })) });
+          set({ equipeConfigs: equipes.map((eq: any) => ({ id: eq.id?.toString() || eq.nome, nome: eq.nome || 'Equipe sem nome', pesoAssinados: 3, pesoGanhos: 3, pesoequipeAssinados: 0, pesoequipeGanhos: 0, bonus: 100 })) });
         } catch (err) { console.error('Erro ao carregar configurações de equipe:', err); }
       },
 
@@ -615,7 +621,6 @@ export const useAppStore = create<AppStore>()(
           if (collaborators.length === 0) await get().loadCollaborators();
 
           const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
-          // Agora colaboradorId pode ser string|number; a API aceita ambos
           const apiParams = { start, end, equipe: equipeNome, colaborador: colaboradorNome, colaboradorId, produto };
           const [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
             fetchEmitidos(apiParams),

@@ -1,3 +1,4 @@
+// backend/routes/colaboradores.js
 import express from 'express';
 import db from '../services/db.js';
 
@@ -10,14 +11,29 @@ function requireAuth(req, res, next) {
   next();
 }
 
+/**
+ * Retorna o primeiro dia do mês atual no formato YYYY-MM-DD.
+ */
 function getCurrentPeriod() {
   const now = new Date();
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
+  return `${year}-${month}-01`;
 }
 
-// Mapeamento de cargo para produto (mantido)
+/**
+ * Converte um parâmetro de mês (YYYY-MM) para data métrica (YYYY-MM-DD).
+ * Se já for uma data completa, mantém.
+ */
+function parseMesToDataMetrica(mesParam) {
+  if (!mesParam) return getCurrentPeriod();
+  if (/^\d{4}-\d{2}$/.test(mesParam)) {
+    return `${mesParam}-01`;
+  }
+  return mesParam; // já deve estar no formato YYYY-MM-DD
+}
+
+// Mapeamento de cargo para produto (usado no retorno)
 function mapGrupoToProduto(cargo) {
   const mapping = {
     'Elite': 'Auxilio Acidente',
@@ -28,68 +44,46 @@ function mapGrupoToProduto(cargo) {
   return mapping[cargo] || '';
 }
 
+// Equipes que não devem ser retornadas na listagem de equipes
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia'
+  'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
+  'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
+  'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
+  'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
+  'Equipe Thales','Financeiro'
 ];
 
 function normalize(str) {
   return (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// Função de correspondência: tenta várias combinações de e‑mail
-function findMetricByEmail(email, metricsMap) {
-  const clean = normalize(email);
-  if (!clean) return null;
-
-  if (metricsMap.has(clean)) return metricsMap.get(clean);
-
-  const variants = new Set();
-  variants.add(clean);
-  if (clean.endsWith('.br')) {
-    variants.add(clean.slice(0, -3));
-  } else {
-    variants.add(clean + '.br');
-  }
-
-  if (clean.includes('@')) {
-    const localPart = clean.split('@')[0];
-    variants.add(localPart);
-    variants.add(localPart + '@madmbrasil.com.br');
-    if (!localPart.endsWith('.br')) {
-      variants.add(localPart + '.br');
-    }
-  }
-
-  for (const v of variants) {
-    if (metricsMap.has(v)) return metricsMap.get(v);
-  }
-  return null;
-}
-
+// ============================================================
 // GET /api/collaborators
+// ============================================================
 router.get('/collaborators', requireAuth, async (req, res) => {
-  const periodo = req.query.mes || getCurrentPeriod();
-  console.log(`📅 Buscando colaboradores para o período: ${periodo}`);
+  const mesParam = req.query.mes;
+  const dataMetrica = parseMesToDataMetrica(mesParam);
+  console.log(`📅 Buscando colaboradores para data_metrica: ${dataMetrica}`);
 
   try {
-    // Consulta base na view de colaboradores
+    // Buscar colaboradores filtrando por data_metrica (ex: '2026-08-01')
     const todosColabs = await db.query(`
-      SELECT email, nome, nome_equipe, cargo, status, periodo
-      FROM core.view_app_colaboradores
-      WHERE periodo = $1
-        AND nome_equipe IS NOT NULL AND TRIM(nome_equipe) != ''
-        AND LOWER(status) != 'desativado'
-        AND LOWER(cargo) != 'desativado'
-    `, [periodo]);
+      SELECT c.email, c.nome, c.nome_equipe, c.cargo, c.status, c.periodo
+      FROM core.view_app_colaboradores c
+      INNER JOIN app_comissionamento.view_app_metricas_assessores m
+        ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
+      WHERE m.data_metrica::date = $1::date
+        AND c.nome_equipe IS NOT NULL AND TRIM(c.nome_equipe) != ''
+        AND LOWER(c.status) != 'desativado'
+        AND LOWER(c.cargo) != 'desativado'
+    `, [dataMetrica]);
     const colabsArray = todosColabs.rows;
 
     if (colabsArray.length === 0) {
       return res.json({ success: true, data: [] });
     }
 
-    // Métricas da view de métricas assessores
+    // Buscar métricas do mês para popular pesos e bônus
     const metricas = await db.query(`
       SELECT email, data_metrica,
              COALESCE(peso_meta_assinados_diario, 3)   AS meta_diario_assinados,
@@ -98,53 +92,36 @@ router.get('/collaborators', requireAuth, async (req, res) => {
              COALESCE(peso_meta_ganho_semanal, 3)      AS meta_semanal_ganhos,
              COALESCE(peso_meta_assinados_mensal, 10)  AS meta_mensal_assinados,
              COALESCE(peso_meta_ganho_mensal, 10)      AS meta_mensal_ganhos,
-             COALESCE(comissao_bonus, 0)               AS comissao,
              COALESCE(comissao_bonus, 0)               AS bonus_comissao
       FROM app_comissionamento.view_app_metricas_assessores
-      WHERE TO_CHAR(data_metrica::date, 'YYYY-MM') = $1
-    `, [periodo]);
+      WHERE data_metrica::date = $1::date
+    `, [dataMetrica]);
 
+    // Mapeia métricas por email normalizado
     const metricsByEmail = new Map();
     for (const m of metricas.rows) {
-      const normalized = normalize(m.email);
-      metricsByEmail.set(normalized, m);
-      if (normalized.endsWith('.br')) {
-        metricsByEmail.set(normalized.slice(0, -3), m);
-      } else {
-        metricsByEmail.set(normalized + '.br', m);
-      }
+      metricsByEmail.set(normalize(m.email), m);
     }
 
-    const colaboradores = [];
-    for (const colab of colabsArray) {
-      const equipeNome = (colab.nome_equipe || '').trim();
-      if (EXCLUDED_TEAMS.includes(equipeNome)) continue;
+    // Montar resposta no formato esperado pelo front-end
+    const colaboradores = colabsArray.map(colab => {
+      const emailNormalizado = normalize(colab.email);
+      const metrica = metricsByEmail.get(emailNormalizado);
 
-      const emailColab = normalize(colab.email);
-      let metrica = findMetricByEmail(emailColab, metricsByEmail);
-
-      if (!metrica) {
-        const nomeColab = normalize(colab.nome);
-        for (const [key, m] of metricsByEmail.entries()) {
-          if (key === nomeColab || key.includes(nomeColab) || nomeColab.includes(key)) {
-            metrica = m;
-            break;
-          }
-        }
-      }
-
-      colaboradores.push({
-        id: colab.email,
+      return {
+        id: colab.email,                               // identificador único é o e-mail
         name: colab.nome,
         email: colab.email,
-        equipeId: '',  // id_equipe não disponível na view
-        equipeNome,
-        grupo: colab.cargo || '',
+        equipeId: '',                                  // a view não fornece id_equipe
+        equipeNome: colab.nome_equipe,
+        grupo: colab.cargo || '',                      // compatibilidade
+        cargo: colab.cargo || '',
         status: colab.status || 'ativo',
-        periodo: colab.periodo || periodo,
+        periodo: colab.periodo || dataMetrica,
         avatar: (colab.nome || '?').charAt(0).toUpperCase(),
         emitidos: 0,
         assinados: 0,
+        protocolados: 0,
         ganhos: 0,
         perdidos: 0,
         metaDiarioAssinados: metrica ? Number(metrica.meta_diario_assinados) : 3,
@@ -153,15 +130,15 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         metaSemanalGanhos: metrica ? Number(metrica.meta_semanal_ganhos) : 15,
         metaMensalAssinados: metrica ? Number(metrica.meta_mensal_assinados) : 60,
         metaMensalGanhos: metrica ? Number(metrica.meta_mensal_ganhos) : 60,
-        comissao: metrica ? Number(metrica.comissao) : 0,
+        comissao: metrica ? Number(metrica.bonus_comissao) : 0,
         bonusComissao: metrica ? Number(metrica.bonus_comissao) : 0,
         metaAssinados: 3,
         metaGanhos: 3,
         bonusPorCiclo: 0,
         bonusRecebido: 0,
         produto: mapGrupoToProduto(colab.cargo || ''),
-      });
-    }
+      };
+    });
 
     console.log(`✅ Retornando ${colaboradores.length} colaboradores.`);
     res.json({ success: true, data: colaboradores });
@@ -171,33 +148,27 @@ router.get('/collaborators', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================
 // GET /api/equipes
+// ============================================================
 router.get('/equipes', requireAuth, async (req, res) => {
-  const gruposPermitidos = [
-    'Elite', 'Supervisor', 'Análise de segurado', 'Concomitante',
-    'Salesops', 'Quinquenio', 'Quinquênio ', 'Coordenador', 'CEO', 'Diretoria'
-  ];
-  const periodo = getCurrentPeriod();
-
+  const mesParam = req.query.mes;
+  const dataMetrica = parseMesToDataMetrica(mesParam);
   try {
     const result = await db.query(
-      `SELECT DISTINCT nome_equipe AS equipe
-       FROM core.view_app_colaboradores
-       WHERE periodo = $1 AND cargo = ANY($2)
-         AND nome_equipe IS NOT NULL AND TRIM(nome_equipe) != ''`,
-      [periodo, gruposPermitidos]
+      `SELECT DISTINCT c.nome_equipe AS nome
+       FROM core.view_app_colaboradores c
+       INNER JOIN app_comissionamento.view_app_metricas_assessores m
+         ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
+       WHERE m.data_metrica::date = $1::date
+         AND c.nome_equipe IS NOT NULL AND TRIM(c.nome_equipe) != ''
+         AND LOWER(c.status) != 'desativado'
+         AND LOWER(c.cargo) != 'desativado'`,
+      [dataMetrica]
     );
 
-    const teamsMap = new Map();
-    for (const row of result.rows) {
-      const nome = (row.equipe || '').trim();
-      if (!teamsMap.has(nome)) {
-        teamsMap.set(nome, nome);  // id não disponível, usa o próprio nome
-      }
-    }
-
-    const equipes = Array.from(teamsMap.entries())
-      .map(([nome, id]) => ({ id, nome }))
+    const equipes = result.rows
+      .map(r => ({ id: r.nome, nome: r.nome }))
       .filter(eq => !EXCLUDED_TEAMS.includes(eq.nome))
       .sort((a, b) => a.nome.localeCompare(b.nome));
 

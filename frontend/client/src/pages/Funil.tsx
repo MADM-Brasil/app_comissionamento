@@ -43,18 +43,14 @@ const EXCLUDED_TEAMS = [
 ];
 
 const EXCLUDED_CARGOS = [
-  // Nenhum acesso (NONE)
   "desativado",
   "assistente",
   "analista juridico",
   "gestor de projetos",
   "analista",
   "analista de discadora",
-  // Supervisão
   "supervisor",
-  // Coordenador
   "coordenador",
-  // Administrativo
   "salesops",
   "ceo",
   "analista de crm",
@@ -77,7 +73,6 @@ const isDesativado = (c: Collaborator) => {
   return cargo === 'desativado' || equipe.includes('desativado');
 };
 
-// Mapeamento produto -> cargo (usado para filtragem local)
 const productToGroup: Record<string, string | string[] | undefined> = {
   "Todos": undefined,
   "Auxilio Acidente": "Elite",
@@ -206,7 +201,6 @@ export default function Funil() {
 
   const { hasPermission } = useAccessControl();
 
-  // 👇 colaboradorId agora é string | number | undefined
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
@@ -228,7 +222,6 @@ export default function Funil() {
   const lastFetchLeads = useRef<number>(0);
   const LEADS_CACHE_TTL = 60000;
 
-  // ========== TIMEOUT DE SEGURANÇA: FORÇA O PRIMEIRO FILTRO APÓS 3 SEGUNDOS ==========
   useEffect(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
@@ -242,7 +235,6 @@ export default function Funil() {
     };
   }, [isFirstFilterApplied]);
 
-  // ========== Função de recarga (somente manual ou inicial) ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
     const datesChanged =
       currentStartDate !== lastDatesRef.current.start ||
@@ -252,7 +244,6 @@ export default function Funil() {
       filters.colaborador !== lastFiltersRef.current.colaborador ||
       filters.produto !== lastFiltersRef.current.produto;
 
-    // Se nada mudou e já carregou, não recarrega (exceto se rawMetrics estiver vazio ou for forçado)
     const metricsEmpty = rawMetrics.assinados === 0 && rawMetrics.emitidos === 0 && rawMetrics.ganhos === 0;
     if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) {
       return;
@@ -283,7 +274,6 @@ export default function Funil() {
         await loadWeeklyPerformanceData();
       }
 
-      // Buscar leads com intervalo estendido para "Hoje"
       const dateRange = getChartDateRange(period, currentStartDate, currentEndDate);
       
       const now = Date.now();
@@ -323,7 +313,6 @@ export default function Funil() {
     }
   }, [filters, period, currentStartDate, currentEndDate, rawMetrics, loadMetricsForPeriod, loadRawMetrics, loadWeeklyPerformanceData, leadsStageData.length]);
 
-  // ========== CARREGAMENTO INICIAL (apenas após primeiro filtro e na montagem) ==========
   useEffect(() => {
     if (!isFirstFilterApplied) return;
 
@@ -332,7 +321,6 @@ export default function Funil() {
       return;
     }
 
-    // Só carrega se for a primeira vez
     if (initialLoadDone.current) {
       setLoading(false);
       return;
@@ -342,7 +330,6 @@ export default function Funil() {
     reloadData(false);
   }, [isFirstFilterApplied, currentStartDate, currentEndDate, reloadData]);
 
-  // ========== HANDLER DO FILTERBAR ==========
   const handleFilterChange = (newFilters: {
     equipe: string;
     colaborador: string;
@@ -353,10 +340,8 @@ export default function Funil() {
     if (!isFirstFilterApplied) {
       setIsFirstFilterApplied(true);
     }
-    // Não recarrega automaticamente – usuário deve clicar em "Atualizar"
   };
 
-  // Filtragem local para exibição
   const filteredCollaborators = useMemo(() => {
     let filtered = [...rawCollaborators];
     if (filters.equipe !== "todas") {
@@ -464,10 +449,14 @@ export default function Funil() {
 
   const isFirstLeadLoad = loadingLeads && leadsStageData.length === 0;
 
+  const uniqueStages = useMemo(
+    () => Array.from(new Set(leadsStageData.map(d => d.etapa_lead || "Sem etapa"))).sort(),
+    [leadsStageData]
+  );
+
   // ========== RENDER ==========
   return (
     <DashboardLayout title="Funil de Vendas" subtitle="Acompanhe a jornada das oportunidades — da emissão ao resultado final">
-
 
       <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
 
@@ -484,7 +473,7 @@ export default function Funil() {
         </div>
       )}
 
-            {/* Indicador de atualização em tempo real */}
+      {/* Indicador de atualização em tempo real */}
       <div className="flex items-center justify-end gap-2 mb-2">
         {refreshing && (
           <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
@@ -495,7 +484,6 @@ export default function Funil() {
         <span className="text-[10px] text-gray-400">
           Atualizado {new Date().toLocaleTimeString()}
         </span>
-        {/* Botão de atualização manual */}
         <button
           onClick={() => reloadData(true)}
           disabled={refreshing}
@@ -641,30 +629,47 @@ export default function Funil() {
             </div>
           )}
 
-          {/* Tabela detalhada */}
+          {/* ============================================================
+               TABELA DETALHADA – CORRIGIDA COM SCROLL HORIZONTAL ISOLADO
+               ============================================================ */}
           {collaboratorStageSummary.length > 0 && (
             <div className="madm-card animate-fade-in-up">
               <div className="p-5 border-b border-gray-100 flex justify-between items-center">
-                <h3 className="text-sm font-bold text-[#09175b]">Detalhamento por Colaborador (etapa_lead)</h3>
-                <span className="text-xs text-gray-400">{collaboratorStageSummary.length} colaboradores</span>
+                <h3 className="text-sm font-bold text-[#09175b]">
+                  Detalhamento por Colaborador
+                </h3>
+                <span className="text-xs text-gray-400">
+                  {collaboratorStageSummary.length} colaboradores
+                </span>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full">
+              {/* WRAPPER COM SCROLL HORIZONTAL PRÓPRIO */}
+              <div className="funil-table-wrapper">
+                <table>
                   <thead>
                     <tr className="border-b border-gray-100 bg-gray-50/50">
-                      <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500">Colaborador</th>
-                      <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500">Total Leads</th>
-                      {Array.from(new Set(leadsStageData.map(d => d.etapa_lead || "Sem etapa"))).sort().map(etapa => (
-                        <th key={etapa} className="text-center px-2 py-3 text-xs font-semibold text-gray-500">{etapa}</th>
+                      <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 sticky left-0 bg-gray-50/50 z-10">
+                        Colaborador
+                      </th>
+                      <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500">
+                        Total Leads
+                      </th>
+                      {uniqueStages.map(etapa => (
+                        <th key={etapa} className="text-center px-2 py-3 text-xs font-semibold text-gray-500">
+                          {etapa}
+                        </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {collaboratorStageSummary.map((item) => (
                       <tr key={item.colaborador} className="border-b border-gray-50 hover:bg-gray-50/50">
-                        <td className="px-5 py-3 text-sm font-medium text-gray-800">{item.colaborador}</td>
-                        <td className="px-5 py-3 text-sm font-bold text-[#09175b]">{formatInt(item.totalLeads)}</td>
-                        {Array.from(new Set(leadsStageData.map(d => d.etapa_lead || "Sem etapa"))).sort().map(etapa => (
+                        <td className="px-5 py-3 text-sm font-medium text-gray-800 sticky left-0 bg-white z-10">
+                          {item.colaborador}
+                        </td>
+                        <td className="px-5 py-3 text-sm font-bold text-[#09175b]">
+                          {formatInt(item.totalLeads)}
+                        </td>
+                        {uniqueStages.map(etapa => (
                           <td key={etapa} className="px-2 py-3 text-center text-sm text-gray-600">
                             {formatInt(item.stages[etapa] || 0)}
                           </td>

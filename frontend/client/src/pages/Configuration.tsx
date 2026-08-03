@@ -10,14 +10,16 @@ import {
 import { useAppStore, formatCurrency } from "@/lib/dataStore";
 import { fetchCollaborators, fetchEquipes, API_BASE } from "@/lib/api";
 import { recalculateHierarchyWeights } from "@/lib/metrics";
-import { useAccessControl } from "@/hooks/useAccessControl"; 
+import { useAccessControl } from "@/hooks/useAccessControl";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia'
+  'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
+  'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
+  'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
+  'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
+  'Equipe Thales','Financeiro'
 ];
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
@@ -472,14 +474,14 @@ export default function Configuration() {
   // ========== RENDER ==========
   return (
     <DashboardLayout title="Configurações" subtitle="Gerencie metas e bônus do sistema">
-      <div className="space-y-5">
+      <div className="space-y-6">
         {/* AVISO DE BLOQUEIO + BOTÃO GERAR PRÓXIMO MÊS */}
         {isLocked && (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-3 animate-fade-in-up">
-            <CalendarPlus className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" aria-hidden="true" />
+          <div className="alert-banner warning">
+            <CalendarPlus className="w-5 h-5 text-[#EA8C1D] mt-0.5 flex-shrink-0" />
             <div className="flex-1">
-              <p className="text-sm font-bold text-amber-800">Período de fechamento</p>
-              <p className="text-xs text-amber-700 mt-1">
+              <p className="text-sm font-bold text-[#0f172a]">Período de fechamento</p>
+              <p className="text-xs text-[#64748b] mt-1">
                 {isPastMonth
                   ? 'Este mês já foi encerrado e não pode ser alterado.'
                   : `De 25/${now.getMonth() + 1} até ${new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()}/${now.getMonth() + 1} as alterações estão bloqueadas.`}
@@ -490,10 +492,10 @@ export default function Configuration() {
                 <button onClick={generateNextMonth}
                   disabled={isNextMonthGenerated}
                   className={cn("px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 transition-colors",
-                    isNextMonthGenerated ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-green-600 text-white hover:bg-green-700")}
+                    isNextMonthGenerated ? "bg-gray-200 text-gray-500 cursor-not-allowed" : "bg-[#16A34A] text-white hover:bg-[#16A34A]/90")}
                   aria-label={isNextMonthGenerated ? "Próximo mês já foi gerado" : "Gerar registros do próximo mês"}
-                  title={isNextMonthGenerated ? "Próximo mês já foi gerado" : "Gerar registros do próximo mês"}>
-                  <CalendarPlus className="w-4 h-4" aria-hidden="true" />
+                >
+                  <CalendarPlus className="w-4 h-4" />
                   {isNextMonthGenerated ? "Próximo mês já gerado" : "Gerar próximo mês"}
                 </button>
               )}
@@ -502,55 +504,53 @@ export default function Configuration() {
         )}
 
         {/* SELETOR DE MÊS */}
-        <div className="flex items-center gap-3 bg-white p-3 rounded-xl shadow-sm">
-          <Calendar className="w-5 h-5 text-[#09175b]" aria-hidden="true" />
-          <label htmlFor="monthSelect" className="text-sm font-semibold text-gray-600">Mês de referência:</label>
+        <div className="card flex items-center gap-4 p-4">
+          <Calendar className="w-5 h-5 text-[#2F6FED]" />
+          <label htmlFor="monthSelect" className="text-sm font-semibold text-[#0f172a]">Mês de referência:</label>
           <select id="monthSelect" value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)}
-            className="px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white"
+            className="px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
             aria-label="Selecione o mês de referência">
             {availableMonths.length > 0
               ? availableMonths.map(m => <option key={m} value={m}>{formatMonthYear(m)}</option>)
               : <option value={`${currentMonthPrefix}-01`}>{formatMonthYear(`${currentMonthPrefix}-01`)}</option>}
           </select>
           <button onClick={refreshMonths} disabled={loadingMonths}
-            className="p-2 text-gray-500 hover:text-[#09175b] transition-colors"
-            aria-label="Atualizar lista de meses" title="Atualizar meses">
-            <RefreshCw className={cn("w-4 h-4", loadingMonths && "animate-spin")} aria-hidden="true" />
+            className="p-2 text-[#64748b] hover:text-[#2F6FED] transition-colors"
+            aria-label="Atualizar lista de meses">
+            <RefreshCw className={cn("w-4 h-4", loadingMonths && "animate-spin")} />
           </button>
           {monthsError && (
-            <div className="flex items-center gap-1 text-xs text-red-600" role="status">
-              <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+            <div className="flex items-center gap-1 text-xs text-red-600">
+              <AlertTriangle className="w-3.5 h-3.5" />
               <span>Erro ao carregar meses</span>
             </div>
           )}
-          {isLocked && <span className="text-xs text-amber-700 bg-amber-50 px-2 py-1 rounded-full font-medium">Bloqueado</span>}
+          {isLocked && <span className="badge warning">Bloqueado</span>}
         </div>
 
         {/* CONFIGURAÇÕES GLOBAIS */}
-        <div className="madm-card animate-fade-in-up">
-          <div className="px-5 py-3 border-b border-gray-100">
+        <div className="card">
+          <div className="px-5 py-3 border-b border-[#e2e8f0]">
             <div className="flex items-center gap-2">
-              <Settings className="w-4 h-4 text-[#09175b]" aria-hidden="true" />
-              <h3 className="text-sm font-bold text-[#09175b]">Configurações Globais</h3>
+              <Settings className="w-4 h-4 text-[#2F6FED]" />
+              <h3 className="text-sm font-bold text-[#0f172a]">Configurações Globais</h3>
             </div>
           </div>
-          <div className="p-4">
-            <div className="mb-4">
-              <span className="text-xs font-medium text-gray-600">Aplicar para o período:</span>
+          <div className="p-4 space-y-4">
+            <div>
+              <span className="text-xs font-medium text-[#64748b]">Aplicar para o período:</span>
               <div className="flex gap-2 mt-1">
                 {(['diario','semanal','mensal'] as CicloPeriodo[]).map(p => (
                   <button key={p} onClick={() => setSelectedPeriod(p)}
-                    className={cn("px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
-                      selectedPeriod === p ? "bg-[#09175b] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200")}
-                    aria-label={`Selecionar período ${p === 'diario' ? 'diário' : p === 'semanal' ? 'semanal' : 'mensal'}`}>
+                    className={cn("filter-pill", selectedPeriod === p && "active")}>
                     {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
                   </button>
                 ))}
               </div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-gray-50 rounded-lg p-3">
-                <label htmlFor="globalPesoAssinados" className="block text-xs font-medium text-gray-600 mb-1">Peso de Assinados</label>
+              <div className="bg-[#f8fafc] rounded-lg p-3">
+                <label htmlFor="globalPesoAssinados" className="block text-xs font-medium text-[#64748b] mb-1">Peso de Assinados</label>
                 <input id="globalPesoAssinados" type="number" min="1"
                   value={selectedPeriod === 'diario' ? globalConfig.pesoDiarioAssinados : selectedPeriod === 'semanal' ? globalConfig.pesoSemanalAssinados : globalConfig.pesoMensalAssinados}
                   onChange={(e) => {
@@ -560,11 +560,11 @@ export default function Configuration() {
                     else updateGlobalConfig({ pesoMensalAssinados: v });
                   }}
                   disabled={isAllDisabled}
-                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-gray-200 text-center disabled:opacity-50"
+                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
                   aria-label="Peso de assinados" />
               </div>
-              <div className="bg-gray-50 rounded-lg p-3">
-                <label htmlFor="globalPesoGanhos" className="block text-xs font-medium text-gray-600 mb-1">Peso de Ganhos</label>
+              <div className="bg-[#f8fafc] rounded-lg p-3">
+                <label htmlFor="globalPesoGanhos" className="block text-xs font-medium text-[#64748b] mb-1">Peso de Ganhos</label>
                 <input id="globalPesoGanhos" type="number" min="1"
                   value={selectedPeriod === 'diario' ? globalConfig.pesoDiarioGanhos : selectedPeriod === 'semanal' ? globalConfig.pesoSemanalGanhos : globalConfig.pesoMensalGanhos}
                   onChange={(e) => {
@@ -574,24 +574,23 @@ export default function Configuration() {
                     else updateGlobalConfig({ pesoMensalGanhos: v });
                   }}
                   disabled={isAllDisabled}
-                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-gray-200 text-center disabled:opacity-50"
+                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
                   aria-label="Peso de ganhos" />
               </div>
-              <div className="bg-gray-50 rounded-lg p-3">
-                <label htmlFor="globalBonus" className="block text-xs font-medium text-gray-600 mb-1">Bônus por Ciclo (R$)</label>
+              <div className="bg-[#f8fafc] rounded-lg p-3">
+                <label htmlFor="globalBonus" className="block text-xs font-medium text-[#64748b] mb-1">Bônus por Ciclo (R$)</label>
                 <input id="globalBonus" type="number" min="1"
                   value={globalConfig.valorBonus}
                   onChange={(e) => updateGlobalConfig({ valorBonus: parseInt(e.target.value) || 1 })}
                   disabled={!isBonusEditable}
-                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-gray-200 text-center disabled:opacity-50"
+                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
                   aria-label="Valor do bônus por ciclo" />
               </div>
             </div>
-            <div className="flex justify-end mt-4">
+            <div className="flex justify-end">
               <button onClick={saveGlobalConfig} disabled={!isEditable}
-                className="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#09175b] text-white disabled:opacity-50"
-                aria-label="Aplicar configurações globais a todos os colaboradores">
-                <Save className="w-3.5 h-3.5" aria-hidden="true" /> Aplicar a todos
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 flex items-center gap-1.5">
+                <Save className="w-3.5 h-3.5" /> Aplicar a todos
               </button>
             </div>
           </div>
@@ -599,64 +598,61 @@ export default function Configuration() {
 
         {/* METAS POR EQUIPE */}
         {filteredEquipeConfigs.length > 0 && (
-          <div className="madm-card animate-fade-in-up">
-            <div className="px-5 py-3 border-b border-gray-100">
+          <div className="card">
+            <div className="px-5 py-3 border-b border-[#e2e8f0]">
               <div className="flex items-center gap-2">
-                <Briefcase className="w-4 h-4 text-[#34a853]" aria-hidden="true" />
-                <h3 className="text-sm font-bold text-[#09175b]">Metas por Equipe</h3>
+                <Briefcase className="w-4 h-4 text-[#16A34A]" />
+                <h3 className="text-sm font-bold text-[#0f172a]">Metas por Equipe</h3>
               </div>
             </div>
             <div className="p-4">
               <div className="flex flex-wrap items-end gap-4">
-                <div className="bg-gray-50 rounded-lg p-2">
-                  <label htmlFor="teamSelect" className="block text-xs font-medium text-gray-600 mb-1">Equipe</label>
+                <div className="bg-[#f8fafc] rounded-lg p-2">
+                  <label htmlFor="teamSelect" className="block text-xs font-medium text-[#64748b] mb-1">Equipe</label>
                   <select id="teamSelect" value={teamSelected} onChange={(e) => setTeamSelected(e.target.value)}
-                    className="px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white" aria-label="Selecionar equipe">
+                    className="px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white" aria-label="Selecionar equipe">
                     {filteredEquipeConfigs.map(eq => <option key={eq.id} value={eq.nome}>{eq.nome}</option>)}
                   </select>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-2">
-                  <span className="block text-xs font-medium text-gray-600 mb-1">Período</span>
+                <div className="bg-[#f8fafc] rounded-lg p-2">
+                  <span className="block text-xs font-medium text-[#64748b] mb-1">Período</span>
                   <div className="flex gap-2">
                     {(['diario','semanal','mensal'] as CicloPeriodo[]).map(p => (
                       <button key={p} onClick={() => setTeamPeriod(p)}
-                        className={cn("px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
-                          teamPeriod === p ? "bg-[#09175b] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200")}
-                        aria-label={`Período ${p}`}>
+                        className={cn("filter-pill", teamPeriod === p && "active")}>
                         {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
                       </button>
                     ))}
                   </div>
                 </div>
-                <div className="bg-gray-50 rounded-lg p-2">
-                  <label htmlFor="teamAssinados" className="block text-xs font-medium text-gray-600 mb-1">Peso Assinados</label>
+                <div className="bg-[#f8fafc] rounded-lg p-2">
+                  <label htmlFor="teamAssinados" className="block text-xs font-medium text-[#64748b] mb-1">Peso Assinados</label>
                   <input id="teamAssinados" type="number" min="1" value={teamAssinados}
                     onChange={(e) => setTeamAssinados(parseInt(e.target.value) || 1)}
                     disabled={isAllDisabled}
-                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-gray-200 text-center disabled:opacity-50"
+                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
                     aria-label="Peso assinados equipe" />
                 </div>
-                <div className="bg-gray-50 rounded-lg p-2">
-                  <label htmlFor="teamGanhos" className="block text-xs font-medium text-gray-600 mb-1">Peso Ganhos</label>
+                <div className="bg-[#f8fafc] rounded-lg p-2">
+                  <label htmlFor="teamGanhos" className="block text-xs font-medium text-[#64748b] mb-1">Peso Ganhos</label>
                   <input id="teamGanhos" type="number" min="1" value={teamGanhos}
                     onChange={(e) => setTeamGanhos(parseInt(e.target.value) || 0)}
                     disabled={isAllDisabled}
-                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-gray-200 text-center disabled:opacity-50"
+                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
                     aria-label="Peso ganhos equipe" />
                 </div>
-                <div className="bg-gray-50 rounded-lg p-2">
-                  <label htmlFor="teamBonus" className="block text-xs font-medium text-gray-600 mb-1">Bônus (R$)</label>
+                <div className="bg-[#f8fafc] rounded-lg p-2">
+                  <label htmlFor="teamBonus" className="block text-xs font-medium text-[#64748b] mb-1">Bônus (R$)</label>
                   <input id="teamBonus" type="number" min="1" value={teamBonus}
                     onChange={(e) => setTeamBonus(parseInt(e.target.value) || 1)}
                     disabled={!isBonusEditable}
-                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-gray-200 text-center disabled:opacity-50"
+                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
                     aria-label="Bônus equipe" />
                 </div>
-                <div className="pb-1">
+                <div>
                   <button onClick={saveTeamMetrics} disabled={!isEditable}
-                    className="text-xs flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#09175b] text-white h-9 disabled:opacity-50"
-                    aria-label="Salvar metas da equipe">
-                    <Save className="w-3.5 h-3.5" aria-hidden="true" /> Salvar
+                    className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 flex items-center gap-1.5">
+                    <Save className="w-3.5 h-3.5" /> Salvar
                   </button>
                 </div>
               </div>
@@ -665,35 +661,33 @@ export default function Configuration() {
         )}
 
         {/* VISÃO GERAL */}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="madm-card p-3 text-center">
-            <Users className="w-5 h-5 text-[#09175b] mx-auto mb-1" aria-hidden="true" />
-            <div className="text-xl font-black text-[#09175b]">{formatInt(totalStats.totalColaboradores)}</div>
-            <div className="text-[10px] text-gray-500">Colaboradores</div>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="card p-4 text-center">
+            <Users className="w-5 h-5 text-[#2F6FED] mx-auto mb-1" />
+            <div className="kpi-value text-[#0f172a]">{formatInt(totalStats.totalColaboradores)}</div>
+            <div className="text-xs text-[#64748b]">Colaboradores</div>
           </div>
-          <div className="madm-card p-3 text-center">
-            <Award className="w-5 h-5 text-[#34a853] mx-auto mb-1" aria-hidden="true" />
-            <div className="text-xl font-black text-[#34a853]">{formatInt(filteredEquipeConfigs.length)}</div>
-            <div className="text-[10px] text-gray-500">Equipes</div>
+          <div className="card p-4 text-center">
+            <Award className="w-5 h-5 text-[#16A34A] mx-auto mb-1" />
+            <div className="kpi-value text-[#16A34A]">{formatInt(filteredEquipeConfigs.length)}</div>
+            <div className="text-xs text-[#64748b]">Equipes</div>
           </div>
         </div>
 
         {/* FILTROS E PESQUISA */}
-        <div className="madm-card p-3">
+        <div className="card p-3">
           <div className="flex flex-col sm:flex-row gap-2">
             <div className="flex-1 relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]" />
               <input type="text" placeholder="Buscar por nome ou e-mail..." value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-8 pr-2 py-1.5 text-xs rounded-lg border border-gray-200"
-                aria-label="Buscar colaborador por nome ou e-mail" title="Buscar colaborador" />
+                className="w-full pl-8 pr-2 py-1.5 text-xs rounded-lg border border-[#e2e8f0] focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                aria-label="Buscar colaborador" />
             </div>
             <div className="flex items-center gap-2">
-              <Filter className="w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
-              <label htmlFor="equipeFilter" className="sr-only">Filtrar por equipe</label>
+              <Filter className="w-3.5 h-3.5 text-[#94a3b8]" />
               <select id="equipeFilter" value={selectedEquipe} onChange={(e) => setSelectedEquipe(e.target.value)}
-                className="px-2 py-1.5 text-xs rounded-lg border border-gray-200"
-                aria-label="Filtrar colaboradores por equipe">
+                className="px-2 py-1.5 text-xs rounded-lg border border-[#e2e8f0] bg-white">
                 {equipeNomes.map(eq => <option key={eq}>{eq}</option>)}
               </select>
             </div>
@@ -701,14 +695,12 @@ export default function Configuration() {
         </div>
 
         {/* SELETOR DE PERÍODO */}
-        <div className="madm-card p-3 flex items-center gap-3">
-          <span className="text-xs font-medium text-gray-600">Exibir metas para:</span>
+        <div className="card p-3 flex items-center gap-3">
+          <span className="text-xs font-medium text-[#64748b]">Exibir metas para:</span>
           <div className="flex gap-2">
             {(['diario','semanal','mensal'] as CicloPeriodo[]).map(p => (
               <button key={p} onClick={() => setSelectedPeriod(p)}
-                className={cn("px-3 py-1.5 rounded-lg text-xs font-medium transition-all",
-                  selectedPeriod === p ? "bg-[#09175b] text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200")}
-                aria-label={`Exibir metas do período ${p}`}>
+                className={cn("filter-pill", selectedPeriod === p && "active")}>
                 {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
               </button>
             ))}
@@ -716,40 +708,34 @@ export default function Configuration() {
         </div>
 
         {/* TABELA DE METAS POR COLABORADOR */}
-        <div className="madm-card animate-fade-in-up">
-          <div className="px-5 py-3 border-b border-gray-100">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <User className="w-4 h-4 text-[#09175b]" aria-hidden="true" />
-                <h3 className="text-sm font-bold text-[#09175b]">Metas por Colaborador</h3>
-              </div>
-              {isAdminOnly && (
-                <button
-                  onClick={handleRecalculateHierarchy}
-                  disabled={recalculating}
-                  className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
-                  aria-label="Recalcular pesos de supervisores e coordenadores"
-                  title="Recalcular hierarquia"
-                >
-                  <RefreshCw className={cn("w-3.5 h-3.5", recalculating && "animate-spin")} aria-hidden="true" />
-                  Recalcular Hierarquia
-                </button>
-              )}
+        <div className="card">
+          <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <User className="w-4 h-4 text-[#2F6FED]" />
+              <h3 className="text-sm font-bold text-[#0f172a]">Metas por Colaborador</h3>
             </div>
+            {isAdminOnly && (
+              <button
+                onClick={handleRecalculateHierarchy}
+                disabled={recalculating}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw className={cn("w-3.5 h-3.5", recalculating && "animate-spin")} />
+                Recalcular Hierarquia
+              </button>
+            )}
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className="simple-table">
               <thead>
-                <tr className="border-b border-gray-100 bg-gray-50/50">
-                  <th className="text-left px-4 py-2 text-[10px] font-semibold text-gray-500">Colaborador</th>
-                  <th className="text-left px-4 py-2 text-[10px] font-semibold text-gray-500">Equipe</th>
-                  <th className="text-center px-4 py-2 text-[10px] font-semibold text-gray-500">
-                    Meta (A/G) {selectedPeriod === 'diario' ? '(diário)' : selectedPeriod === 'semanal' ? '(semanal)' : '(mensal)'}
-                  </th>
-                  <th className="text-center px-4 py-2 text-[10px] font-semibold text-gray-500">Metas Batidas</th>
-                  <th className="text-center px-4 py-2 text-[10px] font-semibold text-gray-500">Bônus Ciclo</th>
-                  <th className="text-center px-4 py-2 text-[10px] font-semibold text-gray-500">Bônus Estimado</th>
-                  <th className="text-center px-4 py-2 text-[10px] font-semibold text-gray-500">Ações</th>
+                <tr>
+                  <th>Colaborador</th>
+                  <th>Equipe</th>
+                  <th className="text-center">Meta (A/G) {selectedPeriod === 'diario' ? '(diário)' : selectedPeriod === 'semanal' ? '(semanal)' : '(mensal)'}</th>
+                  <th className="text-center">Metas Batidas</th>
+                  <th className="text-center">Bônus Ciclo</th>
+                  <th className="text-center">Bônus Estimado</th>
+                  <th className="text-center">Ações</th>
                 </tr>
               </thead>
               <tbody>
@@ -764,125 +750,116 @@ export default function Configuration() {
                   const individualEditable = isIndividualEditable(collab);
                   return (
                     <React.Fragment key={collab.id}>
-                      <tr className="border-b border-gray-50 hover:bg-gray-50/50">
-                        <td className="px-4 py-2">
+                      <tr>
+                        <td>
                           <div className="flex items-center gap-2">
-                            <div className="w-7 h-7 rounded-full bg-gray-200 flex items-center justify-center text-xs font-bold">{collab.avatar}</div>
+                            <div className="w-7 h-7 rounded-full bg-[#f1f5f9] flex items-center justify-center text-xs font-bold text-[#64748b]">{collab.avatar}</div>
                             <div>
-                              <div className="text-xs font-medium">{collab.name}</div>
-                              <div className="text-[10px] text-gray-400">{collab.email}</div>
+                              <div className="text-xs font-medium text-[#0f172a]">{collab.name}</div>
+                              <div className="text-[10px] text-[#94a3b8]">{collab.email}</div>
                             </div>
                           </div>
                         </td>
-                        <td className="px-4 py-2">
-                          <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-gray-100">{collab.equipeNome}</span>
-                        </td>
-                        <td className="px-4 py-2 text-center">
+                        <td><span className="badge info">{collab.equipeNome}</span></td>
+                        <td className="text-center">
                           {isEditing ? (
                             <div className="flex items-center justify-center gap-1">
                               <input type="number" min="1" value={editForm.assinados ?? currentMeta.assinados}
                                 onChange={(e) => setEditForm(prev => ({ ...prev, assinados: parseInt(e.target.value) || 1 }))}
-                                className="w-12 text-center text-xs px-1 py-0.5 rounded border" aria-label="Meta de assinados" />
+                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" aria-label="Meta de assinados" />
                               <span className="text-xs">/</span>
                               <input type="number" min="1" value={editForm.ganhos ?? currentMeta.ganhos}
                                 onChange={(e) => setEditForm(prev => ({ ...prev, ganhos: parseInt(e.target.value) || 1 }))}
-                                className="w-12 text-center text-xs px-1 py-0.5 rounded border" aria-label="Meta de ganhos" />
+                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" aria-label="Meta de ganhos" />
                             </div>
                           ) : (
                             <div className="flex flex-col items-center">
                               <span className="text-xs font-medium">{formatInt(currentMeta.assinados)}/{formatInt(currentMeta.ganhos)}</span>
-                              <div className="w-12 mt-0.5 h-1 bg-gray-100 rounded-full overflow-hidden" aria-hidden="true">
-                                <div className="h-full bg-[#09175b] rounded-full" style={{ width: `${Math.min((collab.assinados / currentMeta.assinados) * 100, 100)}%` }} />
+                              <div className="progress-bar w-12 mt-0.5">
+                                <div className="progress-fill" style={{ width: `${Math.min((collab.assinados / currentMeta.assinados) * 100, 100)}%` }} />
                               </div>
                             </div>
                           )}
                         </td>
-                        <td className="px-4 py-2 text-center">
-                          <span className="text-sm font-bold text-[#09175b]">{formatInt(ciclosCompletos)}</span>
-                        </td>
-                        <td className="px-4 py-2 text-center">
+                        <td className="text-center font-bold text-[#0f172a]">{formatInt(ciclosCompletos)}</td>
+                        <td className="text-center">
                           {isEditingBonus ? (
                             <div className="flex items-center justify-center gap-1">
                               <input type="number" min="1" value={editBonusValue} onChange={(e) => setEditBonusValue(parseInt(e.target.value) || 1)}
-                                className="w-20 text-center text-xs px-1 py-0.5 rounded border" aria-label="Novo valor do bônus por ciclo" />
+                                className="w-20 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" aria-label="Novo valor do bônus" />
                               <button onClick={() => saveBonusEdit(collab.id)} disabled={savingId === collab.id}
                                 className="p-0.5 rounded hover:bg-green-50" aria-label="Salvar novo bônus">
-                                <Save className="w-3.5 h-3.5 text-green-600" aria-hidden="true" />
+                                <Save className="w-3.5 h-3.5 text-[#16A34A]" />
                               </button>
-                              <button onClick={cancelEditBonus} className="p-0.5 rounded hover:bg-red-50" aria-label="Cancelar edição de bônus">
-                                <X className="w-3.5 h-3.5 text-red-500" aria-hidden="true" />
+                              <button onClick={cancelEditBonus} className="p-0.5 rounded hover:bg-red-50" aria-label="Cancelar">
+                                <X className="w-3.5 h-3.5 text-[#DC2626]" />
                               </button>
                             </div>
                           ) : (
                             <div className="flex items-center justify-center gap-1">
-                              <span className="text-sm font-bold text-[#34a853]">{formatCurrency(bonusPorCiclo)}</span>
+                              <span className="text-sm font-bold text-[#16A34A]">{formatCurrency(bonusPorCiclo)}</span>
                               {isBonusEditable && (
-                                <button onClick={() => startEditBonus(collab)} className="p-0.5 rounded hover:bg-gray-100"
-                                  aria-label={`Editar bônus de ${collab.name}`} title="Editar bônus individual">
-                                  <Edit2 className="w-3 h-3 text-gray-500" aria-hidden="true" />
+                                <button onClick={() => startEditBonus(collab)} className="p-0.5 rounded hover:bg-[#f1f5f9]" aria-label="Editar bônus">
+                                  <Edit2 className="w-3 h-3 text-[#64748b]" />
                                 </button>
                               )}
                             </div>
                           )}
                         </td>
-                        <td className="px-4 py-2 text-center">
-                          <span className="text-sm font-bold text-[#34a853]">{formatCurrency(bonusEstimado)}</span>
-                        </td>
-                        <td className="px-4 py-2 text-center">
+                        <td className="text-center font-bold text-[#16A34A]">{formatCurrency(bonusEstimado)}</td>
+                        <td className="text-center">
                           <div className="flex items-center justify-center gap-1">
                             {isEditing ? (
                               <>
                                 <button onClick={() => saveEdit(collab.id)} disabled={!individualEditable || savingId === collab.id}
-                                  className="p-0.5 rounded hover:bg-green-50 disabled:opacity-50" aria-label="Salvar edição de meta">
-                                  <Save className="w-3.5 h-3.5 text-green-600" aria-hidden="true" />
+                                  className="p-0.5 rounded hover:bg-green-50 disabled:opacity-50" aria-label="Salvar edição">
+                                  <Save className="w-3.5 h-3.5 text-[#16A34A]" />
                                 </button>
-                                <button onClick={cancelEdit} className="p-0.5 rounded hover:bg-red-50" aria-label="Cancelar edição de meta">
-                                  <X className="w-3.5 h-3.5 text-red-500" aria-hidden="true" />
+                                <button onClick={cancelEdit} className="p-0.5 rounded hover:bg-red-50" aria-label="Cancelar">
+                                  <X className="w-3.5 h-3.5 text-[#DC2626]" />
                                 </button>
                               </>
                             ) : (
                               <button onClick={() => startEdit(collab)} disabled={!individualEditable}
-                                className="p-0.5 rounded hover:bg-gray-100 disabled:opacity-50"
-                                aria-label={individualEditable ? `Editar meta de ${collab.name}` : "Metas automáticas (não editável)"}
-                                title={individualEditable ? "Editar meta" : "Metas automáticas"}>
-                                <Edit2 className="w-3.5 h-3.5 text-gray-500" aria-hidden="true" />
+                                className="p-0.5 rounded hover:bg-[#f1f5f9] disabled:opacity-50"
+                                aria-label={individualEditable ? `Editar meta de ${collab.name}` : "Metas automáticas"}>
+                                <Edit2 className="w-3.5 h-3.5 text-[#64748b]" />
                               </button>
                             )}
-                            <button onClick={() => toggleExpand(collab.id)} className="p-0.5 rounded hover:bg-gray-100"
-                              aria-label={isExpanded ? "Recolher detalhes" : "Expandir detalhes"}>
-                              {isExpanded ? <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" /> : <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />}
+                            <button onClick={() => toggleExpand(collab.id)} className="p-0.5 rounded hover:bg-[#f1f5f9]" aria-label={isExpanded ? "Recolher detalhes" : "Expandir detalhes"}>
+                              {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                             </button>
                           </div>
                         </td>
                       </tr>
                       {isExpanded && (
-                        <tr className="bg-gray-50/50">
+                        <tr className="bg-[#f8fafc]">
                           <td colSpan={7} className="px-4 py-2">
                             <div className="grid grid-cols-5 gap-2 text-center">
                               <div className="bg-white rounded p-2">
-                                <FileText className="w-3 h-3 text-[#34a853] mx-auto mb-0.5" aria-hidden="true" />
-                                <div className="text-xs font-bold text-[#34a853]">{formatInt(collab.emitidos)}</div>
-                                <div className="text-[9px] text-gray-400">Emitidos</div>
+                                <FileText className="w-3 h-3 text-[#2F6FED] mx-auto mb-0.5" />
+                                <div className="text-xs font-bold text-[#2F6FED]">{formatInt(collab.emitidos)}</div>
+                                <div className="text-[9px] text-[#94a3b8]">Emitidos</div>
                               </div>
                               <div className="bg-white rounded p-2">
-                                <CheckCircle className="w-3 h-3 text-[#09175b] mx-auto mb-0.5" aria-hidden="true" />
-                                <div className="text-xs font-bold text-[#09175b]">{formatInt(collab.assinados)}</div>
-                                <div className="text-[9px] text-gray-400">Assinados</div>
+                                <CheckCircle className="w-3 h-3 text-[#16A34A] mx-auto mb-0.5" />
+                                <div className="text-xs font-bold text-[#16A34A]">{formatInt(collab.assinados)}</div>
+                                <div className="text-[9px] text-[#94a3b8]">Assinados</div>
                               </div>
                               <div className="bg-white rounded p-2">
-                                <Archive className="w-3 h-3 text-[#045b5b] mx-auto mb-0.5" aria-hidden="true" />
-                                <div className="text-xs font-bold text-[#045b5b]">{formatInt(collab.protocolados || 0)}</div>
-                                <div className="text-[9px] text-gray-400">Protocolados</div>
+                                <Archive className="w-3 h-3 text-[#8B5CF6] mx-auto mb-0.5" />
+                                <div className="text-xs font-bold text-[#8B5CF6]">{formatInt(collab.protocolados || 0)}</div>
+                                <div className="text-[9px] text-[#94a3b8]">Protocolados</div>
                               </div>
                               <div className="bg-white rounded p-2">
-                                <Award className="w-3 h-3 text-[#34a853] mx-auto mb-0.5" aria-hidden="true" />
-                                <div className="text-xs font-bold text-[#34a853]">{formatInt(collab.ganhos)}</div>
-                                <div className="text-[9px] text-gray-400">Ganhos</div>
+                                <Award className="w-3 h-3 text-[#EA8C1D] mx-auto mb-0.5" />
+                                <div className="text-xs font-bold text-[#EA8C1D]">{formatInt(collab.ganhos)}</div>
+                                <div className="text-[9px] text-[#94a3b8]">Ganhos</div>
                               </div>
                               <div className="bg-white rounded p-2">
-                                <XCircle className="w-3 h-3 text-red-500 mx-auto mb-0.5" aria-hidden="true" />
-                                <div className="text-xs font-bold text-red-500">{formatInt(collab.perdidos)}</div>
-                                <div className="text-[9px] text-gray-400">Perdidos</div>
+                                <XCircle className="w-3 h-3 text-[#DC2626] mx-auto mb-0.5" />
+                                <div className="text-xs font-bold text-[#DC2626]">{formatInt(collab.perdidos)}</div>
+                                <div className="text-[9px] text-[#94a3b8]">Perdidos</div>
                               </div>
                             </div>
                           </td>
@@ -896,8 +873,8 @@ export default function Configuration() {
           </div>
           {filteredCollaborators.length === 0 && (
             <div className="text-center py-8">
-              <Users className="w-8 h-8 text-gray-300 mx-auto mb-2" aria-hidden="true" />
-              <p className="text-xs text-gray-400">Nenhum colaborador encontrado</p>
+              <Users className="w-8 h-8 text-[#cbd5e1] mx-auto mb-2" />
+              <p className="text-xs text-[#94a3b8]">Nenhum colaborador encontrado</p>
             </div>
           )}
         </div>
