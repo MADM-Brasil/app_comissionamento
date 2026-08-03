@@ -155,11 +155,25 @@ export default function Suporte() {
 
   return (
     <DashboardLayout title="Suporte Operacional" subtitle="Movimentação de leads e reporte de problemas">
-      <div className="mb-6 border-b border-gray-200">
+      <div className="mb-6 border-b border-[#e2e8f0]">
         <div className="flex gap-2">
-          <button type="button" onClick={() => setActiveTab("reportar")} className={cn("px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors", activeTab === "reportar" ? "bg-white text-[#09175b] border-b-2 border-[#09175b]" : "text-gray-500 hover:text-gray-700")}>🔍 Reportar</button>
-          <button type="button" onClick={() => setActiveTab("movimentacao")} className={cn("px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors", activeTab === "movimentacao" ? "bg-white text-[#09175b] border-b-2 border-[#09175b]" : "text-gray-500 hover:text-gray-700")}>📋 Movimentar</button>
-          {isAdmin && <button type="button" onClick={() => setActiveTab("salesops")} className={cn("px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors", activeTab === "salesops" ? "bg-white text-[#09175b] border-b-2 border-[#09175b]" : "text-gray-500 hover:text-gray-700")}>📊 Visão SalesOps</button>}
+          {[
+            { id: "reportar", label: "🔍 Reportar" },
+            { id: "movimentacao", label: "📋 Movimentar" },
+            ...(isAdmin ? [{ id: "salesops", label: "📊 Visão SalesOps" }] : []),
+          ].map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id as typeof activeTab)}
+              className={cn(
+                "filter-pill",
+                activeTab === tab.id && "active"
+              )}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
       </div>
       {activeTab === "movimentacao" && <MovimentacaoTab />}
@@ -335,36 +349,41 @@ function MovimentacaoTab() {
 
   return (
     <div className="space-y-6 animate-fade-in-up">
-      <div className="madm-card p-5">
-        <h2 className="text-lg font-bold text-[#09175b] mb-4">Movimentação de Leads</h2>
+      <div className="card p-5">
+        <h2 className="text-lg font-bold text-[#0f172a] mb-4">Movimentação de Leads</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">Nome *</label><input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg" required /></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">Sobrenome *</label><input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg" required /></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">E-mail *</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg" required /></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">Origem do Lead</label><select value={origem} onChange={e => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg"><option value="">Selecionar origem</option><option value="cat">CAT</option><option value="indicacao">Indicação</option><option value="trafego_pago">Marketing</option></select></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">Telefone</label><input type="tel" value={telefone} onChange={e => setTelefone(e.target.value)} onBlur={() => telefone && setTelefone(formatPhoneDisplay(telefone))} className="w-full px-3 py-2 border border-gray-300 rounded-lg" /></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">CPF</label><input type="text" value={cpf} onChange={e => setCpf(e.target.value)} onBlur={() => cpf && setCpf(formatCPF(cpf))} className="w-full px-3 py-2 border border-gray-300 rounded-lg" /></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">Equipe Destino *</label><select value={equipe} onChange={e => setEquipe(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg" required>{equipesDisponiveis.map(nome => <option key={nome} value={nome}>{nome}</option>)}</select></div>
-            <div><label className="block text-sm font-medium text-gray-700 mb-1">Assessor Destino *</label><select value={assessorId} onChange={e => setAssessorId(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg" required>{loadingColaboradores ? <option disabled>Carregando...</option> : assessoresDisponiveis.length === 0 ? <option disabled>Nenhum disponível</option> : assessoresDisponiveis.map(a => <option key={a.id} value={a.id}>{a.nome}</option>)}</select></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Nome *</label><input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome *</label><input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail *</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label><select value={origem} onChange={e => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"><option value="">Selecionar origem</option><option value="cat">CAT</option><option value="indicacao">Indicação</option><option value="trafego_pago">Marketing</option></select></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone</label><input type="tel" value={telefone} onChange={e => setTelefone(e.target.value)} onBlur={() => telefone && setTelefone(formatPhoneDisplay(telefone))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label><input type="text" value={cpf} onChange={e => setCpf(e.target.value)} onBlur={() => cpf && setCpf(formatCPF(cpf))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Equipe Destino *</label><select value={equipe} onChange={e => setEquipe(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>{equipesDisponiveis.map(nome => <option key={nome} value={nome}>{nome}</option>)}</select></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Assessor Destino *</label><select value={assessorId} onChange={e => setAssessorId(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>{loadingColaboradores ? <option disabled>Carregando...</option> : assessoresDisponiveis.length === 0 ? <option disabled>Nenhum disponível</option> : assessoresDisponiveis.map(a => <option key={a.id} value={a.id}>{a.nome}</option>)}</select></div>
           </div>
           {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">{message.text}</div>}
-          <div className="flex justify-end"><button type="submit" disabled={loading || loadingColaboradores} className="bg-[#09175b] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#1a2f8a] transition-colors disabled:opacity-50">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}{loading ? "Enviando..." : "Registrar Movimentação"}</button></div>
+          <div className="flex justify-end"><button type="submit" disabled={loading || loadingColaboradores} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}{loading ? "Enviando..." : "Registrar Movimentação"}</button></div>
         </form>
       </div>
 
-      <div className="madm-card p-5">
+      <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <h2 className="text-lg font-bold text-[#09175b]">Histórico</h2>
+          <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
           <div className="flex gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border rounded text-sm">{statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}</option>)}</select>
-            <button onClick={exportHistory} className="text-sm bg-gray-100 px-3 py-1 rounded flex items-center gap-1 hover:bg-gray-200"><Download className="w-3 h-3" /> Exportar</button>
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">{statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}</option>)}</select>
+            <button onClick={exportHistory} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"><Download className="w-3 h-3" /> Exportar</button>
             <button onClick={clearHistory} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"><Trash2 className="w-3 h-3" /> Limpar</button>
           </div>
         </div>
-        {loadingHistory ? <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#09175b]" /></div> :
-          filteredMovements.length === 0 ? <div className="text-center py-8 text-gray-500">Nenhuma movimentação registrada</div> :
-          <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-gray-500 border-b"><tr><th className="pb-2">Data/Hora</th><th className="pb-2">Cliente</th><th className="pb-2">E-mail</th><th className="pb-2">Contato</th><th className="pb-2">Equipe/Assessor</th><th className="pb-2">Status</th><th className="pb-2">Resultado</th></tr></thead><tbody>{filteredMovements.map(m => { const info = getStatusInfo(m.status); return (<tr key={m.id} className="border-b border-gray-100 hover:bg-gray-50"><td className="py-2 whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td><td className="py-2">{m.cliente}</td><td className="py-2">{m.email}</td><td className="py-2"><div>{m.telefone}</div><small className="text-gray-400">{m.cpf}</small></td><td className="py-2"><div>{m.equipe}</div><small>{m.assessor}</small></td><td className="py-2"><span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", info.className)}>{info.icon} {info.label}</span></td><td className="py-2 max-w-xs truncate">{m.resultado}</td></tr>); })}</tbody></table></div>}
+        {loadingHistory ? <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div> :
+          filteredMovements.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada</div> :
+          <div className="overflow-x-auto">
+            <table className="simple-table">
+              <thead><tr><th>Data/Hora</th><th>Cliente</th><th>E-mail</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Resultado</th></tr></thead>
+              <tbody>{filteredMovements.map(m => { const info = getStatusInfo(m.status); return (<tr key={m.id}><td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td><td>{m.cliente}</td><td>{m.email}</td><td><div>{m.telefone}</div><small className="text-[#94a3b8]">{m.cpf}</small></td><td><div>{m.equipe}</div><small>{m.assessor}</small></td><td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td><td className="max-w-xs truncate">{m.resultado}</td></tr>); })}</tbody>
+            </table>
+          </div>}
       </div>
     </div>
   );
@@ -418,28 +437,33 @@ function ReportarTab() {
 
   return (
     <div className="space-y-6 animate-fade-in-up">
-      <div className="madm-card p-5">
-        <h2 className="text-lg font-bold text-[#09175b] mb-4">Reportar Problema</h2>
+      <div className="card p-5">
+        <h2 className="text-lg font-bold text-[#0f172a] mb-4">Reportar Problema</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div><label htmlFor="rep-assunto" className="block text-sm font-medium text-gray-700 mb-1">Assunto</label><select id="rep-assunto" value={assunto} onChange={e => setAssunto(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded-lg" required><option value="">Selecionar assunto</option><option value="Discadora">Discadora</option><option value="CRM">CRM</option><option value="Dash">Dash</option><option value="Acesso">Acessos</option><option value="Reversao">Reversão</option><option value="Outro">Outro</option></select></div>
-          <div><label htmlFor="rep-descricao" className="block text-sm font-medium text-gray-700 mb-1">Descrição</label><textarea id="rep-descricao" value={descricao} onChange={e => setDescricao(e.target.value)} rows={5} className="w-full px-3 py-2 border border-gray-300 rounded-lg" required /><div className="text-right text-xs text-gray-400 mt-1">{descricao.length}/1000</div></div>
-          <div><label htmlFor="reportar-arquivos" className="block text-sm font-medium text-gray-700 mb-1">Anexos</label><input type="file" id="reportar-arquivos" multiple onChange={handleFileChange} className="w-full text-sm" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip" />{files.length > 0 && (<div className="mt-2 space-y-1">{files.map((f, idx) => (<div key={idx} className="flex items-center justify-between bg-gray-50 p-2 rounded text-sm"><span className="truncate">{f.name} ({(f.size / 1024).toFixed(0)} KB)</span><button type="button" onClick={() => removeFile(idx)} className="text-red-500 hover:text-red-700"><X className="w-4 h-4" /></button></div>))}</div>)}</div>
+          <div><label htmlFor="rep-assunto" className="block text-sm font-medium text-[#0f172a] mb-1">Assunto</label><select id="rep-assunto" value={assunto} onChange={e => setAssunto(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required><option value="">Selecionar assunto</option><option value="Discadora">Discadora</option><option value="CRM">CRM</option><option value="Dash">Dash</option><option value="Acesso">Acessos</option><option value="Reversao">Reversão</option><option value="Outro">Outro</option></select></div>
+          <div><label htmlFor="rep-descricao" className="block text-sm font-medium text-[#0f172a] mb-1">Descrição</label><textarea id="rep-descricao" value={descricao} onChange={e => setDescricao(e.target.value)} rows={5} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /><div className="text-right text-xs text-[#94a3b8] mt-1">{descricao.length}/1000</div></div>
+          <div><label htmlFor="reportar-arquivos" className="block text-sm font-medium text-[#0f172a] mb-1">Anexos</label><input type="file" id="reportar-arquivos" multiple onChange={handleFileChange} className="w-full text-sm" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip" />{files.length > 0 && (<div className="mt-2 space-y-1">{files.map((f, idx) => (<div key={idx} className="flex items-center justify-between bg-[#f8fafc] p-2 rounded text-sm"><span className="truncate">{f.name} ({(f.size / 1024).toFixed(0)} KB)</span><button type="button" onClick={() => removeFile(idx)} className="text-red-500 hover:text-red-700"><X className="w-4 h-4" /></button></div>))}</div>)}</div>
           {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">{message.text}</div>}
-          <div className="flex justify-end"><button type="submit" disabled={loading} className="bg-[#09175b] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#1a2f8a] transition-colors disabled:opacity-50">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}{loading ? "Enviando..." : "Enviar Reporte"}</button></div>
+          <div className="flex justify-end"><button type="submit" disabled={loading} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}{loading ? "Enviando..." : "Enviar Reporte"}</button></div>
         </form>
       </div>
-      <div className="madm-card p-5">
+      <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <h2 className="text-lg font-bold text-[#09175b]">Meus Reportes</h2>
+          <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
           <div className="flex gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border rounded text-sm">{statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}</select>
-            <button type="button" onClick={exportReports} className="text-sm bg-gray-100 px-3 py-1 rounded flex items-center gap-1 hover:bg-gray-200"><Download className="w-3 h-3" /> Exportar</button>
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">{statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}</select>
+            <button type="button" onClick={exportReports} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"><Download className="w-3 h-3" /> Exportar</button>
             <button type="button" onClick={clearReports} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"><Trash2 className="w-3 h-3" /> Limpar</button>
             <button type="button" onClick={updateAllReportsStatus} className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-blue-100"><RefreshCw className="w-3 h-3" /> Atualizar</button>
           </div>
         </div>
-        {filteredReports.length === 0 ? <div className="text-center py-8 text-gray-500">Nenhum reporte</div> :
-          <div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-gray-500 border-b"><tr><th className="pb-2">Data</th><th className="pb-2">Assunto</th><th className="pb-2">Status</th><th className="pb-2">Ações</th></tr></thead><tbody>{filteredReports.map(r => { const info = getStatusInfo(r.status); return (<tr key={r.id} className="border-b border-gray-100 hover:bg-gray-50"><td className="py-2 whitespace-nowrap">{new Date(r.data).toLocaleString("pt-BR")}</td><td className="py-2">{r.assunto}</td><td className="py-2"><span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", info.className)}>{info.icon} {info.label}</span></td><td className="py-2"><button type="button" onClick={() => viewDetails(r)} className="text-blue-600 hover:text-blue-800"><Eye className="w-4 h-4" /></button></td></tr>); })}</tbody></table></div>}
+        {filteredReports.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhum reporte</div> :
+          <div className="overflow-x-auto">
+            <table className="simple-table">
+              <thead><tr><th>Data</th><th>Assunto</th><th>Status</th><th>Ações</th></tr></thead>
+              <tbody>{filteredReports.map(r => { const info = getStatusInfo(r.status); return (<tr key={r.id}><td className="whitespace-nowrap">{new Date(r.data).toLocaleString("pt-BR")}</td><td>{r.assunto}</td><td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td><td><button type="button" onClick={() => viewDetails(r)} className="text-[#2F6FED] hover:text-[#2F6FED]/80"><Eye className="w-4 h-4" /></button></td></tr>); })}</tbody>
+            </table>
+          </div>}
       </div>
     </div>
   );
@@ -451,28 +475,23 @@ function SalesOpsTab() {
 
   return (
     <div className="space-y-4">
-      {/* Sub-navegação */}
-      <div className="flex gap-2 border-b border-gray-200 pb-2">
-        <button
-          type="button"
-          onClick={() => setSubTab("movimentacoes")}
-          className={cn(
-            "px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors",
-            subTab === "movimentacoes" ? "bg-white text-[#09175b] border-b-2 border-[#09175b]" : "text-gray-500 hover:text-gray-700"
-          )}
-        >
-          Movimentações
-        </button>
-        <button
-          type="button"
-          onClick={() => setSubTab("reportes")}
-          className={cn(
-            "px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors",
-            subTab === "reportes" ? "bg-white text-[#09175b] border-b-2 border-[#09175b]" : "text-gray-500 hover:text-gray-700"
-          )}
-        >
-          Reportes
-        </button>
+      <div className="flex gap-2 border-b border-[#e2e8f0] pb-2">
+        {[
+          { id: "movimentacoes", label: "Movimentações" },
+          { id: "reportes", label: "Reportes" },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setSubTab(tab.id as typeof subTab)}
+            className={cn(
+              "filter-pill",
+              subTab === tab.id && "active"
+            )}
+          >
+            {tab.label}
+          </button>
+        ))}
       </div>
 
       {subTab === "movimentacoes" && <MovimentacoesSuporteTab />}
@@ -544,16 +563,16 @@ function MovimentacoesSuporteTab() {
 
   const filteredTickets = tickets.filter(t => filterStatus === "todos" || t.status_mapeamento === filterStatus);
 
-  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#09175b]" /></div>;
+  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>;
 
   return (
     <div className="space-y-4">
       {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}>{message.text}</div>}
-      <div className="madm-card p-5">
+      <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <h2 className="text-lg font-bold text-[#09175b]">Movimentações (Suporte)</h2>
+          <h2 className="text-lg font-bold text-[#0f172a]">Movimentações (Suporte)</h2>
           <div className="flex gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border rounded text-sm" title="Filtrar por status" aria-label="Filtrar tickets por status">
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Filtrar por status" aria-label="Filtrar tickets por status">
               <option value="todos">Todos</option>
               <option value="pendente">Pendente</option>
               <option value="processando">Processando</option>
@@ -565,22 +584,22 @@ function MovimentacoesSuporteTab() {
           </div>
         </div>
         {filteredTickets.length === 0 ? (
-          <div className="text-center py-8 text-gray-500">Nenhum ticket de movimentação encontrado</div>
+          <div className="text-center py-8 text-[#64748b]">Nenhum ticket de movimentação encontrado</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-gray-500 border-b">
+            <table className="simple-table">
+              <thead>
                 <tr>
-                  <th className="pb-2">ID</th>
-                  <th className="pb-2">Data</th>
-                  <th className="pb-2">Solicitante</th>
-                  <th className="pb-2">Cliente</th>
-                  <th className="pb-2">Contato</th>
-                  <th className="pb-2">Origem</th>
-                  <th className="pb-2">Destino</th>
-                  <th className="pb-2">Status</th>
-                  <th className="pb-2">Obs.</th>
-                  <th className="pb-2">Ações</th>
+                  <th>ID</th>
+                  <th>Data</th>
+                  <th>Solicitante</th>
+                  <th>Cliente</th>
+                  <th>Contato</th>
+                  <th>Origem</th>
+                  <th>Destino</th>
+                  <th>Status</th>
+                  <th>Obs.</th>
+                  <th>Ações</th>
                 </tr>
               </thead>
               <tbody>
@@ -588,23 +607,23 @@ function MovimentacoesSuporteTab() {
                   const isEditing = editingId === ticket.id_ticket_movimentacao;
                   const statusInfo = getStatusInfo(ticket.status_mapeamento || 'pendente');
                   return (
-                    <tr key={ticket.id_ticket_movimentacao} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="py-2">{ticket.id_ticket_movimentacao}</td>
-                      <td className="py-2 whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
-                      <td className="py-2">{ticket.colaborador_origem_nome}</td>
-                      <td className="py-2">{`${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`}</td>
-                      <td className="py-2">
+                    <tr key={ticket.id_ticket_movimentacao}>
+                      <td>{ticket.id_ticket_movimentacao}</td>
+                      <td className="whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
+                      <td>{ticket.colaborador_origem_nome}</td>
+                      <td>{`${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`}</td>
+                      <td>
                         <div>{ticket.telefone_cliente_informado || "—"}</div>
-                        <small className="text-gray-400">{ticket.cpf_cliente_informado || "—"}</small>
+                        <small className="text-[#94a3b8]">{ticket.cpf_cliente_informado || "—"}</small>
                       </td>
-                      <td className="py-2">{ticket.equipe_origem_nome}</td>
-                      <td className="py-2">{ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</td>
-                      <td className="py-2">
+                      <td>{ticket.equipe_origem_nome}</td>
+                      <td>{ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</td>
+                      <td>
                         {isEditing ? (
                           <select
                             value={editForm.status_mapeamento}
                             onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
-                            className="px-2 py-1 border rounded text-xs"
+                            className="px-2 py-1 border border-[#e2e8f0] rounded text-xs"
                           >
                             <option value="pendente">Pendente</option>
                             <option value="processando">Processando</option>
@@ -614,32 +633,32 @@ function MovimentacoesSuporteTab() {
                             <option value="erro">Erro</option>
                           </select>
                         ) : (
-                          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", statusInfo.className)}>
+                          <span className={cn("badge", statusInfo.className)}>
                             {statusInfo.icon} {statusInfo.label}
                           </span>
                         )}
                       </td>
-                      <td className="py-2 max-w-[150px]">
+                      <td className="max-w-[150px]">
                         {isEditing ? (
                           <textarea
                             value={editForm.observacao_sales_ops}
                             onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
                             rows={2}
-                            className="w-full px-2 py-1 border rounded text-xs resize-none"
+                            className="w-full px-2 py-1 border border-[#e2e8f0] rounded text-xs resize-none"
                             placeholder="Nova observação"
                           />
                         ) : (
                           <span className="truncate block" title={ticket.observacao_sales_ops}>{ticket.observacao_sales_ops || "—"}</span>
                         )}
                       </td>
-                      <td className="py-2">
+                      <td>
                         {isEditing ? (
                           <div className="flex items-center gap-1">
                             <button onClick={() => saveEdit(ticket.id_ticket_movimentacao)} disabled={saving} className="p-1 rounded hover:bg-green-50" title="Salvar"><Save className="w-3.5 h-3.5 text-green-600" /></button>
                             <button onClick={cancelEdit} className="p-1 rounded hover:bg-red-50" title="Cancelar"><X className="w-3.5 h-3.5 text-red-500" /></button>
                           </div>
                         ) : (
-                          <button onClick={() => startEdit(ticket)} className="p-1 rounded hover:bg-gray-100" title="Editar"><Edit2 className="w-3.5 h-3.5 text-gray-500" /></button>
+                          <button onClick={() => startEdit(ticket)} className="p-1 rounded hover:bg-[#f1f5f9]" title="Editar"><Edit2 className="w-3.5 h-3.5 text-[#64748b]" /></button>
                         )}
                       </td>
                     </tr>
@@ -667,7 +686,6 @@ function ReportesSuporteTab() {
   useEffect(() => {
     const carregarReportes = async () => {
       try {
-        // Endpoint hipotético – o backend pode expor uma rota que retorna todos os tickets de suporte
         const res = await fetch(`${API_BASE}/suporte/tickets-suporte?todos=1`, { credentials: 'include' });
         const data = await res.json();
         if (data.success) setTickets(data.data);
@@ -718,19 +736,19 @@ function ReportesSuporteTab() {
 
   const filteredTickets = tickets.filter(t => filterStatus === "todos" || t.status === filterStatus);
 
-  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#09175b]" /></div>;
+  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>;
 
   return (
     <div className="space-y-4">
       {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}>{message.text}</div>}
-      <div className="madm-card p-5">
+      <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <h2 className="text-lg font-bold text-[#09175b]">Reportes (Suporte)</h2>
+          <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
           <div className="flex gap-2">
             <select
               value={filterStatus}
               onChange={e => setFilterStatus(e.target.value)}
-              className="px-2 py-1 border rounded text-sm"
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
               title="Filtrar por status"
               aria-label="Filtrar reportes por status"
             >
@@ -745,20 +763,20 @@ function ReportesSuporteTab() {
           </div>
         </div>
         {filteredTickets.length === 0 ? (
-          <div className="text-center py-8 text-gray-500">Nenhum reporte encontrado</div>
+          <div className="text-center py-8 text-[#64748b]">Nenhum reporte encontrado</div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="text-left text-gray-500 border-b">
+            <table className="simple-table">
+              <thead>
                 <tr>
-                  <th className="pb-2">ID</th>
-                  <th className="pb-2">Data</th>
-                  <th className="pb-2">Solicitante</th>
-                  <th className="pb-2">Equipe</th>
-                  <th className="pb-2">Assunto</th>
-                  <th className="pb-2">Status</th>
-                  <th className="pb-2">Obs. SalesOps</th>
-                  <th className="pb-2">Ações</th>
+                  <th>ID</th>
+                  <th>Data</th>
+                  <th>Solicitante</th>
+                  <th>Equipe</th>
+                  <th>Assunto</th>
+                  <th>Status</th>
+                  <th>Obs. SalesOps</th>
+                  <th>Ações</th>
                 </tr>
               </thead>
               <tbody>
@@ -766,18 +784,18 @@ function ReportesSuporteTab() {
                   const isEditing = editingId === ticket.id_ticket_suporte;
                   const statusInfo = getStatusInfo(ticket.status || 'ENVIADO');
                   return (
-                    <tr key={ticket.id_ticket_suporte} className="border-b border-gray-100 hover:bg-gray-50">
-                      <td className="py-2">{ticket.id_ticket_suporte}</td>
-                      <td className="py-2 whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
-                      <td className="py-2">{ticket.solicitante_nome}</td>
-                      <td className="py-2">{ticket.equipe_nome}</td>
-                      <td className="py-2">{ticket.assunto}</td>
-                      <td className="py-2">
+                    <tr key={ticket.id_ticket_suporte}>
+                      <td>{ticket.id_ticket_suporte}</td>
+                      <td className="whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
+                      <td>{ticket.solicitante_nome}</td>
+                      <td>{ticket.equipe_nome}</td>
+                      <td>{ticket.assunto}</td>
+                      <td>
                         {isEditing ? (
                           <select
                             value={editForm.status}
                             onChange={e => setEditForm(prev => ({ ...prev, status: e.target.value }))}
-                            className="px-2 py-1 border rounded text-xs"
+                            className="px-2 py-1 border border-[#e2e8f0] rounded text-xs"
                           >
                             <option value="ENVIADO">Enviado</option>
                             <option value="SUSPEITO">Suspeito</option>
@@ -787,32 +805,32 @@ function ReportesSuporteTab() {
                             <option value="REVISÃO">Revisão</option>
                           </select>
                         ) : (
-                          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", statusInfo.className)}>
+                          <span className={cn("badge", statusInfo.className)}>
                             {statusInfo.icon} {statusInfo.label}
                           </span>
                         )}
                       </td>
-                      <td className="py-2 max-w-[150px]">
+                      <td className="max-w-[150px]">
                         {isEditing ? (
                           <textarea
                             value={editForm.observacao_sales_ops}
                             onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
                             rows={2}
-                            className="w-full px-2 py-1 border rounded text-xs resize-none"
+                            className="w-full px-2 py-1 border border-[#e2e8f0] rounded text-xs resize-none"
                             placeholder="Nova observação"
                           />
                         ) : (
                           <span className="truncate block" title={ticket.observacao_sales_ops}>{ticket.observacao_sales_ops || "—"}</span>
                         )}
                       </td>
-                      <td className="py-2">
+                      <td>
                         {isEditing ? (
                           <div className="flex items-center gap-1">
                             <button onClick={() => saveEdit(ticket.id_ticket_suporte)} disabled={saving} className="p-1 rounded hover:bg-green-50" title="Salvar"><Save className="w-3.5 h-3.5 text-green-600" /></button>
                             <button onClick={cancelEdit} className="p-1 rounded hover:bg-red-50" title="Cancelar"><X className="w-3.5 h-3.5 text-red-500" /></button>
                           </div>
                         ) : (
-                          <button onClick={() => startEdit(ticket)} className="p-1 rounded hover:bg-gray-100" title="Editar"><Edit2 className="w-3.5 h-3.5 text-gray-500" /></button>
+                          <button onClick={() => startEdit(ticket)} className="p-1 rounded hover:bg-[#f1f5f9]" title="Editar"><Edit2 className="w-3.5 h-3.5 text-[#64748b]" /></button>
                         )}
                       </td>
                     </tr>

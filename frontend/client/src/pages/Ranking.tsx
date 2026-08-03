@@ -1,4 +1,4 @@
-// src/pages/Ranking.tsx
+// src/pages/Ranking.tsx (novo layout)
 import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { useAppStore } from "@/lib/dataStore";
@@ -30,7 +30,7 @@ const WEIGHTS: Record<SortMetric, number> = {
 };
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO – agora baseadas em cargo
+// CONSTANTES DE EXCLUSÃO – baseadas em cargo
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
@@ -39,28 +39,9 @@ const EXCLUDED_TEAMS = [
 ];
 
 const EXCLUDED_CARGOS = [
-  // Nenhum acesso (NONE)
-  "desativado",
-  "assistente",
-  "analista juridico",
-  "gestor de projetos",
-  "analista",
-  "analista de discadora",
-  
-  // Supervisão
-  "supervisor",
-  
-  // Coordenador
-  "coordenador",
-  
-  // Administrativo
-  "salesops",
-  "ceo",
-  "analista de crm",
-  "desenvolvedor",
-  "diretora",
-  "analista de dados",
-  "desenvolvedor make",
+  "desativado","assistente","analista juridico","gestor de projetos","analista",
+  "analista de discadora","supervisor","coordenador","salesops","ceo",
+  "analista de crm","desenvolvedor","diretora","analista de dados","desenvolvedor make",
 ];
 
 type RankingType = "colaborador" | "equipe";
@@ -78,7 +59,7 @@ interface RankingItem {
   trend: "up" | "down" | "same";
   isCurrentUser?: boolean;
   equipe?: string;
-  id?: string;                // agora é o email (string)
+  id?: string;
 }
 
 interface TeamRankingItem {
@@ -102,7 +83,7 @@ const isExcludedCargo = (cargo: string) =>
   EXCLUDED_CARGOS.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: any) => {
-  const cargo = normalize(c.cargo);                     // ⬅️ usa cargo
+  const cargo = normalize(c.cargo);
   const equipe = normalize(c.equipeNome);
   return cargo === 'desativado' || equipe.includes('desativado');
 };
@@ -124,7 +105,7 @@ function RankBadge({ position }: { position: number }) {
   if (position === 2) {
     return (
       <div className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: "linear-gradient(135deg, #e2e8f0, #cbd5e1)" }}>
-        <Medal className="w-4 h-4 text-gray-600" />
+        <Medal className="w-4 h-4 text-[#475569]" />
       </div>
     );
   }
@@ -136,8 +117,8 @@ function RankBadge({ position }: { position: number }) {
     );
   }
   return (
-    <div className="w-8 h-8 rounded-full flex items-center justify-center bg-gray-100">
-      <span className="text-xs font-bold text-gray-500">#{position}</span>
+    <div className="w-8 h-8 rounded-full flex items-center justify-center bg-[#f1f5f9]">
+      <span className="text-xs font-bold text-[#64748b]">#{position}</span>
     </div>
   );
 }
@@ -197,9 +178,9 @@ export default function Ranking() {
   const timeoutIdRef = useRef<NodeJS.Timeout | null>(null);
   const isMountedRef = useRef(true);
   const lastFetchTime = useRef<number>(0);
-  const CACHE_TTL = 60000; // 1 minuto
+  const CACHE_TTL = 60000;
 
-  // ========== FUNÇÃO PARA CARREGAR DADOS (com cache) – agora sem recarga automática ==========
+  // ========== FUNÇÃO PARA CARREGAR DADOS (com cache) ==========
   const loadAllData = useCallback(async (showRefreshing = false) => {
     const datesChanged =
       currentStartDate !== lastDatesRef.current.start ||
@@ -209,10 +190,7 @@ export default function Ranking() {
       selectedTeam !== lastFiltersRef.current.team ||
       rankingType !== lastFiltersRef.current.type;
 
-    // Não recarrega automaticamente – apenas se forçado (showRefreshing)
-    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged) {
-      return;
-    }
+    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged) return;
 
     if (showRefreshing) setRefreshing(true);
     try {
@@ -281,7 +259,7 @@ export default function Ranking() {
     }
   }, [currentStartDate, currentEndDate, selectedProduct, selectedTeam, rankingType, allCollaborators.length]);
 
-  // ========== CARREGAMENTO INICIAL (apenas uma vez) ==========
+  // ========== CARREGAMENTO INICIAL ==========
   useEffect(() => {
     isMountedRef.current = true;
     if (!currentStartDate || !currentEndDate) {
@@ -289,7 +267,6 @@ export default function Ranking() {
       return;
     }
 
-    // Só carrega se for a primeira montagem (initialLoadDone.current false)
     if (initialLoadDone.current) {
       setLoading(false);
       return;
@@ -316,8 +293,6 @@ export default function Ranking() {
       if (timeoutIdRef.current) clearTimeout(timeoutIdRef.current);
     };
   }, [currentStartDate, currentEndDate, loadAllData, loading]);
-
-  // ❌ Removido polling (useEffect com setInterval). Agora o usuário deve clicar em "Atualizar".
 
   // ========== FILTROS ==========
   const productToGroup: Record<string, string | string[] | undefined> = {
@@ -351,7 +326,7 @@ export default function Ranking() {
   const rankingCollaborators = useMemo(() => {
     let filtered = allCollaborators.filter(c => {
       if (isDesativado(c)) return false;
-      if (isExcludedCargo(c.cargo)) return false;   // ⬅️ usa cargo
+      if (isExcludedCargo(c.cargo)) return false;
       if (isExcludedTeam(c.equipeNome)) return false;
       return true;
     });
@@ -360,9 +335,9 @@ export default function Ranking() {
       const group = productToGroup[selectedProduct];
       if (group) {
         if (Array.isArray(group)) {
-          filtered = filtered.filter(c => group.includes(c.cargo));   // ⬅️ usa cargo
+          filtered = filtered.filter(c => group.includes(c.cargo));
         } else {
-          filtered = filtered.filter(c => c.cargo === group);         // ⬅️ usa cargo
+          filtered = filtered.filter(c => c.cargo === group);
         }
       }
     }
@@ -379,7 +354,7 @@ export default function Ranking() {
     let items: RankingItem[] = rankingCollaborators.map((colab) => {
       const metrics = metricsData[colab.name] || { emitidos: 0, assinados: 0, protocolados: 0, ganhos: 0, perdidos: 0 };
       const base = {
-        id: colab.id,                       // email (string)
+        id: colab.id,
         name: colab.name,
         emitidos: metrics.emitidos || 0,
         assinados: metrics.assinados || 0,
@@ -448,7 +423,6 @@ export default function Ranking() {
     return teamRanking.find((team) => team.name === currentUser.equipe);
   }, [rankingType, teamRanking, currentUser]);
 
-  // currentUserData: busca pelo email (id) ou nome
   const currentUserData = allCollaborators.find(c => c.id === currentUser?.id || c.name === currentUser?.nome);
   const myEmitidos = metricsData[currentUserData?.name]?.emitidos || 0;
   const myAssinados = metricsData[currentUserData?.name]?.assinados || 0;
@@ -485,7 +459,7 @@ export default function Ranking() {
     return (
       <DashboardLayout title="Ranking" subtitle="Carregando dados...">
         <div className="flex items-center justify-center h-64">
-          <div className="text-center text-gray-500">
+          <div className="text-center text-[#64748b]">
             <Loader2 className="w-8 h-8 animate-spin mx-auto mb-2" />
             <p>Carregando ranking...</p>
           </div>
@@ -498,7 +472,7 @@ export default function Ranking() {
     return (
       <DashboardLayout title="Ranking" subtitle="Nenhum dado encontrado">
         <div className="flex items-center justify-center h-64">
-          <div className="text-center text-gray-500">
+          <div className="text-center text-[#64748b]">
             <p>Nenhum colaborador elegível para o ranking com os filtros atuais.</p>
             <p className="text-sm">Verifique se os dados do período foram carregados ou ajuste os filtros.</p>
           </div>
@@ -512,34 +486,12 @@ export default function Ranking() {
       title="Ranking de Vendedores"
       subtitle="Veja quem são os melhores vendedores do mês e acompanhe sua posição!"
     >
-      <div className="flex items-center justify-end gap-2 mb-2">
-        {refreshing && (
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Atualizando dados...</span>
-          </div>
-        )}
-        <span className="text-[10px] text-gray-400">
-          Atualizado {new Date().toLocaleTimeString()}
-        </span>
-        {/* Botão de atualização manual */}
-        <button
-          onClick={() => loadAllData(true)}
-          disabled={refreshing}
-          className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
-          aria-label="Atualizar dados manualmente"
-        >
-          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
-          Atualizar
-        </button>
-      </div>
-
       {/* Banner */}
       <div
         className="relative rounded-2xl overflow-hidden mb-6 animate-fade-in-up"
         style={{ backgroundImage: `url(${RANKING_BG})`, backgroundSize: "cover", backgroundPosition: "center", minHeight: "180px" }}
       >
-        <div className="absolute inset-0 rounded-2xl" style={{ background: "rgba(9, 23, 91, 0.65)" }} />
+        <div className="absolute inset-0 rounded-2xl" style={{ background: "rgba(15, 23, 42, 0.7)" }} />
         <div className="relative z-10 p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 mb-2">
@@ -616,93 +568,102 @@ export default function Ranking() {
         </div>
       </div>
 
-      {/* Filtros */}
-      <div className="flex flex-wrap items-center gap-3 mb-6">
-        <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-1">
-          <button
-            onClick={() => setRankingType("colaborador")}
-            className={cn("flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all", rankingType === "colaborador" ? "bg-white text-[#09175b] shadow-sm" : "text-gray-500 hover:text-gray-700")}
-          >
-            <User className="w-3.5 h-3.5" /> Colaborador
-          </button>
-          <button
-            onClick={() => setRankingType("equipe")}
-            className={cn("flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all", rankingType === "equipe" ? "bg-white text-[#09175b] shadow-sm" : "text-gray-500 hover:text-gray-700")}
-          >
-            <Users className="w-3.5 h-3.5" /> Equipe
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-1 flex-wrap">
-          {(["ganhos", "assinados", "protocolados", "emitidos"] as SortMetric[]).map((metric) => (
-            <label key={metric} className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold cursor-pointer">
-              <input
-                type="checkbox"
-                checked={activeSortMetrics.includes(metric)}
-                onChange={() => toggleSortMetric(metric)}
-                className="w-3.5 h-3.5 accent-[#09175b]"
-              />
-              <span className="text-gray-700">{metricLabels[metric]}</span>
-              <span className="text-[10px] text-gray-400 font-normal">(peso {WEIGHTS[metric]})</span>
-            </label>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-1">
-          <Package className="w-3.5 h-3.5 text-gray-500" aria-hidden="true" />
-          <select
-            value={selectedProduct}
-            onChange={(e) => setSelectedProduct(e.target.value)}
-            className="bg-transparent text-xs font-semibold text-gray-700 focus:outline-none"
-            aria-label="Filtrar ranking por produto"
-            title="Filtrar ranking por produto"
-          >
-            {productOptions.map((prod) => (<option key={prod} value={prod}>{prod}</option>))}
-          </select>
-        </div>
-
-        {rankingType === "colaborador" && (
-          <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-1">
-            <Briefcase className="w-3.5 h-3.5 text-gray-500" aria-hidden="true" />
-            <select
-              value={selectedTeam}
-              onChange={(e) => setSelectedTeam(e.target.value)}
-              className="bg-transparent text-xs font-semibold text-gray-700 focus:outline-none"
-              aria-label="Filtrar ranking por equipe"
-              title="Filtrar ranking por equipe"
+      {/* Filtros e botão Atualizar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 bg-[#f1f5f9] rounded-lg p-1">
+            <button
+              onClick={() => setRankingType("colaborador")}
+              className={cn("flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all", rankingType === "colaborador" ? "bg-white text-[#2F6FED] shadow-sm" : "text-[#64748b] hover:text-[#0f172a]")}
             >
-              {equipeOptions.map((equipe) => (<option key={equipe} value={equipe}>{equipe === "todas" ? "Todas as equipes" : equipe}</option>))}
+              <User className="w-3.5 h-3.5" /> Colaborador
+            </button>
+            <button
+              onClick={() => setRankingType("equipe")}
+              className={cn("flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all", rankingType === "equipe" ? "bg-white text-[#2F6FED] shadow-sm" : "text-[#64748b] hover:text-[#0f172a]")}
+            >
+              <Users className="w-3.5 h-3.5" /> Equipe
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 bg-[#f1f5f9] rounded-lg p-1 flex-wrap">
+            {(["ganhos", "assinados", "protocolados", "emitidos"] as SortMetric[]).map((metric) => (
+              <label key={metric} className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={activeSortMetrics.includes(metric)}
+                  onChange={() => toggleSortMetric(metric)}
+                  className="w-3.5 h-3.5 accent-[#2F6FED]"
+                />
+                <span className="text-[#0f172a]">{metricLabels[metric]}</span>
+                <span className="text-[10px] text-[#94a3b8] font-normal">(peso {WEIGHTS[metric]})</span>
+              </label>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2 bg-[#f1f5f9] rounded-lg p-1">
+            <Package className="w-3.5 h-3.5 text-[#64748b]" aria-hidden="true" />
+            <select
+              value={selectedProduct}
+              onChange={(e) => setSelectedProduct(e.target.value)}
+              className="bg-transparent text-xs font-semibold text-[#0f172a] focus:outline-none"
+              aria-label="Filtrar ranking por produto"
+            >
+              {productOptions.map((prod) => (<option key={prod} value={prod}>{prod}</option>))}
             </select>
           </div>
-        )}
+
+          {rankingType === "colaborador" && (
+            <div className="flex items-center gap-2 bg-[#f1f5f9] rounded-lg p-1">
+              <Briefcase className="w-3.5 h-3.5 text-[#64748b]" aria-hidden="true" />
+              <select
+                value={selectedTeam}
+                onChange={(e) => setSelectedTeam(e.target.value)}
+                className="bg-transparent text-xs font-semibold text-[#0f172a] focus:outline-none"
+                aria-label="Filtrar ranking por equipe"
+              >
+                {equipeOptions.map((equipe) => (<option key={equipe} value={equipe}>{equipe === "todas" ? "Todas as equipes" : equipe}</option>))}
+              </select>
+            </div>
+          )}
+        </div>
+
+        {/* Botão Atualizar + Timestamp */}
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-[#94a3b8]">Atualizado {new Date().toLocaleTimeString()}</span>
+          <button onClick={() => loadAllData(true)} disabled={refreshing}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 transition-colors">
+            <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} /> Atualizar Dados
+          </button>
+        </div>
       </div>
 
       {/* Top 3 (pódio) */}
       {top3.length >= 3 && (
-        <div className="madm-card p-6 mb-6 animate-fade-in-up">
+        <div className="card p-6 mb-6 animate-fade-in-up">
           <div className="flex items-center gap-2 mb-6">
-            <Star className="w-4 h-4 text-[#34a853] fill-[#34a853]" />
-            <h3 className="text-sm font-bold text-[#09175b]">Top 3 — {rankingType === "colaborador" ? "Melhores Vendedores" : "Melhores Equipes"}</h3>
+            <Star className="w-4 h-4 text-[#16A34A] fill-[#16A34A]" />
+            <h3 className="text-sm font-bold text-[#0f172a]">Top 3 — {rankingType === "colaborador" ? "Melhores Vendedores" : "Melhores Equipes"}</h3>
           </div>
           <div className="flex items-end justify-center gap-4">
             {top3[1] && (
               <div className="flex flex-col items-center flex-1 max-w-36">
                 <div className="w-14 h-14 rounded-full flex items-center justify-center text-sm font-bold mb-2" style={{ background: "linear-gradient(135deg, #e2e8f0, #cbd5e1)", color: "#475569" }}>{getAvatar(top3[1])}</div>
-                <div className="text-xs font-bold text-gray-700 text-center mb-1">{top3[1].name}</div>
-                <div className="w-full rounded-t-xl flex flex-col items-center justify-end py-4" style={{ background: "linear-gradient(180deg, #e2e8f0, #cbd5e1)", height: "80px" }}><span className="text-2xl font-black text-gray-600">2</span></div>
+                <div className="text-xs font-bold text-[#0f172a] text-center mb-1">{top3[1].name}</div>
+                <div className="w-full rounded-t-xl flex flex-col items-center justify-end py-4" style={{ background: "linear-gradient(180deg, #e2e8f0, #cbd5e1)", height: "80px" }}><span className="text-2xl font-black text-[#475569]">2</span></div>
               </div>
             )}
             {top3[0] && (
               <div className="flex flex-col items-center flex-1 max-w-36">
                 <div className="relative mb-2"><div className="w-16 h-16 rounded-full flex items-center justify-center text-sm font-bold" style={getPodiumStyle(1)}>{getAvatar(top3[0])}</div><div className="absolute -top-2 -right-1 w-6 h-6 rounded-full flex items-center justify-center" style={{ background: "#ffcc00" }}><Crown className="w-3.5 h-3.5 text-white" /></div></div>
-                <div className="text-xs font-bold text-[#09175b] text-center mb-1">{top3[0].name}</div>
+                <div className="text-xs font-bold text-[#0f172a] text-center mb-1">{top3[0].name}</div>
                 <div className="w-full rounded-t-xl flex flex-col items-center justify-end py-4" style={{ background: "linear-gradient(180deg, #ffcc00, #f59e0b)", height: "110px" }}><span className="text-3xl font-black text-white">1</span></div>
               </div>
             )}
             {top3[2] && (
               <div className="flex flex-col items-center flex-1 max-w-36">
                 <div className="w-14 h-14 rounded-full flex items-center justify-center text-sm font-bold mb-2" style={{ background: "linear-gradient(135deg, #d97706, #b45309)", color: "white" }}>{getAvatar(top3[2])}</div>
-                <div className="text-xs font-bold text-gray-700 text-center mb-1">{top3[2].name}</div>
+                <div className="text-xs font-bold text-[#0f172a] text-center mb-1">{top3[2].name}</div>
                 <div className="w-full rounded-t-xl flex flex-col items-center justify-end py-4" style={{ background: "linear-gradient(180deg, #d97706, #b45309)", height: "65px" }}><span className="text-xl font-black text-white">3</span></div>
               </div>
             )}
@@ -711,30 +672,30 @@ export default function Ranking() {
       )}
 
       {/* Tabela com os 20 melhores */}
-      <div className="madm-card animate-fade-in-up">
-        <div className="p-5 border-b border-gray-100">
-          <h3 className="text-sm font-bold text-[#09175b]">
+      <div className="card animate-fade-in-up">
+        <div className="p-5 border-b border-[#e2e8f0]">
+          <h3 className="text-sm font-bold text-[#0f172a]">
             Top {Math.min(displayRanking.length, MAX_DISPLAY_ITEMS)} — {rankingType === "colaborador" ? "Melhores Colaboradores" : "Melhores Equipes"}
           </h3>
-          <p className="text-xs text-gray-500 mt-1">
+          <p className="text-xs text-[#64748b] mt-1">
             {displayRanking.length} {rankingType === "colaborador" ? "consultores" : "equipes"} exibidos (de {fullRanking.length} no total)
-            <span className="ml-2 text-[#09175b] font-medium">• Ordenado por Pontuação Ponderada</span>
+            <span className="ml-2 text-[#2F6FED] font-medium">• Ordenado por Pontuação Ponderada</span>
           </p>
         </div>
 
         <div className="overflow-x-auto">
-          <div className="px-5 py-2 border-b border-gray-100 hidden md:grid" style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 90px", gap: "0.75rem" }}>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider text-center">Pos</div>
+          <div className="px-5 py-2 border-b border-[#e2e8f0] hidden md:grid" style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 90px", gap: "0.75rem" }}>
+            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Pos</div>
             <div></div>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider">Nome</div>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider text-center">Emitidos</div>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider text-center">Assinados</div>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider text-center">Protocolados</div>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider text-center">Ganhos</div>
-            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider text-center">Score</div>
+            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider">Nome</div>
+            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Emitidos</div>
+            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Assinados</div>
+            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Protocolados</div>
+            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Ganhos</div>
+            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Score</div>
           </div>
 
-          <div className="divide-y divide-gray-50">
+          <div className="divide-y divide-[#f1f5f9]">
             {displayRanking.map((person) => {
               const isTop3 = person.position <= 3;
               const isMe = rankingType === "colaborador" && (person as RankingItem).isCurrentUser;
@@ -743,33 +704,33 @@ export default function Ranking() {
               return (
                 <div
                   key={person.position}
-                  className={cn("flex flex-col md:grid items-center px-5 py-4 transition-colors", highlight ? "bg-[#eff6ff]" : "hover:bg-gray-50/50")}
-                  style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 90px", gap: "0.75rem", ...(highlight ? { borderLeft: "3px solid #09175b" } : {}) }}
+                  className={cn("flex flex-col md:grid items-center px-5 py-4 transition-colors", highlight ? "bg-[#eff6ff]" : "hover:bg-[#f8fafc]")}
+                  style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 90px", gap: "0.75rem", ...(highlight ? { borderLeft: "3px solid #2F6FED" } : {}) }}
                 >
                   <div><RankBadge position={person.position} /></div>
-                  <div className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0" style={isTop3 ? getPodiumStyle(person.position) : highlight ? { background: "#09175b", color: "#34a853" } : { background: "#f3f4f6", color: "#6b7280" }}>{getAvatar(person)}</div>
+                  <div className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0" style={isTop3 ? getPodiumStyle(person.position) : highlight ? { background: "#2F6FED", color: "white" } : { background: "#f1f5f9", color: "#64748b" }}>{getAvatar(person)}</div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className={cn("text-sm font-semibold truncate", highlight ? "text-[#09175b]" : "text-gray-800")}>{person.name}</span>
-                      {highlight && rankingType === "colaborador" && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: "#09175b", color: "#34a853" }}>VOCÊ</span>}
-                      {highlight && rankingType === "equipe" && currentUser && person.name === currentUser.equipe && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: "#09175b", color: "#34a853" }}>SUA EQUIPE</span>}
-                      {isTop3 && <Star className="w-3 h-3 text-[#34a853] fill-[#34a853] flex-shrink-0" />}
-                      {rankingType === "equipe" && "membersCount" in person && <span className="text-[10px] text-gray-400 ml-1">({(person as TeamRankingItem).membersCount} membros)</span>}
+                      <span className={cn("text-sm font-semibold truncate", highlight ? "text-[#2F6FED]" : "text-[#0f172a]")}>{person.name}</span>
+                      {highlight && rankingType === "colaborador" && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-[#2F6FED] text-white">VOCÊ</span>}
+                      {highlight && rankingType === "equipe" && currentUser && person.name === currentUser.equipe && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-[#2F6FED] text-white">SUA EQUIPE</span>}
+                      {isTop3 && <Star className="w-3 h-3 text-[#16A34A] fill-[#16A34A] flex-shrink-0" />}
+                      {rankingType === "equipe" && "membersCount" in person && <span className="text-[10px] text-[#94a3b8] ml-1">({(person as TeamRankingItem).membersCount} membros)</span>}
                     </div>
                   </div>
-                  <div className="text-center text-sm font-bold text-[#09175b] whitespace-nowrap">{person.emitidos}</div>
-                  <div className="text-center text-sm font-bold text-[#34a853] whitespace-nowrap">{person.assinados}</div>
-                  <div className="text-center text-sm font-bold text-[#045b5b] whitespace-nowrap">{person.protocolados}</div>
-                  <div className="text-center text-sm font-bold text-[#f59e0b] whitespace-nowrap">{Math.round(person.ganhos)}</div>
-                  <div className="text-center text-sm font-bold text-[#09175b] whitespace-nowrap">{person.score.toFixed(1)}</div>
+                  <div className="text-center text-sm font-bold text-[#0f172a] whitespace-nowrap">{person.emitidos}</div>
+                  <div className="text-center text-sm font-bold text-[#16A34A] whitespace-nowrap">{person.assinados}</div>
+                  <div className="text-center text-sm font-bold text-[#8B5CF6] whitespace-nowrap">{person.protocolados}</div>
+                  <div className="text-center text-sm font-bold text-[#EA8C1D] whitespace-nowrap">{Math.round(person.ganhos)}</div>
+                  <div className="text-center text-sm font-bold text-[#2F6FED] whitespace-nowrap">{person.score.toFixed(1)}</div>
                 </div>
               );
             })}
           </div>
         </div>
 
-        <div className="px-5 py-4 border-t border-gray-100 text-center">
-          <p className="text-xs text-gray-400">
+        <div className="px-5 py-4 border-t border-[#e2e8f0] text-center">
+          <p className="text-xs text-[#94a3b8]">
             Exibindo os {MAX_DISPLAY_ITEMS} melhores de {fullRanking.length} {rankingType === "colaborador" ? "consultores" : "equipes"}.
             {fullRanking.length > MAX_DISPLAY_ITEMS && " Para ver a lista completa, ajuste os filtros."}
             <br />

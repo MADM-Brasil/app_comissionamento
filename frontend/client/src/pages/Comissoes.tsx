@@ -1,4 +1,4 @@
-// src/pages/Comissoes.tsx
+// src/pages/Comissoes.tsx (novo layout)
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
@@ -15,10 +15,8 @@ import { cn } from "@/lib/utils";
 
 type PeriodoMeta = 'diario' | 'semanal' | 'mensal';
 
-// ========== FUNÇÃO AUXILIAR PARA FORMATAÇÃO DE INTEIROS ==========
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
-// Equipes e cargos que não devem aparecer nos cálculos de comissão
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
@@ -28,25 +26,9 @@ const EXCLUDED_TEAMS = [
 ];
 
 const EXCLUDED_CARGOS = [
-  // Nenhum acesso (NONE)
-  "desativado",
-  "assistente",
-  "analista juridico",
-  "gestor de projetos",
-  "analista",
-  "analista de discadora",
-  // Supervisão
-  "supervisor",
-  // Coordenador
-  "coordenador",
-  // Administrativo
-  "salesops",
-  "ceo",
-  "analista de crm",
-  "desenvolvedor",
-  "diretora",
-  "analista de dados",
-  "desenvolvedor make",
+  "desativado","assistente","analista juridico","gestor de projetos","analista",
+  "analista de discadora","supervisor","coordenador","salesops","ceo",
+  "analista de crm","desenvolvedor","diretora","analista de dados","desenvolvedor make",
 ];
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
@@ -60,21 +42,9 @@ function isSpecialGroupColaborador(colaborador: any): boolean {
 
 function obterMetaPorPeriodo(colaborador: any, periodo: PeriodoMeta) {
   switch (periodo) {
-    case 'diario':
-      return {
-        assinados: colaborador.metaDiarioAssinados ?? 3,
-        ganhos: colaborador.metaDiarioGanhos ?? 3,
-      };
-    case 'semanal':
-      return {
-        assinados: colaborador.metaSemanalAssinados ?? 15,
-        ganhos: colaborador.metaSemanalGanhos ?? 15,
-      };
-    default:
-      return {
-        assinados: colaborador.metaMensalAssinados ?? 60,
-        ganhos: colaborador.metaMensalGanhos ?? 60,
-      };
+    case 'diario': return { assinados: colaborador.metaDiarioAssinados ?? 3, ganhos: colaborador.metaDiarioGanhos ?? 3 };
+    case 'semanal': return { assinados: colaborador.metaSemanalAssinados ?? 15, ganhos: colaborador.metaSemanalGanhos ?? 15 };
+    default: return { assinados: colaborador.metaMensalAssinados ?? 60, ganhos: colaborador.metaMensalGanhos ?? 60 };
   }
 }
 
@@ -83,9 +53,7 @@ function calcularCiclosPeriodo(colaborador: any, periodo: PeriodoMeta, isSpecial
   const assinados = colaborador.assinados || 0;
   const ganhos = isSpecial ? 0 : (colaborador.ganhos || 0);
   if (meta.assinados <= 0) return 0;
-  if (isSpecial) {
-    return Math.floor(assinados / meta.assinados);
-  }
+  if (isSpecial) return Math.floor(assinados / meta.assinados);
   if (meta.ganhos <= 0) return 0;
   return Math.floor(Math.min(assinados / meta.assinados, ganhos / meta.ganhos));
 }
@@ -96,12 +64,11 @@ function obterBonusCiclo(colaborador: any, configEquipe: any[], configGlobal: an
   return equipe?.bonus || configGlobal.valorBonus;
 }
 
-// ========== COMPONENTE DE TOOLTIP EXTERNO ==========
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (active && payload?.length) {
     return (
-      <div className="bg-white border border-gray-200 rounded-lg p-3 shadow-lg text-xs">
-        <p className="font-semibold text-gray-700 mb-1">{label}</p>
+      <div className="bg-white border border-[#e2e8f0] rounded-lg p-3 shadow-lg text-xs">
+        <p className="font-semibold text-[#0f172a] mb-1">{label}</p>
         {payload.map((entry: any, i: number) => (
           <p key={i} style={{ color: entry.color }} className="font-medium">
             {entry.name}: {typeof entry.value === 'number' ? formatCurrency(entry.value) : entry.value}
@@ -124,7 +91,6 @@ export default function Comissoes() {
 
   const { currentUser } = useAccessControl();
 
-  // Filtros – colaboradorId agora aceita string | number
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
@@ -135,8 +101,6 @@ export default function Comissoes() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Controle para evitar carregamento antes do primeiro filtro
   const [isFirstFilterApplied, setIsFirstFilterApplied] = useState(false);
 
   const initialLoadDone = useRef(false);
@@ -145,7 +109,6 @@ export default function Comissoes() {
   const isLoadingRef = useRef(false);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // ========== TIMEOUT DE SEGURANÇA: FORÇA O PRIMEIRO FILTRO APÓS 3 SEGUNDOS ==========
   useEffect(() => {
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
@@ -154,37 +117,17 @@ export default function Comissoes() {
         setIsFirstFilterApplied(true);
       }
     }, 3000);
-    return () => {
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    };
+    return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
   }, [isFirstFilterApplied]);
 
-  // ========== FUNÇÃO DE RECARGA (chamada manual ou inicial) ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
-    if (isLoadingRef.current) {
-      console.log('ℹ️ Comissoes: já está carregando, ignorando');
-      return;
-    }
-
-    const datesChanged =
-      currentStartDate !== lastDatesRef.current.start ||
-      currentEndDate !== lastDatesRef.current.end;
-    const filtersChanged =
-      filters.equipe !== lastFiltersRef.current.equipe ||
-      filters.colaborador !== lastFiltersRef.current.colaborador ||
-      filters.produto !== lastFiltersRef.current.produto;
-
-    // Só recarrega se algo mudou ou se for forçado (showRefreshing = true)
-    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged) {
-      console.log('ℹ️ Comissoes: dados já carregados e sem alterações, pulando recarga');
-      return;
-    }
-
-    console.log('🔄 Comissoes: recarregando dados...', { datesChanged, filtersChanged });
+    if (isLoadingRef.current) return;
+    const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
+    const filtersChanged = filters.equipe !== lastFiltersRef.current.equipe || filters.colaborador !== lastFiltersRef.current.colaborador || filters.produto !== lastFiltersRef.current.produto;
+    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged) return;
 
     isLoadingRef.current = true;
     if (showRefreshing) setRefreshing(true);
-    
     try {
       const equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
       const colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
@@ -201,7 +144,6 @@ export default function Comissoes() {
       lastFiltersRef.current = { ...filters };
       initialLoadDone.current = true;
       setError(null);
-      console.log('✅ Comissoes: dados carregados com sucesso');
     } catch (err: any) {
       console.error("❌ Comissoes: erro ao recarregar dados:", err);
       setError(err.message || "Falha ao recarregar dados.");
@@ -212,62 +154,27 @@ export default function Comissoes() {
     }
   }, [filters, currentStartDate, currentEndDate, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
 
-  // ========== HANDLER DO FILTERBAR ==========
-  const handleFilterChange = (newFilters: {
-    equipe: string;
-    colaborador: string;
-    colaboradorId?: string | number;
-    produto: string;
-  }) => {
+  const handleFilterChange = (newFilters: any) => {
     setFilters(newFilters);
-    if (!isFirstFilterApplied) {
-      setIsFirstFilterApplied(true);
-    }
+    if (!isFirstFilterApplied) setIsFirstFilterApplied(true);
   };
 
-  // ========== CARREGAMENTO INICIAL (apenas na montagem e após primeiro filtro) ==========
   useEffect(() => {
-    if (!isFirstFilterApplied) {
-      console.log('ℹ️ Comissoes: aguardando primeiro filtro');
-      return;
-    }
-
-    if (!currentStartDate || !currentEndDate) {
-      setLoading(false);
-      return;
-    }
-
-    // Só carrega se for a primeira vez (initialLoadDone false)
-    if (initialLoadDone.current) {
-      setLoading(false);
-      return;
-    }
-
-    // Timeout de segurança
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => {
-      if (loading) {
-        console.warn("⏱️ Comissoes: timeout de segurança forçando fim do loading");
-        setLoading(false);
-      }
-    }, 15000);
-
+    if (!isFirstFilterApplied) return;
+    if (!currentStartDate || !currentEndDate) { setLoading(false); return; }
+    if (initialLoadDone.current) { setLoading(false); return; }
     setLoading(true);
     reloadData(false);
   }, [isFirstFilterApplied, currentStartDate, currentEndDate, reloadData, loading]);
 
-  // ========== DADOS FILTRADOS E CÁLCULOS ==========
   const filteredColabs = useMemo(() => {
     let filtered = storeColabs.filter(c => {
       if (EXCLUDED_TEAMS.some(team => normalizeText(c.equipeNome) === normalizeText(team))) return false;
-      // FILTRO POR CARGO (antes era 'grupo')
       if (EXCLUDED_CARGOS.some(cargo => normalizeText(c.cargo) === normalizeText(cargo))) return false;
-
       if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
       return true;
     });
-
     const hasCurrentUser = filtered.some(c => c.id === currentUser?.id);
     if (currentUser && !hasCurrentUser) {
       const userColab = storeColabs.find(c => c.id === currentUser.id);
@@ -292,8 +199,6 @@ export default function Comissoes() {
         periodDetails[period] = { cycles, commission: commissionPeriod, bonus };
       }
       const monthlyMeta = obterMetaPorPeriodo(col, 'mensal');
-      const metaAssinados = monthlyMeta.assinados;
-      const metaGanhos = isSpecial ? 0 : monthlyMeta.ganhos;
       return {
         id: col.id,
         name: col.name,
@@ -301,10 +206,10 @@ export default function Comissoes() {
         totalCycles,
         assinados: col.assinados || 0,
         ganhos: isSpecial ? 0 : (col.ganhos || 0),
-        metaAssinados,
-        metaGanhos,
+        metaAssinados: monthlyMeta.assinados,
+        metaGanhos: isSpecial ? 0 : monthlyMeta.ganhos,
         avatar: col.avatar || col.name.charAt(0).toUpperCase(),
-        cargo: col.cargo,                     // ← alterado de 'group' para 'cargo'
+        cargo: col.cargo,
         periodDetails,
         isSpecial,
       };
@@ -328,144 +233,90 @@ export default function Comissoes() {
   }, [commissionData]);
 
   const summaryCards = [
-    {
-      label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign,
-      color: "#09175b", bg: "#eff6ff", sub: "Soma das comissões diária, semanal e mensal",
-      isCurrency: true,
-    },
-    {
-      label: "Metas Batidas (Total)", value: totals.ciclos, icon: Award,
-      color: "#34a853", bg: "#f0fdf4", sub: "Diário + Semanal + Mensal",
-      isInteger: true,
-    },
-    {
-      label: "Vendas Fechadas",
-      value: rawMetrics.assinados, icon: FileCheck, color: "#f59e0b", bg: "#fffbeb",
-      sub: "Total de assinados no período",
-      isInteger: true,
-    },
-    {
-      label: "Progresso Médio", value: avgProgress, icon: Target,
-      color: "#045b5b", bg: "#f0fdfa",
-      sub: "Média do menor percentual (assinados/ganhos mensais)",
-      isPercent: true,
-    },
+    { label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign, color: "#2F6FED", sub: "Soma das comissões diária, semanal e mensal", isCurrency: true },
+    { label: "Metas Batidas (Total)", value: totals.ciclos, icon: Award, color: "#16A34A", sub: "Diário + Semanal + Mensal", isInteger: true },
+    { label: "Vendas Fechadas", value: rawMetrics.assinados, icon: FileCheck, color: "#EA8C1D", sub: "Total de assinados no período", isInteger: true },
+    { label: "Progresso Médio", value: avgProgress, icon: Target, color: "#8B5CF6", sub: "Média do menor percentual (assinados/ganhos mensais)", isPercent: true },
   ];
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
 
-  // ========== RENDER ==========
+  if (!isFirstFilterApplied) {
+    return (
+      <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">
+        <div className="flex justify-center items-center py-12"><Loader2 className="w-8 h-8 animate-spin text-[#2F6FED]" /><span className="ml-2 text-[#64748b]">Aguardando configuração dos filtros...</span></div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">
-
       <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
 
-      {loading && (
-        <div className="flex justify-center items-center py-8">
-          <Loader2 className="w-6 h-6 animate-spin text-[#09175b]" />
-          <span className="ml-2 text-sm text-gray-500">Carregando dados...</span>
+      {/* Botão Atualizar + Timestamp */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2 text-xs text-[#64748b]">
+          {refreshing && <span className="flex items-center gap-1.5 animate-pulse"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Atualizando...</span>}
+          <span>Atualizado {new Date().toLocaleTimeString()}</span>
         </div>
-      )}
-
-      <div className="flex items-center justify-end gap-2 mb-2">
-        {refreshing && (
-          <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            <span>Atualizando dados...</span>
-          </div>
-        )}
-        <span className="text-[10px] text-gray-400">
-          Atualizado {new Date().toLocaleTimeString()}
-        </span>
-        {/* Botão de atualização manual */}
-        <button
-          onClick={() => reloadData(true)}
-          disabled={refreshing}
-          className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
-          aria-label="Atualizar dados manualmente"
-        >
-          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
-          Atualizar
+        <button onClick={() => reloadData(true)} disabled={refreshing} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 transition-colors">
+          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} /> Atualizar Dados
         </button>
       </div>
 
-      {error && (
-        <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-center text-red-700 text-sm mb-4">
-          <p>{error}</p>
-          <button
-            onClick={() => reloadData(true)}
-            className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700 transition-colors"
-          >
-            Tentar novamente
-          </button>
-        </div>
-      )}
-
-      {!loading && filteredColabs.length === 0 && !error && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
-          Nenhum colaborador disponível para os filtros atuais.
-        </div>
-      )}
+      {loading && <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /><span className="ml-2 text-sm text-[#64748b]">Carregando dados...</span></div>}
+      {error && <div className="bg-red-50 text-red-700 p-4 rounded-lg text-sm mb-4"><p>{error}</p><button onClick={() => reloadData(true)} className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700">Tentar novamente</button></div>}
+      {!loading && filteredColabs.length === 0 && !error && <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">Nenhum colaborador disponível para os filtros atuais.</div>}
 
       {!loading && filteredColabs.length > 0 && (
         <>
           {hasActiveFilters && (
-            <div className="mb-4 px-4 py-2 bg-blue-50 rounded-lg text-xs text-blue-700 flex gap-2 flex-wrap">
+            <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex gap-2 flex-wrap">
               <span>📊</span>
-              <span>
-                Mostrando dados para:
-                {filters.equipe !== "todas" && ` Equipe ${filters.equipe}`}
-                {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
-                {filters.produto !== "Todos" && ` • Produto: ${filters.produto}`}
-              </span>
+              <span>Mostrando dados para: {filters.equipe !== "todas" && ` Equipe ${filters.equipe}`} {filters.colaborador !== "todos" && ` - ${filters.colaborador}`} {filters.produto !== "Todos" && ` • Produto: ${filters.produto}`}</span>
             </div>
           )}
 
+          {/* Cards resumo */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             {summaryCards.map((card, idx) => {
               const Icon = card.icon;
               let displayValue: string;
-              if (card.isPercent) {
-                displayValue = `${card.value.toFixed(1)}%`;
-              } else if (card.isCurrency) {
-                displayValue = formatCurrency(card.value);
-              } else if (card.isInteger) {
-                displayValue = formatInt(card.value);
-              } else {
-                displayValue = String(card.value);
-              }
+              if (card.isPercent) displayValue = `${card.value.toFixed(1)}%`;
+              else if (card.isCurrency) displayValue = formatCurrency(card.value);
+              else displayValue = formatInt(card.value);
               return (
-                <div key={card.label} className="madm-card p-5 animate-fade-in-up" style={{ animationDelay: `${idx * 80}ms` }}>
+                <div key={card.label} className="card animate-fade-in-up" style={{ animationDelay: `${idx * 80}ms` }}>
                   <div className="flex items-center gap-3 mb-3">
-                    <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: card.bg }}>
+                    <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: `${card.color}15` }}>
                       <Icon className="w-4.5 h-4.5" style={{ color: card.color }} />
                     </div>
-                    <span className="text-xs text-gray-500 font-medium">{card.label}</span>
+                    <span className="text-xs text-[#64748b] font-medium">{card.label}</span>
                   </div>
-                  <div className="madm-kpi-value text-2xl" style={{ color: "#09175b" }}>{displayValue}</div>
-                  <div className="text-xs text-gray-400 mt-1">{card.sub}</div>
+                  <div className="kpi-value mb-1" style={{ color: "#0f172a" }}>{displayValue}</div>
+                  <div className="text-xs text-[#94a3b8]">{card.sub}</div>
                 </div>
               );
             })}
           </div>
 
-
+          {/* Gráfico + Metas individuais */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-            <div className="madm-card p-5 animate-fade-in-up" style={{ animationDelay: "320ms" }}>
-              <h3 className="text-sm font-bold text-[#09175b] mb-4">Comissão Total por Colaborador</h3>
+            <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "320ms" }}>
+              <h3 className="text-sm font-bold text-[#0f172a] mb-4">Comissão Total por Colaborador</h3>
               {commissionData.length === 0 ? (
-                <div className="text-center text-gray-400 text-sm py-8">Nenhum colaborador com os filtros atuais.</div>
+                <div className="text-center text-[#94a3b8] text-sm py-8">Nenhum colaborador com os filtros atuais.</div>
               ) : (
                 <div className="max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                   <ResponsiveContainer width="100%" height={Math.max(300, commissionData.length * 35)}>
                     <BarChart data={commissionData} layout="vertical" margin={{ left: 20, right: 20 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" horizontal={false} />
-                      <XAxis type="number" tick={{ fontSize: 11, fill: "#6b7280" }} tickFormatter={v => formatCurrency(v)} />
-                      <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: "#374151" }} width={120} interval={0} />
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                      <XAxis type="number" tick={{ fontSize: 11, fill: "#64748b" }} tickFormatter={v => formatCurrency(v)} />
+                      <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: "#0f172a" }} width={120} interval={0} />
                       <Tooltip content={<CustomTooltip />} />
                       <Bar dataKey="totalCommission" name="Comissão Total" radius={[0, 6, 6, 0]} barSize={24}>
                         {commissionData.map((entry, i) => (
-                          <Cell key={i} fill={entry.totalCommission > 0 ? "#34a853" : "#e8eaed"} stroke={entry.totalCommission > 0 ? "#2d8f47" : "#d1d5db"} strokeWidth={1} />
+                          <Cell key={i} fill={entry.totalCommission > 0 ? "#16A34A" : "#e2e8f0"} stroke={entry.totalCommission > 0 ? "#16A34A" : "#cbd5e1"} strokeWidth={1} />
                         ))}
                       </Bar>
                     </BarChart>
@@ -474,8 +325,8 @@ export default function Comissoes() {
               )}
             </div>
 
-            <div className="madm-card p-5 animate-fade-in-up" style={{ animationDelay: "400ms" }}>
-              <h3 className="text-sm font-bold text-[#09175b] mb-4">Metas Mensais vs Realizado</h3>
+            <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "400ms" }}>
+              <h3 className="text-sm font-bold text-[#0f172a] mb-4">Metas Mensais vs Realizado</h3>
               <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                 {commissionData.map(item => {
                   const pctAss = item.metaAssinados ? (item.assinados / item.metaAssinados) * 100 : 0;
@@ -490,28 +341,28 @@ export default function Comissoes() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex justify-between text-sm mb-1">
-                            <span className="font-medium text-gray-700 truncate">{item.name}</span>
-                            <span className="text-gray-500 text-xs ml-2">
+                            <span className="font-medium text-[#0f172a] truncate">{item.name}</span>
+                            <span className="text-[#64748b] text-xs ml-2">
                               {formatInt(item.assinados)}/{formatInt(item.metaAssinados)} A {showGanhos && `| ${formatInt(item.ganhos)}/${formatInt(item.metaGanhos)} G`}
-                              {item.isSpecial && <span className="text-blue-500 ml-1">(só A)</span>}
+                              {item.isSpecial && <span className="text-[#2F6FED] ml-1">(só A)</span>}
                             </span>
                           </div>
-                          <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden shadow-inner">
+                          <div className="progress-bar h-2">
                             <div
-                              className="h-2 rounded-full transition-all duration-500"
+                              className="progress-fill"
                               style={{
                                 width: `${Math.min(pct, 100)}%`,
-                                background: pct >= 100 ? "linear-gradient(90deg, #34a853, #2d8f47)" : pct >= 70 ? "linear-gradient(90deg, #f59e0b, #e6a100)" : "linear-gradient(90deg, #09175b, #1e3a8a)",
+                                background: pct >= 100 ? "#16A34A" : pct >= 70 ? "#EA8C1D" : "#2F6FED",
                               }}
                             />
                           </div>
                         </div>
-                        <span className="text-sm font-bold text-[#09175b] w-18 text-right">{formatCurrency(item.totalCommission)}</span>
+                        <span className="text-sm font-bold text-[#0f172a] w-18 text-right">{formatCurrency(item.totalCommission)}</span>
                       </div>
-                      <div className="text-xs text-gray-500 ml-11 mt-0.5">
-                        Metas batidas (total): <span className="font-semibold text-[#09175b]">{formatInt(item.totalCycles)}</span>
+                      <div className="text-xs text-[#64748b] ml-11 mt-0.5">
+                        Metas batidas (total): <span className="font-semibold text-[#0f172a]">{formatInt(item.totalCycles)}</span>
                         {item.periodDetails && (
-                          <span className="text-gray-400 ml-1">
+                          <span className="text-[#94a3b8] ml-1">
                             (D: {formatInt(item.periodDetails.diario?.cycles || 0)}, S: {formatInt(item.periodDetails.semanal?.cycles || 0)}, M: {formatInt(item.periodDetails.mensal?.cycles || 0)})
                           </span>
                         )}
@@ -519,20 +370,19 @@ export default function Comissoes() {
                     </div>
                   );
                 })}
-                {commissionData.length === 0 && (
-                  <div className="text-center text-gray-400 text-sm py-4">Nenhum colaborador com os filtros atuais.</div>
-                )}
+                {commissionData.length === 0 && <div className="text-center text-[#94a3b8] text-sm py-4">Nenhum colaborador com os filtros atuais.</div>}
               </div>
             </div>
           </div>
 
-          <div className="madm-card p-5 animate-fade-in-up mb-6" style={{ animationDelay: "480ms" }}>
-            <h3 className="text-sm font-bold text-[#09175b] mb-3">Como a comissão é calculada</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-gray-600">
-              <div className="bg-gray-50 rounded-lg p-3"><span className="font-bold">1. Três períodos independentes:</span> diário, semanal e mensal. Cada um possui seu próprio peso e bônus.</div>
-              <div className="bg-gray-50 rounded-lg p-3"><span className="font-bold">2. Metas batidas por período:</span> mínimo entre (assinados ÷ peso_assinados) e (ganhos ÷ peso_ganhos).</div>
-              <div className="bg-gray-50 rounded-lg p-3"><span className="font-bold">3. Comissão total:</span> soma das comissões dos três períodos (cada uma = metas_batidas × bônus_do_período).</div>
-              <div className="bg-gray-50 rounded-lg p-3"><span className="font-bold">4. Hierarquia:</span> supervisores somam os pesos de sua equipe; coordenadores/administrativos somam todos os ativos.</div>
+          {/* Explicação do cálculo */}
+          <div className="card p-5 animate-fade-in-up mb-6" style={{ animationDelay: "480ms" }}>
+            <h3 className="text-sm font-bold text-[#0f172a] mb-3">Como a comissão é calculada</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
+              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos independentes:</span> diário, semanal e mensal. Cada um possui seu próprio peso e bônus.</div>
+              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Metas batidas por período:</span> mínimo entre (assinados ÷ peso_assinados) e (ganhos ÷ peso_ganhos).</div>
+              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma das comissões dos três períodos (cada uma = metas_batidas × bônus_do_período).</div>
+              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Hierarquia:</span> supervisores somam os pesos de sua equipe; coordenadores/administrativos somam todos os ativos.</div>
             </div>
           </div>
         </>

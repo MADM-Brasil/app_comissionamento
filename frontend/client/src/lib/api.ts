@@ -1,25 +1,15 @@
 // src/lib/api.ts
-
-// ============================================================
-// BASE URL – usa VITE_API_URL em produção, /api em dev (proxy)
-// ============================================================
 export const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// ============================================================
-// FUNÇÃO AUXILIAR PARA TRATAR RESPOSTAS (CORRIGIDA)
-// ============================================================
 async function handleResponse(response: Response, defaultErrorMessage: string) {
-  // Verifica se a resposta está vazia (ex: 204 ou 403 sem corpo)
   const contentLength = response.headers.get('content-length');
   if (contentLength === '0' || response.status === 204) {
     if (response.status === 403) {
       throw new Error('Token CSRF inválido. Recarregue a página e tente novamente.');
     }
-    // Resposta vazia não é erro; retornamos um objeto vazio
     return {};
   }
 
-  // Lê o corpo como texto UMA ÚNICA VEZ
   let text;
   try {
     text = await response.text();
@@ -28,12 +18,10 @@ async function handleResponse(response: Response, defaultErrorMessage: string) {
     throw new Error(defaultErrorMessage || 'Erro desconhecido ao processar a resposta');
   }
 
-  // Tenta fazer parse como JSON
   let data;
   try {
     data = JSON.parse(text);
   } catch (_) {
-    // Se não for JSON, usa o texto como mensagem de erro
     console.error('❌ Resposta não é JSON:', text?.substring(0, 200));
     throw new Error(text?.substring(0, 100) || 'Resposta inválida do servidor');
   }
@@ -49,9 +37,6 @@ async function handleResponse(response: Response, defaultErrorMessage: string) {
   return data;
 }
 
-// ============================================================
-// FUNÇÃO AUXILIAR CSRF
-// ============================================================
 function csrfHeaders(extraHeaders: Record<string, string> = {}) {
   const token = localStorage.getItem('csrfToken');
   return {
@@ -61,13 +46,15 @@ function csrfHeaders(extraHeaders: Record<string, string> = {}) {
   };
 }
 
-// ============================================================
-// COLABORADORES E EQUIPES
-// ============================================================
+// ============ COLABORADORES E EQUIPES ============
+
 export async function fetchCollaborators(queryString = "") {
   const url = `${API_BASE}/collaborators${queryString}`;
+  console.log('🌐 [fetchCollaborators] URL:', url);
   const response = await fetch(url, { credentials: 'include' });
+  console.log('📡 [fetchCollaborators] Status:', response.status);
   const data = await handleResponse(response, 'Erro ao carregar colaboradores');
+  console.log('📦 [fetchCollaborators] Itens recebidos:', data.data?.length);
   return data.data || [];
 }
 
@@ -76,7 +63,6 @@ export async function fetchEquipes() {
   const data = await handleResponse(response, 'Erro ao carregar equipes');
   return data.data || [];
 }
-
 // ============================================================
 // MÉTRICAS GLOBAIS
 // ============================================================
@@ -231,7 +217,7 @@ export function getDateRangeFromPeriod(periodo: string): { start: string; end: s
     const first = now.getDate() - now.getDay() + (now.getDay() === 0 ? -6 : 1);
     start = new Date(now.getFullYear(), now.getMonth(), first);
     end = new Date(now.getFullYear(), now.getMonth(), first + 7);
-  } else { // Mês
+  } else {
     start = new Date(now.getFullYear(), now.getMonth(), 1);
     end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   }
