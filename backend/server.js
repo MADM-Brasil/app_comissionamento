@@ -5,6 +5,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import session from 'express-session';
 import crypto from 'crypto';
+import bcrypt from 'bcrypt'; // <-- adicionado para hash da nova senha
 
 import { pool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
@@ -109,7 +110,15 @@ app.use(session({
   },
 }));
 
-// ========== ROTAS PÚBLICAS ==========
+// ========== FUNÇÃO AUXILIAR – período atual ==========
+function getCurrentPeriod() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+// ========== ROTAS PÚBLICAS (sem CSRF) ==========
 app.get('/api/auth/ping', (req, res) => {
   if (!req.session.isAuthenticated) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
@@ -239,14 +248,119 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
-// ========== MIDDLEWARES DE PROTEÇÃO ==========
+// ========== NOVAS ROTAS PÚBLICAS DE RECUPERAÇÃO DE SENHA ==========
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, error: 'E-mail é obrigatório' });
+
+    const periodo = getCurrentPeriod();
+    const result = await pool.query(
+      `SELECT nome, email
+       FROM core.view_app_colaboradores
+       WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
+         AND periodo = $2`,
+      [email, periodo]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'E-mail não encontrado.' });
+    }
+
+    const user = result.rows[0];
+    // Método adicionado ao twoFactorService para enviar código de reset
+    const sendResult = await twoFactorService.sendPasswordResetCode(user.email, user.nome);
+    if (!sendResult.success) {
+      return res.status(500).json({ success: false, error: sendResult.error });
+    }
+
+    req.session.resetEmail = email;
+    req.session.resetName = user.nome;
+
+    req.session.save((err) => {
+      if (err) return res.status(500).json({ success: false, error: 'Erro ao salvar sessão' });
+      res.json({ success: true, message: 'Código enviado para o e-mail.' });
+    });
+  } catch (err) {
+    console.error('Erro em forgot-password:', err);
+    res.status(500).json({ success: false, error: 'Erro interno' });
+  }
+});
+
+app.post('/api/auth/verify-reset-code', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) return res.status(400).json({ success: false, error: 'E-mail e código são obrigatórios' });
+
+    if (!req.session.resetName || req.session.resetEmail !== email) {
+      return res.status(400).json({ success: false, error: 'Sessão de recuperação inválida.' });
+    }
+
+    const verification = twoFactorService.verifyPasswordResetCode(req.session.resetName, code);
+    if (!verification.success) {
+      return res.status(401).json({ success: false, error: verification.error });
+    }
+
+    req.session.resetToken = verification.resetToken;
+    req.session.save((err) => {
+      if (err) return res.status(500).json({ success: false, error: 'Erro interno' });
+      res.json({ success: true, resetToken: verification.resetToken });
+    });
+  } catch (err) {
+    console.error('Erro em verify-reset-code:', err);
+    res.status(500).json({ success: false, error: 'Erro interno' });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { resetToken, newPassword } = req.body;
+    if (!resetToken || !newPassword) return res.status(400).json({ success: false, error: 'Token e nova senha são obrigatórios' });
+    if (newPassword.length < 6) return res.status(400).json({ success: false, error: 'A senha deve ter pelo menos 6 caracteres' });
+
+    if (!req.session.resetToken || req.session.resetToken !== resetToken) {
+      return res.status(401).json({ success: false, error: 'Token inválido ou expirado' });
+    }
+
+    const email = req.session.resetEmail;
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // UPDATE na tabela original (não na view)
+    const updateResult = await pool.query(
+      `UPDATE app_comissionamento.metricas_assessores
+       SET senha_colaborador_hash = $1, updated_at = NOW()
+       WHERE LOWER(TRIM(email)) = LOWER(TRIM($2))
+       RETURNING id_assessor`,
+      [hashedPassword, email]
+    );
+
+    if (updateResult.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
+    }
+
+    // Limpa dados de reset da sessão
+    delete req.session.resetToken;
+    delete req.session.resetEmail;
+    delete req.session.resetName;
+
+    req.session.save((err) => {
+      if (err) return res.status(500).json({ success: false, error: 'Erro ao salvar sessão' });
+      res.json({ success: true, message: 'Senha redefinida com sucesso.' });
+    });
+  } catch (err) {
+    console.error('Erro em reset-password:', err);
+    res.status(500).json({ success: false, error: 'Erro interno' });
+  }
+});
+
+// ========== MIDDLEWARES DE PROTEÇÃO (CSRF + Autenticação) ==========
 app.use(csrfProtection);
 app.use((req, res, next) => {
   if (req.session.isAuthenticated) return next();
   return res.status(401).json({ success: false, error: 'Não autenticado' });
 });
 
-// ========== NOVA ROTA: métricas dos assessores (acessível como /api/metricas-assessores) ==========
+// ========== ROTAS PROTEGIDAS (a partir daqui, token CSRF obrigatório) ==========
 app.get('/api/metricas-assessores', async (req, res) => {
   try {
     const { mes, email, colaborador_id } = req.query;
@@ -275,7 +389,6 @@ app.get('/api/metricas-assessores', async (req, res) => {
   }
 });
 
-// ========== ROTAS PROTEGIDAS ==========
 app.use('/api', colaboradoresRoutes);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/admin', adminRoutes);

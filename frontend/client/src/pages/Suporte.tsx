@@ -6,7 +6,6 @@ import {
   Send,
   X,
   Download,
-  Trash2,
   Eye,
   Loader2,
   CheckCircle,
@@ -14,7 +13,6 @@ import {
   AlertCircle,
   AlertTriangle,
   FileText,
-  RefreshCw,
   Edit2,
   Save,
 } from "lucide-react";
@@ -125,7 +123,7 @@ const getStatusInfo = (status: string) => {
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia'
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia', 'Equipe de Reciclagem'
 ];
 
 const isExcludedTeam = (teamName: string): boolean => {
@@ -373,7 +371,7 @@ function MovimentacaoTab() {
           <div className="flex gap-2">
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">{statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}</option>)}</select>
             <button onClick={exportHistory} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"><Download className="w-3 h-3" /> Exportar</button>
-            <button onClick={clearHistory} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"><Trash2 className="w-3 h-3" /> Limpar</button>
+            <button onClick={clearHistory} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"><X className="w-3 h-3" /> Limpar</button>
           </div>
         </div>
         {loadingHistory ? <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div> :
@@ -389,8 +387,10 @@ function MovimentacaoTab() {
   );
 }
 
-// ---------------------- Aba Reportar ----------------------
+// ---------------------- Aba Reportar (CORRIGIDA – persistência + validação de print + URL singular) ----------------------
 function ReportarTab() {
+  const { currentUser } = useAppStore();
+
   const [assunto, setAssunto] = useState("");
   const [descricao, setDescricao] = useState("");
   const [files, setFiles] = useState<File[]>([]);
@@ -398,30 +398,127 @@ function ReportarTab() {
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [reports, setReports] = useState<ReportItem[]>([]);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
+  const [loadingReports, setLoadingReports] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Carrega os reportes do utilizador a partir da API (GET /suporte/ticket-suporte)
+  const loadUserReports = async () => {
+    if (!currentUser?.nome) {
+      setLoadingReports(false);
+      return;
+    }
+    try {
+      setLoadingReports(true);
+      setLoadError(null);
+      // 🔁 URL CORRIGIDA para singular
+      const res = await fetch(
+        `${API_BASE}/suporte/ticket-suporte?solicitante_nome=${encodeURIComponent(currentUser.nome)}`,
+        { credentials: 'include' }
+      );
+      if (!res.ok) throw new Error(`Erro ${res.status}: ${res.statusText}`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        const mapped: ReportItem[] = data.data.map((ticket: any) => ({
+          id: `REP_${ticket.id_ticket_suporte}`,
+          data: ticket.criado_em,
+          assunto: ticket.assunto,
+          descricao: ticket.descricao || '',
+          descricaoResumida: ticket.descricao
+            ? ticket.descricao.length > 200
+              ? ticket.descricao.substring(0, 200) + "..."
+              : ticket.descricao
+            : '',
+          solicitante: ticket.solicitante_nome,
+          equipe: ticket.equipe_nome,
+          status: ticket.status || "ENVIADO",
+          ultimaAtualizacao: ticket.criado_em,
+        }));
+        setReports(mapped);
+      } else {
+        setLoadError('Formato de resposta inesperado da API.');
+      }
+    } catch (err: any) {
+      console.error('Erro ao carregar reportes:', err);
+      setLoadError(err.message || 'Erro desconhecido ao carregar reportes.');
+    } finally {
+      setLoadingReports(false);
+    }
+  };
+
+  useEffect(() => {
+    if (currentUser?.nome) {
+      loadUserReports();
+    } else {
+      setLoadingReports(false);
+    }
+  }, [currentUser?.nome]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!assunto || !descricao.trim()) { setMessage({ text: "Preencha assunto e descrição", type: "error" }); return; }
-    if (descricao.replace(/\n/g, "").length < 10) { setMessage({ text: "Descrição muito curta", type: "error" }); return; }
-    setLoading(true); setMessage(null);
+    if (!assunto || !descricao.trim()) {
+      setMessage({ text: "Preencha assunto e descrição", type: "error" });
+      return;
+    }
+    if (descricao.replace(/\n/g, "").length < 10) {
+      setMessage({ text: "Descrição muito curta", type: "error" });
+      return;
+    }
+    // 🚨 EXIGE PELO MENOS 1 PRINT
+    if (files.length === 0) {
+      setMessage({ text: "Necessário 1 print para o envio", type: "error" });
+      return;
+    }
+
+    setLoading(true);
+    setMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/suporte/ticket-suporte`, { method: 'POST', headers: getCsrfHeaders(), credentials: 'include', body: JSON.stringify({ assunto, descricao, files: files.map(f => f.name) }) });
+      const res = await fetch(`${API_BASE}/suporte/ticket-suporte`, {
+        method: 'POST',
+        headers: getCsrfHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          assunto,
+          descricao,
+          files: files.map(f => f.name), // adapte se o backend esperar o conteúdo binário
+        }),
+      });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro');
-      const newReport: ReportItem = { id: `REP_${Date.now()}`, data: new Date().toISOString(), assunto, descricao, descricaoResumida: descricao.length > 200 ? descricao.substring(0, 200) + "..." : descricao, solicitante: "Usuário atual", equipe: "Equipe atual", status: "ENVIADO", ultimaAtualizacao: new Date().toISOString() };
-      setReports(prev => [newReport, ...prev]);
-      setMessage({ text: "Reporte registado.", type: "success" });
-      setAssunto(""); setDescricao(""); setFiles([]);
-      const fileInput = document.getElementById("reportar-arquivos") as HTMLInputElement; if (fileInput) fileInput.value = "";
-    } catch (err: any) { setMessage({ text: err.message, type: "error" }); } finally { setLoading(false); }
+      if (!res.ok) throw new Error(data.error || 'Erro ao registrar ticket');
+
+      setMessage({ text: "Reporte registado com sucesso.", type: "success" });
+      setAssunto("");
+      setDescricao("");
+      setFiles([]);
+      const fileInput = document.getElementById("reportar-arquivos") as HTMLInputElement;
+      if (fileInput) fileInput.value = "";
+
+      // Recarrega a lista após envio bem‑sucedido
+      await loadUserReports();
+    } catch (err: any) {
+      if (err.message && err.message.includes('metadados')) {
+        setMessage({ text: "Necessário 1 print para o envio", type: "error" });
+      } else {
+        setMessage({ text: err.message, type: "error" });
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => { if (e.target.files) setFiles(Array.from(e.target.files)); };
-  const removeFile = (index: number) => { setFiles(prev => prev.filter((_, i) => i !== index)); };
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) setFiles(Array.from(e.target.files));
+  };
+
+  const removeFile = (index: number) => {
+    setFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
   const exportReports = () => {
     if (reports.length === 0) return;
     const headers = ["Data", "Assunto", "Status", "Solicitante", "Equipe"];
-    const rows = reports.map(r => [new Date(r.data).toLocaleString("pt-BR"), `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`].join(";"));
+    const rows = reports.map(r =>
+      [new Date(r.data).toLocaleString("pt-BR"), `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`].join(";")
+    );
     const csv = [headers.join(";"), ...rows].join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -429,41 +526,119 @@ function ReportarTab() {
     a.href = url; a.download = `reportes_${new Date().toISOString().split("T")[0]}.csv`;
     a.click(); URL.revokeObjectURL(url);
   };
-  const clearReports = () => { if (confirm("Limpar?")) { setReports([]); setMessage({ text: "Limpos.", type: "success" }); } };
-  const updateAllReportsStatus = () => { setReports(prev => prev.map(r => ({ ...r, status: r.status === "ENVIADO" ? "CONCLUÍDO" : r.status, ultimaAtualizacao: new Date().toISOString() }))); setMessage({ text: "Status atualizados.", type: "success" }); };
+
   const filteredReports = reports.filter(r => filterStatus === "todos" || r.status === filterStatus);
   const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "REVISÃO"];
-  const viewDetails = (report: ReportItem) => { alert(`Detalhes:\n${report.descricao}`); };
+
+  const viewDetails = (report: ReportItem) => {
+    alert(`Detalhes:\n${report.descricao}`);
+  };
 
   return (
     <div className="space-y-6 animate-fade-in-up">
       <div className="card p-5">
         <h2 className="text-lg font-bold text-[#0f172a] mb-4">Reportar Problema</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div><label htmlFor="rep-assunto" className="block text-sm font-medium text-[#0f172a] mb-1">Assunto</label><select id="rep-assunto" value={assunto} onChange={e => setAssunto(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required><option value="">Selecionar assunto</option><option value="Discadora">Discadora</option><option value="CRM">CRM</option><option value="Dash">Dash</option><option value="Acesso">Acessos</option><option value="Reversao">Reversão</option><option value="Outro">Outro</option></select></div>
-          <div><label htmlFor="rep-descricao" className="block text-sm font-medium text-[#0f172a] mb-1">Descrição</label><textarea id="rep-descricao" value={descricao} onChange={e => setDescricao(e.target.value)} rows={5} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /><div className="text-right text-xs text-[#94a3b8] mt-1">{descricao.length}/1000</div></div>
-          <div><label htmlFor="reportar-arquivos" className="block text-sm font-medium text-[#0f172a] mb-1">Anexos</label><input type="file" id="reportar-arquivos" multiple onChange={handleFileChange} className="w-full text-sm" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip" />{files.length > 0 && (<div className="mt-2 space-y-1">{files.map((f, idx) => (<div key={idx} className="flex items-center justify-between bg-[#f8fafc] p-2 rounded text-sm"><span className="truncate">{f.name} ({(f.size / 1024).toFixed(0)} KB)</span><button type="button" onClick={() => removeFile(idx)} className="text-red-500 hover:text-red-700"><X className="w-4 h-4" /></button></div>))}</div>)}</div>
-          {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">{message.text}</div>}
-          <div className="flex justify-end"><button type="submit" disabled={loading} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}{loading ? "Enviando..." : "Enviar Reporte"}</button></div>
+          <div>
+            <label htmlFor="rep-assunto" className="block text-sm font-medium text-[#0f172a] mb-1">Assunto</label>
+            <select id="rep-assunto" value={assunto} onChange={e => setAssunto(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>
+              <option value="">Selecionar assunto</option>
+              <option value="Discadora">Discadora</option>
+              <option value="CRM">CRM</option>
+              <option value="Dash">Dash</option>
+              <option value="Acesso">Acessos</option>
+              <option value="Reversao">Reversão</option>
+              <option value="Outro">Outro</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="rep-descricao" className="block text-sm font-medium text-[#0f172a] mb-1">Descrição</label>
+            <textarea id="rep-descricao" value={descricao} onChange={e => setDescricao(e.target.value)} rows={5} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
+            <div className="text-right text-xs text-[#94a3b8] mt-1">{descricao.length}/1000</div>
+          </div>
+          <div>
+            <label htmlFor="reportar-arquivos" className="block text-sm font-medium text-[#0f172a] mb-1">
+              Anexos (obrigatório pelo menos 1 print)
+            </label>
+            <input type="file" id="reportar-arquivos" multiple onChange={handleFileChange} className="w-full text-sm" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip" />
+            {files.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {files.map((f, idx) => (
+                  <div key={idx} className="flex items-center justify-between bg-[#f8fafc] p-2 rounded text-sm">
+                    <span className="truncate">{f.name} ({(f.size / 1024).toFixed(0)} KB)</span>
+                    <button type="button" onClick={() => removeFile(idx)} className="text-red-500 hover:text-red-700"><X className="w-4 h-4" /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {message && (
+            <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">
+              {message.text}
+            </div>
+          )}
+          <div className="flex justify-end">
+            <button type="submit" disabled={loading} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              {loading ? "Enviando..." : "Enviar Reporte"}
+            </button>
+          </div>
         </form>
       </div>
+
+      {/* Meus Reportes (persistente) */}
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
           <div className="flex gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">{statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}</select>
-            <button type="button" onClick={exportReports} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"><Download className="w-3 h-3" /> Exportar</button>
-            <button type="button" onClick={clearReports} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"><Trash2 className="w-3 h-3" /> Limpar</button>
-            <button type="button" onClick={updateAllReportsStatus} className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-blue-100"><RefreshCw className="w-3 h-3" /> Atualizar</button>
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
+              {statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}
+            </select>
+            <button type="button" onClick={exportReports} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]">
+              <Download className="w-3 h-3" /> Exportar
+            </button>
           </div>
         </div>
-        {filteredReports.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhum reporte</div> :
+        {loadError && (
+          <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700 mb-4">
+            Erro ao carregar reportes: {loadError}
+          </div>
+        )}
+        {loadingReports ? (
+          <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>
+        ) : filteredReports.length === 0 ? (
+          <div className="text-center py-8 text-[#64748b]">Nenhum reporte encontrado</div>
+        ) : (
           <div className="overflow-x-auto">
             <table className="simple-table">
-              <thead><tr><th>Data</th><th>Assunto</th><th>Status</th><th>Ações</th></tr></thead>
-              <tbody>{filteredReports.map(r => { const info = getStatusInfo(r.status); return (<tr key={r.id}><td className="whitespace-nowrap">{new Date(r.data).toLocaleString("pt-BR")}</td><td>{r.assunto}</td><td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td><td><button type="button" onClick={() => viewDetails(r)} className="text-[#2F6FED] hover:text-[#2F6FED]/80"><Eye className="w-4 h-4" /></button></td></tr>); })}</tbody>
+              <thead>
+                <tr>
+                  <th>Data</th>
+                  <th>Assunto</th>
+                  <th>Status</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredReports.map(r => {
+                  const info = getStatusInfo(r.status);
+                  return (
+                    <tr key={r.id}>
+                      <td className="whitespace-nowrap">{new Date(r.data).toLocaleString("pt-BR")}</td>
+                      <td>{r.assunto}</td>
+                      <td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td>
+                      <td>
+                        <button type="button" onClick={() => viewDetails(r)} className="text-[#2F6FED] hover:text-[#2F6FED]/80">
+                          <Eye className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
             </table>
-          </div>}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -673,7 +848,7 @@ function MovimentacoesSuporteTab() {
   );
 }
 
-// ---------------------- Tabela de reportes com edição inline ----------------------
+// ---------------------- Tabela de reportes com edição inline (SalesOps) ----------------------
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
@@ -686,7 +861,8 @@ function ReportesSuporteTab() {
   useEffect(() => {
     const carregarReportes = async () => {
       try {
-        const res = await fetch(`${API_BASE}/suporte/tickets-suporte?todos=1`, { credentials: 'include' });
+        // 🔁 URL CORRIGIDA para singular + ?todos=1
+        const res = await fetch(`${API_BASE}/suporte/ticket-suporte?todos=1`, { credentials: 'include' });
         const data = await res.json();
         if (data.success) setTickets(data.data);
         else setMessage({ text: "Erro ao carregar reportes", type: "error" });

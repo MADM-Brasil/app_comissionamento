@@ -16,6 +16,19 @@ const STATUS_MAP = {
   erro: 'Erro',
 };
 
+// ════════════════════════════════════════════════════════════════════════════
+// ANTES DE USAR, execute no banco de dados:
+//   ALTER TABLE app_comissionamento.tickets_suporte
+//     ADD COLUMN IF NOT EXISTS solicitante_nome TEXT,
+//     ADD COLUMN IF NOT EXISTS equipe_nome TEXT,
+//     ADD COLUMN IF NOT EXISTS observacao_sales_ops TEXT;
+//
+//   -- Se a coluna metadados permitir NULL, não precisa alterar.
+//   -- Mas para garantir consistência, defina um valor padrão:
+//   ALTER TABLE app_comissionamento.tickets_suporte
+//     ALTER COLUMN metadados SET DEFAULT '{}'::jsonb;
+// ════════════════════════════════════════════════════════════════════════════
+
 // ==================== REGISTO DE TICKET DE MOVIMENTAÇÃO ====================
 router.post('/ticket-movimentacao', async (req, res) => {
   try {
@@ -57,8 +70,8 @@ router.post('/ticket-movimentacao', async (req, res) => {
     // 1. Criar ticket base na tabela tickets_suporte
     const baseResult = await pool.query(
       `INSERT INTO app_comissionamento.tickets_suporte 
-         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, criado_em, atualizado_em)
-       VALUES ($1, 'Movimentacao', 'Movimentacao', 'AUTO', 'Aberto', 'movimentacao card', $2, 'suporte comissionamento', NOW(), NOW())
+         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, metadados, criado_em, atualizado_em)
+       VALUES ($1, 'Movimentacao', 'Movimentacao', 'AUTO', 'Aberto', 'movimentacao card', $2, 'suporte comissionamento', '{}'::jsonb, NOW(), NOW())
        RETURNING id_ticket`,
       [PLACEHOLDER_UUID, descricao]
     );
@@ -127,7 +140,6 @@ router.post('/ticket-movimentacao', async (req, res) => {
     const result = await pool.query(query, values);
 
     // ========== INTEGRAÇÃO COM HUBSPOT (em background) ==========
-    // Não bloqueia a resposta ao utilizador; apenas loga o resultado.
     (async () => {
       try {
         let contact = await searchContact({
@@ -177,12 +189,18 @@ router.post('/ticket-suporte', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Assunto e descrição são obrigatórios.' });
     }
 
-    const metadados = files.length > 0 ? { arquivos: files } : null;
+    // Garante que metadados nunca seja NULL
+    const metadados = files.length > 0 ? { arquivos: files } : {};
+    const metadadosJson = JSON.stringify(metadados);
+
+    // Obtém o nome do utilizador e equipa da sessão (ou usa fallback)
+    const solicitanteNome = req.user?.nome || req.body?.solicitante_nome || 'frontend';
+    const equipeNome = req.user?.equipe || req.body?.equipe_nome || '';
 
     const result = await pool.query(
       `INSERT INTO app_comissionamento.tickets_suporte 
-         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, metadados, criado_em, atualizado_em)
-       VALUES ($1, $2, $3, NULL, 'Aberto', $4, $5, 'suporte comissionamento', $6, NOW(), NOW())
+         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, metadados, solicitante_nome, equipe_nome, criado_em, atualizado_em)
+       VALUES ($1, $2, $3, NULL, 'Aberto', $4, $5, 'suporte comissionamento', $6, $7, $8, NOW(), NOW())
        RETURNING id_ticket`,
       [
         PLACEHOLDER_UUID,
@@ -190,7 +208,9 @@ router.post('/ticket-suporte', async (req, res) => {
         'Reporte',
         assunto,
         descricao,
-        metadados ? JSON.stringify(metadados) : null,
+        metadadosJson,
+        solicitanteNome,
+        equipeNome,
       ]
     );
 
@@ -205,7 +225,7 @@ router.post('/ticket-suporte', async (req, res) => {
   }
 });
 
-// ==================== LISTAGEM DE TICKETS ====================
+// ==================== LISTAGEM DE TICKETS DE MOVIMENTAÇÃO ====================
 router.get('/tickets-movimentacao', async (req, res) => {
   try {
     const { status_mapeamento, colaborador_origem_nome, todos } = req.query;
@@ -244,7 +264,48 @@ router.get('/tickets-movimentacao', async (req, res) => {
   }
 });
 
-// ==================== ATUALIZAÇÃO DE TICKET (PATCH) ====================
+// ==================== LISTAGEM DE TICKETS DE SUPORTE (NOVO) ====================
+router.get('/ticket-suporte', async (req, res) => {
+  try {
+    const { solicitante_nome, todos } = req.query;
+    let query = `
+      SELECT id_ticket AS id_ticket_suporte,
+             titulo AS assunto,
+             descricao,
+             solicitante_nome,
+             equipe_nome,
+             status,
+             COALESCE(observacao_sales_ops, '') AS observacao_sales_ops,
+             criado_em
+      FROM app_comissionamento.tickets_suporte
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramIndex = 1;
+
+    if (todos === '1') {
+      // Administrador pode ver todos; opcional: verificar permissão aqui
+      // Nenhum filtro adicional
+    } else if (solicitante_nome) {
+      query += ` AND LOWER(TRIM(solicitante_nome)) = LOWER(TRIM($${paramIndex++}))`;
+      params.push(solicitante_nome);
+    } else {
+      // Sem filtro? retorna array vazio (ou todos, dependendo da regra)
+      // Aqui devolve vazio por segurança
+      return res.json({ success: true, data: [] });
+    }
+
+    query += ' ORDER BY criado_em DESC';
+
+    const result = await pool.query(query, params);
+    return res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Erro ao listar tickets de suporte:', err);
+    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+  }
+});
+
+// ==================== ATUALIZAÇÃO DE TICKET DE MOVIMENTAÇÃO ====================
 router.patch('/tickets-movimentacao/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -313,6 +374,51 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
     return res.json({ success: true, message: 'Ticket atualizado com sucesso (movimentação e ticket base).' });
   } catch (err) {
     console.error('Erro ao atualizar ticket:', err);
+    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+  }
+});
+
+// ==================== ATUALIZAÇÃO DE TICKET DE SUPORTE (NOVO) ====================
+router.patch('/tickets-suporte/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, observacao_sales_ops } = req.body;
+
+    if (!status && observacao_sales_ops === undefined) {
+      return res.status(400).json({ success: false, error: 'Nenhum campo para atualizar.' });
+    }
+
+    const setClauses = [];
+    const values = [];
+    let paramIndex = 1;
+
+    if (status) {
+      setClauses.push(`status = $${paramIndex++}`);
+      values.push(status);
+    }
+    if (observacao_sales_ops !== undefined) {
+      setClauses.push(`observacao_sales_ops = $${paramIndex++}`);
+      values.push(observacao_sales_ops);
+    }
+
+    setClauses.push(`atualizado_em = NOW()`);
+
+    const query = `
+      UPDATE app_comissionamento.tickets_suporte
+      SET ${setClauses.join(', ')}
+      WHERE id_ticket = $${paramIndex}
+      RETURNING id_ticket
+    `;
+    values.push(id);
+
+    const result = await pool.query(query, values);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Ticket de suporte não encontrado.' });
+    }
+
+    return res.json({ success: true, message: 'Ticket de suporte atualizado com sucesso.' });
+  } catch (err) {
+    console.error('Erro ao atualizar ticket de suporte:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
   }
 });

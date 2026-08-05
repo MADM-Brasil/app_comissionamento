@@ -185,6 +185,47 @@ router.get('/assinados', requireAuth, async (req, res) => {
   }
 });
 
+router.get('/assinados-diario-por-equipe', requireAuth, async (req, res) => {
+  try {
+    const { inicio, fim, equipe } = req.query;
+    if (!inicio || !fim) return res.status(400).json({ success: false, error: 'inicio e fim obrigatórios' });
+
+    let query = `
+      SELECT
+        equipe_responsavel_assinatura as equipe,
+        (data_assinatura AT TIME ZONE 'UTC')::date as dia,
+        COUNT(*)::int as total
+      FROM madm.view_app_emitidos_e_assinados
+      WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1
+        AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
+        AND status = 'signed'
+        AND consultor_responsavel_assinatura IS NOT NULL
+        AND consultor_responsavel_assinatura != ''
+    `;
+    const params = [inicio, fim];
+
+    if (equipe && equipe !== 'todas') {
+      query += ` AND LOWER(TRIM(equipe_responsavel_assinatura)) = LOWER(TRIM($3))`;
+      params.push(equipe);
+    }
+
+    query += ` GROUP BY equipe_responsavel_assinatura, dia ORDER BY dia, equipe_responsavel_assinatura`;
+
+    const result = await db.query(query, params);
+    const rows = result.rows.map(item => ({
+      equipe: item.equipe,
+      time: item.equipe,
+      dia: item.dia instanceof Date ? item.dia.toISOString().slice(0, 10) : item.dia,
+      total: Number(item.total) || 0,
+    }));
+
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error('Erro em /assinados-diario-por-equipe:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // --- PROTOCOLADOS ---
 router.get('/protocolados', requireAuth, async (req, res) => {
   try {

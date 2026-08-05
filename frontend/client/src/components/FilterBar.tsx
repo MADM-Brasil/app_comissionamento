@@ -25,7 +25,7 @@ const normalize = (str: string): string => (str || '').trim().toLowerCase();
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia'
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia', 'Equipe de Reciclagem'
 ];
 
 const isExcludedTeam = (teamName: string): boolean => {

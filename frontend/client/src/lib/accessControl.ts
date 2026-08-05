@@ -15,11 +15,14 @@ interface User {
   nome_equipe?: string;
   email?: string;
   nome?: string;
-  status?: string;         // necessário para verificar "desativado"
+  status?: string;        
   [key: string]: any;
 }
 
-interface Permissions {
+export interface Permissions {
+  canAccessDashboard: boolean;   // Home
+  canAccessComissoes: boolean;   // Página Comissões
+  canAccessRanking: boolean;     // Ranking
   canAccessReports: boolean;
   canAccessConfiguration: boolean;
   canViewTeam: boolean;
@@ -53,7 +56,7 @@ interface UIConfig extends FullPermissions {
   level: Level;
   levelName: string;
   cargo?: string;
-  grupo?: string;               // compatibilidade
+  grupo?: string;
   nome_equipe?: string;
   menuItems: MenuItem[];
   filter: FilterRestrictions;
@@ -95,6 +98,9 @@ const GROUP_MAPPING: Record<string, Level> = {
 
 const PERMISSIONS: Record<Level, FullPermissions> = {
   [LEVELS.NONE]: {
+    canAccessDashboard: false,
+    canAccessComissoes: false,
+    canAccessRanking: false,
     canAccessReports: false,
     canAccessConfiguration: false,
     canViewTeam: false,
@@ -108,6 +114,9 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Sem acesso',
   },
   [LEVELS.ASSESSOR]: {
+    canAccessDashboard: true,      
+    canAccessComissoes: true,      
+    canAccessRanking: true,       
     canAccessReports: false,
     canAccessConfiguration: false,
     canViewTeam: false,
@@ -118,9 +127,12 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     filterLocked: true,
     lockedTeam: true,
     lockedCollaborator: true,
-    description: 'Visualiza apenas seus próprios dados',
+    description: 'Visualiza seus próprios dados, Home, Comissões e Ranking',
   },
   [LEVELS.SUPERVISAO]: {
+    canAccessDashboard: true,
+    canAccessComissoes: true,
+    canAccessRanking: true,
     canAccessReports: true,
     canAccessConfiguration: true,
     canViewTeam: true,
@@ -134,6 +146,9 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Visualiza dados da equipe; vê configurações sem editar',
   },
   [LEVELS.COORDENADOR]: {
+    canAccessDashboard: true,
+    canAccessComissoes: true,
+    canAccessRanking: true,
     canAccessReports: true,
     canAccessConfiguration: true,
     canViewTeam: true,
@@ -147,6 +162,9 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Ajusta metas, não altera bônus, filtro livre',
   },
   [LEVELS.ADMINISTRATIVO]: {
+    canAccessDashboard: true,
+    canAccessComissoes: true,
+    canAccessRanking: true,
     canAccessReports: true,
     canAccessConfiguration: true,
     canViewTeam: true,
@@ -165,7 +183,7 @@ export function getAccessLevel(cargo: string | undefined, status?: string): Leve
   // 1. Se status for "desativado", sem acesso
   if (status && normalize(status) === 'desativado') return LEVELS.NONE;
 
-  // 2. Mapeia o cargo (case insensitive e sem espaços extras)
+  // 2. Mapeia o cargo
   if (!cargo) return LEVELS.NONE;
   const normalized = normalize(cargo);
   if (GROUP_MAPPING[normalized] !== undefined) {
@@ -193,19 +211,22 @@ export function getUserPermissions(user?: User) {
     level,
     levelName: getLevelName(level),
     cargo: user?.cargo,
-    grupo: user?.cargo,            // compatibilidade
+    grupo: user?.cargo,    
     nome_equipe: user?.nome_equipe,
-    canAccessReports: perms.canAccessReports as boolean,
-    canAccessConfiguration: perms.canAccessConfiguration as boolean,
-    canViewTeam: perms.canViewTeam as boolean,
-    canEditConfiguration: perms.canEditConfiguration as boolean,
-    canEditBonus: perms.canEditBonus as boolean,
-    canGenerateNextMonth: perms.canGenerateNextMonth as boolean,
-    canExportData: perms.canExportData as boolean,
-    filterLocked: perms.filterLocked as boolean,
-    lockedTeam: perms.lockedTeam as boolean,
-    lockedCollaborator: perms.lockedCollaborator as boolean,
-    description: perms.description as string,
+    canAccessDashboard: perms.canAccessDashboard,
+    canAccessComissoes: perms.canAccessComissoes,
+    canAccessRanking: perms.canAccessRanking,
+    canAccessReports: perms.canAccessReports,
+    canAccessConfiguration: perms.canAccessConfiguration,
+    canViewTeam: perms.canViewTeam,
+    canEditConfiguration: perms.canEditConfiguration,
+    canEditBonus: perms.canEditBonus,
+    canGenerateNextMonth: perms.canGenerateNextMonth,
+    canExportData: perms.canExportData,
+    filterLocked: perms.filterLocked,
+    lockedTeam: perms.lockedTeam,
+    lockedCollaborator: perms.lockedCollaborator,
+    description: perms.description,
   };
 }
 
@@ -230,7 +251,7 @@ export function filterTeamData(teamMembers: User[], currentUser?: User): User[] 
   if (userLevel === LEVELS.ASSESSOR) {
     return teamMembers.filter(m => m.email === currentUser.email);
   }
-  return [];  // NONE vê nada
+  return []; 
 }
 
 export function getFilterRestrictions(user?: User): FilterRestrictions {
@@ -262,6 +283,9 @@ export function getUIConfig(currentUser?: User): UIConfig {
   const filterRestrictions = getFilterRestrictions(currentUser);
 
   return {
+    canAccessDashboard: perms.canAccessDashboard,
+    canAccessComissoes: perms.canAccessComissoes,
+    canAccessRanking: perms.canAccessRanking,
     canAccessReports: perms.canAccessReports,
     canAccessConfiguration: perms.canAccessConfiguration,
     canViewTeam: perms.canViewTeam,
@@ -288,20 +312,29 @@ export function getUIConfig(currentUser?: User): UIConfig {
 }
 
 function getMenuItems(permissions: {
+  canAccessDashboard: boolean;
+  canAccessComissoes: boolean;
+  canAccessRanking: boolean;
   canViewTeam: boolean;
   canAccessReports: boolean;
   canAccessConfiguration: boolean;
 }): MenuItem[] {
   const items: MenuItem[] = [];
-  items.push({ id: 'dashboard', label: 'Dashboard', link: '/' });
-  if (permissions.canViewTeam) {
-    items.push({ id: 'team', label: 'Equipe', link: '/equipe' });
+  if (permissions.canAccessDashboard) {
+    items.push({ id: 'dashboard', label: 'Home', link: '/' });
   }
-  if (permissions.canAccessReports) {
-    items.push({ id: 'reports', label: 'Relatórios', link: '/relatorios' });
+  if (permissions.canAccessComissoes) {
+    items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
+  }
+  // Agrupa "Dashboard" (Funil, Visão Geral, Equipe, etc.) se tiver acesso a qualquer subitem
+  if (permissions.canViewTeam || permissions.canAccessReports) {
+    items.push({ id: 'dashboard-group', label: 'Dashboard', link: '' });
+  }
+  if (permissions.canAccessRanking) {
+    items.push({ id: 'ranking', label: 'Ranking', link: '/ranking' });
   }
   if (permissions.canAccessConfiguration) {
-    items.push({ id: 'configuration', label: 'Configurações', link: '/configuracoes' });
+    items.push({ id: 'configuration', label: 'Configurações', link: '/configuration' });
   }
   return items;
 }

@@ -1,7 +1,8 @@
 // backend/security/verif-2factory.js
 import nodemailer from 'nodemailer';
+import crypto from 'crypto';
 
-// Armazenamento temporário dos códigos (chave: email, valor: { code, expires })
+// Armazenamento temporário dos códigos (chave: email ou userName, valor: { code, expires })
 const codeStore = new Map();
 
 // SendGrid – funciona em qualquer ambiente (inclusive Render)
@@ -33,69 +34,25 @@ function generateCode() {
 }
 
 /**
- * Envia o código de verificação por e‑mail.
- * Estratégia: SendGrid → SMTP → console
- */
-async function sendCode(email, userName) {
-  const code = generateCode();
-  const expires = Date.now() + 5 * 60 * 1000; // expira em 5 minutos
-  codeStore.set(email, { code, expires });
-
-  // 1. Tenta enviar via SendGrid (se configurado)
-  if (sendgridApiKey) {
-    try {
-      await sendViaSendgrid(email, userName, code);
-      console.log(`✅ [2FA] E-mail enviado via SendGrid para ${email}`);
-      return { success: true, tempToken: email };
-    } catch (err) {
-      console.error(`❌ [2FA] SendGrid falhou: ${err.message}`);
-      // Continua para o próximo método (SMTP ou console)
-    }
-  }
-
-  // 2. Tenta enviar via SMTP (se configurado)
-  if (hasSmtpCredentials) {
-    try {
-      await transporter.sendMail({
-        from: process.env.EMAIL_FROM || `"MADM Brasil" <${emailUser}>`,
-        to: email,
-        subject: 'Código de verificação - MADM Brasil',
-        html: `<p>Olá ${userName || ''},</p>
-               <p>Seu código de verificação é: <strong>${code}</strong></p>
-               <p>Este código expira em 5 minutos.</p>`,
-      });
-      console.log(`✅ [2FA] E-mail enviado via SMTP para ${email}`);
-      return { success: true, tempToken: email };
-    } catch (err) {
-      console.error(`❌ [2FA] SMTP falhou: ${err.message}`);
-      // Continua para o console
-    }
-  }
-
-  // 3. Fallback: exibe o código no console
-  console.log(`📧 [2FA] Nenhum serviço de e‑mail disponível. Código para ${email}: ${code}`);
-  return { success: true, tempToken: email };
-}
-
-/**
  * Envia e‑mail usando a API HTTP do SendGrid
  */
-async function sendViaSendgrid(to, userName, code) {
+async function sendViaSendgrid(to, userName, code, isReset = false) {
   const url = 'https://api.sendgrid.com/v3/mail/send';
   const fromEmail = process.env.EMAIL_USER || 'noreply@madmbrasil.com';
+  const subject = isReset ? 'Recuperação de senha - MADM Brasil' : 'Código de verificação - MADM Brasil';
+  const html = isReset
+    ? `<p>Olá ${userName || ''},</p>
+       <p>Seu código de recuperação de senha é: <strong>${code}</strong></p>
+       <p>Este código expira em 5 minutos.</p>`
+    : `<p>Olá ${userName || ''},</p>
+       <p>Seu código de verificação é: <strong>${code}</strong></p>
+       <p>Este código expira em 5 minutos.</p>`;
 
   const data = {
     personalizations: [{ to: [{ email: to }] }],
     from: { email: fromEmail, name: 'MADM Brasil' },
-    subject: 'Código de verificação - MADM Brasil',
-    content: [
-      {
-        type: 'text/html',
-        value: `<p>Olá ${userName || ''},</p>
-               <p>Seu código de verificação é: <strong>${code}</strong></p>
-               <p>Este código expira em 5 minutos.</p>`,
-      },
-    ],
+    subject,
+    content: [{ type: 'text/html', value: html }],
   };
 
   const response = await fetch(url, {
@@ -111,6 +68,92 @@ async function sendViaSendgrid(to, userName, code) {
     const errorText = await response.text();
     throw new Error(`SendGrid HTTP ${response.status}: ${errorText}`);
   }
+}
+
+/**
+ * Envia o código de verificação por e‑mail.
+ * Estratégia: SendGrid → SMTP → console
+ */
+async function sendCode(email, userName) {
+  const code = generateCode();
+  const expires = Date.now() + 5 * 60 * 1000; // 5 minutos
+  codeStore.set(email, { code, expires });
+
+  // 1. Tenta enviar via SendGrid
+  if (sendgridApiKey) {
+    try {
+      await sendViaSendgrid(email, userName, code, false);
+      console.log(`✅ [2FA] E-mail enviado via SendGrid para ${email}`);
+      return { success: true, tempToken: email };
+    } catch (err) {
+      console.error(`❌ [2FA] SendGrid falhou: ${err.message}`);
+    }
+  }
+
+  // 2. Tenta enviar via SMTP
+  if (hasSmtpCredentials) {
+    try {
+      await transporter.sendMail({
+        from: process.env.EMAIL_FROM || `"MADM Brasil" <${emailUser}>`,
+        to: email,
+        subject: 'Código de verificação - MADM Brasil',
+        html: `<p>Olá ${userName || ''},</p>
+               <p>Seu código de verificação é: <strong>${code}</strong></p>
+               <p>Este código expira em 5 minutos.</p>`,
+      });
+      console.log(`✅ [2FA] E-mail enviado via SMTP para ${email}`);
+      return { success: true, tempToken: email };
+    } catch (err) {
+      console.error(`❌ [2FA] SMTP falhou: ${err.message}`);
+    }
+  }
+
+  // 3. Fallback: console
+  console.log(`📧 [2FA] Nenhum serviço de e‑mail disponível. Código para ${email}: ${code}`);
+  return { success: true, tempToken: email };
+}
+
+/**
+ * Envia código de recuperação de senha (reaproveita a lógica de envio, mas usa a chave userName)
+ */
+async function sendPasswordResetCode(email, userName) {
+  const code = generateCode();
+  const expires = Date.now() + 5 * 60 * 1000;
+  // Usamos o userName como chave, conforme usado no verifyResetCode
+  codeStore.set(userName, { code, expires });
+
+  // 1. Tenta enviar via SendGrid
+  if (sendgridApiKey) {
+    try {
+      await sendViaSendgrid(email, userName, code, true); // isReset = true
+      console.log(`✅ [RESET] E-mail enviado via SendGrid para ${email}`);
+      return { success: true, tempToken: userName };
+    } catch (err) {
+      console.error(`❌ [RESET] SendGrid falhou: ${err.message}`);
+    }
+  }
+
+  // 2. Tenta SMTP
+  if (hasSmtpCredentials) {
+    try {
+      await transporter.sendMail({
+        from: process.env.EMAIL_FROM || `"MADM Brasil" <${emailUser}>`,
+        to: email,
+        subject: 'Recuperação de senha - MADM Brasil',
+        html: `<p>Olá ${userName || ''},</p>
+               <p>Seu código de recuperação de senha é: <strong>${code}</strong></p>
+               <p>Este código expira em 5 minutos.</p>`,
+      });
+      console.log(`✅ [RESET] E-mail enviado via SMTP para ${email}`);
+      return { success: true, tempToken: userName };
+    } catch (err) {
+      console.error(`❌ [RESET] SMTP falhou: ${err.message}`);
+    }
+  }
+
+  // 3. Console
+  console.log(`📧 [RESET] Nenhum serviço de e‑mail disponível. Código para ${email}: ${code}`);
+  return { success: true, tempToken: userName };
 }
 
 /**
@@ -133,7 +176,29 @@ function verifyCode(userId, code) {
 }
 
 /**
- * Reenvia um novo código (remove o anterior e gera outro).
+ * Verifica o código de recuperação de senha e gera um token se válido.
+ */
+function verifyPasswordResetCode(userName, code) {
+  const entry = codeStore.get(userName);
+  if (!entry) {
+    return { success: false, error: 'Nenhum código encontrado.' };
+  }
+  if (Date.now() > entry.expires) {
+    codeStore.delete(userName);
+    return { success: false, error: 'Código expirado.' };
+  }
+  if (entry.code !== code) {
+    return { success: false, error: 'Código inválido.' };
+  }
+  codeStore.delete(userName);
+  // Gera um token aleatório para autorizar o reset
+  const resetToken = crypto.randomBytes(32).toString('hex');
+  // Opcionalmente, poderia armazenar o token com expiração; mas usamos a sessão
+  return { success: true, resetToken };
+}
+
+/**
+ * Reenvia um novo código (remove o anterior e gera outro) – para 2FA.
  */
 async function resendCode(userId, email) {
   codeStore.delete(userId);
@@ -141,17 +206,25 @@ async function resendCode(userId, email) {
 }
 
 /**
- * Remove o código do usuário (utilizado no cancelamento/logout).
+ * Remove o código do usuário.
  */
 function clearCode(userId) {
   codeStore.delete(userId);
 }
 
 /**
- * Método para parar um possível temporizador (mantido por compatibilidade).
+ * Método mantido por compatibilidade.
  */
 function stopTimer() {
   // Sem operação
 }
 
-export default { sendCode, verifyCode, resendCode, clearCode, stopTimer };
+export default {
+  sendCode,
+  verifyCode,
+  resendCode,
+  clearCode,
+  stopTimer,
+  sendPasswordResetCode,
+  verifyPasswordResetCode,
+};
