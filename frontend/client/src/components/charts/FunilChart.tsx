@@ -1,5 +1,5 @@
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Card } from "@/components/ui/Card";
+import { Card } from "@/components/ui/card";
 
 interface FunilChartProps {
   etapas: Array<{ stage: string; count: number; color?: string }>;

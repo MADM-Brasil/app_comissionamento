@@ -4,7 +4,7 @@ import clsx from "clsx";
 import { Link } from "wouter";
 import { useAppStore, type Collaborator, type RawMetrics } from "@/lib/dataStore";
 import FilterBar from "@/components/FilterBar";
-import { Card } from "@/components/ui/Card";
+import { Card } from "@/components/ui/card";
 import { KpiCard } from "@/components/kpi/KpiCard";
 import { formatNumero } from "@/lib/format";
 import {
