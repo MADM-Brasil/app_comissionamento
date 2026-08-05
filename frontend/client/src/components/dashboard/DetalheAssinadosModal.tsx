@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { Card } from "@/components/ui/Card";
+import { Card } from "@/components/ui/card";
 import type { Collaborator } from "@/lib/dataStore";
 import { formatNumero } from "@/lib/format";
 

@@ -34,7 +34,7 @@ import {
   YAxis,
 } from "recharts";
 import { useAppStore, Collaborator } from "@/lib/dataStore";
-import { Card } from "@/components/ui/Card";
+import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import DashboardLayout from "@/components/DashboardLayout";
 import { useAccessControl } from "@/hooks/useAccessControl";

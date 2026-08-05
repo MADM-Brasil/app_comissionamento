@@ -26,7 +26,7 @@ import {
 import { cn } from "@/lib/utils";
 import { KpiCard } from "@/components/kpi/KpiCard";
 import { ResumoMesCard } from "@/components/kpi/ResumoMesCard";
-import { Card } from "@/components/ui/Card";
+import { Card } from "@/components/ui/card";
 import { FunilChart } from "@/components/charts/FunilChart";
 import { DetalheAssinadosModal } from "@/components/dashboard/DetalheAssinadosModal";
 import { calcularPaceProjecao, classificarPace } from "@/lib/diagnostico";
