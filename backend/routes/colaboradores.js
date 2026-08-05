@@ -162,7 +162,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       };
     });
 
-    console.log(`✅ Retornando ${colaboradores.length} colaboradores (incluindo Judit).`);
+    console.log(`✅ Retornando ${colaboradores.length} colaboradores.`);
     res.json({ success: true, data: colaboradores });
   } catch (err) {
     console.error('❌ Erro ao buscar colaboradores:', err);

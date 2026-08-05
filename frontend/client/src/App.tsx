@@ -15,7 +15,7 @@ import Ranking from "./pages/Ranking";
 import Configuration from "./pages/Configuration";
 import Suporte from "./pages/Suporte";
 import Login from "./pages/Login";
-import Vgeral from "./pages/Vgeral";
+import Vgeral from "./pages/Visao_geral";
 import Gargalos from "./pages/Gargalos";
 import Equipe from "./pages/Equipe";
 import Verify2FA from "./pages/ResetPassword/Verify2FA";
