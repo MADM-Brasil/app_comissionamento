@@ -11,9 +11,6 @@ function requireAuth(req, res, next) {
   next();
 }
 
-/**
- * Retorna o primeiro dia do mês atual no formato YYYY-MM-DD.
- */
 function getCurrentPeriod() {
   const now = new Date();
   const year = now.getFullYear();
@@ -21,20 +18,20 @@ function getCurrentPeriod() {
   return `${year}-${month}-01`;
 }
 
-/**
- * Converte um parâmetro de mês (YYYY-MM) para data métrica (YYYY-MM-DD).
- * Se já for uma data completa, mantém.
- */
 function parseMesToDataMetrica(mesParam) {
   if (!mesParam) return getCurrentPeriod();
   if (/^\d{4}-\d{2}$/.test(mesParam)) {
     return `${mesParam}-01`;
   }
-  return mesParam; // já deve estar no formato YYYY-MM-DD
+  return mesParam;
 }
 
 // Mapeamento de cargo para produto (usado no retorno)
-function mapGrupoToProduto(cargo) {
+function mapGrupoToProduto(cargo, classificacaoOperacional) {
+  // Se for Judit, usa 'Judit' como produto (ou mantém o mapeamento específico)
+  if (classificacaoOperacional && classificacaoOperacional.toLowerCase() === 'judit') {
+    return 'Judit';
+  }
   const mapping = {
     'Elite': 'Auxilio Acidente',
     'Quinquenio': 'Quinquenio',
@@ -44,7 +41,6 @@ function mapGrupoToProduto(cargo) {
   return mapping[cargo] || '';
 }
 
-// Equipes que não devem ser retornadas na listagem de equipes
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
@@ -59,6 +55,8 @@ function normalize(str) {
 
 // ============================================================
 // GET /api/collaborators
+// Agora integra colaboradores Judit da view de métricas,
+// mesmo que não existam em core.view_app_colaboradores.
 // ============================================================
 router.get('/collaborators', requireAuth, async (req, res) => {
   const mesParam = req.query.mes;
@@ -66,24 +64,39 @@ router.get('/collaborators', requireAuth, async (req, res) => {
   console.log(`📅 Buscando colaboradores para data_metrica: ${dataMetrica}`);
 
   try {
-    // Buscar colaboradores filtrando por data_metrica (ex: '2026-08-01')
-    const todosColabs = await db.query(`
-      SELECT c.email, c.nome, c.nome_equipe, c.cargo, c.status, c.periodo
-      FROM core.view_app_colaboradores c
-      INNER JOIN app_comissionamento.view_app_metricas_assessores m
+    // Primeiro, buscar todos os colaboradores com métricas na data, incluindo classificacao_operacional
+    // Usamos LEFT JOIN para incluir colaboradores que podem não estar em core.view_app_colaboradores,
+    // mas que estão em view_app_metricas_assessores (ex: Judit recém criados).
+    // Se o colaborador não existir em core, os campos de nome_equipe, cargo, status virão nulos,
+    // então tratamos com COALESCE.
+    const query = `
+      SELECT 
+        COALESCE(c.email, m.email) AS email,
+        COALESCE(c.nome, m.email) AS nome,
+        c.nome_equipe,
+        c.cargo,
+        c.status,
+        m.classificacao_operacional,
+        m.data_metrica
+      FROM app_comissionamento.view_app_metricas_assessores m
+      LEFT JOIN core.view_app_colaboradores c
         ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
       WHERE m.data_metrica::date = $1::date
-        AND c.nome_equipe IS NOT NULL AND TRIM(c.nome_equipe) != ''
-        AND LOWER(c.status) != 'desativado'
-        AND LOWER(c.cargo) != 'desativado'
-    `, [dataMetrica]);
-    const colabsArray = todosColabs.rows;
+        AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
+        AND (c.status IS NULL OR LOWER(c.status) != 'desativado')
+        AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')
+        -- Para colaboradores Judit, mesmo que não tenham cargo/equipe, incluímos
+        AND (m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != '')
+    `;
+    const result = await db.query(query, [dataMetrica]);
+    const colabsArray = result.rows;
 
     if (colabsArray.length === 0) {
       return res.json({ success: true, data: [] });
     }
 
-    // Buscar métricas do mês para popular pesos e bônus
+    // Buscar métricas do mês para popular pesos e bônus (já temos na mesma view, mas podemos reaproveitar)
+    // Para simplificar, vamos buscar novamente todas as métricas para mapear por email.
     const metricas = await db.query(`
       SELECT email, data_metrica,
              COALESCE(peso_meta_assinados_diario, 3)   AS meta_diario_assinados,
@@ -97,24 +110,30 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       WHERE data_metrica::date = $1::date
     `, [dataMetrica]);
 
-    // Mapeia métricas por email normalizado
     const metricsByEmail = new Map();
     for (const m of metricas.rows) {
       metricsByEmail.set(normalize(m.email), m);
     }
 
-    // Montar resposta no formato esperado pelo front-end
+    // Montar resposta
     const colaboradores = colabsArray.map(colab => {
       const emailNormalizado = normalize(colab.email);
       const metrica = metricsByEmail.get(emailNormalizado);
 
+      // Determinar canal: se classificacao_operacional for 'Judit', então canal = 'Judit', senão 'Discadora'
+      const isJudit = colab.classificacao_operacional && colab.classificacao_operacional.toLowerCase() === 'judit';
+      const canal = isJudit ? 'Judit' : 'Discadora';
+
+      // Produto: se Judit, produto = 'Judit', senão usa mapeamento de cargo
+      const produto = isJudit ? 'Judit' : mapGrupoToProduto(colab.cargo, colab.classificacao_operacional);
+
       return {
-        id: colab.email,                               // identificador único é o e-mail
-        name: colab.nome,
+        id: colab.email,
+        name: colab.nome || colab.email,
         email: colab.email,
-        equipeId: '',                                  // a view não fornece id_equipe
-        equipeNome: colab.nome_equipe,
-        grupo: colab.cargo || '',                      // compatibilidade
+        equipeId: '',
+        equipeNome: colab.nome_equipe || '',
+        grupo: colab.cargo || '',
         cargo: colab.cargo || '',
         status: colab.status || 'ativo',
         periodo: colab.periodo || dataMetrica,
@@ -136,11 +155,14 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         metaGanhos: 3,
         bonusPorCiclo: 0,
         bonusRecebido: 0,
-        produto: mapGrupoToProduto(colab.cargo || ''),
+        produto,
+        // Campos adicionais para identificar Judit
+        classificacaoOperacional: colab.classificacao_operacional || '',
+        canal, // 'Judit' ou 'Discadora'
       };
     });
 
-    console.log(`✅ Retornando ${colaboradores.length} colaboradores.`);
+    console.log(`✅ Retornando ${colaboradores.length} colaboradores (incluindo Judit).`);
     res.json({ success: true, data: colaboradores });
   } catch (err) {
     console.error('❌ Erro ao buscar colaboradores:', err);
@@ -149,27 +171,27 @@ router.get('/collaborators', requireAuth, async (req, res) => {
 });
 
 // ============================================================
-// GET /api/equipes
+// GET /api/equipes (sem alterações, mas pode incluir Judit)
 // ============================================================
 router.get('/equipes', requireAuth, async (req, res) => {
   const mesParam = req.query.mes;
   const dataMetrica = parseMesToDataMetrica(mesParam);
   try {
     const result = await db.query(
-      `SELECT DISTINCT c.nome_equipe AS nome
-       FROM core.view_app_colaboradores c
-       INNER JOIN app_comissionamento.view_app_metricas_assessores m
+      `SELECT DISTINCT COALESCE(c.nome_equipe, 'Sem Equipe') AS nome
+       FROM app_comissionamento.view_app_metricas_assessores m
+       LEFT JOIN core.view_app_colaboradores c
          ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
        WHERE m.data_metrica::date = $1::date
-         AND c.nome_equipe IS NOT NULL AND TRIM(c.nome_equipe) != ''
-         AND LOWER(c.status) != 'desativado'
-         AND LOWER(c.cargo) != 'desativado'`,
+         AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
+         AND (c.status IS NULL OR LOWER(c.status) != 'desativado')
+         AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')`,
       [dataMetrica]
     );
 
     const equipes = result.rows
       .map(r => ({ id: r.nome, nome: r.nome }))
-      .filter(eq => !EXCLUDED_TEAMS.includes(eq.nome))
+      .filter(eq => !EXCLUDED_TEAMS.includes(eq.nome) && eq.nome !== 'Sem Equipe')
       .sort((a, b) => a.nome.localeCompare(b.nome));
 
     res.json({ success: true, data: equipes });

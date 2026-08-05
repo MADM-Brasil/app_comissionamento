@@ -1,5 +1,5 @@
 // src/components/DashboardLayout.tsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
@@ -10,51 +10,25 @@ import {
   Bell,
   Menu,
   X,
-  ChevronRight,
+  ChevronRight, 
   ChevronDown,
   Settings,
   LogOut,
   Calendar,
   RefreshCw,
   Home,
-  HelpCircle,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { logout } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import logoBranca from './img/LogoBranca.png';
-import path from "path";
+import { getUserPermissions } from "@/lib/accessControl";
 
+// Tipos auxiliares
 type NavChild = { path: string; label: string; icon: React.ComponentType<any> };
 type NavItem =
   | { path: string; label: string; icon: React.ComponentType<any>; children?: undefined }
   | { label: string; icon: React.ComponentType<any>; children: NavChild[] };
-
-const navItems: NavItem[] = [
-  { path: "/", label: "Home", icon: Home },
-  { path: "/comissoes", label: "Comissões", icon: DollarSign },
-  {
-    label: "Dashboard",
-    icon: LayoutDashboard,
-    children: [
-      { path: "/funil", label: "Funil de Vendas", icon: GitBranch },
-      { path: "/analytics", label: "Analytics", icon: BarChart3 },
-    ],
-  },
-  { path: "/ranking", label: "Ranking", icon: Trophy },
-  { path: "/suporte", label: "Suporte", icon: HelpCircle},
-  { path: "/configuration", label: "Configurações", icon: Settings },
-];
-
-const mobileNavItems = [
-  { path: "/", label: "Home", icon: Home },
-  { path: "/comissoes", label: "Comissões", icon: DollarSign },
-  { path: "/funil", label: "Funil", icon: GitBranch },
-  { path: "/analytics", label: "Analytics", icon: BarChart3 },
-  { path: "/ranking", label: "Ranking", icon: Trophy },
-  { path: "/suporte", label: "Suporte", icon: HelpCircle},
-  { path: "/configuration", label: "Config.", icon: Settings },  
-];
 
 const HIDE_PERIOD_FILTER_PATHS = ["/notificacoes", "/relatorio", "/configuration", "/suporte"];
 
@@ -69,7 +43,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
-  const [manualCloseChild, setManualCloseChild] = useState(false); // controle de fechamento manual em rota filha
+  const [manualCloseChild, setManualCloseChild] = useState(false);
 
   const {
     period,
@@ -84,37 +58,109 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     collaborators,
   } = useAppStore();
 
-  // Reseta o flag de fechamento manual sempre que a rota mudar
+  // Obtém permissões do usuário logado
+  const permissions = useMemo(() => getUserPermissions(currentUser ?? undefined), [currentUser]);
+
+  // Monta itens do menu lateral com base nas permissões
+  const navItems: NavItem[] = useMemo(() => {
+    const items: NavItem[] = [];
+
+    if (permissions.canAccessDashboard) {
+      items.push({ path: "/", label: "Home", icon: Home });
+    }
+    if (permissions.canAccessComissoes) {
+      items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
+    }
+
+    // Grupo Dashboard (expansível) – aparece se tiver acesso a qualquer subpágina
+    const dashboardChildren: NavChild[] = [];
+    if (permissions.canViewTeam) {
+      dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
+    }
+    if (permissions.canAccessReports) {
+      dashboardChildren.push({ path: "/Vgeral", label: "Visão Geral", icon: BarChart3 });
+      dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+      dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
+      dashboardChildren.push({ path: "/gargalos", label: "Gargalos", icon: BarChart3 });
+    }
+
+    if (dashboardChildren.length > 0) {
+      items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
+    }
+
+    if (permissions.canAccessRanking) {
+      items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+    }
+    if (permissions.canAccessConfiguration) {
+      items.push({ path: "/configuration", label: "Configurações", icon: Settings });
+    }
+
+    return items;
+  }, [permissions]);
+
+  // Menu mobile simplificado, também respeita permissões
+  const mobileNavItems = useMemo(() => {
+    const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
+    if (permissions.canAccessDashboard) flat.push({ path: "/", label: "Home", icon: Home });
+    if (permissions.canAccessComissoes) flat.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
+    if (permissions.canViewTeam) flat.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
+    if (permissions.canAccessReports) {
+      flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
+      flat.push({ path: "/Vgeral", label: "V. Geral", icon: BarChart3 });
+      flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+      flat.push({ path: "/gargalos", label: "Gargalos", icon: BarChart3 });
+    }
+    if (permissions.canAccessRanking) flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+    if (permissions.canAccessConfiguration) flat.push({ path: "/configuration", label: "Config.", icon: Settings });
+    return flat.slice(0, 5); // até 5 ícones no rodapé
+  }, [permissions]);
+
+  // Controle de expansão do grupo Dashboard
   useEffect(() => {
     setManualCloseChild(false);
   }, [location]);
 
-  // Auto‑expande/recolhe o grupo Dashboard baseado apenas na rota atual,
-  // respeitando um fechamento manual temporário.
   useEffect(() => {
-    const dashboardItem = navItems.find(
+    const dashboardGroup = navItems.find(
       (item): item is Extract<NavItem, { children: NavChild[] }> => "children" in item && item.label === "Dashboard"
     );
-    const isChildActive = dashboardItem?.children.some((child) => child.path === location) ?? false;
+    const isChildActive = dashboardGroup?.children.some((child) => child.path === location) ?? false;
 
     if (isChildActive && !manualCloseChild) {
       setExpandedGroup("Dashboard");
     } else if (!isChildActive) {
       setExpandedGroup(null);
     }
-    // Se isChildActive e manualCloseChild forem true, não altera expandedGroup
-  }, [location, manualCloseChild]);
+  }, [location, manualCloseChild, navItems]);
 
+  // Notificações
   useEffect(() => {
     const count = notifications.filter((n) => !n.read).length;
     setUnreadCount(count);
   }, [notifications]);
 
+  // Carrega colaboradores se necessário
   useEffect(() => {
     if (currentUser && collaborators.length === 0) {
       loadCollaborators();
     }
   }, [currentUser, collaborators.length, loadCollaborators]);
+
+  // Fecha sidebar ao mudar de rota (mobile)
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location]);
+
+  // Fecha sidebar ao redimensionar para desktop
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth >= 1024) {
+        setSidebarOpen(false);
+      }
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const handleLogout = async () => {
     if (window.confirm("Tem certeza que deseja sair do sistema?")) {
@@ -180,7 +226,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
           </div>
         </div>
 
-        {/* Navegação */}
+        {/* Navegação dinâmica */}
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
             if (item.children) {
@@ -193,11 +239,9 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
                     onClick={() => {
                       const currentExpanded = expandedGroup === item.label;
                       const childActive = item.children.some((c) => c.path === location);
-                      // Se estiver expandido e em rota filha, marca fechamento manual
                       if (currentExpanded && childActive) {
                         setManualCloseChild(true);
                       } else if (!currentExpanded && childActive) {
-                        // Se o usuário reabrir manualmente, cancela o fechamento manual
                         setManualCloseChild(false);
                       }
                       setExpandedGroup((prev) => (prev === item.label ? null : item.label));
@@ -372,7 +416,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       {/* Navegação mobile inferior */}
       <nav className="mobile-nav lg:hidden">
         <div className="flex items-center justify-around px-2 py-2">
-          {mobileNavItems.slice(0, 5).map((item) => {
+          {mobileNavItems.map((item) => {
             const Icon = item.icon;
             const isActive = location === item.path;
             return (

@@ -15,6 +15,9 @@ import Ranking from "./pages/Ranking";
 import Configuration from "./pages/Configuration";
 import Suporte from "./pages/Suporte";
 import Login from "./pages/Login";
+import Vgeral from "./pages/Vgeral";
+import Gargalos from "./pages/Gargalos";
+import Equipe from "./pages/Equipe";
 import Verify2FA from "./pages/ResetPassword/Verify2FA";
 import ProtectedRoute from "./components/ProtectedRoute";
 import ForgotPassword from "./pages/ResetPassword/ForgotPassword";
@@ -23,17 +26,47 @@ import { API_BASE } from "@/lib/api";
 import { useAppStore } from "@/lib/dataStore";
 import { fetchCurrentUser } from "@/lib/auth";
 import { Loader2 } from "lucide-react";
+import { getUserPermissions, type Permissions } from "@/lib/accessControl";
 
-/** Redireciona usuário autenticado para Home ao acessar páginas públicas */
+/**
+ * Redireciona usuário autenticado para Home ao acessar páginas públicas
+ */
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const currentUser = useAppStore((s) => s.currentUser);
   if (currentUser?.email) return <Redirect to="/" />;
   return <>{children}</>;
 }
 
+/**
+ * Protege rota verificando autenticação E permissão específica.
+ * Se o usuário não tem a permissão, redireciona para Home (ou mostra mensagem).
+ */
+function ProtectedRouteWithPermission({
+  permission,
+  children,
+}: {
+  permission: keyof Permissions;
+  children: React.ReactNode;
+}) {
+  const currentUser = useAppStore((s) => s.currentUser);
+  const perms = getUserPermissions(currentUser ?? undefined);
+
+  if (!currentUser?.email) return <Redirect to="/login" />;
+  if (!perms[permission]) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh]">
+        <p className="text-slate-500">Acesso não autorizado a esta página.</p>
+        <Redirect to="/" />
+      </div>
+    );
+  }
+  return <>{children}</>;
+}
+
 function Router() {
   return (
     <Switch>
+      {/* Rotas públicas */}
       <Route path="/login">
         <PublicRoute>
           <Login />
@@ -57,55 +90,124 @@ function Router() {
 
       <Route path="/404" component={NotFound} />
 
+      {/* Home – requer permissão canAccessDashboard */}
       <Route path="/">
         <PeriodProvider>
-          <ProtectedRoute>
+          <ProtectedRouteWithPermission permission="canAccessDashboard">
             <Home />
-          </ProtectedRoute>
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
       <Route path="/home">
         <PeriodProvider>
-          <ProtectedRoute>
+          <ProtectedRouteWithPermission permission="canAccessDashboard">
             <Home />
-          </ProtectedRoute>
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
+
+      {/* Comissões – requer permissão canAccessComissoes */}
       <Route path="/comissoes">
         <PeriodProvider>
-          <ProtectedRoute>
+          <ProtectedRouteWithPermission permission="canAccessComissoes">
             <Comissoes />
-          </ProtectedRoute>
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
+
+      {/* Ranking – requer permissão canAccessRanking */}
+      <Route path="/ranking">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canAccessRanking">
+            <Ranking />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+
+      {/* Dashboard / Analytics – requer permissão canAccessReports */}
       <Route path="/funil">
         <PeriodProvider>
-          <ProtectedRoute>
+          <ProtectedRouteWithPermission permission="canAccessReports">
             <Funil />
-          </ProtectedRoute>
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
       <Route path="/analytics">
         <PeriodProvider>
-          <ProtectedRoute>
+          <ProtectedRouteWithPermission permission="canAccessReports">
             <Analytics />
-          </ProtectedRoute>
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
-      <Route path="/ranking">
+      <Route path="/Vgeral">
         <PeriodProvider>
-          <ProtectedRoute>
-            <Ranking />
-          </ProtectedRoute>
+          <ProtectedRouteWithPermission permission="canAccessReports">
+            <Vgeral />
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
+      <Route path="/Gargalos">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canAccessReports">
+            <Gargalos />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+
+      {/* Equipe – requer permissão canViewTeam */}
+      <Route path="/Equipe">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canViewTeam">
+            <Equipe />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+      <Route path="/Equipe/:supervisor">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canViewTeam">
+            <Equipe />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+      <Route path="/equipe">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canViewTeam">
+            <Equipe />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+      <Route path="/equipe/:supervisor">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canViewTeam">
+            <Equipe />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+      <Route path="/colaboradores/:id">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canViewTeam">
+            <Equipe />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+      <Route path="/colaborador/:id">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canViewTeam">
+            <Equipe />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+
+      {/* Configuração – requer permissão canAccessConfiguration */}
       <Route path="/configuration">
         <PeriodProvider>
-          <ProtectedRoute>
+          <ProtectedRouteWithPermission permission="canAccessConfiguration">
             <Configuration />
-          </ProtectedRoute>
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
+
+      {/* Suporte (mantido protegido apenas por autenticação) */}
       <Route path="/suporte">
         <PeriodProvider>
           <ProtectedRoute>
@@ -113,6 +215,8 @@ function Router() {
           </ProtectedRoute>
         </PeriodProvider>
       </Route>
+
+      {/* Fallback */}
       <Route component={NotFound} />
     </Switch>
   );
