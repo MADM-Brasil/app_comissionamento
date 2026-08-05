@@ -39,8 +39,8 @@ export interface Collaborator {
   bonusRecebido: number;
   status: "ativo" | "inativo";
   produto: string;
-  cargo: string;                  // campo novo, substitui 'grupo'
-  grupo?: string;                 // mantido para compatibilidade
+  cargo: string;
+  grupo?: string;                 // mantido para compatibilidade, mas preterido
   metaDiarioAssinados?: number;
   metaDiarioGanhos?: number;
   metaSemanalAssinados?: number;
@@ -55,6 +55,8 @@ export interface Collaborator {
   pesoSemanalGanhos: number;
   pesoMensalAssinados: number;
   pesoMensalGanhos: number;
+  classificacaoOperacional: string; 
+  canal: string;                    
 }
 export interface GlobalConfig {
   pesoMetaAssinados: number; pesoMetaGanhos: number; pesoMetaequipeAssinados: number; pesoMetaequipeGanhos: number;
@@ -519,7 +521,6 @@ export const useAppStore = create<AppStore>()(
             return;
           }
 
-          // REMOVIDO: filtro unique que causava o problema (todos os ids undefined)
           const baseCollaborators: Collaborator[] = collabs.map((c: any) => ({
             id: c.id || c.email,
             name: c.name,
@@ -554,6 +555,8 @@ export const useAppStore = create<AppStore>()(
             pesoSemanalGanhos: c.pesoSemanalGanhos ?? 15,
             pesoMensalAssinados: c.pesoMensalAssinados ?? 60,
             pesoMensalGanhos: c.pesoMensalGanhos ?? 60,
+            classificacaoOperacional: c.classificacaoOperacional || c.classificacao_operacional || '',
+            canal: c.canal || (c.classificacaoOperacional || c.classificacao_operacional || '').toLowerCase() === 'judit' ? 'Judit' : 'Discadora',
           }));
 
           console.log('✅ [loadCollaborators] Mapeados:', baseCollaborators.length);

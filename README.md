@@ -117,4 +117,13 @@ Mudança para views:
                            |
     Administrativo         | Salesops, CEO, Analista de CRM,Desenvolvedor,Diretora,
                            | Analista de dados, Desenvolvedor Make
-                           
+
+Equipe.tsx
+
+Card do colaborador
+
+Atual (linha azul): os dados do período que você selecionou no filtro de datas do topo da página.
+Exemplo: se você escolheu o mês de agosto de 2026, a linha azul mostra quantos assinados o colaborador teve em cada dia de agosto.
+
+Anterior (linha laranja): os dados do período imediatamente anterior, com a mesma duração do período atual.
+Exemplo: para o mês de agosto (31 dias), o período anterior será julho de 2026 (também 31 dias). Se você escolheu um intervalo customizado de 10 dias, o anterior será os 10 dias imediatamente anteriores a esse intervalo.

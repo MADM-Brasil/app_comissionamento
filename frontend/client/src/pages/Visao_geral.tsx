@@ -1,4 +1,4 @@
-// src/pages/Vgeral.tsx
+// src/pages/Visao_geral.tsx
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { useAppStore, Collaborator } from "@/lib/dataStore";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -10,7 +10,6 @@ import {
   Archive,
   XCircle,
   TrendingUp,
-  TrendingDown,
   AlertTriangle,
   Award,
   Inbox,
@@ -29,13 +28,24 @@ import { ResumoMesCard } from "@/components/kpi/ResumoMesCard";
 import { Card } from "@/components/ui/card";
 import { FunilChart } from "@/components/charts/FunilChart";
 import { DetalheAssinadosModal } from "@/components/dashboard/DetalheAssinadosModal";
+import { PlanoAcaoColaboradores } from "@/components/dashboard/PlanoAcaoColaboradores";
 import { calcularPaceProjecao, classificarPace } from "@/lib/diagnostico";
 import { contarDiasUteis, getPeriodoMesDoCalendario } from "@/lib/period";
 import { formatNumero, formatPct } from "@/lib/format";
 import { ehSupervisor } from "@/lib/colaboradoresAtivos";
 import { Link } from "wouter";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Cell,
+} from "recharts";
 
-// ========== CONSTANTES DE EXCLUSÃO (idênticas ao Funil) ==========
+// ========== CONSTANTES DE EXCLUSÃO ==========
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
@@ -56,6 +66,16 @@ const isExcludedCargo = (cargo: string) =>
 const isDesativado = (c: Collaborator) =>
   normalize(c.cargo) === 'desativado' || normalize(c.equipeNome).includes('desativado');
 
+function AlertCard({ alerta }: { alerta: { id: number; prioridade: string; mensagem: string; titulo: string } }) {
+  return (
+    <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-red-600">{alerta.titulo}</p>
+      <p className="mt-1 text-sm text-slate-700">{alerta.mensagem}</p>
+    </div>
+  );
+}
+
+// ========== RADAR DE CONVERSÃO (colaboradores individuais) ==========
 function RadarConversaoLigacoes({ colaboradores }: { colaboradores: Collaborator[] }) {
   const dados = colaboradores.map((colab) => ({
     name: colab.name,
@@ -85,44 +105,40 @@ function RadarConversaoLigacoes({ colaboradores }: { colaboradores: Collaborator
   );
 }
 
-function AlertCard({ alerta }: { alerta: { id: number; prioridade: string; mensagem: string; titulo: string } }) {
+// ========== GRÁFICO DE BARRAS (equipes) ==========
+const CORES_TIME = ['#2563eb', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4'];
+
+interface DadoDesempenho {
+  nome: string;
+  assinados: number;
+}
+
+function DesempenhoEquipes({ dados }: { dados: DadoDesempenho[] }) {
+  if (dados.length === 0) {
+    return <p className="text-sm text-slate-500">Nenhum dado disponível.</p>;
+  }
+
   return (
-    <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-red-600">{alerta.titulo}</p>
-      <p className="mt-1 text-sm text-slate-700">{alerta.mensagem}</p>
+    <div className="h-72">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={dados} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+          <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+          <XAxis dataKey="nome" tick={{ fontSize: 10, fill: '#475569' }} tickLine={false} axisLine={false} />
+          <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
+          <Tooltip formatter={(v) => [formatNumero(Number(v)), 'Assinados']} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+          <Bar dataKey="assinados" radius={[4, 4, 0, 0]} barSize={32}>
+            {dados.map((_, indice) => (
+              <Cell key={indice} fill={CORES_TIME[indice % CORES_TIME.length]} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
     </div>
   );
 }
 
-function PlanoAcaoColaboradores({ colaboradores, diasUteisPeriodo }: { colaboradores: Collaborator[]; diasUteisPeriodo: number }) {
-  const lista = colaboradores
-    .filter((colab) => (colab.assinados || 0) < 2)
-    .slice(0, 5);
-
-  return (
-    <Card>
-      <h3 className="text-sm font-semibold text-slate-700 mb-3">Plano de ação</h3>
-      <p className="text-sm text-slate-500 mb-3">Dias úteis no período: {diasUteisPeriodo}</p>
-      <div className="space-y-2">
-        {lista.length === 0 ? (
-          <p className="text-sm text-slate-500">Nenhum ajuste necessário no momento.</p>
-        ) : (
-          lista.map((colab) => (
-            <div key={colab.id} className="flex items-center justify-between rounded-lg border border-slate-200 px-3 py-2">
-              <div>
-                <p className="text-sm font-medium text-slate-900">{colab.name}</p>
-                <p className="text-xs text-slate-500">{colab.equipeNome}</p>
-              </div>
-              <div className="text-sm font-semibold text-amber-600">Acompanhar rotina</div>
-            </div>
-          ))
-        )}
-      </div>
-    </Card>
-  );
-}
-
-export default function Vgeral() {
+// ========== PÁGINA PRINCIPAL ==========
+export default function VisaoGeral() {
   const {
     collaborators: rawCollaborators,
     currentStartDate,
@@ -134,7 +150,6 @@ export default function Vgeral() {
     loadCollaborators,
   } = useAppStore();
 
-  // ========== CORREÇÃO DE TIPOS ==========
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
@@ -148,7 +163,7 @@ export default function Vgeral() {
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [modalAberto, setModalAberto] = useState<"geral" | null>(null);
+  const [modalAberto, setModalAberto] = useState<"discador" | "judit" | null>(null);
   const initialLoadDone = useRef(false);
 
   const fetchData = useCallback(async (showRefreshing = false) => {
@@ -183,18 +198,16 @@ export default function Vgeral() {
 
   useEffect(() => {
     if (initialLoadDone.current) return;
-
     initialLoadDone.current = true;
     setLoading(true);
     void fetchData();
   }, [fetchData]);
 
-  // ========== handleFilterChange tipado corretamente ==========
   const handleFilterChange = (newFilters: typeof filters) => {
     setFilters(newFilters);
   };
 
-  // Colaboradores ativos após exclusões (idêntico ao Funil)
+  // Colaboradores ativos após exclusões
   const collaborators = useMemo(() => {
     let list = rawCollaborators.filter(
       c => !isDesativado(c) && !isExcludedTeam(c.equipeNome) && !isExcludedCargo(c.cargo)
@@ -213,25 +226,42 @@ export default function Vgeral() {
     return list;
   }, [rawCollaborators, filters]);
 
-  // Totais do funil (derivados de rawMetrics)
-  const funnelStages = useMemo(() => [
-    { stage: "Emitidos", count: rawMetrics.emitidos, color: "#09175b", icon: FileText },
-    { stage: "Assinados", count: rawMetrics.assinados, color: "#34a853", icon: CheckCircle },
-    { stage: "Protocolados", count: rawMetrics.protocolados, color: "#045b5b", icon: Archive },
-    { stage: "Ganhos", count: rawMetrics.ganhos, color: "#f59e0b", icon: DollarSign },
-    { stage: "Perdidos", count: rawMetrics.perdidos, color: "#ef4444", icon: XCircle },
-  ], [rawMetrics]);
+  // Segmentação por canal
+  const collaboratorsDiscador = useMemo(
+    () => collaborators.filter(c => c.classificacaoOperacional?.toLowerCase() !== 'judit'),
+    [collaborators]
+  );
+  const collaboratorsJudit = useMemo(
+    () => collaborators.filter(c => c.classificacaoOperacional?.toLowerCase() === 'judit'),
+    [collaborators]
+  );
 
+  // Totais Discador
+  const totalAssinadosDiscador = useMemo(
+    () => collaboratorsDiscador.reduce((sum, c) => sum + (c.assinados || 0), 0),
+    [collaboratorsDiscador]
+  );
+  const metaMensalDiscador = useMemo(
+    () => collaboratorsDiscador.reduce((sum, c) => sum + (c.metaMensalAssinados || 0), 0),
+    [collaboratorsDiscador]
+  );
+
+  // Totais Judit
+  const totalAssinadosJudit = useMemo(
+    () => collaboratorsJudit.reduce((sum, c) => sum + (c.assinados || 0), 0),
+    [collaboratorsJudit]
+  );
+  const metaMensalJudit = useMemo(
+    () => collaboratorsJudit.reduce((sum, c) => sum + (c.metaMensalAssinados || 0), 0),
+    [collaboratorsJudit]
+  );
+
+  // Totais gerais
   const totalAssinados = rawMetrics.assinados;
   const totalProtocolados = rawMetrics.protocolados;
   const totalGanhos = rawMetrics.ganhos;
   const totalRecebidos = rawMetrics.emitidos;
   const conversaoGeral = totalRecebidos > 0 ? (totalAssinados / totalRecebidos) * 100 : 0;
-
-  const metaMensalTotal = useMemo(
-    () => collaborators.reduce((sum, c) => sum + (c.metaMensalAssinados || 0), 0),
-    [collaborators]
-  );
 
   const periodoSelecionado = { inicio: currentStartDate, fim: currentEndDate };
   const diasUteisPeriodoSelecionado = useMemo(() => contarDiasUteis(periodoSelecionado), [periodoSelecionado]);
@@ -240,8 +270,11 @@ export default function Vgeral() {
   const hoje = new Date().toISOString().slice(0, 10);
   const diasUteisDecorridos = useMemo(() => contarDiasUteis({ inicio: mesPeriodo.inicio, fim: hoje }), [mesPeriodo, hoje]);
 
-  const paceEquipe = calcularPaceProjecao(totalAssinados, metaMensalTotal, diasUteisDecorridos, diasUteisTotaisMes);
-  const statusPace = classificarPace(paceEquipe, metaMensalTotal);
+  // Pace
+  const paceDiscador = calcularPaceProjecao(totalAssinadosDiscador, metaMensalDiscador, diasUteisDecorridos, diasUteisTotaisMes);
+  const statusPaceDiscador = classificarPace(paceDiscador, metaMensalDiscador);
+  const paceJudit = calcularPaceProjecao(totalAssinadosJudit, metaMensalJudit, diasUteisDecorridos, diasUteisTotaisMes);
+  const statusPaceJudit = classificarPace(paceJudit, metaMensalJudit);
 
   const produtividadeMedia = useMemo(() => {
     const ativos = collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo');
@@ -267,6 +300,7 @@ export default function Vgeral() {
     return pior;
   }, [collaborators]);
 
+  // Dados para o gráfico de equipes
   const times = useMemo(() => Array.from(new Set(collaborators.map(c => c.equipeNome))), [collaborators]);
   const porTime = useMemo(() =>
     times.map(time => {
@@ -274,7 +308,14 @@ export default function Vgeral() {
       const ass = membros.reduce((s, c) => s + c.assinados, 0);
       const prot = membros.reduce((s, c) => s + c.protocolados, 0);
       return { time, pessoas: membros.length, assinados: ass, protocolados: prot, taxa: ass ? (prot / ass) * 100 : 0 };
-    }), [times, collaborators]);
+    }).sort((a, b) => b.assinados - a.assinados), [times, collaborators]);
+
+  const dadosEquipes = useMemo(
+    () => porTime.map(t => ({ nome: t.time.replace('Equipe ', ''), assinados: t.assinados })),
+    [porTime]
+  );
+
+  const equipeSelecionada = filters.equipe !== "todas";
 
   const alertas = useMemo(() => {
     const lista: { id: number; prioridade: string; mensagem: string; titulo: string }[] = [];
@@ -288,8 +329,16 @@ export default function Vgeral() {
   }, [conversaoGeral, totalAssinados, totalRecebidos]);
 
   const alertasCriticos = alertas.filter(a => a.prioridade === 'critico').slice(0, 2);
-  const atingimentoMetaPeriodo = metaMensalTotal > 0 ? (totalAssinados / metaMensalTotal) * 100 : 0;
+  const atingimentoMetaPeriodo = metaMensalDiscador > 0 ? (totalAssinadosDiscador / metaMensalDiscador) * 100 : 0;
   const metaComprometida = atingimentoMetaPeriodo < 90;
+
+  const funnelStages = useMemo(() => [
+    { stage: "Emitidos", count: rawMetrics.emitidos, color: "#09175b", icon: FileText },
+    { stage: "Assinados", count: rawMetrics.assinados, color: "#34a853", icon: CheckCircle },
+    { stage: "Protocolados", count: rawMetrics.protocolados, color: "#045b5b", icon: Archive },
+    { stage: "Ganhos", count: rawMetrics.ganhos, color: "#f59e0b", icon: DollarSign },
+    { stage: "Perdidos", count: rawMetrics.perdidos, color: "#ef4444", icon: XCircle },
+  ], [rawMetrics]);
 
   return (
     <DashboardLayout title="Visão Geral" subtitle={`Panorama executivo da operação comercial — Período ${period}`}>
@@ -324,14 +373,49 @@ export default function Vgeral() {
             </button>
           </div>
 
+          {/* Cards de resumo: Discador e Judit */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-            <ResumoMesCard titulo="Geral · Assinados" icon={FileSignature} atual={totalAssinados} meta={metaMensalTotal} pace={paceEquipe} statusPace={statusPace} onClick={() => setModalAberto('geral')} />
+            <ResumoMesCard
+              titulo="Discador · Assinados"
+              icon={FileSignature}
+              atual={totalAssinadosDiscador}
+              meta={metaMensalDiscador}
+              pace={paceDiscador}
+              statusPace={statusPaceDiscador}
+              onClick={() => setModalAberto('discador')}
+            />
+            {collaboratorsJudit.length > 0 && (
+              <ResumoMesCard
+                titulo="Judit · Assinados"
+                icon={FileSignature}
+                atual={totalAssinadosJudit}
+                meta={metaMensalJudit}
+                pace={paceJudit}
+                statusPace={statusPaceJudit}
+                onClick={() => setModalAberto('judit')}
+              />
+            )}
           </div>
 
-          {modalAberto === 'geral' && (
-            <DetalheAssinadosModal titulo="Geral · Assinados" colaboradores={collaborators} atual={totalAssinados} onFechar={() => setModalAberto(null)} />
+          {/* Modais */}
+          {modalAberto === 'discador' && (
+            <DetalheAssinadosModal
+              titulo="Discador · Assinados"
+              colaboradores={collaboratorsDiscador}
+              atual={totalAssinadosDiscador}
+              onFechar={() => setModalAberto(null)}
+            />
+          )}
+          {modalAberto === 'judit' && (
+            <DetalheAssinadosModal
+              titulo="Judit · Assinados"
+              colaboradores={collaboratorsJudit}
+              atual={totalAssinadosJudit}
+              onFechar={() => setModalAberto(null)}
+            />
           )}
 
+          {/* KPIs principais */}
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
             <KpiCard titulo="Venda Ganha" valor={formatNumero(totalGanhos)} icon={Award} accent="brand" />
             <KpiCard titulo="Recebidos" valor={formatNumero(totalRecebidos)} icon={Inbox} accent="info" />
@@ -340,12 +424,13 @@ export default function Vgeral() {
             <KpiCard titulo="Perdidos" valor={formatNumero(rawMetrics.perdidos)} icon={XCircle} accent="danger" />
           </div>
 
+          {/* Resumo textual (Discador) */}
           <Card className="mb-6 flex items-start gap-3" style={{ borderLeft: `3px solid ${metaComprometida ? '#ef4444' : '#22c55e'}` }}>
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: metaComprometida ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', color: metaComprometida ? '#ef4444' : '#22c55e' }}>
               {metaComprometida ? <AlertTriangle size={17} /> : <TrendingUp size={17} />}
             </div>
             <div>
-              <p className="text-sm font-semibold text-slate-900">No período, a equipe assinou {formatNumero(totalAssinados)} e protocolou {formatNumero(totalProtocolados)}</p>
+              <p className="text-sm font-semibold text-slate-900">No período, a equipe Discador assinou {formatNumero(totalAssinadosDiscador)} e protocolou {formatNumero(totalProtocolados)}</p>
               <p className="mt-1 text-[13px] text-slate-600">
                 {metaComprometida
                   ? `Isso representa apenas ${formatPct(atingimentoMetaPeriodo, 1)} da meta mensal de assinados — abaixo do esperado.`
@@ -354,10 +439,17 @@ export default function Vgeral() {
             </div>
           </Card>
 
+          {/* Desempenho (gráfico de equipes ou radar) */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
             <Card className="xl:col-span-2">
-              <h3 className="text-sm font-semibold text-slate-700 mb-3">Desempenho da Equipe</h3>
-              <RadarConversaoLigacoes colaboradores={collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo')} />
+              <h3 className="text-sm font-semibold text-slate-700 mb-3">
+                {equipeSelecionada ? `Desempenho · ${filters.equipe}` : "Desempenho das Equipes"}
+              </h3>
+              {equipeSelecionada ? (
+                <RadarConversaoLigacoes colaboradores={collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo')} />
+              ) : (
+                <DesempenhoEquipes dados={dadosEquipes} />
+              )}
             </Card>
             <Card>
               <h3 className="text-sm font-semibold text-slate-700 mb-3">Funil Comercial</h3>
@@ -365,6 +457,7 @@ export default function Vgeral() {
             </Card>
           </div>
 
+          {/* Melhor, pior, produtividade */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
             <Card className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400"><Trophy size={18} /></div>
@@ -389,6 +482,7 @@ export default function Vgeral() {
             </Card>
           </div>
 
+          {/* Comparativo por time */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
             <Card className="xl:col-span-2">
               <h3 className="text-sm font-semibold text-slate-700 mb-3">Comparativo por time</h3>
@@ -413,8 +507,12 @@ export default function Vgeral() {
             </Card>
           </div>
 
+          {/* Plano de Ação (novo componente) */}
           <div className="mt-6">
-            <PlanoAcaoColaboradores colaboradores={collaborators} diasUteisPeriodo={diasUteisPeriodoSelecionado} />
+            <PlanoAcaoColaboradores
+              colaboradores={collaborators}
+              diasUteisPeriodo={diasUteisPeriodoSelecionado}
+            />
           </div>
         </>
       )}

@@ -39,6 +39,7 @@ import { cn } from "@/lib/utils";
 import DashboardLayout from "@/components/DashboardLayout";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { getAccessLevel, LEVELS } from "@/lib/accessControl";
+import { fetchAssinadosDiarioColaborador } from "@/lib/assinados_diario_colaborador";
 
 // ============================================================
 //  FORMATAÇÃO E CONSTANTES
@@ -124,7 +125,7 @@ const EXCLUDED_TEAMS = [
   "Equipe Erica", "Equipe Erika", "Equipe Lucas", "Equipe Irene", "Equipe Maria Eduarda", "SalesOps",
   "Equipe Murilo Balsalobre", "Comercial", "Backoffice", "CEO", "Prontuário",
   "Equipe Leonardo Cardoso", "Equipe Julia", "Equipe Leticia", "Dr. Felipe Marx", "Administrativo",
-  "Equipe Thales", "Financeiro", "Equipe Reciclagem",""
+  "Equipe Thales", "Financeiro", "Equipe Reciclagem",
 ];
 const EXCLUDED_CARGOS = [
   "desativado", "assistente", "analista juridico", "gestor de projetos", "analista",
@@ -189,18 +190,6 @@ async function fetchAssinadosDiarioPorTime(inicio: string, fim: string): Promise
     dia: item.dia,
     total: Number(item.total) || 0,
   }));
-}
-async function fetchAssinadosDiarioColaborador(
-  nome: string,
-  inicio: string,
-  fim: string
-): Promise<AssinadosDiarioLinha[]> {
-  const url = `${API_BASE}/metrics/assinados-diario-colaborador?nome=${encodeURIComponent(nome)}&inicio=${inicio}&fim=${fim}`;
-  const res = await fetch(url, { credentials: "include" });
-  if (!res.ok) return [];
-  const response = await res.json();
-  const rows = Array.isArray(response) ? response : response.data || [];
-  return rows.map((item: any) => ({ dia: item.dia, total: Number(item.total) || 0 }));
 }
 
 // ============================================================
@@ -328,7 +317,6 @@ export default function Equipe() {
 
   const [busca, setBusca] = useState("");
 
-  // Extrai supervisor da URL
   const supervisor = useMemo(() => {
     const pathMatch = location.match(/^\/equipe\/(.+)$/);
     if (pathMatch?.[1]) return decodeURIComponent(pathMatch[1]);
@@ -342,7 +330,6 @@ export default function Equipe() {
     return undefined;
   }, [location]);
 
-  // Redirecionamentos para acesso indevido
   useEffect(() => {
     if (!currentUser) return;
     if (isSupervisor && supervisor && normalize(supervisor) !== normalize(currentUser.equipe || "")) {
@@ -354,7 +341,6 @@ export default function Equipe() {
     }
   }, [currentUser, isSupervisor, isAssessor, supervisor, rawCollaborators]);
 
-  // Filtro de colaboradores ativos com restrições de acesso
   const colaboradores = useMemo(() => {
     let filtered = rawCollaborators.filter(
       (c) =>
@@ -399,10 +385,8 @@ export default function Equipe() {
       ) : colaboradorId ? (
         <DetalhesColaborador colaboradorId={colaboradorId} colaboradores={colaboradores} />
       ) : isAssessor ? (
-        // Assessor sem ID na URL: mostra seu próprio detalhe
         <DetalhesColaborador colaboradorId={colaboradores[0]?.id} colaboradores={colaboradores} />
       ) : isSupervisor ? (
-        // Supervisor sem equipe na URL: redireciona para sua equipe
         <ColaboradoresDaEquipe equipe={currentUser?.equipe || ""} colaboradores={colaboradores} />
       ) : (
         <ListaEquipes colaboradores={colaboradores} busca={busca} setBusca={setBusca} />
@@ -412,7 +396,7 @@ export default function Equipe() {
 }
 
 // ============================================================
-//  LISTA DE EQUIPES (com fallback para gráficos vazios)
+//  LISTA DE EQUIPES (inalterada)
 // ============================================================
 function BuscaColaborador({ busca, setBusca }: { busca: string; setBusca: (v: string) => void }) {
   return (
@@ -754,7 +738,7 @@ function ListaEquipes({
 }
 
 // ============================================================
-//  COLABORADOR CARD (Protocolados no lugar de Comissão)
+//  COLABORADOR CARD
 // ============================================================
 function ColaboradorCard({ c }: { c: Collaborator }) {
   const recebidos = c.emitidos || 0;
@@ -791,14 +775,13 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
 }
 
 // ============================================================
-//  COLABORADORES DA EQUIPE (com restrição de acesso)
+//  COLABORADORES DA EQUIPE
 // ============================================================
 function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; colaboradores: Collaborator[] }) {
   const { currentUser } = useAccessControl();
   const userLevel = getAccessLevel(currentUser?.cargo, currentUser?.status);
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
 
-  // Garante que supervisor só veja sua própria equipe
   const membros = useMemo(() => {
     if (isSupervisor) {
       return colaboradores.filter(c => normalize(c.equipeNome) === normalize(currentUser?.equipe || ""));
@@ -825,7 +808,7 @@ function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; cola
 }
 
 // ============================================================
-//  DETALHES DO COLABORADOR (completo, sem R$ em Venda Ganha)
+//  DETALHES DO COLABORADOR (Evolução com "Dia 1", "Dia 2"...)
 // ============================================================
 function DetalhesColaborador({
   colaboradorId,
@@ -838,13 +821,29 @@ function DetalhesColaborador({
   const { currentUser } = useAccessControl();
   const userLevel = getAccessLevel(currentUser?.cargo, currentUser?.status);
   const { currentStartDate, currentEndDate } = useAppStore();
-  const [evolucaoMensal, setEvolucaoMensal] = useState<{ dia: number; atual: number; anterior: number }[]>([]);
+  const [evolucaoMensal, setEvolucaoMensal] = useState<
+    { dia: string; dataCompletaAtual: string; dataCompletaAnterior: string; atual: number; anterior: number }[]
+  >([]);
   const [carregandoEvolucao, setCarregandoEvolucao] = useState(false);
 
   const periodoAnterior = useMemo(
     () => mesmoPeriodoAnterior(currentStartDate, currentEndDate),
     [currentStartDate, currentEndDate]
   );
+
+  // Função auxiliar para extrair mês/ano de uma data DD/MM/AAAA
+  const mesAnoDeData = (dataDDMMAAAA: string): string => {
+    if (!dataDDMMAAAA || dataDDMMAAAA.length < 10) return "—";
+    const partes = dataDDMMAAAA.split('/');
+    if (partes.length !== 3) return "—";
+    const mes = parseInt(partes[1], 10);
+    const ano = partes[2];
+    const nomesMeses = [
+      "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+      "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+    ];
+    return `${nomesMeses[mes - 1] || mes}/${ano}`;
+  };
 
   useEffect(() => {
     if (!colaborador) return;
@@ -853,31 +852,61 @@ function DetalhesColaborador({
     const diasAtual = gerarDiasEntre(currentStartDate, currentEndDate);
     const diasAnterior = gerarDiasEntre(periodoAnterior.inicio, periodoAnterior.fim);
 
-    Promise.all([
+    const gerarEstimativa = (dias: string[], totalAssinados: number) => {
+      const diasUteis = dias.filter(d => isDiaUtil(new Date(d + 'T00:00:00'))).length || 1;
+      const media = totalAssinados / diasUteis;
+      return dias.map(d => ({
+        dia: d,
+        total: isDiaUtil(new Date(d + 'T00:00:00')) ? media : 0,
+      }));
+    };
+
+    Promise.allSettled([
       fetchAssinadosDiarioColaborador(colaborador.name, currentStartDate, currentEndDate),
       fetchAssinadosDiarioColaborador(colaborador.name, periodoAnterior.inicio, periodoAnterior.fim),
-    ])
-      .then(([linhasAtual, linhasAnterior]) => {
-        if (cancelado) return;
-        const mapAtual = new Map(linhasAtual.map((l) => [l.dia, l.total]));
-        const mapAnterior = new Map(linhasAnterior.map((l) => [l.dia, l.total]));
-        const totalDias = Math.max(diasAtual.length, diasAnterior.length);
-        const combinado = Array.from({ length: totalDias }, (_, i) => ({
-          dia: i + 1,
-          atual: diasAtual[i] ? mapAtual.get(diasAtual[i]) ?? 0 : 0,
-          anterior: diasAnterior[i] ? mapAnterior.get(diasAnterior[i]) ?? 0 : 0,
-        }));
-        setEvolucaoMensal(combinado);
-      })
-      .catch(() => {
-        if (!cancelado) setEvolucaoMensal([]);
-      })
-      .finally(() => {
-        if (!cancelado) setCarregandoEvolucao(false);
+    ]).then(([resultAtual, resultAnterior]) => {
+      if (cancelado) return;
+
+      const linhasAtual = resultAtual.status === 'fulfilled' && resultAtual.value.length > 0
+        ? resultAtual.value
+        : gerarEstimativa(diasAtual, colaborador.assinados || 0);
+
+      const linhasAnterior = resultAnterior.status === 'fulfilled' ? resultAnterior.value : [];
+
+      const mapAtual = new Map(linhasAtual.map((l) => [l.dia, l.total]));
+      const mapAnterior = new Map(linhasAnterior.map((l) => [l.dia, l.total]));
+
+      const totalDias = Math.max(diasAtual.length, diasAnterior.length);
+      const combinado = Array.from({ length: totalDias }, (_, i) => {
+        const dataAtual = diasAtual[i] || null;
+        const dataAnterior = diasAnterior[i] || null;
+
+        // Rótulo para eixo X: "Dia 1", "Dia 2", ...
+        const rotulo = `Dia ${i + 1}`;
+
+        // Datas completas para tooltip
+        const dataCompletaAtual = dataAtual
+          ? dataAtual.slice(8, 10) + '/' + dataAtual.slice(5, 7) + '/' + dataAtual.slice(0, 4)
+          : '';
+        const dataCompletaAnterior = dataAnterior
+          ? dataAnterior.slice(8, 10) + '/' + dataAnterior.slice(5, 7) + '/' + dataAnterior.slice(0, 4)
+          : '';
+
+        return {
+          dia: rotulo,
+          dataCompletaAtual,
+          dataCompletaAnterior,
+          atual: dataAtual ? (mapAtual.get(dataAtual) ?? 0) : 0,
+          anterior: dataAnterior ? (mapAnterior.get(dataAnterior) ?? 0) : 0,
+        };
       });
-    return () => {
-      cancelado = true;
-    };
+
+      setEvolucaoMensal(combinado);
+    }).finally(() => {
+      if (!cancelado) setCarregandoEvolucao(false);
+    });
+
+    return () => { cancelado = true; };
   }, [colaborador?.name, currentStartDate, currentEndDate, periodoAnterior.inicio, periodoAnterior.fim]);
 
   if (!colaborador) {
@@ -891,7 +920,6 @@ function DetalhesColaborador({
     );
   }
 
-  // Bloqueio de acesso: supervisor não pode ver colaborador de outra equipe; assessor só pode ver a si mesmo
   if (
     (userLevel === LEVELS.SUPERVISAO && normalize(colaborador.equipeNome) !== normalize(currentUser?.equipe || "")) ||
     (userLevel === LEVELS.ASSESSOR && colaborador.email !== currentUser?.email)
@@ -965,7 +993,6 @@ function DetalhesColaborador({
         <ArrowLeft size={15} /> Voltar para a equipe
       </Link>
 
-      {/* Cabeçalho */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-4">
           <Avatar nome={colaborador.name} size={56} />
@@ -980,7 +1007,6 @@ function DetalhesColaborador({
         </div>
       </div>
 
-      {/* KPIs principais */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
         <KpiCard titulo="Recebidos" valor={formatNumero(recebidos)} icon={FileStack} accent="info" />
         <KpiCard
@@ -1001,7 +1027,6 @@ function DetalhesColaborador({
         />
       </div>
 
-      {/* Pace do mês */}
       {metaMensal > 0 && pace && statusPace && (
         <Card className="mb-6" style={{ borderLeft: `3px solid ${STATUS_COLOR[statusPace]}` }}>
           <div className="flex items-center justify-between mb-3">
@@ -1045,7 +1070,6 @@ function DetalhesColaborador({
         </Card>
       )}
 
-      {/* Evolução e Eficiência */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
         <Card className="xl:col-span-2">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">
@@ -1059,29 +1083,49 @@ function DetalhesColaborador({
           ) : evolucaoMensal.length === 0 ? (
             <p className="text-sm text-slate-500 py-10 text-center">Sem dados de evolução para o período selecionado.</p>
           ) : (
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={evolucaoMensal} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-                <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
-                <XAxis
-                  dataKey="dia"
-                  stroke="#64748b"
-                  tick={{ fontSize: 10 }}
-                  tickLine={false}
-                  axisLine={false}
-                  interval={2}
-                  label={{ value: "dia do período", position: "insideBottom", offset: -2, fontSize: 10, fill: "#94a3b8" }}
-                />
-                <YAxis stroke="#64748b" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
-                <Tooltip
-                  formatter={(v, name) => [formatNumero(Number(v)), name === "atual" ? "Atual" : "Anterior"]}
-                  labelFormatter={(l) => `Dia ${l}`}
-                  contentStyle={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12 }}
-                />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Line type="monotone" dataKey="anterior" name="anterior" stroke="#f97316" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="atual" name="atual" stroke="#2563eb" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            <>
+              {evolucaoMensal.every(p => p.anterior === 0) && (
+                <p className="text-xs text-amber-600 mb-2">Dados do período anterior não disponíveis.</p>
+              )}
+              <ResponsiveContainer width="100%" height={220}>
+                <LineChart data={evolucaoMensal} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                  <XAxis
+                    dataKey="dia"
+                    stroke="#64748b"
+                    tick={{ fontSize: 10 }}
+                    tickLine={false}
+                    axisLine={false}
+                    interval={Math.floor(evolucaoMensal.length / 8) || 1}
+                  />
+                  <YAxis stroke="#64748b" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
+                  <Tooltip
+                    formatter={(v, name) => [formatNumero(Number(v)), name === "atual" ? "Atual" : "Anterior"]}
+                    labelFormatter={(label, payload: any[]) => {
+                      const item = payload?.[0]?.payload;
+                      if (!item) return label;
+
+                      const mesAtual = mesAnoDeData(item.dataCompletaAtual);
+                      const mesAnterior = item.dataCompletaAnterior
+                        ? mesAnoDeData(item.dataCompletaAnterior)
+                        : "—";
+
+                      return (
+                        <div>
+                          <p className="font-semibold text-slate-800">{label}</p>
+                          <p className="text-xs text-slate-500">Período anterior: {mesAnterior}</p>
+                          <p className="text-xs text-slate-500">Período atual: {mesAtual}</p>
+                        </div>
+                      );
+                    }}
+                    contentStyle={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12 }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Line type="monotone" dataKey="anterior" name="anterior" stroke="#f97316" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="atual" name="atual" stroke="#2563eb" strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </>
           )}
         </Card>
         <Card className="flex flex-col items-center justify-center">
@@ -1118,7 +1162,6 @@ function DetalhesColaborador({
         </Card>
       </div>
 
-      {/* Radar e Recomendações */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
         <Card className="xl:col-span-1">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">Comparação com a equipe</h3>
