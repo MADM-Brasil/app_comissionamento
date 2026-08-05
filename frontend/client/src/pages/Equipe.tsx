@@ -125,7 +125,7 @@ const EXCLUDED_TEAMS = [
   "Equipe Erica", "Equipe Erika", "Equipe Lucas", "Equipe Irene", "Equipe Maria Eduarda", "SalesOps",
   "Equipe Murilo Balsalobre", "Comercial", "Backoffice", "CEO", "Prontuário",
   "Equipe Leonardo Cardoso", "Equipe Julia", "Equipe Leticia", "Dr. Felipe Marx", "Administrativo",
-  "Equipe Thales", "Financeiro", "Equipe Reciclagem",
+  "Equipe Thales", "Financeiro", "Equipe Reciclagem",""
 ];
 const EXCLUDED_CARGOS = [
   "desativado", "assistente", "analista juridico", "gestor de projetos", "analista",
