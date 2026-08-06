@@ -74,7 +74,6 @@ const GROUP_MAPPING: Record<string, Level> = {
   'analista juridico': LEVELS.NONE,
   'gestor de projetos': LEVELS.NONE,
   'analista': LEVELS.NONE,
-  'analista de discadora': LEVELS.NONE,
 
   // Assessor
   'assessor': LEVELS.ASSESSOR,
