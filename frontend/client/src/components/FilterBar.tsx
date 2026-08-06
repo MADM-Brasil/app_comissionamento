@@ -1,6 +1,6 @@
 // src/components/FilterBar.tsx
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Filter, Users, Briefcase, Search, X, Package, Loader2, AlertCircle } from "lucide-react";
+import { Filter, Users, Briefcase, Search, X, Package, Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,8 @@ interface FilterBarProps {
   initialEquipe?: string;
   initialColaborador?: string;
   initialProduto?: string;
+  /** Callback opcional para recarregar os dados manualmente */
+  onRefresh?: () => Promise<void>;
 }
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
@@ -49,6 +51,7 @@ export default function FilterBar({
   initialEquipe = "todas",
   initialColaborador = "todos",
   initialProduto = "Todos",
+  onRefresh,
 }: FilterBarProps) {
   const { collaborators, equipeConfigs, setCollaborators, setEquipeConfigs } = useAppStore();
   const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
@@ -62,10 +65,19 @@ export default function FilterBar({
   const [colabError, setColabError] = useState<string | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [hasAppliedRestrictions, setHasAppliedRestrictions] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<string>("");
 
   const userLevel = getAccessLevel();
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
+
+  // Atualiza a hora quando os dados ficam prontos
+  useEffect(() => {
+    if (isReady) {
+      setLastUpdated(new Date().toLocaleTimeString());
+    }
+  }, [isReady]);
 
   // ========== TIMEOUT DE SEGURANÇA ==========
   useEffect(() => {
@@ -183,7 +195,6 @@ export default function FilterBar({
     if (!isReady || !collaborators.length) return [];
     let filtered = [...collaborators];
     filtered = filtered.filter((c) => !isExcludedTeam(c.equipeNome));
-    // uso cargo (não grupo) para excluir
     filtered = filtered.filter((c) => normalize(c.cargo) !== 'administrativo');
 
     let effectiveEquipe = selectedEquipe;
@@ -208,15 +219,70 @@ export default function FilterBar({
     return filtered;
   }, [collaborators, selectedEquipe, isAssessor, isSupervisor, currentUser, searchTerm, isReady]);
 
-  // ========== NOTIFICAR O PARENT ==========
+  // ========== NOTIFICAR O PARENT (IMEDIATO) ==========
   const onFilterChangeRef = useRef(onFilterChange);
   useEffect(() => {
     onFilterChangeRef.current = onFilterChange;
   }, [onFilterChange]);
 
-  useEffect(() => {
+  const notifyParent = (
+    equipe: string,
+    colaborador: string,
+    produto: string,
+    search?: string
+  ) => {
     if (!isReady || !hasAppliedRestrictions || !currentUser) return;
 
+    let finalEquipe = equipe;
+    let finalColaborador = colaborador;
+    if (isAssessor && currentUser) {
+      finalEquipe = currentUser.equipe || "todas";
+      finalColaborador = currentUser.nome || "todos";
+    } else if (isSupervisor && currentUser) {
+      finalEquipe = currentUser.equipe || "todas";
+      finalColaborador = colaborador;
+    }
+
+    // Se o colaborador foi selecionado, buscar o ID correspondente
+    const colaboradorId =
+      finalColaborador !== "todos"
+        ? collaborators.find((c) => c.name === finalColaborador)?.id
+        : undefined;
+
+    onFilterChangeRef.current({
+      equipe: finalEquipe,
+      colaborador: finalColaborador,
+      colaboradorId,
+      produto,
+    });
+  };
+
+  // ========== HANDLERS DE MUDANÇA (acionam o pai imediatamente) ==========
+  const handleEquipeChange = (novaEquipe: string) => {
+    setSelectedEquipe(novaEquipe);
+    // Se a equipe mudou para uma que força produto, o produto será atualizado via useEffect,
+    // mas como queremos notificar imediatamente, passamos o produto atual ou o mapeado.
+    const produtoMapeado = TEAM_TO_PRODUCT[novaEquipe] || selectedProduto;
+    if (TEAM_TO_PRODUCT[novaEquipe]) {
+      setSelectedProduto(produtoMapeado);
+    }
+    notifyParent(novaEquipe, selectedColaborador, produtoMapeado);
+  };
+
+  const handleColaboradorChange = (novoColaborador: string) => {
+    setSelectedColaborador(novoColaborador);
+    notifyParent(selectedEquipe, novoColaborador, selectedProduto);
+  };
+
+  const handleProdutoChange = (novoProduto: string) => {
+    setSelectedProduto(novoProduto);
+    notifyParent(selectedEquipe, selectedColaborador, novoProduto);
+  };
+
+  const handleSearchChange = (novoTermo: string) => {
+    setSearchTerm(novoTermo);
+    // Notifica o pai com o termo de busca, mas sem reaplicar restrições desnecessárias
+    if (!isReady || !hasAppliedRestrictions || !currentUser) return;
     let finalEquipe = selectedEquipe;
     let finalColaborador = selectedColaborador;
     if (isAssessor && currentUser) {
@@ -224,12 +290,10 @@ export default function FilterBar({
       finalColaborador = currentUser.nome || "todos";
     } else if (isSupervisor && currentUser) {
       finalEquipe = currentUser.equipe || "todas";
-      finalColaborador = selectedColaborador;
     }
-
     const colaboradorId =
       finalColaborador !== "todos"
-        ? collaborators.find((c) => c.name === finalColaborador)?.id    // agora id é string
+        ? collaborators.find((c) => c.name === finalColaborador)?.id
         : undefined;
 
     onFilterChangeRef.current({
@@ -238,26 +302,44 @@ export default function FilterBar({
       colaboradorId,
       produto: selectedProduto,
     });
-  }, [selectedEquipe, selectedColaborador, selectedProduto, isAssessor, isSupervisor, currentUser, collaborators, isReady, hasAppliedRestrictions]);
+  };
 
   // ========== LIMPAR FILTROS ==========
   const clearFilters = () => {
     if (!isReady) return;
     if (isAssessor && currentUser) {
       setSelectedProduto("Todos");
+      notifyParent(selectedEquipe, selectedColaborador, "Todos");
     } else if (isSupervisor && currentUser) {
       setSelectedColaborador("todos");
       setSearchTerm("");
       setSelectedProduto("Todos");
+      notifyParent(selectedEquipe, "todos", "Todos");
     } else {
       setSelectedEquipe("todas");
       setSelectedColaborador("todos");
       setSearchTerm("");
       setSelectedProduto("Todos");
+      notifyParent("todas", "todos", "Todos");
     }
   };
 
-  const hasActiveFilters = (() => {
+  // ========== AÇÃO DE ATUALIZAR ==========
+  const handleRefresh = async () => {
+    if (refreshing || !onRefresh) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+      setLastUpdated(new Date().toLocaleTimeString());
+    } catch (error) {
+      console.error("Erro ao atualizar dados:", error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // Filtros ativos (agora apenas indicador visual, sem bloquear notificações)
+  const hasActiveFilters = useMemo(() => {
     if (!isReady) return false;
     if (isAssessor) return selectedProduto !== "Todos";
     if (isSupervisor)
@@ -268,7 +350,7 @@ export default function FilterBar({
       searchTerm !== "" ||
       selectedProduto !== "Todos"
     );
-  })();
+  }, [isReady, isAssessor, isSupervisor, selectedEquipe, selectedColaborador, searchTerm, selectedProduto]);
 
   const isEquipeDisabled = isAssessor || isSupervisor || loadingEquipes || !isReady;
   const isColaboradorDisabled = isAssessor || loadingCollaborators || !isReady;
@@ -307,6 +389,7 @@ export default function FilterBar({
 
   return (
     <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
+
       <div className="flex flex-col gap-4">
         {collaborators.length > 5 && !isAssessor && showColaboradorFilter && (
           <div className="relative">
@@ -315,7 +398,7 @@ export default function FilterBar({
               type="text"
               placeholder="Buscar colaborador por nome ou e-mail..."
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => handleSearchChange(e.target.value)}
               disabled={isAssessor}
               className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20"
               aria-label="Buscar colaborador por nome ou e-mail"
@@ -333,7 +416,7 @@ export default function FilterBar({
             <select
               id="filterEquipe"
               value={selectedEquipe}
-              onChange={(e) => setSelectedEquipe(e.target.value)}
+              onChange={(e) => handleEquipeChange(e.target.value)}
               disabled={isEquipeDisabled}
               className={cn(
                 "w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20",
@@ -360,7 +443,7 @@ export default function FilterBar({
                 id="filterColaborador"
                 key={filteredColaboradores.length}
                 value={selectedColaborador}
-                onChange={(e) => setSelectedColaborador(e.target.value)}
+                onChange={(e) => handleColaboradorChange(e.target.value)}
                 disabled={isColaboradorDisabled}
                 className={cn(
                   "w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20",
@@ -393,7 +476,7 @@ export default function FilterBar({
             <select
               id="filterProduto"
               value={selectedProduto}
-              onChange={(e) => setSelectedProduto(e.target.value)}
+              onChange={(e) => handleProdutoChange(e.target.value)}
               disabled={isProdutoDisabled}
               className={cn(
                 "w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20",
@@ -423,27 +506,30 @@ export default function FilterBar({
           )}
         </div>
 
-        {/* Filtros ativos */}
-        {hasActiveFilters && (
-          <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
-            <Filter className="w-3 h-3 text-gray-400" />
-            <span className="text-[10px] text-gray-500">
-              Filtros ativos:
-              {!isSupervisor && selectedEquipe !== "todas" && selectedEquipe && (
-                <span className="font-medium text-[#09175b] ml-1">Equipe: {selectedEquipe}</span>
-              )}
-              {selectedColaborador !== "todos" && selectedColaborador && (
-                <span className="font-medium text-[#09175b] ml-2">Colaborador: {selectedColaborador}</span>
-              )}
-              {searchTerm && (
-                <span className="font-medium text-[#09175b] ml-2">Busca: {searchTerm}</span>
-              )}
-              {selectedProduto !== "Todos" && selectedProduto && (
-                <span className="font-medium text-[#09175b] ml-2">Produto: {selectedProduto}</span>
-              )}
-            </span>
-          </div>
-        )}
+              {/* Botão e indicador de atualização */}
+      {onRefresh && (
+        <div className="flex items-center justify-end gap-2 mb-2">
+          {refreshing && (
+            <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>Atualizando dados...</span>
+            </div>
+          )}
+          <span className="text-[10px] text-gray-400">
+            Atualizado {lastUpdated || new Date().toLocaleTimeString()}
+          </span>
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
+            aria-label="Atualizar dados manualmente"
+            title="Clique para recarregar os dados mantendo os filtros atuais"
+          >
+            <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+            Atualizar Dados
+          </button>
+        </div>
+      )}
       </div>
     </div>
   );
