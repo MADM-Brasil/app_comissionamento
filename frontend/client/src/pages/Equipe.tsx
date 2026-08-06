@@ -304,11 +304,19 @@ function CardPodioTime({ item, posicao }: { item: any; posicao: 1 | 2 | 3 }) {
 }
 
 // ============================================================
-//  PÁGINA PRINCIPAL (com controle de acesso)
+//  PÁGINA PRINCIPAL (com carregamento inicial)
 // ============================================================
 export default function Equipe() {
   const [location] = useLocation();
-  const { collaborators: rawCollaborators, currentStartDate, currentEndDate, period } = useAppStore();
+  const {
+    collaborators: rawCollaborators,
+    currentStartDate,
+    currentEndDate,
+    period,
+    loadCollaborators,
+    loadMetricsForPeriod,
+    updateCurrentDates,
+  } = useAppStore();
   const { currentUser } = useAccessControl();
   const userLevel = getAccessLevel(currentUser?.cargo, currentUser?.status);
   const isAssessor = userLevel === LEVELS.ASSESSOR;
@@ -316,6 +324,23 @@ export default function Equipe() {
   const canSeeAll = userLevel >= LEVELS.COORDENADOR;
 
   const [busca, setBusca] = useState("");
+  const [initialLoading, setInitialLoading] = useState(true);
+
+  // Garante que as datas estejam definidas e carrega dados iniciais
+  useEffect(() => {
+    updateCurrentDates();
+    const load = async () => {
+      if (rawCollaborators.length === 0) {
+        await loadCollaborators();
+      }
+      if (getAccessLevel(currentUser?.cargo, currentUser?.status) >= LEVELS.COORDENADOR) {
+        await loadMetricsForPeriod();
+      }
+      setInitialLoading(false);
+    };
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const supervisor = useMemo(() => {
     const pathMatch = location.match(/^\/equipe\/(.+)$/);
@@ -376,6 +401,17 @@ export default function Equipe() {
     ? "Seus indicadores de desempenho."
     : `Visão geral das equipes. Assinados de ${labelPeriodo}.`;
 
+  if (initialLoading) {
+    return (
+      <DashboardLayout title={titulo} subtitle="Carregando...">
+        <div className="flex justify-center items-center h-64">
+          <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
+          <span className="ml-2 text-sm text-slate-500">Carregando dados...</span>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout title={titulo} subtitle={subtitulo}>
       {!supervisor && !colaboradorId && canSeeAll ? (
@@ -396,7 +432,7 @@ export default function Equipe() {
 }
 
 // ============================================================
-//  LISTA DE EQUIPES (inalterada)
+//  LISTA DE EQUIPES (inalterada – mantida a versão anterior completa)
 // ============================================================
 function BuscaColaborador({ busca, setBusca }: { busca: string; setBusca: (v: string) => void }) {
   return (
@@ -428,7 +464,7 @@ function ListaEquipes({
   const [diario, setDiario] = useState<AssinadosDiarioLinha[]>([]);
   const [loadingDiario, setLoadingDiario] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const { loadCollaborators, loadMetricsForPeriod } = useAppStore();
+  const { loadCollaborators: loadCollabs, loadMetricsForPeriod: loadMetrics } = useAppStore();
 
   const carregarDiario = async () => {
     setLoadingDiario(true);
@@ -453,7 +489,7 @@ function ListaEquipes({
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      await Promise.allSettled([loadCollaborators(), loadMetricsForPeriod(), carregarDiario()]);
+      await Promise.allSettled([loadCollabs(), loadMetrics(), carregarDiario()]);
     } finally {
       setRefreshing(false);
     }
@@ -808,7 +844,7 @@ function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; cola
 }
 
 // ============================================================
-//  DETALHES DO COLABORADOR (Evolução com "Dia 1", "Dia 2"...)
+//  DETALHES DO COLABORADOR (estrutura refatorada para evitar hooks condicionais)
 // ============================================================
 function DetalhesColaborador({
   colaboradorId,
@@ -827,7 +863,7 @@ function DetalhesColaborador({
   const [carregandoEvolucao, setCarregandoEvolucao] = useState(false);
 
   const periodoAnterior = useMemo(
-    () => mesmoPeriodoAnterior(currentStartDate, currentEndDate),
+    () => (currentStartDate && currentEndDate ? mesmoPeriodoAnterior(currentStartDate, currentEndDate) : { inicio: "", fim: "" }),
     [currentStartDate, currentEndDate]
   );
 
@@ -845,12 +881,15 @@ function DetalhesColaborador({
     return `${nomesMeses[mes - 1] || mes}/${ano}`;
   };
 
+  // Efeito para buscar evolução diária (só roda se existir colaborador e período)
   useEffect(() => {
-    if (!colaborador) return;
+    if (!colaborador || !currentStartDate || !currentEndDate) return;
     let cancelado = false;
     setCarregandoEvolucao(true);
     const diasAtual = gerarDiasEntre(currentStartDate, currentEndDate);
-    const diasAnterior = gerarDiasEntre(periodoAnterior.inicio, periodoAnterior.fim);
+    const diasAnterior = periodoAnterior.inicio && periodoAnterior.fim
+      ? gerarDiasEntre(periodoAnterior.inicio, periodoAnterior.fim)
+      : [];
 
     const gerarEstimativa = (dias: string[], totalAssinados: number) => {
       const diasUteis = dias.filter(d => isDiaUtil(new Date(d + 'T00:00:00'))).length || 1;
@@ -861,17 +900,23 @@ function DetalhesColaborador({
       }));
     };
 
-    Promise.allSettled([
+    const promessas = [
       fetchAssinadosDiarioColaborador(colaborador.name, currentStartDate, currentEndDate),
-      fetchAssinadosDiarioColaborador(colaborador.name, periodoAnterior.inicio, periodoAnterior.fim),
-    ]).then(([resultAtual, resultAnterior]) => {
+    ];
+    if (periodoAnterior.inicio && periodoAnterior.fim) {
+      promessas.push(fetchAssinadosDiarioColaborador(colaborador.name, periodoAnterior.inicio, periodoAnterior.fim));
+    } else {
+      promessas.push(Promise.resolve([]));
+    }
+
+    Promise.allSettled(promessas).then(([resultAtual, resultAnterior]) => {
       if (cancelado) return;
 
       const linhasAtual = resultAtual.status === 'fulfilled' && resultAtual.value.length > 0
         ? resultAtual.value
         : gerarEstimativa(diasAtual, colaborador.assinados || 0);
 
-      const linhasAnterior = resultAnterior.status === 'fulfilled' ? resultAnterior.value : [];
+      const linhasAnterior = (resultAnterior.status === 'fulfilled' ? resultAnterior.value : []) || [];
 
       const mapAtual = new Map(linhasAtual.map((l) => [l.dia, l.total]));
       const mapAnterior = new Map(linhasAnterior.map((l) => [l.dia, l.total]));
@@ -881,10 +926,8 @@ function DetalhesColaborador({
         const dataAtual = diasAtual[i] || null;
         const dataAnterior = diasAnterior[i] || null;
 
-        // Rótulo para eixo X: "Dia 1", "Dia 2", ...
         const rotulo = `Dia ${i + 1}`;
 
-        // Datas completas para tooltip
         const dataCompletaAtual = dataAtual
           ? dataAtual.slice(8, 10) + '/' + dataAtual.slice(5, 7) + '/' + dataAtual.slice(0, 4)
           : '';
@@ -909,41 +952,29 @@ function DetalhesColaborador({
     return () => { cancelado = true; };
   }, [colaborador?.name, currentStartDate, currentEndDate, periodoAnterior.inicio, periodoAnterior.fim]);
 
-  if (!colaborador) {
-    return (
-      <div>
-        <Link to="/equipe" className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-4 w-fit">
-          <ArrowLeft size={15} /> Voltar para equipes
-        </Link>
-        <p className="text-slate-500">Colaborador não encontrado.</p>
-      </div>
-    );
-  }
-
-  if (
+  // Todos os hooks chamados incondicionalmente – o retorno condicional só ocorre no JSX
+  const acessoNegado = !!(colaborador && (
     (userLevel === LEVELS.SUPERVISAO && normalize(colaborador.equipeNome) !== normalize(currentUser?.equipe || "")) ||
     (userLevel === LEVELS.ASSESSOR && colaborador.email !== currentUser?.email)
-  ) {
-    return <p className="text-slate-500">Acesso não autorizado.</p>;
-  }
+  ));
 
-  const recebidos = colaborador.emitidos || 0;
-  const assinados = colaborador.assinados || 0;
-  const protocolados = colaborador.protocolados || 0;
-  const ganhos = colaborador.ganhos || 0;
-  const metaMensal = colaborador.metaMensalAssinados || 0;
+  const recebidos = colaborador?.emitidos || 0;
+  const assinados = colaborador?.assinados || 0;
+  const protocolados = colaborador?.protocolados || 0;
+  const ganhos = colaborador?.ganhos || 0;
+  const metaMensal = colaborador?.metaMensalAssinados || 0;
   const taxaConversao = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
   const conversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
 
   const hoje = new Date();
-  const inicioPeriodo = new Date(currentStartDate);
-  const fimPeriodo = new Date(currentEndDate);
+  const inicioPeriodo = currentStartDate ? new Date(currentStartDate) : new Date();
+  const fimPeriodo = currentEndDate ? new Date(currentEndDate) : new Date();
   const diasUteisTotais = contarDiasUteis(inicioPeriodo, fimPeriodo);
   const diasUteisDecorridos = contarDiasUteis(inicioPeriodo, hoje < fimPeriodo ? hoje : fimPeriodo);
   const pace = calcularPaceProjecao(assinados, metaMensal, diasUteisDecorridos, diasUteisTotais);
   const statusPace = pace ? classificarPace(pace, metaMensal) : undefined;
 
-  const equipe = colaboradores.filter((c) => c.equipeNome === colaborador.equipeNome);
+  const equipe = colaboradores.filter((c) => c.equipeNome === colaborador?.equipeNome);
   const mediaEquipe = useMemo(() => {
     if (equipe.length === 0) return null;
     const total = equipe.length;
@@ -982,6 +1013,22 @@ function DetalhesColaborador({
   }
   if (taxaConversao < 70) {
     recomendacoes.push("Reforçar técnicas de fechamento comercial (etapa emissão → assinatura).");
+  }
+
+  // Renderização condicional apenas no JSX
+  if (!colaborador) {
+    return (
+      <div>
+        <Link to="/equipe" className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700 mb-4 w-fit">
+          <ArrowLeft size={15} /> Voltar para equipes
+        </Link>
+        <p className="text-slate-500">Colaborador não encontrado.</p>
+      </div>
+    );
+  }
+
+  if (acessoNegado) {
+    return <p className="text-slate-500">Acesso não autorizado.</p>;
   }
 
   return (
@@ -1113,8 +1160,8 @@ function DetalhesColaborador({
                       return (
                         <div>
                           <p className="font-semibold text-slate-800">{label}</p>
-                          <p className="text-xs text-slate-500">Período anterior: {mesAnterior}</p>
                           <p className="text-xs text-slate-500">Período atual: {mesAtual}</p>
+                          <p className="text-xs text-slate-500">Período anterior: {mesAnterior}</p>
                         </div>
                       );
                     }}
