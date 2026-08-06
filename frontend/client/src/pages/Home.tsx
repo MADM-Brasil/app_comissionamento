@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import {
   TrendingUp, Target, Zap, ArrowRight, Award,
-  DollarSign, FileCheck, BarChart2, Loader2, RefreshCw,
+  DollarSign, FileCheck, BarChart2, Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
@@ -305,10 +305,11 @@ export default function Home() {
   }[]>([]);
   const [dailyChartData, setDailyChartData] = useState<{ date: string; leads: number; assinados: number }[]>([]);
 
-  const initialLoadDone = useRef(false);
-  const lastFiltersRef = useRef(filters);
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
 
+  // ============================================================
+  // DEFINIÇÃO DE loadRankingData (ANTES de ser utilizada)
+  // ============================================================
   const loadRankingData = useCallback(async () => {
     if (!currentStartDate || !currentEndDate) return;
     const now = Date.now();
@@ -339,6 +340,78 @@ export default function Home() {
     finally { setRankingLoading(false); }
   }, [currentStartDate, currentEndDate, allCollaborators.length]);
 
+  // ============================================================
+  // FUNÇÃO CENTRAL DE RECARGA
+  // ============================================================
+  const reloadData = useCallback(async (showRefreshing = false) => {
+    if (!currentStartDate || !currentEndDate) return;
+    if (showRefreshing) setRefreshing(true);
+    else setLoading(true);
+
+    try {
+      const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
+      const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
+
+      await loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi);
+      await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
+      await loadWeeklyPerformanceData();
+
+      const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
+      if (datesChanged) await loadRankingData();
+
+      lastDatesRef.current = { start: currentStartDate, end: currentEndDate };
+    } catch (err) {
+      console.error("Erro ao recarregar dados:", err);
+    } finally {
+      setRefreshing(false);
+      setLoading(false);
+    }
+  }, [
+    currentStartDate, currentEndDate, filters,
+    loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData
+  ]);
+
+  const handleFilterChange = useCallback((newFilters: typeof filters) => {
+    setFilters(newFilters);
+  }, []);
+
+  const handleRefresh = useCallback(async () => {
+    await reloadData(true);
+  }, [reloadData]);
+
+  const getChartFilterParams = useCallback(() => {
+    let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
+    let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
+    let colaboradorIdApi = filters.colaboradorId;
+    const selectedColab = filters.colaboradorId ? collaborators.find(c => c.id === filters.colaboradorId) : null;
+    const isSupervisor = selectedColab?.cargo?.toLowerCase() === 'supervisor';
+    if (isSupervisor && selectedColab) {
+      equipeApi = selectedColab.equipeNome;
+      colaboradorApi = undefined;
+      colaboradorIdApi = undefined;
+    }
+    return { equipeApi, colaboradorApi, colaboradorIdApi };
+  }, [filters, collaborators]);
+
+  // ============================================================
+  // EFEITO QUE REAGE IMEDIATAMENTE A MUDANÇAS DE FILTROS/DATAS
+  // ============================================================
+  useEffect(() => {
+    if (!currentStartDate || !currentEndDate) return;
+    reloadData(false);
+  }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (currentStartDate && currentEndDate && allCollaborators.length === 0) {
+      loadRankingData();
+    }
+  }, [currentStartDate, currentEndDate, allCollaborators.length, loadRankingData]);
+
+  useEffect(() => setMounted(true), []);
+
+  // ============================================================
+  // CÁLCULOS DERIVADOS
+  // ============================================================
   const globalRanking = useMemo(() => {
     const eligible = allCollaborators.filter(c => {
       if (isDesativado(c)) return false;
@@ -380,51 +453,6 @@ export default function Home() {
     if (!aboveUser || currentIndex < 0) return 0;
     return aboveUser.score - (globalRanking[currentIndex]?.score || 0);
   }, [aboveUser, currentIndex, globalRanking]);
-
-  const reloadData = useCallback(async (showRefreshing = false) => {
-    const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
-    const filtersChanged = filters.equipe !== lastFiltersRef.current.equipe || filters.colaborador !== lastFiltersRef.current.colaborador || filters.produto !== lastFiltersRef.current.produto;
-    const metricsEmpty = rawMetrics.assinados === 0 && rawMetrics.emitidos === 0 && rawMetrics.ganhos === 0;
-    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) return;
-    if (showRefreshing) setRefreshing(true);
-    try {
-      const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
-      const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
-      if (datesChanged || filtersChanged || metricsEmpty) {
-        await loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi);
-        await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
-        await loadWeeklyPerformanceData();
-        if (datesChanged) await loadRankingData();
-      }
-      lastDatesRef.current = { start: currentStartDate, end: currentEndDate };
-      lastFiltersRef.current = { ...filters };
-      initialLoadDone.current = true;
-    } catch (err) { console.error("Erro ao recarregar dados:", err); }
-    finally { if (showRefreshing) setRefreshing(false); setLoading(false); }
-  }, [filters, currentStartDate, currentEndDate, rawMetrics, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData]);
-
-  const getChartFilterParams = useCallback(() => {
-    let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
-    let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
-    let colaboradorIdApi = filters.colaboradorId;
-    const selectedColab = filters.colaboradorId ? collaborators.find(c => c.id === filters.colaboradorId) : null;
-    const isSupervisor = selectedColab?.cargo?.toLowerCase() === 'supervisor';
-    if (isSupervisor && selectedColab) { equipeApi = selectedColab.equipeNome; colaboradorApi = undefined; colaboradorIdApi = undefined; }
-    return { equipeApi, colaboradorApi, colaboradorIdApi };
-  }, [filters, collaborators]);
-
-  useEffect(() => {
-    if (!currentStartDate || !currentEndDate) return;
-    if (initialLoadDone.current) return;
-    setLoading(true);
-    reloadData(false);
-  }, [currentStartDate, currentEndDate, reloadData]);
-
-  useEffect(() => {
-    if (currentStartDate && currentEndDate && allCollaborators.length === 0) loadRankingData();
-  }, [currentStartDate, currentEndDate, allCollaborators.length, loadRankingData]);
-
-  useEffect(() => setMounted(true), []);
 
   const isSpecialGroup = filters.produto === 'Quinquenio' || filters.produto === 'Concomitante';
 
@@ -488,6 +516,9 @@ export default function Home() {
     return { comissaoTotal: totalComissao, metaBatida: metasBatidasUser, bonusPorCiclo: bonusPorCicloUser };
   }, [currentUserData, isSpecialGroup, period, globalConfig, authUser]);
 
+  // ============================================================
+  // GRÁFICOS DE PERFORMANCE
+  // ============================================================
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
     const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
@@ -583,11 +614,6 @@ export default function Home() {
     fetchDailyData();
   }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
 
-  const handleFilterChange = (newFilters: { equipe: string; colaborador: string; colaboradorId?: string | number; produto: string }) => setFilters(newFilters);
-
-  const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
-  const firstName = currentUser?.nome?.split(" ")[0] || "Usuário";
-
   const stats = useMemo(() => {
     if (isSpecialGroup || weeklyDetailed.length === 0) return { totalAssinados: 0, totalGanhos: 0, performanceAssinados: 0, performanceGanhos: 0, bestDay: { day: '', value: 0 }, avgGanhos: 0, daysWithMeta: 0, totalDays: 0 };
     const { start, end } = getCurrentWeekDatesUTC();
@@ -615,30 +641,42 @@ export default function Home() {
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
   ];
 
+  const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
+  const firstName = currentUser?.nome?.split(" ")[0] || "Usuário";
+
   return (
     <DashboardLayout title={`Olá, ${firstName}! 👋`} subtitle="Aqui está o resumo do seu desempenho de hoje!">
-      <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
+      <FilterBar
+        onFilterChange={handleFilterChange}
+        showColaboradorFilter={true}
+        className="mb-6"
+        onRefresh={handleRefresh}
+      />
 
-      {/* Botão Atualizar + timestamp */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2 text-xs text-[#64748b]">
-          {refreshing && <span className="flex items-center gap-1.5 animate-pulse"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Atualizando...</span>}
-          <span>Atualizado {new Date().toLocaleTimeString()}</span>
+      {loading && (
+        <div className="flex justify-center items-center py-4">
+          <Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" />
+          <span className="ml-2 text-sm text-[#64748b]">Carregando dados...</span>
         </div>
-        <button onClick={() => reloadData(true)} disabled={refreshing} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 transition-colors">
-          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} /> Atualizar Dados
-        </button>
-      </div>
+      )}
 
-      {loading && <div className="flex justify-center items-center py-4"><Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" /><span className="ml-2 text-sm text-[#64748b]">Carregando dados...</span></div>}
-      {collaborators.length === 0 && !loading && <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">Nenhum colaborador disponível no momento.</div>}
+      {collaborators.length === 0 && !loading && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
+          Nenhum colaborador disponível no momento.
+        </div>
+      )}
 
-      {collaborators.length > 0 && (
+      {collaborators.length > 0 && !loading && (
         <>
           {hasActiveFilters && (
             <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
-              <span>📊</span><span>Mostrando dados de: {filters.equipe !== "todas" && ` Equipe ${filters.equipe}`}{filters.colaborador !== "todos" && ` - ${filters.colaborador}`}{filters.produto !== "Todos" && ` • Produto: ${filters.produto}`}</span>
-            </div>
+              <span>📊</span>
+              <span>
+                Mostrando dados de:
+                {filters.equipe !== "todas" && ` ${filters.equipe}`}
+                {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
+                {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
+              </span>            </div>
           )}
 
           {bonusData.active && bonusData.bonusValue > 0 && (
@@ -796,8 +834,5 @@ export default function Home() {
         </>
       )}
     </DashboardLayout>
-
-    
   );
-
 }

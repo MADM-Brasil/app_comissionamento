@@ -1,4 +1,4 @@
-// src/pages/Comissoes.tsx (novo layout)
+// src/pages/Comissoes.tsx
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
@@ -101,33 +101,20 @@ export default function Comissoes() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isFirstFilterApplied, setIsFirstFilterApplied] = useState(false);
 
-  const initialLoadDone = useRef(false);
-  const lastFiltersRef = useRef(filters);
-  const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
+  // Removido isFirstFilterApplied e timeout – agora reage diretamente
+
   const isLoadingRef = useRef(false);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  useEffect(() => {
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    timeoutRef.current = setTimeout(() => {
-      if (!isFirstFilterApplied) {
-        console.warn("⏱️ Comissoes: timeout de segurança forçando primeiro filtro");
-        setIsFirstFilterApplied(true);
-      }
-    }, 3000);
-    return () => { if (timeoutRef.current) clearTimeout(timeoutRef.current); };
-  }, [isFirstFilterApplied]);
 
   const reloadData = useCallback(async (showRefreshing = false) => {
-    if (isLoadingRef.current) return;
-    const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
-    const filtersChanged = filters.equipe !== lastFiltersRef.current.equipe || filters.colaborador !== lastFiltersRef.current.colaborador || filters.produto !== lastFiltersRef.current.produto;
-    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged) return;
+    if (!currentStartDate || !currentEndDate) return;
+    if (isLoadingRef.current && !showRefreshing) return;
 
     isLoadingRef.current = true;
     if (showRefreshing) setRefreshing(true);
+    else setLoading(true);
+    setError(null);
+
     try {
       const equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
       const colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
@@ -139,11 +126,6 @@ export default function Comissoes() {
         loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi }),
         loadWeeklyPerformanceData(),
       ]);
-
-      lastDatesRef.current = { start: currentStartDate, end: currentEndDate };
-      lastFiltersRef.current = { ...filters };
-      initialLoadDone.current = true;
-      setError(null);
     } catch (err: any) {
       console.error("❌ Comissoes: erro ao recarregar dados:", err);
       setError(err.message || "Falha ao recarregar dados.");
@@ -152,20 +134,21 @@ export default function Comissoes() {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [filters, currentStartDate, currentEndDate, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
+  }, [currentStartDate, currentEndDate, filters, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
 
-  const handleFilterChange = (newFilters: any) => {
+  const handleFilterChange = useCallback((newFilters: typeof filters) => {
     setFilters(newFilters);
-    if (!isFirstFilterApplied) setIsFirstFilterApplied(true);
-  };
+  }, []);
 
+  const handleRefresh = useCallback(async () => {
+    await reloadData(true);
+  }, [reloadData]);
+
+  // Efeito que reage imediatamente a mudanças nos filtros ou datas
   useEffect(() => {
-    if (!isFirstFilterApplied) return;
-    if (!currentStartDate || !currentEndDate) { setLoading(false); return; }
-    if (initialLoadDone.current) { setLoading(false); return; }
-    setLoading(true);
+    if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
-  }, [isFirstFilterApplied, currentStartDate, currentEndDate, reloadData, loading]);
+  }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const filteredColabs = useMemo(() => {
     let filtered = storeColabs.filter(c => {
@@ -175,6 +158,7 @@ export default function Comissoes() {
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
       return true;
     });
+    // Garantir que o usuário logado sempre apareça nos seus próprios dados
     const hasCurrentUser = filtered.some(c => c.id === currentUser?.id);
     if (currentUser && !hasCurrentUser) {
       const userColab = storeColabs.find(c => c.id === currentUser.id);
@@ -233,47 +217,55 @@ export default function Comissoes() {
   }, [commissionData]);
 
   const summaryCards = [
-    { label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign, color: "#2F6FED", sub: "Soma das comissões diária, semanal e mensal", isCurrency: true },
-    { label: "Metas Batidas (Total)", value: totals.ciclos, icon: Award, color: "#16A34A", sub: "Diário + Semanal + Mensal", isInteger: true },
-    { label: "Vendas Fechadas", value: rawMetrics.assinados, icon: FileCheck, color: "#EA8C1D", sub: "Total de assinados no período", isInteger: true },
-    { label: "Progresso Médio", value: avgProgress, icon: Target, color: "#8B5CF6", sub: "Média do menor percentual (assinados/ganhos mensais)", isPercent: true },
+    { label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign, color: "#2F6FED", isCurrency: true },
+    { label: "Metas Batidas (Total)", value: totals.ciclos, icon: Award, color: "#16A34A", isInteger: true },
+    { label: "Vendas Fechadas", value: rawMetrics.assinados, icon: FileCheck, color: "#EA8C1D", isInteger: true },
+    { label: "Progresso Médio", value: avgProgress, icon: Target, color: "#8B5CF6", isPercent: true },
   ];
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
 
-  if (!isFirstFilterApplied) {
-    return (
-      <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">
-        <div className="flex justify-center items-center py-12"><Loader2 className="w-8 h-8 animate-spin text-[#2F6FED]" /><span className="ml-2 text-[#64748b]">Aguardando configuração dos filtros...</span></div>
-      </DashboardLayout>
-    );
-  }
-
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">
-      <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
+      <FilterBar
+        onFilterChange={handleFilterChange}
+        showColaboradorFilter={true}
+        className="mb-6"
+        onRefresh={handleRefresh}
+      />
 
-      {/* Botão Atualizar + Timestamp */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2 text-xs text-[#64748b]">
-          {refreshing && <span className="flex items-center gap-1.5 animate-pulse"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Atualizando...</span>}
-          <span>Atualizado {new Date().toLocaleTimeString()}</span>
+      {loading && (
+        <div className="flex justify-center items-center py-4">
+          <Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" />
+          <span className="ml-2 text-sm text-[#64748b]">Carregando dados...</span>
         </div>
-        <button onClick={() => reloadData(true)} disabled={refreshing} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 transition-colors">
-          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} /> Atualizar Dados
-        </button>
-      </div>
+      )}
 
-      {loading && <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /><span className="ml-2 text-sm text-[#64748b]">Carregando dados...</span></div>}
-      {error && <div className="bg-red-50 text-red-700 p-4 rounded-lg text-sm mb-4"><p>{error}</p><button onClick={() => reloadData(true)} className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700">Tentar novamente</button></div>}
-      {!loading && filteredColabs.length === 0 && !error && <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">Nenhum colaborador disponível para os filtros atuais.</div>}
+      {error && (
+        <div className="bg-red-50 text-red-700 p-4 rounded-lg text-sm mb-4">
+          <p>{error}</p>
+          <button onClick={() => reloadData(true)} className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700">
+            Tentar novamente
+          </button>
+        </div>
+      )}
+
+      {!loading && filteredColabs.length === 0 && !error && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
+          Nenhum colaborador disponível para os filtros atuais.
+        </div>
+      )}
 
       {!loading && filteredColabs.length > 0 && (
         <>
           {hasActiveFilters && (
             <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex gap-2 flex-wrap">
               <span>📊</span>
-              <span>Mostrando dados para: {filters.equipe !== "todas" && ` Equipe ${filters.equipe}`} {filters.colaborador !== "todos" && ` - ${filters.colaborador}`} {filters.produto !== "Todos" && ` • Produto: ${filters.produto}`}</span>
+              <span>
+                Mostrando dados de: {filters.equipe !== "todas" && ` ${filters.equipe}`}
+                {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
+                {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
+              </span>
             </div>
           )}
 
@@ -294,7 +286,6 @@ export default function Comissoes() {
                     <span className="text-xs text-[#64748b] font-medium">{card.label}</span>
                   </div>
                   <div className="kpi-value mb-1" style={{ color: "#0f172a" }}>{displayValue}</div>
-                  <div className="text-xs text-[#94a3b8]">{card.sub}</div>
                 </div>
               );
             })}

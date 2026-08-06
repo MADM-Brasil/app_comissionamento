@@ -259,7 +259,7 @@ export default function VisaoGeral() {
   // Totais gerais
   const totalAssinados = rawMetrics.assinados;
   const totalProtocolados = rawMetrics.protocolados;
-  const totalGanhos = rawMetrics.ganhos;
+  const totalGanhos = rawMetrics.ganhos; 
   const totalRecebidos = rawMetrics.emitidos;
   const conversaoGeral = totalRecebidos > 0 ? (totalAssinados / totalRecebidos) * 100 : 0;
 
@@ -359,19 +359,6 @@ export default function VisaoGeral() {
 
       {!loading && rawCollaborators.length > 0 && (
         <>
-          <div className="flex items-center justify-end gap-2 mb-2">
-            {refreshing && (
-              <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                <span>Atualizando dados...</span>
-              </div>
-            )}
-            <span className="text-[10px] text-gray-400">Atualizado {new Date().toLocaleTimeString()}</span>
-            <button onClick={() => fetchData(true)} disabled={refreshing} className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors">
-              <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
-              Atualizar
-            </button>
-          </div>
 
           {/* Cards de resumo: Discador e Judit */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
@@ -483,27 +470,19 @@ export default function VisaoGeral() {
           </div>
 
           {/* Comparativo por time */}
-          <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className="mt-6">
             <Card className="xl:col-span-2">
               <h3 className="text-sm font-semibold text-slate-700 mb-3">Comparativo por time</h3>
               <div className="space-y-2">
                 {porTime.map(t => (
                   <Link key={t.time} to={`/equipe/${encodeURIComponent(t.time)}`} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 hover:bg-slate-100 transition-colors">
                     <span className="text-[13px] font-medium text-slate-700">{t.time} <span className="text-slate-400 font-normal">· {t.pessoas} pessoas</span></span>
-                    <span className="text-[13px] text-slate-600">{formatNumero(t.protocolados)} protocolados</span>
+                    <span className="text-[13px] text-slate-400 text-center">{formatNumero(t.protocolados)} protocolados</span>
                     <span className="text-[13px] font-semibold text-slate-900">{formatPct(t.taxa)}</span>
                   </Link>
                 ))}
                 {porTime.length === 0 && <p className="text-sm text-slate-500">Nenhum time encontrado com os filtros atuais.</p>}
               </div>
-            </Card>
-            <Card>
-              <div className="flex items-center justify-between mb-3"><h3 className="text-sm font-semibold text-slate-700">Alertas críticos</h3></div>
-              {alertasCriticos.length > 0 ? (
-                <div className="space-y-3">{alertasCriticos.map(a => <AlertCard key={a.id} alerta={a} />)}</div>
-              ) : (
-                <p className="text-sm text-slate-500">Nenhum alerta crítico no período. Equipe operando dentro do esperado.</p>
-              )}
             </Card>
           </div>
 

@@ -1,4 +1,4 @@
-// src/pages/Analytics.tsx (novo layout)
+// src/pages/Analytics.tsx
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -14,7 +14,7 @@ import {
 import {
   TrendingUp, TrendingDown, Target, Users,
   ShoppingBag, Award, DollarSign, FileCheck,
-  BarChart2, Activity, RefreshCw, Loader2,
+  BarChart2, Activity, Loader2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -23,7 +23,6 @@ import {
   fetchGanhos,
   fetchProtocolados,
   fetchPerdidos,
-  fetchCollaborators,
 } from "@/lib/api";
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
@@ -132,7 +131,7 @@ export default function Analytics() {
   const [, navigate] = useLocation();
   const {
     currentStartDate, currentEndDate, period,
-    collaborators, globalConfig, currentUser,
+    collaborators, currentUser,
     loadCollaboratorsAndMetrics, loadWeeklyPerformanceData,
     rawMetrics, loadRawMetrics,
   } = useAppStore();
@@ -140,35 +139,28 @@ export default function Analytics() {
 
   useEffect(() => { if (!hasPermission("canAccessReports")) navigate("/"); }, [hasPermission, navigate]);
 
-  const [filters, setFilters] = useState<{ equipe: string; colaborador: string; colaboradorId?: number; produto: string }>(
-    { equipe: "todas", colaborador: "todos", produto: "Todos" }
-  );
+  const [filters, setFilters] = useState<{
+    equipe: string;
+    colaborador: string;
+    colaboradorId?: string | number;
+    produto: string;
+  }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
+
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   const [dailyChartData, setDailyChartData] = useState<any[]>([]);
   const [totalLeads, setTotalLeads] = useState(0);
   const [totalAssinados, setTotalAssinados] = useState(0);
-  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+
   const [userBonus, setUserBonus] = useState<number | null>(null);
   const [bonusLoading, setBonusLoading] = useState(true);
   const [bonusError, setBonusError] = useState<string | null>(null);
   const [isExcluded, setIsExcluded] = useState(false);
-  const [apiError, setApiError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [isFirstFilterApplied, setIsFirstFilterApplied] = useState(false);
 
   const equipe = filters.equipe, colaborador = filters.colaborador, colaboradorId = filters.colaboradorId, produto = filters.produto;
-  const initialLoadDone = useRef(false);
-  const lastFiltersRef = useRef(filters);
-  const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
-  const isFetchingRef = useRef(false);
-  const timeoutIdRef = useRef<NodeJS.Timeout | null>(null);
-  const lastFetchChartTime = useRef<number>(0);
-  const CHART_CACHE_TTL = 60000;
-
-  useEffect(() => {
-    const timeout = setTimeout(() => { if (!isFirstFilterApplied) setIsFirstFilterApplied(true); }, 3000);
-    return () => clearTimeout(timeout);
-  }, [isFirstFilterApplied]);
 
   const currentUserData = useMemo(() => currentUser?.id ? collaborators.find(c => c.id === currentUser.id) : null, [collaborators, currentUser]);
   useEffect(() => {
@@ -176,41 +168,47 @@ export default function Analytics() {
     setIsExcluded(isExcludedTeam(currentUserData.equipeNome) || isExcludedGroup(currentUserData.cargo));
   }, [currentUserData]);
 
-  // ========== FUNÇÃO DE RECARGA ==========
+  // ========== FUNÇÃO DE RECARGA PRINCIPAL ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
-    const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
-    const filtersChanged = filters.equipe !== lastFiltersRef.current.equipe || filters.colaborador !== lastFiltersRef.current.colaborador || filters.produto !== lastFiltersRef.current.produto;
-    const metricsEmpty = rawMetrics.assinados === 0 && rawMetrics.emitidos === 0 && rawMetrics.ganhos === 0;
-    if (!showRefreshing && initialLoadDone.current && !datesChanged && !filtersChanged && !metricsEmpty) return;
+    if (!currentStartDate || !currentEndDate) return;
     if (showRefreshing) setRefreshing(true);
+    else setLoading(true);
+    setError(null);
+
     try {
       const equipeApi = equipe === "todas" ? undefined : equipe;
       const colaboradorApi = colaborador === "todos" ? undefined : colaborador;
       const produtoApi = produto === "Todos" ? undefined : produto;
-      if (datesChanged || filtersChanged || metricsEmpty) {
-        await loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorId, produtoApi);
-        await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId, produto: produtoApi });
-        await loadWeeklyPerformanceData();
-      }
-      lastDatesRef.current = { start: currentStartDate, end: currentEndDate };
-      lastFiltersRef.current = { ...filters };
-      initialLoadDone.current = true;
-    } catch (err) { console.error("❌ Analytics: erro ao recarregar dados:", err); }
-    finally { if (showRefreshing) setRefreshing(false); setLoading(false); }
-  }, [currentStartDate, currentEndDate, filters, equipe, colaborador, colaboradorId, produto, rawMetrics, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
 
-  // ========== CARREGAMENTO INICIAL ==========
+      await Promise.all([
+        loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorId, produtoApi),
+        loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId, produto: produtoApi }),
+        loadWeeklyPerformanceData(),
+      ]);
+    } catch (err: any) {
+      console.error("❌ Analytics: erro ao recarregar dados:", err);
+      setError(err.message || "Falha ao recarregar dados.");
+    } finally {
+      if (showRefreshing) setRefreshing(false);
+      setLoading(false);
+    }
+  }, [currentStartDate, currentEndDate, equipe, colaborador, colaboradorId, produto, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
+
+  const handleFilterChange = useCallback((newFilters: typeof filters) => {
+    setFilters(newFilters);
+  }, []);
+
+  const handleRefresh = useCallback(async () => {
+    await reloadData(true);
+  }, [reloadData]);
+
+  // ========== EFEITO QUE REAGE A MUDANÇAS DE FILTROS/DATAS ==========
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
-    if (initialLoadDone.current && currentStartDate === lastDatesRef.current.start && currentEndDate === lastDatesRef.current.end) return;
-    if (!isFirstFilterApplied && !initialLoadDone.current) return;
-    setLoading(true);
     reloadData(false);
-  }, [currentStartDate, currentEndDate, reloadData, isFirstFilterApplied]);
+  }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleFilterChange = (newFilters: any) => { setFilters(newFilters); if (!isFirstFilterApplied) setIsFirstFilterApplied(true); };
-
-  // ========== BUSCA DO BÔNUS ==========
+  // ========== BUSCA DO BÔNUS (independente) ==========
   useEffect(() => {
     if (!currentUser?.id) { setBonusLoading(false); setUserBonus(0); return; }
     if (isExcluded) { setBonusLoading(false); setUserBonus(0); return; }
@@ -244,7 +242,9 @@ export default function Analytics() {
 
   // ========== GRÁFICO DE EVOLUÇÃO DIÁRIA ==========
   const chartDateRange = useMemo(() => getChartDateRange(period, currentStartDate, currentEndDate), [period, currentStartDate, currentEndDate]);
-  const [chartVersion, setChartVersion] = useState(0);
+  const isFetchingRef = useRef(false);
+  const lastFetchChartTime = useRef<number>(0);
+  const CHART_CACHE_TTL = 60000;
 
   useEffect(() => {
     if (!chartDateRange.start || !chartDateRange.end) return;
@@ -291,7 +291,7 @@ export default function Analytics() {
     };
     fetchChartData();
     return () => { abortController.abort(); isFetchingRef.current = false; };
-  }, [chartDateRange, equipe, colaborador, colaboradorId, produto, period, chartVersion, dailyChartData.length]);
+  }, [chartDateRange, equipe, colaborador, colaboradorId, produto, period, dailyChartData.length]);
 
   // ========== DADOS PARA KPIS ==========
   const totals = rawMetrics;
@@ -350,137 +350,154 @@ export default function Analytics() {
     return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-2xl font-black text-[#0f172a]">{formatCurrency(userBonusCiclo)}</div><div className="text-xs text-[#64748b]">{bonusError||"valor do banco"}</div></div>);
   };
 
-  if (!isFirstFilterApplied) {
-    return (<DashboardLayout title="Analytics" subtitle="Métricas avançadas, comissões e indicadores de performance"><div className="flex justify-center items-center py-12"><Loader2 className="w-8 h-8 animate-spin text-[#2F6FED]" /><span className="ml-2 text-[#64748b]">Aguardando configuração dos filtros...</span></div></DashboardLayout>);
-  }
-  if (loading && collaborators.length===0) {
-    return (<DashboardLayout title="Analytics" subtitle="Métricas avançadas..."><div className="flex justify-center items-center h-64"><Loader2 className="w-8 h-8 animate-spin text-[#2F6FED]" /></div></DashboardLayout>);
-  }
-
   return (
     <DashboardLayout title="Analytics" subtitle="Métricas avançadas, comissões e indicadores de performance">
-      <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" />
+      <FilterBar
+        onFilterChange={handleFilterChange}
+        showColaboradorFilter={true}
+        className="mb-6"
+        onRefresh={handleRefresh}
+      />
 
-      {/* Botão Atualizar Dados + Timestamp */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2 text-xs text-[#64748b]">
-          {refreshing && <span className="flex items-center gap-1.5 animate-pulse"><RefreshCw className="w-3.5 h-3.5 animate-spin" /> Atualizando...</span>}
-          <span>Atualizado {new Date().toLocaleTimeString()}</span>
-        </div>
-        <button onClick={() => reloadData(true)} disabled={refreshing} className="px-3 py-1.5 text-xs font-medium rounded-lg bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 transition-colors">
-          <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} /> Atualizar Dados
-        </button>
-      </div>
-
-      {hasActiveFilters && (
-        <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
-          <span>📊</span><span>Dados filtrados por: {equipe !== "todas" && ` Equipe ${equipe}`} {colaborador !== "todos" && ` - ${colaborador}`} {produto !== "Todos" && ` • Produto: ${produto}`}</span>
+      {loading && (
+        <div className="flex justify-center items-center py-4">
+          <Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" />
+          <span className="ml-2 text-sm text-[#64748b]">Carregando dados...</span>
         </div>
       )}
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Comissão Estimada" value={userMetasBatidas * userBonusCiclo} target={5000} unit="R$" icon={DollarSign} color="#2F6FED" simple />
-        <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.assinados : totals.ganhos} target={isSpecialGroup ? targetAssinados : targetGanhos} unit="" icon={FileCheck} color="#16A34A" />
-        <KpiCard label="Protocolados" value={totals.protocolados} target={60} unit="" icon={BarChart2} color="#8B5CF6" />
-        <KpiCard label="Progresso da Meta" value={goalProgress} target={100} unit="%" icon={Activity} color="#EA8C1D" />
-      </div>
+      {error && (
+        <div className="bg-red-50 text-red-700 p-4 rounded-lg text-sm mb-4">
+          <p>{error}</p>
+          <button onClick={() => reloadData(true)} className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700">
+            Tentar novamente
+          </button>
+        </div>
+      )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div className="card animate-fade-in-up">
-          <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Performance no Período</span>{percentAssinados>=100 ? <TrendingUp className="w-4 h-4 text-[#16A34A]" /> : <TrendingDown className="w-4 h-4 text-[#DC2626]" />}</div>
-          <div className="kpi-value text-[#0f172a]">{percentAssinados.toFixed(1)}%</div>
-          <div className="text-xs text-[#94a3b8] mt-1">{formatInt(totals.assinados)} / {formatInt(targetAssinados)} assinados</div>
-          <div className="progress-bar mt-2"><div className="progress-fill" style={{ width: `${Math.min(percentAssinados, 100)}%` }} /></div>
+      {!loading && collaborators.length === 0 && !error && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
+          Nenhum colaborador disponível para os filtros atuais.
         </div>
-        <div className="card animate-fade-in-up" style={{ animationDelay: "80ms" }}>
-          <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Taxa de Conversão</span><Target className="w-4 h-4 text-[#2F6FED]" /></div>
-          <div className="kpi-value text-[#0f172a]">{taxaConversaoGeral.toFixed(1)}%</div>
-          <div className="text-xs text-[#94a3b8] mt-1">{formatInt(totalAssinados)} vendas / {formatInt(totalLeads)} leads</div>
-        </div>
-        <div className="card animate-fade-in-up" style={{ animationDelay: "160ms" }}>
-          <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Média Diária (assinados)</span><ShoppingBag className="w-4 h-4 text-[#16A34A]" /></div>
-          <div className="kpi-value text-[#0f172a]">{mediaDiariaVendas.toFixed(1)}</div>
-          <div className="text-xs text-[#94a3b8] mt-1">últimos {formatInt(dailyChartData.length)} dias</div>
-        </div>
-        <div className="card animate-fade-in-up" style={{ animationDelay: "240ms" }}>
-          <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Total de Leads</span><Users className="w-4 h-4 text-[#EA8C1D]" /></div>
-          <div className="kpi-value text-[#0f172a]">{formatInt(totalLeads)}</div>
-          <div className="text-xs text-[#94a3b8] mt-1">no período</div>
-        </div>
-      </div>
+      )}
 
-      {/* Evolução Diária */}
-      <div className="card p-5 mb-6 animate-fade-in-up" style={{ animationDelay: "320ms" }}>
-        <h3 className="text-sm font-bold text-[#0f172a] mb-4">Evolução Diária {period === "Hoje" ? "(semana atual)" : period === "Semana" ? "(duas últimas semanas, apenas dias úteis)" : ""}</h3>
-        <p className="text-xs text-[#64748b] mb-2">Período: {chartDateRange.start} a {chartDateRange.end}</p>
-        {isFirstLoad && dailyChartData.length === 0 && !apiError && <div className="flex justify-center py-8"><Loader2 className="w-8 h-8 animate-spin text-[#2F6FED]" /></div>}
-        {apiError && <div className="bg-red-50 text-red-700 p-3 rounded-lg text-sm mb-4">Erro: {apiError}</div>}
-        {!isFirstLoad && dailyChartData.length === 0 && !apiError && <div className="flex items-center justify-center h-[260px] text-[#94a3b8] text-sm">Nenhum dado disponível para o período</div>}
-        {dailyChartData.length > 0 && (
-          <ResponsiveContainer width="100%" height={320}>
-            <AreaChart data={dailyChartData}>
-              <defs>
-                <linearGradient id="colorLeads" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#16A34A" stopOpacity={0.2} /><stop offset="95%" stopColor="#16A34A" stopOpacity={0} /></linearGradient>
-                <linearGradient id="colorAssinados" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#2F6FED" stopOpacity={0.2} /><stop offset="95%" stopColor="#2F6FED" stopOpacity={0} /></linearGradient>
-                <linearGradient id="colorGanhos" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#EA8C1D" stopOpacity={0.2} /><stop offset="95%" stopColor="#EA8C1D" stopOpacity={0} /></linearGradient>
-                <linearGradient id="colorProtocolados" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} /><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0} /></linearGradient>
-                <linearGradient id="colorPerdidos" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#DC2626" stopOpacity={0.2} /><stop offset="95%" stopColor="#DC2626" stopOpacity={0} /></linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} width={30} />
-              <Tooltip content={<CustomTooltip />} />
-              <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
-              <Area type="monotone" dataKey="leads" stroke="#16A34A" strokeWidth={2} fill="url(#colorLeads)" name="Leads" />
-              <Area type="monotone" dataKey="assinados" stroke="#2F6FED" strokeWidth={2} fill="url(#colorAssinados)" name="Assinados" />
-              <Area type="monotone" dataKey="ganhos" stroke="#EA8C1D" strokeWidth={2} fill="url(#colorGanhos)" name="Ganhos" />
-              <Area type="monotone" dataKey="protocolados" stroke="#8B5CF6" strokeWidth={2} fill="url(#colorProtocolados)" name="Protocolados" />
-              <Area type="monotone" dataKey="perdidos" stroke="#DC2626" strokeWidth={2} fill="url(#colorPerdidos)" name="Perdidos" />
-            </AreaChart>
-          </ResponsiveContainer>
-        )}
-      </div>
+      {!loading && collaborators.length > 0 && (
+        <>
+          {hasActiveFilters && (
+            <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
+              <span>📊</span>
+              <span>
+                Mostrando dados de:
+                {filters.equipe !== "todas" && ` ${filters.equipe}`}
+                {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
+                {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
+              </span>            </div>
+          )}
 
-      {/* Distribuição + Conversão */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-        <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "480ms" }}>
-          <h3 className="text-sm font-bold text-[#0f172a] mb-4">Distribuição por Etapa</h3>
-          {funnelChartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={320}>
-              <PieChart><Pie data={funnelChartData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value" label={({name,percent})=>`${name}: ${(percent*100).toFixed(0)}%`} labelLine={true}>{funnelChartData.map((entry,index)=><Cell key={index} fill={entry.color} />)}</Pie><Tooltip content={<CustomTooltip />} /></PieChart>
-            </ResponsiveContainer>
-          ) : <div className="h-[260px] text-center text-[#94a3b8] text-sm">Nenhum dado disponível</div>}
-          <div className="flex flex-wrap justify-center gap-3 mt-3">
-            {funnelChartData.map((item,i) => (<div key={i} className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ background: item.color }} /><span className="text-[10px] text-[#64748b]">{item.name}</span><span className="text-[10px] font-bold text-[#0f172a]">{formatInt(item.value)}</span></div>))}
+          {/* KPI Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <KpiCard label="Comissão Estimada" value={userMetasBatidas * userBonusCiclo} target={5000} unit="R$" icon={DollarSign} color="#2F6FED" simple />
+            <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.assinados : totals.ganhos} target={isSpecialGroup ? targetAssinados : targetGanhos} unit="" icon={FileCheck} color="#16A34A" />
+            <KpiCard label="Protocolados" value={totals.protocolados} target={60} unit="" icon={BarChart2} color="#8B5CF6" />
+            <KpiCard label="Progresso da Meta" value={goalProgress} target={100} unit="%" icon={Activity} color="#EA8C1D" />
           </div>
-        </div>
-        <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "560ms" }}>
-          <h3 className="text-sm font-bold text-[#0f172a] mb-4">Taxa de Conversão por Estágio</h3>
-          <ResponsiveContainer width="100%" height={350}>
-            <BarChart data={conversionByStage} layout="vertical" margin={{ left: 10, right: 30, top: 10, bottom: 10 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
-              <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10, fill: "#64748b" }} tickFormatter={(v) => `${v}%`} />
-              <YAxis type="category" dataKey="stage" tick={{ fontSize: 9, fill: "#0f172a" }} width={150} axisLine={false} tickLine={false} />
-              <Tooltip formatter={(value: any) => [`${value}%`, "Conversão"]} contentStyle={{ fontSize: 11 }} />
-              <Bar dataKey="value" radius={[0, 6, 6, 0]} name="Conversão">
-                {conversionByStage.map((entry, index) => <Cell key={index} fill={entry.value >= 60 ? "#16A34A" : entry.value >= 40 ? "#EA8C1D" : "#DC2626"} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+ 
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <div className="card animate-fade-in-up">
+              <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Performance no Período</span>{percentAssinados>=100 ? <TrendingUp className="w-4 h-4 text-[#16A34A]" /> : <TrendingDown className="w-4 h-4 text-[#DC2626]" />}</div>
+              <div className="kpi-value text-[#0f172a]">{percentAssinados.toFixed(1)}%</div>
+              <div className="text-xs text-[#94a3b8] mt-1">{formatInt(totals.assinados)} / {formatInt(targetAssinados)} assinados</div>
+              <div className="progress-bar mt-2"><div className="progress-fill" style={{ width: `${Math.min(percentAssinados, 100)}%` }} /></div>
+            </div>
+            <div className="card animate-fade-in-up" style={{ animationDelay: "80ms" }}>
+              <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Taxa de Conversão</span><Target className="w-4 h-4 text-[#2F6FED]" /></div>
+              <div className="kpi-value text-[#0f172a]">{taxaConversaoGeral.toFixed(1)}%</div>
+              <div className="text-xs text-[#94a3b8] mt-1">{formatInt(totalAssinados)} vendas / {formatInt(totalLeads)} leads</div>
+            </div>
+            <div className="card animate-fade-in-up" style={{ animationDelay: "160ms" }}>
+              <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Média Diária (assinados)</span><ShoppingBag className="w-4 h-4 text-[#16A34A]" /></div>
+              <div className="kpi-value text-[#0f172a]">{mediaDiariaVendas.toFixed(1)}</div>
+              <div className="text-xs text-[#94a3b8] mt-1">últimos {formatInt(dailyChartData.length)} dias</div>
+            </div>
+            <div className="card animate-fade-in-up" style={{ animationDelay: "240ms" }}>
+              <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Total de Leads</span><Users className="w-4 h-4 text-[#EA8C1D]" /></div>
+              <div className="kpi-value text-[#0f172a]">{formatInt(totalLeads)}</div>
+              <div className="text-xs text-[#94a3b8] mt-1">no período</div>
+            </div>
+          </div>
 
-      {/* Resumo */}
-      <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "640ms" }}>
-        <h3 className="text-sm font-bold text-[#0f172a] mb-4">Resumo de Comissões e Metas</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Metas Batidas</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">suas metas batidas</div></div>
-          {renderBonusCard()}
-          <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div><div className="text-xs text-[#94a3b8]">meta: {formatInt(targetAssinados)}</div></div>
-          <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
-        </div>
-      </div>
+          {/* Evolução Diária */}
+          <div className="card p-5 mb-6 animate-fade-in-up" style={{ animationDelay: "320ms" }}>
+            <h3 className="text-sm font-bold text-[#0f172a] mb-4">Evolução Diária {period === "Hoje" ? "(semana atual)" : period === "Semana" ? "(duas últimas semanas, apenas dias úteis)" : ""}</h3>
+            <p className="text-xs text-[#64748b] mb-2">Período: {chartDateRange.start} a {chartDateRange.end}</p>
+            {apiError && <div className="bg-red-50 text-red-700 p-3 rounded-lg text-sm mb-4">Erro: {apiError}</div>}
+            {dailyChartData.length === 0 && !apiError && <div className="flex items-center justify-center h-[260px] text-[#94a3b8] text-sm">Nenhum dado disponível para o período</div>}
+            {dailyChartData.length > 0 && (
+              <ResponsiveContainer width="100%" height={320}>
+                <AreaChart data={dailyChartData}>
+                  <defs>
+                    <linearGradient id="colorLeads" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#16A34A" stopOpacity={0.2} /><stop offset="95%" stopColor="#16A34A" stopOpacity={0} /></linearGradient>
+                    <linearGradient id="colorAssinados" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#2F6FED" stopOpacity={0.2} /><stop offset="95%" stopColor="#2F6FED" stopOpacity={0} /></linearGradient>
+                    <linearGradient id="colorGanhos" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#EA8C1D" stopOpacity={0.2} /><stop offset="95%" stopColor="#EA8C1D" stopOpacity={0} /></linearGradient>
+                    <linearGradient id="colorProtocolados" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} /><stop offset="95%" stopColor="#8B5CF6" stopOpacity={0} /></linearGradient>
+                    <linearGradient id="colorPerdidos" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#DC2626" stopOpacity={0.2} /><stop offset="95%" stopColor="#DC2626" stopOpacity={0} /></linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} width={30} />
+                  <Tooltip content={<CustomTooltip />} />
+                  <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
+                  <Area type="monotone" dataKey="leads" stroke="#16A34A" strokeWidth={2} fill="url(#colorLeads)" name="Leads" />
+                  <Area type="monotone" dataKey="assinados" stroke="#2F6FED" strokeWidth={2} fill="url(#colorAssinados)" name="Assinados" />
+                  <Area type="monotone" dataKey="ganhos" stroke="#EA8C1D" strokeWidth={2} fill="url(#colorGanhos)" name="Ganhos" />
+                  <Area type="monotone" dataKey="protocolados" stroke="#8B5CF6" strokeWidth={2} fill="url(#colorProtocolados)" name="Protocolados" />
+                  <Area type="monotone" dataKey="perdidos" stroke="#DC2626" strokeWidth={2} fill="url(#colorPerdidos)" name="Perdidos" />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+
+          {/* Distribuição + Conversão */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+            <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "480ms" }}>
+              <h3 className="text-sm font-bold text-[#0f172a] mb-4">Distribuição por Etapa</h3>
+              {funnelChartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height={320}>
+                  <PieChart><Pie data={funnelChartData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value" label={({name,percent})=>`${name}: ${(percent*100).toFixed(0)}%`} labelLine={true}>{funnelChartData.map((entry,index)=><Cell key={index} fill={entry.color} />)}</Pie><Tooltip content={<CustomTooltip />} /></PieChart>
+                </ResponsiveContainer>
+              ) : <div className="h-[260px] text-center text-[#94a3b8] text-sm">Nenhum dado disponível</div>}
+              <div className="flex flex-wrap justify-center gap-3 mt-3">
+                {funnelChartData.map((item,i) => (<div key={i} className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ background: item.color }} /><span className="text-[10px] text-[#64748b]">{item.name}</span><span className="text-[10px] font-bold text-[#0f172a]">{formatInt(item.value)}</span></div>))}
+              </div>
+            </div>
+            <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "560ms" }}>
+              <h3 className="text-sm font-bold text-[#0f172a] mb-4">Taxa de Conversão por Estágio</h3>
+              <ResponsiveContainer width="100%" height={350}>
+                <BarChart data={conversionByStage} layout="vertical" margin={{ left: 10, right: 30, top: 10, bottom: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                  <XAxis type="number" domain={[0, 100]} tick={{ fontSize: 10, fill: "#64748b" }} tickFormatter={(v) => `${v}%`} />
+                  <YAxis type="category" dataKey="stage" tick={{ fontSize: 9, fill: "#0f172a" }} width={150} axisLine={false} tickLine={false} />
+                  <Tooltip formatter={(value: any) => [`${value}%`, "Conversão"]} contentStyle={{ fontSize: 11 }} />
+                  <Bar dataKey="value" radius={[0, 6, 6, 0]} name="Conversão">
+                    {conversionByStage.map((entry, index) => <Cell key={index} fill={entry.value >= 60 ? "#16A34A" : entry.value >= 40 ? "#EA8C1D" : "#DC2626"} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Resumo */}
+          <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "640ms" }}>
+            <h3 className="text-sm font-bold text-[#0f172a] mb-4">Resumo de Comissões e Metas</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Metas Batidas</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">suas metas batidas</div></div>
+              {renderBonusCard()}
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div><div className="text-xs text-[#94a3b8]">meta: {formatInt(targetAssinados)}</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
+            </div>
+          </div>
+        </>
+      )}
     </DashboardLayout>
   );
 }

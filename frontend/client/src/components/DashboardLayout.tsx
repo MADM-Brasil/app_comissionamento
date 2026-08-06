@@ -72,25 +72,26 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
     }
 
+        if (permissions.canAccessRanking) {
+      items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+    }
+
     // Grupo Dashboard (expansível) – aparece se tiver acesso a qualquer subpágina
     const dashboardChildren: NavChild[] = [];
     if (permissions.canViewTeam) {
-      dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
-    }
     if (permissions.canAccessReports) {
       dashboardChildren.push({ path: "/Vgeral", label: "Visão Geral", icon: BarChart3 });
+      dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
       dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+      //dashboardChildren.push({ path: "/gargalos", label: "Gargalos", icon: BarChart3 });
       dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
-      dashboardChildren.push({ path: "/gargalos", label: "Gargalos", icon: BarChart3 });
+    }
     }
 
     if (dashboardChildren.length > 0) {
       items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
     }
 
-    if (permissions.canAccessRanking) {
-      items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
-    }
     if (permissions.canAccessConfiguration) {
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     }
