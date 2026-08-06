@@ -2,10 +2,10 @@
 
 export const LEVELS = {
   NONE: 0,                // sem acesso
-  ASSESSOR: 1,
-  SUPERVISAO: 2,
-  COORDENADOR: 3,
-  ADMINISTRATIVO: 4,
+  ASSESSOR: 1,            //Acesso nivel 1
+  SUPERVISAO: 2,          //Acesso nivel 2
+  COORDENADOR: 3,         //Acesso nivel 3
+  ADMINISTRATIVO: 4,      //Acesso nivel 4
 } as const;
 
 type Level = typeof LEVELS[keyof typeof LEVELS];
@@ -20,7 +20,7 @@ interface User {
 }
 
 export interface Permissions {
-  canAccessDashboard: boolean;   // Home
+  canAccessDashboard: boolean;   // Home 
   canAccessComissoes: boolean;   // Página Comissões
   canAccessRanking: boolean;     // Ranking
   canAccessReports: boolean;
@@ -74,7 +74,6 @@ const GROUP_MAPPING: Record<string, Level> = {
   'analista juridico': LEVELS.NONE,
   'gestor de projetos': LEVELS.NONE,
   'analista': LEVELS.NONE,
-  'analista de discadora': LEVELS.NONE,
 
   // Assessor
   'assessor': LEVELS.ASSESSOR,
@@ -94,6 +93,7 @@ const GROUP_MAPPING: Record<string, Level> = {
   'diretora': LEVELS.ADMINISTRATIVO,
   'analista de dados': LEVELS.ADMINISTRATIVO,
   'desenvolvedor make': LEVELS.ADMINISTRATIVO,
+  'Analista de discadora': LEVELS.ADMINISTRATIVO,
 };
 
 const PERMISSIONS: Record<Level, FullPermissions> = {
