@@ -93,7 +93,7 @@ const GROUP_MAPPING: Record<string, Level> = {
   'diretora': LEVELS.ADMINISTRATIVO,
   'analista de dados': LEVELS.ADMINISTRATIVO,
   'desenvolvedor make': LEVELS.ADMINISTRATIVO,
-  'Analista de discadora': LEVELS.ADMINISTRATIVO,
+  'analista de discadora': LEVELS.ADMINISTRATIVO,
 };
 
 const PERMISSIONS: Record<Level, FullPermissions> = {
