@@ -712,16 +712,6 @@ export default function Configuration() {
               <User className="w-4 h-4 text-[#2F6FED]" />
               <h3 className="text-sm font-bold text-[#0f172a]">Metas por Colaborador</h3>
             </div>
-            {isAdminOnly && (
-              <button
-                onClick={handleRecalculateHierarchy}
-                disabled={recalculating}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 transition-colors"
-              >
-                <RefreshCw className={cn("w-3.5 h-3.5", recalculating && "animate-spin")} />
-                Recalcular Hierarquia
-              </button>
-            )}
           </div>
           <div className="overflow-x-auto">
             <table className="simple-table">
