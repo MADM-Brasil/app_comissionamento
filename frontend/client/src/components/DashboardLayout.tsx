@@ -391,17 +391,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               <RefreshCw className="w-4 h-4" />
             </button>
 
-            <Link href="/notificacoes">
-              <button className="relative p-2 rounded-lg hover:bg-[#f1f5f9] transition-colors" aria-label="Notificações">
-                <Bell className="w-5 h-5 text-[#334155]" />
-                {unreadCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] rounded-full text-[10px] font-bold flex items-center justify-center px-1 bg-[#DC2626] text-white">
-                    {badgeValue}
-                  </span>
-                )}
-              </button>
-            </Link>
-
             <div className="w-8 h-8 rounded-full bg-[#2F6FED] text-white flex items-center justify-center text-xs font-bold flex-shrink-0" aria-label="Avatar do usuário">
               {displayAvatar}
             </div>
