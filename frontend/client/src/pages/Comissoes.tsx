@@ -226,7 +226,7 @@ export default function Comissoes() {
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
 
   return (
-    <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de metas batidas diárias, semanais e mensais">
+    <DashboardLayout title="Painel de Comissões" subtitle="Comissão calculada pela soma de Gols diários, semanais e mensais">
       <FilterBar
         onFilterChange={handleFilterChange}
         showColaboradorFilter={true}
@@ -351,7 +351,7 @@ export default function Comissoes() {
                         <span className="text-sm font-bold text-[#0f172a] w-18 text-right">{formatCurrency(item.totalCommission)}</span>
                       </div>
                       <div className="text-xs text-[#64748b] ml-11 mt-0.5">
-                        Metas batidas (total): <span className="font-semibold text-[#0f172a]">{formatInt(item.totalCycles)}</span>
+                        Gols (total): <span className="font-semibold text-[#0f172a]">{formatInt(item.totalCycles)}</span>
                         {item.periodDetails && (
                           <span className="text-[#94a3b8] ml-1">
                             (D: {formatInt(item.periodDetails.diario?.cycles || 0)}, S: {formatInt(item.periodDetails.semanal?.cycles || 0)}, M: {formatInt(item.periodDetails.mensal?.cycles || 0)})
