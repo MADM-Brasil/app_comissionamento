@@ -51,17 +51,6 @@ function isExcludedGroup(group: string): boolean {
 }
 
 // ========== Utilitários de datas ==========
-function getMonday(date: Date): Date {
-  const day = date.getDay(); const diff = day === 0 ? -6 : 1 - day;
-  const monday = new Date(date); monday.setDate(date.getDate() + diff); monday.setHours(0,0,0,0);
-  return monday;
-}
-function getSunday(date: Date): Date {
-  const monday = getMonday(date); const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6); sunday.setHours(23,59,59,999);
-  return sunday;
-}
-function formatDate(d: Date): string { return d.toISOString().slice(0,10); }
 function getChartDateRange(period: string, currentStart: string, currentEnd: string): { start: string; end: string } {
   return { start: currentStart, end: currentEnd };
 }
@@ -170,6 +159,10 @@ export default function Analytics() {
         loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId, produto: produtoApi }),
         loadWeeklyPerformanceData(),
       ]);
+
+      // Força a atualização dos leads limpando o cache local
+      setDailyChartData([]);
+      setTotalLeads(0);
     } catch (err: any) {
       console.error("❌ Analytics: erro ao recarregar dados:", err);
       setError(err.message || "Falha ao recarregar dados.");
@@ -225,7 +218,7 @@ export default function Analytics() {
     fetchBonus();
   }, [currentUser, currentStartDate, isExcluded]);
 
-  // ========== GRÁFICO DE EVOLUÇÃO DIÁRIA ==========
+  // ========== GRÁFICO DE EVOLUÇÃO DIÁRIA (inclui leads) ==========
   const chartDateRange = useMemo(() => getChartDateRange(period, currentStartDate, currentEndDate), [period, currentStartDate, currentEndDate]);
   const isFetchingRef = useRef(false);
   const lastFetchChartTime = useRef<number>(0);
@@ -262,9 +255,9 @@ export default function Analytics() {
         const endDate = new Date(Date.UTC(parseInt(chartDateRange.end.slice(0,4)), parseInt(chartDateRange.end.slice(5,7))-1, parseInt(chartDateRange.end.slice(8,10))));
         const current = new Date(startDate);
         while (current < endDate) {
-        const dateStr = current.toISOString().split('T')[0];
-         allDates.push(dateStr);
-         current.setUTCDate(current.getUTCDate() + 1);
+          const dateStr = current.toISOString().split('T')[0];
+          allDates.push(dateStr);
+          current.setUTCDate(current.getUTCDate() + 1);
         }
         if (allDates.length === 0 && chartDateRange.start && chartDateRange.end) { const today = new Date(endDate); today.setUTCDate(today.getUTCDate()-1); allDates.push(today.toISOString().split('T')[0]); }
         const chartArray = allDates.map(date => {
@@ -314,8 +307,8 @@ export default function Analytics() {
   const taxaConversaoGeral = totalLeads>0 ? (totalAssinados/totalLeads)*100 : 0;
   const mediaDiariaVendas = dailyChartData.length>0 ? totalAssinados/dailyChartData.length : 0;
 
-const funnelChartData = [
-    { name:"Leads", value: totalLeads, color:"#3b82f6" },       // cor azul clara para leads
+  const funnelChartData = [
+    { name:"Leads", value: totalLeads, color:"#3b82f6" },
     { name:"Emitidos", value:totals.emitidos, color:"#2F6FED" },
     { name:"Assinados", value:totals.assinados, color:"#16A34A" },
     { name:"Ganhos", value:totals.ganhos, color:"#EA8C1D" },
@@ -501,7 +494,7 @@ const funnelChartData = [
           <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "640ms" }}>
             <h3 className="text-sm font-bold text-[#0f172a] mb-4">Resumo de Comissões e Metas</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Gols</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">suas metas batidas</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Metas Batidas</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">suas metas batidas</div></div>
               {renderBonusCard()}
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div><div className="text-xs text-[#94a3b8]">meta: {formatInt(targetAssinados)}</div></div>
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
