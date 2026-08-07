@@ -169,6 +169,15 @@ export default function VisaoGeral() {
 
   const lastFetchLeads = useRef<number>(0);
   const LEADS_CACHE_TTL = 60000;
+  const isFetching = useRef(false);
+
+  // -----------------------------------------------------------
+  //  RESETAR cache de leads sempre que período ou filtros mudarem
+  // -----------------------------------------------------------
+  useEffect(() => {
+    setTotalLeads(0);
+    lastFetchLeads.current = 0;
+  }, [currentStartDate, currentEndDate, filters]);
 
   // Busca leads totais do período
   const fetchLeadsData = useCallback(async () => {
@@ -196,6 +205,7 @@ export default function VisaoGeral() {
     }
   }, [currentStartDate, currentEndDate, filters, totalLeads]);
 
+  // Função principal de carregamento
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate) return;
     if (showRefreshing) setRefreshing(true);
@@ -228,11 +238,18 @@ export default function VisaoGeral() {
     }
   }, [filters, currentStartDate, currentEndDate, rawCollaborators.length, loadCollaborators, loadMetricsForPeriod, loadRawMetrics, fetchLeadsData]);
 
+  // -----------------------------------------------------------
+  //  EFEITO PRINCIPAL (com dependências completas e proteção contra loops)
+  // -----------------------------------------------------------
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
+    if (isFetching.current) return;
+    isFetching.current = true;
     setLoading(true);
-    fetchData();
-  }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
+    fetchData().finally(() => {
+      isFetching.current = false;
+    });
+  }, [currentStartDate, currentEndDate, filters, fetchData]);
 
   const handleFilterChange = (newFilters: typeof filters) => {
     setFilters(newFilters);
