@@ -707,7 +707,7 @@ export default function Home() {
                 <div className="text-center"><div className="eyebrow mb-1">📄 Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}<span className="text-sm font-normal text-[#64748b]">/{formatInt(totalTargetAssinados)}</span></div></div>
                 {!isSpecialGroup && <div className="text-center"><div className="eyebrow mb-1">🏆 Ganhos</div><div className="kpi-value text-[#16A34A]">{formatInt(totals.ganhos)}<span className="text-sm font-normal text-[#64748b]">/{formatInt(totalTargetGanhos)}</span></div></div>}
               </div>
-              <div className="mt-4 text-center"><div className="text-3xl font-black text-[#0f172a]">{formatInt(totalMetasBatidas)}</div><div className="eyebrow">metas batidas</div></div>
+              <div className="mt-4 text-center"><div className="text-3xl font-black text-[#0f172a]">{formatInt(totalMetasBatidas)}</div><div className="eyebrow">Gols</div></div>
               <div className="mt-4 w-full">
                 <div className="rounded-lg p-3 text-center" style={{ background: goalProgress >= 70 ? "#f0fdf4" : "#eff6ff" }}>
                   <p className="text-xs font-semibold" style={{ color: goalProgress >= 70 ? "#16A34A" : "#2F6FED" }}>

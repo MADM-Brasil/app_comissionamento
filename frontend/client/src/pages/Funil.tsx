@@ -229,28 +229,6 @@ function formatDate(d: Date): string {
 }
 
 function getChartDateRange(period: string, currentStart: string, currentEnd: string): { start: string; end: string } {
-  if (period === "Hoje") {
-    const today = new Date();
-    const monday = getMonday(today);
-    const endDate = new Date(today);
-    endDate.setDate(today.getDate() + 1);
-    return {
-      start: formatDate(monday),
-      end: formatDate(endDate),
-    };
-  }
-  if (period === "Semana") {
-    const today = new Date();
-    const currentSunday = getSunday(today);
-    const previousMonday = getMonday(today);
-    previousMonday.setDate(previousMonday.getDate() - 7);
-    const endDate = new Date(currentSunday);
-    endDate.setDate(currentSunday.getDate() + 1);
-    return {
-      start: formatDate(previousMonday),
-      end: formatDate(endDate),
-    };
-  }
   return { start: currentStart, end: currentEnd };
 }
 
@@ -619,7 +597,6 @@ export default function Funil() {
                   </div>
                   <div className="madm-kpi-value text-xl" style={{ color }}>{formatInt(stage.count)}</div>
                   <div className="text-[10px] text-gray-500 mt-0.5 font-medium">{stage.stage}</div>
-                  <div className="text-[10px] text-gray-400 mt-0.5">{pct}% do total</div>
                 </div>
               );
             })}
@@ -721,8 +698,7 @@ export default function Funil() {
           </div>
 
           {/* ============================================================
-              TABELA DETALHADA POR COLABORADOR – CORRIGIDA
-              (z-index elevado e fundos opacos para colunas fixas)
+              TABELA DETALHADA POR COLABORADOR 
               ============================================================ */}
           {collaboratorStageSummary.length > 0 && (
             <div className="madm-card animate-fade-in-up">

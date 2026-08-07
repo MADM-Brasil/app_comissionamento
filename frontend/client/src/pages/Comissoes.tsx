@@ -218,7 +218,7 @@ export default function Comissoes() {
 
   const summaryCards = [
     { label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign, color: "#2F6FED", isCurrency: true },
-    { label: "Metas Batidas (Total)", value: totals.ciclos, icon: Award, color: "#16A34A", isInteger: true },
+    { label: "Gols", value: totals.ciclos, icon: Award, color: "#16A34A", isInteger: true },
     { label: "Vendas Fechadas", value: rawMetrics.assinados, icon: FileCheck, color: "#EA8C1D", isInteger: true },
     { label: "Progresso Médio", value: avgProgress, icon: Target, color: "#8B5CF6", isPercent: true },
   ];
@@ -371,7 +371,7 @@ export default function Comissoes() {
             <h3 className="text-sm font-bold text-[#0f172a] mb-3">Como a comissão é calculada</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
               <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos independentes:</span> diário, semanal e mensal. Cada um possui seu próprio peso e bônus.</div>
-              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Metas batidas por período:</span> mínimo entre (assinados ÷ peso_assinados) e (ganhos ÷ peso_ganhos).</div>
+              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Gols por período:</span> mínimo entre (assinados ÷ peso_assinados) e (ganhos ÷ peso_ganhos).</div>
               <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma das comissões dos três períodos (cada uma = metas_batidas × bônus_do_período).</div>
               <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Hierarquia:</span> supervisores somam os pesos de sua equipe; coordenadores/administrativos somam todos os ativos.</div>
             </div>
