@@ -9,8 +9,6 @@ import {
   DollarSign,
   Archive,
   XCircle,
-  TrendingUp,
-  AlertTriangle,
   Award,
   Inbox,
   Percent,
@@ -29,7 +27,7 @@ import { Card } from "@/components/ui/card";
 import { FunilChart } from "@/components/charts/FunilChart";
 import { DetalheAssinadosModal } from "@/components/dashboard/DetalheAssinadosModal";
 import { PlanoAcaoColaboradores } from "@/components/dashboard/PlanoAcaoColaboradores";
-import { calcularPaceProjecao, classificarPace } from "@/lib/diagnostico";
+import { calcularPaceProjecao } from "@/lib/diagnostico";
 import { contarDiasUteis, getPeriodoMesDoCalendario } from "@/lib/period";
 import { formatNumero, formatPct } from "@/lib/format";
 import { ehSupervisor } from "@/lib/colaboradoresAtivos";
@@ -66,15 +64,6 @@ const isExcludedCargo = (cargo: string) =>
   EXCLUDED_CARGOS.some(g => normalize(g) === normalize(cargo));
 const isDesativado = (c: Collaborator) =>
   normalize(c.cargo) === 'desativado' || normalize(c.equipeNome).includes('desativado');
-
-function AlertCard({ alerta }: { alerta: { id: number; prioridade: string; mensagem: string; titulo: string } }) {
-  return (
-    <div className="rounded-lg border border-red-200 bg-red-50 p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-red-600">{alerta.titulo}</p>
-      <p className="mt-1 text-sm text-slate-700">{alerta.mensagem}</p>
-    </div>
-  );
-}
 
 // ========== RADAR DE CONVERSÃO (colaboradores individuais) ==========
 function RadarConversaoLigacoes({ colaboradores }: { colaboradores: Collaborator[] }) {
@@ -321,11 +310,9 @@ export default function VisaoGeral() {
   const hoje = new Date().toISOString().slice(0, 10);
   const diasUteisDecorridos = useMemo(() => contarDiasUteis({ inicio: mesPeriodo.inicio, fim: hoje }), [mesPeriodo, hoje]);
 
-  // Pace
+  // Pace (sem classificação de status)
   const paceDiscador = calcularPaceProjecao(totalAssinadosDiscador, metaMensalDiscador, diasUteisDecorridos, diasUteisTotaisMes);
-  const statusPaceDiscador = classificarPace(paceDiscador, metaMensalDiscador);
   const paceJudit = calcularPaceProjecao(totalAssinadosJudit, metaMensalJudit, diasUteisDecorridos, diasUteisTotaisMes);
-  const statusPaceJudit = classificarPace(paceJudit, metaMensalJudit);
 
   const produtividadeMedia = useMemo(() => {
     const ativos = collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo');
@@ -368,20 +355,7 @@ export default function VisaoGeral() {
 
   const equipeSelecionada = filters.equipe !== "todas";
 
-  const alertas = useMemo(() => {
-    const lista: { id: number; prioridade: string; mensagem: string; titulo: string }[] = [];
-    if (conversaoGeral < 50 && totalLeads > 0) {
-      lista.push({ id: 1, prioridade: 'critico', mensagem: `Conversão geral de ${formatPct(conversaoGeral, 1)} está abaixo do esperado.`, titulo: 'Baixa conversão' });
-    }
-    if (totalAssinados === 0 && totalLeads > 0) {
-      lista.push({ id: 2, prioridade: 'critico', mensagem: 'Nenhum assinado no período, apesar de haver leads recebidos.', titulo: 'Sem conversão' });
-    }
-    return lista;
-  }, [conversaoGeral, totalAssinados, totalLeads]);
-
-  const alertasCriticos = alertas.filter(a => a.prioridade === 'critico').slice(0, 2);
   const atingimentoMetaPeriodo = metaMensalDiscador > 0 ? (totalAssinadosDiscador / metaMensalDiscador) * 100 : 0;
-  const metaComprometida = atingimentoMetaPeriodo < 90;
 
   // Funil com Leads e ordem correta
   const funnelStages = useMemo(() => [
@@ -412,7 +386,7 @@ export default function VisaoGeral() {
 
       {!loading && rawCollaborators.length > 0 && (
         <>
-          {/* Cards de resumo: Discador e Judit */}
+          {/* Cards de resumo: Discador e Judit (sem statusPace) */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
             <ResumoMesCard
               titulo="Discador · Assinados"
@@ -420,7 +394,6 @@ export default function VisaoGeral() {
               atual={totalAssinadosDiscador}
               meta={metaMensalDiscador}
               pace={paceDiscador}
-              statusPace={statusPaceDiscador}
               onClick={() => setModalAberto('discador')}
             />
             {collaboratorsJudit.length > 0 && (
@@ -430,7 +403,6 @@ export default function VisaoGeral() {
                 atual={totalAssinadosJudit}
                 meta={metaMensalJudit}
                 pace={paceJudit}
-                statusPace={statusPaceJudit}
                 onClick={() => setModalAberto('judit')}
               />
             )}
@@ -454,7 +426,7 @@ export default function VisaoGeral() {
             />
           )}
 
-          {/* KPIs principais – ordem solicitada */}
+          {/* KPIs principais */}
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
             <KpiCard titulo="Leads" valor={formatNumero(totalLeads)} icon={Users} accent="info" />
             <KpiCard titulo="Venda Ganha" valor={formatNumero(totalGanhos)} icon={Award} accent="brand" />
@@ -464,18 +436,13 @@ export default function VisaoGeral() {
           </div>
 
           {/* Resumo textual (Discador) */}
-          <Card className="mb-6 flex items-start gap-3" style={{ borderLeft: `3px solid ${metaComprometida ? '#ef4444' : '#22c55e'}` }}>
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: metaComprometida ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)', color: metaComprometida ? '#ef4444' : '#22c55e' }}>
-              {metaComprometida ? <AlertTriangle size={17} /> : <TrendingUp size={17} />}
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-slate-900">No período, a equipe Discador assinou {formatNumero(totalAssinadosDiscador)} e protocolou {formatNumero(totalProtocolados)}</p>
-              <p className="mt-1 text-[13px] text-slate-600">
-                {metaComprometida
-                  ? `Isso representa apenas ${formatPct(atingimentoMetaPeriodo, 1)} da meta mensal de assinados — abaixo do esperado.`
-                  : `Isso representa ${formatPct(atingimentoMetaPeriodo, 1)} da meta mensal de assinados — dentro do esperado.`}
-              </p>
-            </div>
+          <Card className="mb-6 p-4">
+            <p className="text-sm font-semibold text-slate-900">
+              No período, a equipe Discador assinou {formatNumero(totalAssinadosDiscador)} e protocolou {formatNumero(totalProtocolados)}
+            </p>
+            <p className="mt-1 text-[13px] text-slate-600">
+              Isso representa {formatPct(atingimentoMetaPeriodo, 1)} da meta mensal de assinados.
+            </p>
           </Card>
 
           {/* Desempenho (gráfico de equipes ou radar) */}
@@ -529,7 +496,7 @@ export default function VisaoGeral() {
                 {porTime.map(t => (
                   <Link key={t.time} to={`/equipe/${encodeURIComponent(t.time)}`} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 hover:bg-slate-100 transition-colors">
                     <span className="text-[13px] font-medium text-slate-700">{t.time} <span className="text-slate-400 font-normal">· {t.pessoas} pessoas</span></span>
-                    <span className="text-[13px] text-slate-400 text-center">{formatNumero(t.protocolados)} protocolados</span>
+                    <span className="text-[13px] text-slate-400 text-center">{formatNumero(t.assinados)} assinados</span>
                     <span className="text-[13px] font-semibold text-slate-900">{formatPct(t.taxa)}</span>
                   </Link>
                 ))}
@@ -538,13 +505,13 @@ export default function VisaoGeral() {
             </Card>
           </div>
 
-          {/* Plano de Ação */}
+          {/* Plano de Ação 
           <div className="mt-6">
             <PlanoAcaoColaboradores
               colaboradores={collaborators}
               diasUteisPeriodo={diasUteisPeriodoSelecionado}
             />
-          </div>
+          </div>*/}
         </>
       )}
     </DashboardLayout>

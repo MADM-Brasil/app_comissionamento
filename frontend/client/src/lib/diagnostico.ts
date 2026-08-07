@@ -1,8 +1,6 @@
 // src/lib/diagnostico.ts
 
 // ─── Tipos de domínio integrados ────────────────────────────────
-export type NivelStatus = 'excelente' | 'bom' | 'atencao' | 'alerta' | 'critico';
-
 export type FaixaVolume = 'alto' | 'medio_alto' | 'medio_baixo' | 'baixo';
 
 export type NivelConversaoRelativo = 'alta' | 'baixa';
@@ -189,18 +187,6 @@ export function calcularPaceProjecao(
   const gap = projecao - meta;
 
   return { paceAtual, paceEsperado, projecao, gap };
-}
-
-export function classificarPace(
-  pace: PaceProjecao,
-  meta: number,
-): NivelStatus {
-  const atingimento = meta > 0 ? (pace.projecao / meta) * 100 : 0;
-  if (atingimento >= 100) return 'excelente';
-  if (atingimento >= 85) return 'bom';
-  if (atingimento >= 70) return 'atencao';
-  if (atingimento >= 50) return 'alerta';
-  return 'critico';
 }
 
 export function verificarDivergenciaMeta(

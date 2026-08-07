@@ -14,50 +14,17 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Card } from '@/components/ui/card'; // ajuste o alias conforme seu projeto
-import { cn } from '@/lib/utils';
-import { formatNumero, formatPct } from '@/lib/format'; // ou '@/lib/utils'
+import { Card } from '@/components/ui/card';
+import { formatNumero } from '@/lib/format';
 import type { Collaborator } from '@/lib/dataStore';
 
 // ---------------------------------------------------------------
-// Cores e classificação de status
+// Cores dos times (mantidas para o gráfico de distribuição)
 // ---------------------------------------------------------------
 const CORES_TIME = ['#2563eb', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b6d4'];
 
-type NivelStatus = 'excelente' | 'bom' | 'atencao' | 'alerta' | 'critico';
-
-const STATUS_COLOR: Record<NivelStatus, string> = {
-  excelente: '#22c55e',
-  bom: '#3b82f6',
-  atencao: '#f59e0b',
-  alerta: '#f97316',
-  critico: '#ef4444',
-};
-
-const STATUS_LABEL: Record<NivelStatus, string> = {
-  excelente: 'Excelente',
-  bom: 'Bom',
-  atencao: 'Atenção',
-  alerta: 'Alerta',
-  critico: 'Crítico',
-};
-
-function classificarConversao(protocolados: number, assinados: number): NivelStatus {
-  if (assinados === 0) return 'critico';
-  const taxa = (protocolados / assinados) * 100;
-  if (taxa >= 80) return 'excelente';
-  if (taxa >= 60) return 'bom';
-  if (taxa >= 40) return 'atencao';
-  if (taxa >= 20) return 'alerta';
-  return 'critico';
-}
-
-function colaboradorStatus(colab: Collaborator): NivelStatus {
-  return classificarConversao(colab.protocolados, colab.assinados);
-}
-
 // ---------------------------------------------------------------
-// Componentes internos (evita dependências externas quebradas)
+// Componentes internos
 // ---------------------------------------------------------------
 function AvatarLocal({ nome, size = 40 }: { nome: string; size?: number }) {
   const inicial = (nome || '?')[0].toUpperCase();
@@ -68,34 +35,6 @@ function AvatarLocal({ nome, size = 40 }: { nome: string; size?: number }) {
     >
       {inicial}
     </div>
-  );
-}
-
-function StatusPillLocal({ status }: { status: string }) {
-  const colorMap: Record<string, string> = {
-    excelente: 'bg-green-100 text-green-700',
-    bom: 'bg-blue-100 text-blue-700',
-    atencao: 'bg-amber-100 text-amber-700',
-    alerta: 'bg-orange-100 text-orange-700',
-    critico: 'bg-red-100 text-red-700',
-    ativo: 'bg-green-100 text-green-700',
-    inativo: 'bg-red-100 text-red-700',
-  };
-  const labelMap: Record<string, string> = {
-    excelente: 'Excelente',
-    bom: 'Bom',
-    atencao: 'Atenção',
-    alerta: 'Alerta',
-    critico: 'Crítico',
-    ativo: 'Ativo',
-    inativo: 'Inativo',
-  };
-  const colorClass = colorMap[status] || 'bg-gray-100 text-gray-700';
-  const label = labelMap[status] || status;
-  return (
-    <span className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', colorClass)}>
-      {label}
-    </span>
   );
 }
 
@@ -142,14 +81,6 @@ export function DetalheAssinadosModal({
     { etapa: 'Assinados', valor: atual },
     { etapa: 'Protocolados', valor: contribuiram.reduce((s, c) => s + c.protocolados, 0) },
   ];
-
-  // Status da equipe (distribuição)
-  const ORDEM_STATUS: NivelStatus[] = ['excelente', 'bom', 'atencao', 'alerta', 'critico'];
-  const porStatus = ORDEM_STATUS.map((status) => ({
-    status,
-    label: STATUS_LABEL[status],
-    quantidade: contribuiram.filter((c) => colaboradorStatus(c) === status).length,
-  })).filter((s) => s.quantidade > 0);
 
   // Taxa de protocolados dos top contribuintes
   const conversaoTopContribuintes = contribuiram.slice(0, 8).map((c) => ({
@@ -225,45 +156,24 @@ export function DetalheAssinadosModal({
                   )}
                 </div>
 
-                {/* Funil e Status */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                  <div>
-                    <p className="text-[12px] font-medium text-slate-500 mb-2">
-                      Funil: Recebidos → Assinados → Protocolados
-                    </p>
-                    <ResponsiveContainer width="100%" height={140}>
-                      <BarChart data={funil} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-                        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
-                        <XAxis dataKey="etapa" tick={{ fontSize: 10, fill: '#475569' }} tickLine={false} axisLine={false} />
-                        <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={32} />
-                        <Tooltip formatter={(v) => [formatNumero(Number(v)), 'Total']} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                        <Bar dataKey="valor" radius={[4, 4, 0, 0]} barSize={36}>
-                          <Cell fill="#0ea5e9" />
-                          <Cell fill="#2563eb" />
-                          <Cell fill="#10b981" />
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div>
-                    <p className="text-[12px] font-medium text-slate-500 mb-2">
-                      Status da equipe
-                    </p>
-                    <ResponsiveContainer width="100%" height={140}>
-                      <BarChart data={porStatus} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
-                        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
-                        <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#475569' }} tickLine={false} axisLine={false} />
-                        <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
-                        <Tooltip formatter={(v) => [formatNumero(Number(v)), 'Colaboradores']} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-                        <Bar dataKey="quantidade" radius={[4, 4, 0, 0]} barSize={28}>
-                          {porStatus.map((s) => (
-                            <Cell key={s.status} fill={STATUS_COLOR[s.status]} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
+                {/* Funil */}
+                <div className="mb-4">
+                  <p className="text-[12px] font-medium text-slate-500 mb-2">
+                    Funil: Recebidos → Assinados → Protocolados
+                  </p>
+                  <ResponsiveContainer width="100%" height={140}>
+                    <BarChart data={funil} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                      <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                      <XAxis dataKey="etapa" tick={{ fontSize: 10, fill: '#475569' }} tickLine={false} axisLine={false} />
+                      <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={32} />
+                      <Tooltip formatter={(v) => [formatNumero(Number(v)), 'Total']} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+                      <Bar dataKey="valor" radius={[4, 4, 0, 0]} barSize={36}>
+                        <Cell fill="#0ea5e9" />
+                        <Cell fill="#2563eb" />
+                        <Cell fill="#10b981" />
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
                 </div>
 
                 {/* Taxa de protocolados dos top contribuintes (linha) */}
@@ -300,7 +210,6 @@ export function DetalheAssinadosModal({
                         </Link>
                         <p className="text-[12px] text-slate-500 truncate">{colab.equipeNome}</p>
                       </div>
-                      <StatusPillLocal status={colaboradorStatus(colab)} />
                       <span className="text-base font-bold text-slate-900 shrink-0 w-10 text-right">
                         {formatNumero(colab.assinados)}
                       </span>

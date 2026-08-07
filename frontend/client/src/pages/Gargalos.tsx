@@ -20,29 +20,12 @@ import {
 import DashboardLayout from "@/components/DashboardLayout";
 
 // ===================== TIPOS E CONSTANTES =====================
-type NivelStatus = "excelente" | "bom" | "atencao" | "alerta" | "critico";
-
-const STATUS_COLOR: Record<NivelStatus, string> = {
-  excelente: "#34a853",
-  bom: "#3b82f6",
-  atencao: "#f59e0b",
-  alerta: "#f97316",
-  critico: "#ef4444",
-};
-
-const STATUS_LABEL: Record<NivelStatus, string> = {
-  excelente: "Excelente",
-  bom: "Bom",
-  atencao: "Atenção",
-  alerta: "Alerta",
-  critico: "Crítico",
-};
+// (Removidos NivelStatus, STATUS_COLOR e STATUS_LABEL)
 
 interface Gargalo {
   id: string;
   titulo: string;
   descricao: string;
-  severidade: NivelStatus;
   tipo: "etapa_funil" | "colaborador" | "processo";
   perdaEstimada: number;
   impactoEstimado: string;
@@ -95,14 +78,7 @@ function pct(numerador: number, denominador: number): number {
   return (numerador / denominador) * 100;
 }
 
-function classificarStatus(taxaProtocolados: number, atingimentoMeta: number): NivelStatus {
-  const score = taxaProtocolados * 0.6 + atingimentoMeta * 0.4;
-  if (score >= 85) return "excelente";
-  if (score >= 70) return "bom";
-  if (score >= 55) return "atencao";
-  if (score >= 40) return "alerta";
-  return "critico";
-}
+// (função classificarStatus removida – não é mais necessária)
 
 // ===================== MOTOR DE GARGALOS (BOTTLENECKS INTEGRADO) =====================
 function detectarGargalos(
@@ -137,7 +113,6 @@ function detectarGargalos(
         descricao: `${perdaRA} leads recebidos não foram assinados (${taxaRecebidosAssinados.toFixed(0)}% de conversão).`,
         impactoEstimado: `${perdaRA} oportunidade(s) potencialmente perdida(s)`,
         perdaEstimada: perdaRA,
-        severidade: taxaRecebidosAssinados < 40 ? 'critico' : taxaRecebidosAssinados < 50 ? 'alerta' : 'atencao',
         recomendacoes: ['Revisar qualificação do lead e follow-up.'],
       });
     }
@@ -152,7 +127,6 @@ function detectarGargalos(
           descricao: `${perdaAP} assinados ainda sem protocolo (${taxaProtocolados.toFixed(0)}% de conversão).`,
           impactoEstimado: `${perdaAP} processo(s) represado(s)`,
           perdaEstimada: perdaAP,
-          severidade: taxaProtocolados < 50 ? 'critico' : taxaProtocolados < 65 ? 'alerta' : 'atencao',
           recomendacoes: ['Definir SLA de protocolo e monitorar diariamente.'],
         });
       }
@@ -168,11 +142,9 @@ function detectarGargalos(
     descricao: `${perdaRecebidosAssinados} recebido(s) não assinado(s) (${taxaRecebidosAssinados.toFixed(0)}%).`,
     impactoEstimado: `${perdaRecebidosAssinados} oportunidade(s) perdida(s)`,
     perdaEstimada: perdaRecebidosAssinados,
-    severidade: taxaRecebidosAssinados < 60 ? 'alerta' : 'atencao',
     recomendacoes: ['Revisar script de fechamento e reduzir o tempo de retorno ao cliente.'],
     });
   }
-
 
   if (filtrados.length > 0) {
     const comMetricas = filtrados.map(c => {
@@ -182,8 +154,8 @@ function detectarGargalos(
       const conversaoAP = pct(protocolados, assinados);
       const metaMensal = c.metaMensalAssinados || 60;
       const atingimento = pct(assinados, metaMensal);
-      const status = classificarStatus(conversaoAP, atingimento);
-      return { colaborador: c, perda, conversaoAP, metaMensal, atingimento, status };
+      // severidade removida
+      return { colaborador: c, perda, conversaoAP, metaMensal, atingimento };
     });
 
     const pioresPorPerda = comMetricas
@@ -191,7 +163,7 @@ function detectarGargalos(
       .sort((a, b) => b.perda - a.perda)
       .slice(0, 3);
 
-    for (const { colaborador, perda, conversaoAP, status } of pioresPorPerda) {
+    for (const { colaborador, perda, conversaoAP } of pioresPorPerda) {
       gargalos.push({
         id: `gargalo-colaborador-${colaborador.id}`,
         tipo: 'colaborador',
@@ -199,7 +171,6 @@ function detectarGargalos(
         descricao: `${perda} assinado(s) sem protocolo (conversão de ${conversaoAP.toFixed(0)}%).`,
         impactoEstimado: `${perda} processo(s) represado(s)`,
         perdaEstimada: perda,
-        severidade: status,
         colaboradorId: String(colaborador.id),
         recomendacoes: ['Auditar a carteira e redistribuir casos parados.'],
       });
@@ -220,7 +191,6 @@ function detectarGargalos(
         descricao: `${metasComprometidas.length} colaborador(es) estão abaixo de 70% da meta de assinados.`,
         impactoEstimado: 'Risco ao resultado mensal da equipe',
         perdaEstimada,
-        severidade: metasComprometidas.length >= Math.max(3, filtrados.length / 2) ? 'critico' : 'alerta',
         recomendacoes: ['Redistribuir carteira e acompanhar semanalmente.'],
       });
     }
@@ -233,7 +203,6 @@ function detectarGargalos(
 export default function GargalosPage() {
   const { collaborators, rawMetrics, currentStartDate } = useAppStore();
 
-  // Estado de carregamento simples: sem data início e sem colaboradores
   const isLoading = collaborators.length === 0 && !currentStartDate;
 
   const [filters, setFilters] = useState({
@@ -264,7 +233,6 @@ export default function GargalosPage() {
 
   const filtrados = gargalos.filter(g => !filtroTipo || g.tipo === filtroTipo);
   const perdaTotal = gargalos.reduce((a, g) => a + g.perdaEstimada, 0);
-  const criticos = gargalos.filter(g => g.severidade === "critico").length;
 
   return (
     <DashboardLayout title="Gargalos" subtitle="Onde a operação está perdendo conversão – e o que fazer a respeito.">
@@ -279,11 +247,10 @@ export default function GargalosPage() {
 
       {!isLoading && (
         <>
-          {/* KPIs resumo */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          {/* KPIs resumo – removida a KPI “Críticos” */}
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4 mb-6">
             <KpiCard titulo="Gargalos identificados" valor={formatNumero(gargalos.length)} icon={AlertTriangle} accent={gargalos.length ? "warning" : "success"} />
             <KpiCard titulo="Processos represados" valor={formatNumero(perdaTotal)} icon={TrendingDown} accent="danger" subtitulo="soma da perda estimada" />
-            <KpiCard titulo="Críticos" valor={formatNumero(criticos)} icon={AlertTriangle} accent={criticos ? "danger" : "success"} />
             <KpiCard titulo="Por colaborador" valor={formatNumero(gargalos.filter(g => g.tipo === "colaborador").length)} icon={Users} accent="info" />
           </div>
 
@@ -317,27 +284,23 @@ export default function GargalosPage() {
             })}
           </div>
 
-          {/* Lista de gargalos */}
+          {/* Lista de gargalos – sem classificação de severidade */}
           {filtrados.length === 0 ? (
             <Card><p className="text-sm text-slate-500">Nenhum gargalo relevante identificado com esse filtro.</p></Card>
           ) : (
             <div className="space-y-3">
               {filtrados.map(g => {
-                const cor = STATUS_COLOR[g.severidade] || "#6b7280";
                 const aberto = expandidos.has(g.id);
                 const TipoIcon = TIPO_ICON[g.tipo];
                 return (
                   <Card key={g.id} padded={false} className="overflow-hidden">
                     <button onClick={() => toggle(g.id)} className="w-full flex items-center justify-between gap-4 p-4 text-left hover:bg-slate-50">
                       <div className="flex items-center gap-3 min-w-0">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: `${cor}1a`, color: cor }}>
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
                           <AlertTriangle size={18} />
                         </div>
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 flex-wrap mb-0.5">
-                            <span className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide" style={{ color: cor, backgroundColor: `${cor}1a` }}>
-                              {STATUS_LABEL[g.severidade]}
-                            </span>
                             <span className="flex items-center gap-1 text-[11px] text-slate-400">
                               <TipoIcon size={11} /> {TIPO_LABEL[g.tipo]}
                             </span>

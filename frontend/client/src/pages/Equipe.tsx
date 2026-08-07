@@ -58,24 +58,20 @@ function formatMoeda(valor: number): string {
   }).format(valor);
 }
 
-// Medalhas – ícones e cores
-import { AlertOctagon, AlertTriangle, Medal, Star, Trophy, type LucideIcon } from "lucide-react";
-type Medalha = "ouro" | "prata" | "bronze" | "destaque" | "atencao" | "critico";
+// Medalhas – apenas para pódio, sem status
+import { Medal, Star, Trophy, type LucideIcon } from "lucide-react";
+type Medalha = "ouro" | "prata" | "bronze" | "destaque";
 const MEDALHA_ICON: Record<Medalha, LucideIcon> = {
   ouro: Trophy,
   prata: Medal,
   bronze: Medal,
   destaque: Star,
-  atencao: AlertTriangle,
-  critico: AlertOctagon,
 };
 const MEDALHA_COR: Record<Medalha, string> = {
   ouro: "#f59e0b",
   prata: "#94a3b8",
   bronze: "#c2703d",
   destaque: "#2563eb",
-  atencao: "#f97316",
-  critico: "#ef4444",
 };
 
 // ============================================================
@@ -125,7 +121,7 @@ const EXCLUDED_TEAMS = [
   "Equipe Erica", "Equipe Erika", "Equipe Lucas", "Equipe Irene", "Equipe Maria Eduarda", "SalesOps",
   "Equipe Murilo Balsalobre", "Comercial", "Backoffice", "CEO", "Prontuário",
   "Equipe Leonardo Cardoso", "Equipe Julia", "Equipe Leticia", "Dr. Felipe Marx", "Administrativo",
-  "Equipe Thales", "Financeiro", "Equipe Reciclagem",""
+  "Equipe Thales", "Financeiro", "Equipe Reciclagem",
 ];
 const EXCLUDED_CARGOS = [
   "desativado", "assistente", "analista juridico", "gestor de projetos", "analista",
@@ -153,19 +149,6 @@ function Avatar({ nome, size = 40 }: { nome: string; size?: number }) {
     >
       {inicial}
     </div>
-  );
-}
-function StatusPill({ status }: { status: string }) {
-  const ativo = status === "ativo";
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-        ativo ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
-      )}
-    >
-      {ativo ? "Ativo" : "Inativo"}
-    </span>
   );
 }
 
@@ -251,22 +234,6 @@ function calcularPaceProjecao(
   return { paceAtual, paceEsperado, projecao: Math.round(projecao), gap: Math.round(projecao - metaMensal) };
 }
 
-type StatusPace = "critico" | "alerta" | "bom" | "excelente";
-const STATUS_COLOR: Record<StatusPace, string> = {
-  critico: "#ef4444",
-  alerta: "#f97316",
-  bom: "#10b981",
-  excelente: "#2563eb",
-};
-function classificarPace(pace: PaceData, meta: number): StatusPace {
-  if (meta <= 0) return "bom";
-  const ratio = pace.projecao / meta;
-  if (ratio >= 1) return "excelente";
-  if (ratio >= 0.9) return "bom";
-  if (ratio >= 0.75) return "alerta";
-  return "critico";
-}
-
 // ============================================================
 //  CONSTANTES VISUAIS
 // ============================================================
@@ -304,7 +271,7 @@ function CardPodioTime({ item, posicao }: { item: any; posicao: 1 | 2 | 3 }) {
 }
 
 // ============================================================
-//  PÁGINA PRINCIPAL (com carregamento inicial)
+//  PÁGINA PRINCIPAL
 // ============================================================
 export default function Equipe() {
   const [location] = useLocation();
@@ -315,6 +282,7 @@ export default function Equipe() {
     period,
     loadCollaborators,
     loadMetricsForPeriod,
+    loadRawMetrics,
     updateCurrentDates,
   } = useAppStore();
   const { currentUser } = useAccessControl();
@@ -326,21 +294,24 @@ export default function Equipe() {
   const [busca, setBusca] = useState("");
   const [initialLoading, setInitialLoading] = useState(true);
 
-  // Garante que as datas estejam definidas e carrega dados iniciais
   useEffect(() => {
     updateCurrentDates();
     const load = async () => {
       if (rawCollaborators.length === 0) {
         await loadCollaborators();
       }
-      if (getAccessLevel(currentUser?.cargo, currentUser?.status) >= LEVELS.COORDENADOR) {
-        await loadMetricsForPeriod();
-      }
+      await loadMetricsForPeriod();
+      await loadRawMetrics();
       setInitialLoading(false);
     };
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (initialLoading) return;
+    loadMetricsForPeriod();
+    loadRawMetrics();
+  }, [currentStartDate, currentEndDate]);
 
   const supervisor = useMemo(() => {
     const pathMatch = location.match(/^\/equipe\/(.+)$/);
@@ -432,7 +403,7 @@ export default function Equipe() {
 }
 
 // ============================================================
-//  LISTA DE EQUIPES (inalterada – mantida a versão anterior completa)
+//  LISTA DE EQUIPES
 // ============================================================
 function BuscaColaborador({ busca, setBusca }: { busca: string; setBusca: (v: string) => void }) {
   return (
@@ -464,7 +435,7 @@ function ListaEquipes({
   const [diario, setDiario] = useState<AssinadosDiarioLinha[]>([]);
   const [loadingDiario, setLoadingDiario] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const { loadCollaborators: loadCollabs, loadMetricsForPeriod: loadMetrics } = useAppStore();
+  const { loadCollaborators, loadMetricsForPeriod } = useAppStore();
 
   const carregarDiario = async () => {
     setLoadingDiario(true);
@@ -489,7 +460,7 @@ function ListaEquipes({
   const handleRefresh = async () => {
     setRefreshing(true);
     try {
-      await Promise.allSettled([loadCollabs(), loadMetrics(), carregarDiario()]);
+      await Promise.allSettled([loadCollaborators(), loadMetricsForPeriod(), carregarDiario()]);
     } finally {
       setRefreshing(false);
     }
@@ -803,7 +774,6 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
         </div>
         <div className="flex items-center justify-between">
           <div><p className="text-[11px] text-slate-500">Taxa de Assinados</p><p className="text-base font-semibold text-slate-900">{formatPct(taxa)}</p></div>
-          <StatusPill status={c.status} />
         </div>
       </Card>
     </Link>
@@ -844,7 +814,7 @@ function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; cola
 }
 
 // ============================================================
-//  DETALHES DO COLABORADOR (estrutura refatorada para evitar hooks condicionais)
+//  DETALHES DO COLABORADOR (sem qualquer classificação de status)
 // ============================================================
 function DetalhesColaborador({
   colaboradorId,
@@ -867,7 +837,6 @@ function DetalhesColaborador({
     [currentStartDate, currentEndDate]
   );
 
-  // Função auxiliar para extrair mês/ano de uma data DD/MM/AAAA
   const mesAnoDeData = (dataDDMMAAAA: string): string => {
     if (!dataDDMMAAAA || dataDDMMAAAA.length < 10) return "—";
     const partes = dataDDMMAAAA.split('/');
@@ -881,7 +850,6 @@ function DetalhesColaborador({
     return `${nomesMeses[mes - 1] || mes}/${ano}`;
   };
 
-  // Efeito para buscar evolução diária (só roda se existir colaborador e período)
   useEffect(() => {
     if (!colaborador || !currentStartDate || !currentEndDate) return;
     let cancelado = false;
@@ -952,19 +920,18 @@ function DetalhesColaborador({
     return () => { cancelado = true; };
   }, [colaborador?.name, currentStartDate, currentEndDate, periodoAnterior.inicio, periodoAnterior.fim]);
 
-  // Todos os hooks chamados incondicionalmente – o retorno condicional só ocorre no JSX
-  const acessoNegado = !!(colaborador && (
-    (userLevel === LEVELS.SUPERVISAO && normalize(colaborador.equipeNome) !== normalize(currentUser?.equipe || "")) ||
-    (userLevel === LEVELS.ASSESSOR && colaborador.email !== currentUser?.email)
-  ));
-
   const recebidos = colaborador?.emitidos || 0;
   const assinados = colaborador?.assinados || 0;
   const protocolados = colaborador?.protocolados || 0;
   const ganhos = colaborador?.ganhos || 0;
   const metaMensal = colaborador?.metaMensalAssinados || 0;
-  const taxaConversao = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
-  const conversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
+
+  const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
+  const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
+
+  // cores para os anéis de eficiência – apenas indicativo visual, não classificação de status
+  const corConversaoGeral = taxaConversaoGeral >= 60 ? "#22c55e" : taxaConversaoGeral >= 40 ? "#f59e0b" : "#ef4444";
+  const corConversaoProtocolados = taxaConversaoProtocolados >= 60 ? "#22c55e" : taxaConversaoProtocolados >= 40 ? "#f59e0b" : "#ef4444";
 
   const hoje = new Date();
   const inicioPeriodo = currentStartDate ? new Date(currentStartDate) : new Date();
@@ -972,7 +939,6 @@ function DetalhesColaborador({
   const diasUteisTotais = contarDiasUteis(inicioPeriodo, fimPeriodo);
   const diasUteisDecorridos = contarDiasUteis(inicioPeriodo, hoje < fimPeriodo ? hoje : fimPeriodo);
   const pace = calcularPaceProjecao(assinados, metaMensal, diasUteisDecorridos, diasUteisTotais);
-  const statusPace = pace ? classificarPace(pace, metaMensal) : undefined;
 
   const equipe = colaboradores.filter((c) => c.equipeNome === colaborador?.equipeNome);
   const mediaEquipe = useMemo(() => {
@@ -995,27 +961,35 @@ function DetalhesColaborador({
       { metrica: "Assinados", colaborador: assinados, equipe: mediaEquipe.assinados, max: Math.max(assinados, mediaEquipe.assinados) * 1.2 },
       { metrica: "Protocolados", colaborador: protocolados, equipe: mediaEquipe.protocolados, max: Math.max(protocolados, mediaEquipe.protocolados) * 1.2 },
       { metrica: "Comissão", colaborador: ganhos, equipe: mediaEquipe.ganhos, max: Math.max(ganhos, mediaEquipe.ganhos) * 1.2 },
-      { metrica: "Tx Conversão", colaborador: taxaConversao, equipe: mediaEquipe.taxaConversao, max: 100 },
+      { metrica: "Tx Conversão", colaborador: taxaConversaoGeral, equipe: mediaEquipe.taxaConversao, max: 100 },
     ];
-  }, [recebidos, assinados, protocolados, ganhos, taxaConversao, mediaEquipe]);
+  }, [recebidos, assinados, protocolados, ganhos, taxaConversaoGeral, mediaEquipe]);
 
+  // Recomendações baseadas apenas em thresholds numéricos, sem classificação de status
   const recomendacoes: string[] = [];
-  if (statusPace === "critico") {
-    recomendacoes.push(`Pace muito abaixo do esperado (gap de ${formatNumero(pace!.gap)} vs. meta) — no ritmo atual não fecha o período.`);
-  } else if (statusPace === "alerta") {
-    recomendacoes.push(`Pace abaixo do esperado (gap de ${formatNumero(pace!.gap)} vs. meta) — acompanhar de perto.`);
+  if (pace && metaMensal > 0) {
+    const gapRatio = pace.projecao / metaMensal;
+    if (gapRatio < 0.75) {
+      recomendacoes.push(`Pace muito abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — no ritmo atual não fecha o período.`);
+    } else if (gapRatio < 0.9) {
+      recomendacoes.push(`Pace abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — acompanhar de perto.`);
+    }
   }
-  if (conversaoProtocolados < 60) {
+  if (taxaConversaoProtocolados < 60) {
     recomendacoes.push("Revisar imediatamente a carteira de assinados sem protocolo.");
   }
   if (metaMensal > 0 && assinados < metaMensal * 0.7) {
     recomendacoes.push("Redefinir plano de recuperação de meta com acompanhamento semanal.");
   }
-  if (taxaConversao < 70) {
+  if (taxaConversaoGeral < 70) {
     recomendacoes.push("Reforçar técnicas de fechamento comercial (etapa emissão → assinatura).");
   }
 
-  // Renderização condicional apenas no JSX
+  const acessoNegado = !!(colaborador && (
+    (userLevel === LEVELS.SUPERVISAO && normalize(colaborador.equipeNome) !== normalize(currentUser?.equipe || "")) ||
+    (userLevel === LEVELS.ASSESSOR && colaborador.email !== currentUser?.email)
+  ));
+
   if (!colaborador) {
     return (
       <div>
@@ -1040,6 +1014,7 @@ function DetalhesColaborador({
         <ArrowLeft size={15} /> Voltar para a equipe
       </Link>
 
+      {/* Cabeçalho sem StatusPill */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-4">
           <Avatar nome={colaborador.name} size={56} />
@@ -1049,11 +1024,11 @@ function DetalhesColaborador({
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <StatusPill status={colaborador.status} />
           <span className="text-sm text-slate-500">{colaborador.email}</span>
         </div>
       </div>
 
+      {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
         <KpiCard titulo="Recebidos" valor={formatNumero(recebidos)} icon={FileStack} accent="info" />
         <KpiCard
@@ -1067,28 +1042,18 @@ function DetalhesColaborador({
         <KpiCard titulo="Venda Ganha" valor={formatNumero(ganhos)} icon={Award} accent="warning" />
         <KpiCard
           titulo={metaMensal > 0 ? "Atingimento da Meta" : "Conversão Geral"}
-          valor={formatPct(metaMensal > 0 ? (assinados / metaMensal) * 100 : taxaConversao, 0)}
+          valor={formatPct(metaMensal > 0 ? (assinados / metaMensal) * 100 : taxaConversaoGeral, 0)}
           icon={Target}
           accent={metaMensal === 0 ? "info" : (assinados / metaMensal) * 100 >= 90 ? "success" : "warning"}
           subtitulo={metaMensal === 0 ? "Meta não cadastrada" : undefined}
         />
       </div>
 
-      {metaMensal > 0 && pace && statusPace && (
-        <Card className="mb-6" style={{ borderLeft: `3px solid ${STATUS_COLOR[statusPace]}` }}>
+      {/* Pace sem classificação de status – cor fixa azul */}
+      {metaMensal > 0 && pace && (
+        <Card className="mb-6 border-l-4 border-l-blue-500">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-semibold text-slate-700">Pace do mês</h3>
-              <span
-                className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
-                style={{
-                  backgroundColor: `${STATUS_COLOR[statusPace]}1a`,
-                  color: STATUS_COLOR[statusPace],
-                }}
-              >
-                {statusPace === "excelente" ? "Excelente" : statusPace === "bom" ? "Bom" : statusPace === "alerta" ? "Alerta" : "Crítico"}
-              </span>
-            </div>
+            <h3 className="text-sm font-semibold text-slate-700">Pace do mês</h3>
             <span className="text-[11px] text-slate-500">
               {diasUteisDecorridos} de {diasUteisTotais} dias úteis decorridos · meta: {formatNumero(metaMensal)}
             </span>
@@ -1108,7 +1073,7 @@ function DetalhesColaborador({
             </div>
             <div>
               <p className="text-[11px] text-slate-500">Gap vs. meta</p>
-              <p className="text-base font-semibold flex items-center gap-1" style={{ color: STATUS_COLOR[statusPace] }}>
+              <p className="text-base font-semibold flex items-center gap-1 text-slate-900">
                 <TrendingUp size={14} className={pace.gap >= 0 ? "" : "rotate-180"} />
                 {pace.gap >= 0 ? "+" : ""}{formatNumero(pace.gap)}
               </p>
@@ -1117,6 +1082,7 @@ function DetalhesColaborador({
         </Card>
       )}
 
+      {/* Evolução e Eficiência */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
         <Card className="xl:col-span-2">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">
@@ -1151,12 +1117,10 @@ function DetalhesColaborador({
                     labelFormatter={(label, payload: any[]) => {
                       const item = payload?.[0]?.payload;
                       if (!item) return label;
-
                       const mesAtual = mesAnoDeData(item.dataCompletaAtual);
                       const mesAnterior = item.dataCompletaAnterior
                         ? mesAnoDeData(item.dataCompletaAnterior)
                         : "—";
-
                       return (
                         <div>
                           <p className="font-semibold text-slate-800">{label}</p>
@@ -1175,40 +1139,66 @@ function DetalhesColaborador({
             </>
           )}
         </Card>
+
+        {/* Eficiência com dois anéis */}
         <Card className="flex flex-col items-center justify-center">
           <h3 className="text-sm font-semibold text-slate-700 self-start mb-2">Eficiência</h3>
-          <div className="flex flex-col items-center">
-            <div className="relative w-32 h-32">
-              <svg viewBox="0 0 36 36" className="w-full h-full">
-                <path
-                  d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
-                  fill="none"
-                  stroke="#e2e8f0"
-                  strokeWidth="3"
-                />
-                <path
-                  d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
-                  fill="none"
-                  stroke={STATUS_COLOR[statusPace || "bom"]}
-                  strokeWidth="3"
-                  strokeDasharray={`${Math.min(taxaConversao, 100)}, 100`}
-                />
-              </svg>
-              <div className="absolute inset-0 flex flex-col items-center justify-center">
-                <span className="text-2xl font-bold text-slate-900">{formatPct(taxaConversao, 0)}</span>
-                <span className="text-[10px] text-slate-500">conv. geral</span>
+          <div className="grid grid-cols-2 gap-4 w-full">
+            <div className="flex flex-col items-center">
+              <p className="text-[11px] text-slate-500 mb-1">Conversão Geral</p>
+              <div className="relative w-28 h-28">
+                <svg viewBox="0 0 36 36" className="w-full h-full">
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    fill="none"
+                    stroke="#e2e8f0"
+                    strokeWidth="3"
+                  />
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
+                    fill="none"
+                    stroke={corConversaoGeral}
+                    strokeWidth="3"
+                    strokeDasharray={`${taxaConversaoGeral}, 100`}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-lg font-bold" style={{ color: corConversaoGeral }}>{formatPct(taxaConversaoGeral, 0)}</span>
+                </div>
               </div>
+              <p className="text-xs text-slate-400 mt-1">Assinados / Emitidos</p>
             </div>
-          </div>
-          <div className="grid gap-4 w-full mt-4 text-center">
-            <div>
-              <p className="text-[11px] text-slate-500">Conv. Assinados → Protocolados</p>
-              <p className="text-sm font-semibold text-slate-700">{formatPct(conversaoProtocolados, 0)}</p>
+            <div className="flex flex-col items-center">
+              <p className="text-[11px] text-slate-500 mb-1">Conv. Protocolados</p>
+              <div className="relative w-28 h-28">
+                <svg viewBox="0 0 36 36" className="w-full h-full">
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831"
+                    fill="none"
+                    stroke="#e2e8f0"
+                    strokeWidth="3"
+                  />
+                  <path
+                    d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831"
+                    fill="none"
+                    stroke={corConversaoProtocolados}
+                    strokeWidth="3"
+                    strokeDasharray={`${taxaConversaoProtocolados}, 100`}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-lg font-bold" style={{ color: corConversaoProtocolados }}>{formatPct(taxaConversaoProtocolados, 0)}</span>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 mt-1">Protocolados / Assinados</p>
             </div>
           </div>
         </Card>
       </div>
 
+      {/* Radar e Recomendações */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
         <Card className="xl:col-span-1">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">Comparação com a equipe</h3>
@@ -1230,7 +1220,6 @@ function DetalhesColaborador({
         <Card className="xl:col-span-2">
           <div className="flex items-center gap-2 mb-3">
             <h3 className="text-sm font-semibold text-slate-700">Recomendações</h3>
-            <StatusPill status={colaborador.status} />
           </div>
           {recomendacoes.length > 0 ? (
             <ul className="space-y-2">
@@ -1244,25 +1233,15 @@ function DetalhesColaborador({
           ) : (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
               <div className="flex items-start gap-3">
-                <div
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
-                  style={{
-                    backgroundColor: `${STATUS_COLOR[statusPace || "bom"]}1a`,
-                    color: STATUS_COLOR[statusPace || "bom"],
-                  }}
-                >
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-500/15 text-blue-600">
                   <ShieldCheck size={17} />
                 </div>
                 <div>
                   <p className="text-sm font-semibold text-slate-900">
-                    {statusPace === "excelente" || statusPace === "bom"
-                      ? "Nenhum alerta disparado — performance dentro do esperado."
-                      : "Nenhuma recomendação automática gerada, mas o status requer atenção."}
+                    Nenhuma recomendação automática gerada.
                   </p>
                   <p className="mt-1 text-[13px] text-slate-500">
-                    {statusPace === "excelente" || statusPace === "bom"
-                      ? "As métricas de conversão, pace e meta estão estáveis no período. Continue acompanhando."
-                      : "Apesar de não cruzarem os limiares críticos, o status geral já sinaliza que o resultado está abaixo do ideal. Acompanhe de perto."}
+                    Os indicadores atuais não acionaram sugestões. Continue monitorando.
                   </p>
                 </div>
               </div>
