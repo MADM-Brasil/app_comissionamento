@@ -302,7 +302,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
             <LogOut className="w-4.5 h-4.5" />
             <span>Sair</span>
           </button>
-          <div className="text-[#94a3b8] text-xs text-center mt-2">MADM Brasil v1.0</div>
+          <div className="text-[#94a3b8] text-xs text-center mt-2">MADM Brasil v1.2</div>
         </div>
       </aside>
 
