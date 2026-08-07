@@ -761,7 +761,7 @@ export default function Home() {
                     </div>
                     <div>
                       <div className="flex justify-between items-center mb-2"><span className="text-[#64748b]">Melhor dia (assinados):</span><span className="font-medium text-[#0f172a]">{stats.bestDay.day} ({formatInt(stats.bestDay.value)})</span></div>
-                      <div className="flex justify-between items-center"><span className="text-[#64748b]">Dias com meta batida:</span><span className="font-medium text-[#16A34A]">{stats.daysWithMeta}/{stats.totalDays}</span></div>
+                      <div className="flex justify-between items-center"><span className="text-[#64748b]">Dias com gols realizados:</span><span className="font-medium text-[#16A34A]">{stats.daysWithMeta}/{stats.totalDays}</span></div>
                     </div>
                   </div>
                 </div>

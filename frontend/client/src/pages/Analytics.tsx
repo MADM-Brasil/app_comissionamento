@@ -315,18 +315,18 @@ export default function Analytics() {
     { name:"Protocolados", value:totals.protocolados, color:"#8B5CF6" },
     { name:"Perdidos", value:totals.perdidos, color:"#DC2626" },
   ].filter(item=>item.value>0);
-  const conversionByStage = useMemo(() => {
-    const leads = totalLeads;
-    const e=totals.emitidos,a=totals.assinados,p=totals.protocolados,g=totals.ganhos,pe=totals.perdidos;
-    return [
-      { stage:"Leads Recebidos → Emitidos", value: leads>0?+((e/leads)*100).toFixed(1):0 },
-      { stage:"Emitidos → Assinados", value: e>0?+((a/e)*100).toFixed(1):0 },
-      { stage:"Assinados → Protocolados", value: a>0?+((p/a)*100).toFixed(1):0 },
-      { stage:"Protocolados → Ganhos", value: p>0?+((g/p)*100).toFixed(1):0 },
-      { stage:"Assinados → Ganhos", value: a>0?+((g/a)*100).toFixed(1):0 },
-      { stage:"Ganhos → Perdidos", value: g>0?+((pe/g)*100).toFixed(1):0 },
-    ];
-  }, [totals, totalLeads]);
+const conversionByStage = useMemo(() => {
+  const leads = totalLeads;
+  const e=totals.emitidos,a=totals.assinados,p=totals.protocolados,g=totals.ganhos,pe=totals.perdidos;
+  return [
+    { stage:"Leads Recebidos → Emitidos", value: leads>0?+((e/leads)*100).toFixed(1):0 },
+    { stage:"Emitidos → Assinados", value: e>0?+((a/e)*100).toFixed(1):0 },
+    { stage:"Assinados → Protocolados", value: a>0?+((p/a)*100).toFixed(1):0 },
+    { stage:"Protocolados → Ganhos", value: p>0?+((g/p)*100).toFixed(1):0 },
+    { stage:"Assinados → Ganhos", value: a>0?+((g/a)*100).toFixed(1):0 },
+    { stage:"Assinados → Perdidos", value: a>0?+((pe/a)*100).toFixed(1):0 },  
+  ];
+}, [totals, totalLeads]);
   const hasActiveFilters = equipe!=="todas"||colaborador!=="todos"||produto!=="Todos";
 
   const renderBonusCard = () => {
