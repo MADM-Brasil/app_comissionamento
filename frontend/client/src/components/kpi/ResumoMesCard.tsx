@@ -3,7 +3,7 @@ import React from "react";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
 import { TrendingUp, TrendingDown } from "lucide-react";
-import type { PaceProjecao, NivelStatus } from "@/lib/diagnostico";
+import type { PaceProjecao } from "@/lib/diagnostico";
 import { formatNumero, formatPct } from "@/lib/format";
 
 interface ResumoMesCardProps {
@@ -12,25 +12,8 @@ interface ResumoMesCardProps {
   atual: number;
   meta: number;
   pace: PaceProjecao;
-  statusPace: NivelStatus;
   onClick?: () => void;
 }
-
-const STATUS_COLOR: Record<NivelStatus, string> = {
-  excelente: "#22c55e",
-  bom: "#3b82f6",
-  atencao: "#f59e0b",
-  alerta: "#f97316",
-  critico: "#ef4444",
-};
-
-const STATUS_LABEL: Record<NivelStatus, string> = {
-  excelente: "Excelente",
-  bom: "Bom",
-  atencao: "Atenção",
-  alerta: "Alerta",
-  critico: "Crítico",
-};
 
 export function ResumoMesCard({
   titulo,
@@ -38,12 +21,14 @@ export function ResumoMesCard({
   atual,
   meta,
   pace,
-  statusPace,
   onClick,
 }: ResumoMesCardProps) {
   const percentual = meta > 0 ? (atual / meta) * 100 : 0;
   const gap = pace.gap ?? 0;
   const projetado = pace.projecao ?? 0;
+
+  // Cor neutra para barra de progresso (sem classificação de status)
+  const progressColor = "#2563eb"; // azul 600
 
   return (
     <Card
@@ -58,15 +43,6 @@ export function ResumoMesCard({
           <Icon size={18} className="text-slate-500" />
           <h3 className="text-sm font-semibold text-slate-700">{titulo}</h3>
         </div>
-        <span
-          className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium"
-          style={{
-            backgroundColor: `${STATUS_COLOR[statusPace]}20`,
-            color: STATUS_COLOR[statusPace],
-          }}
-        >
-          {STATUS_LABEL[statusPace]}
-        </span>
       </div>
 
       <div className="grid grid-cols-2 gap-4 mb-3">
@@ -91,7 +67,7 @@ export function ResumoMesCard({
             className="h-full rounded-full transition-all"
             style={{
               width: `${Math.min(100, percentual)}%`,
-              backgroundColor: STATUS_COLOR[statusPace],
+              backgroundColor: progressColor,
             }}
           />
         </div>
