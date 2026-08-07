@@ -63,22 +63,7 @@ function getSunday(date: Date): Date {
 }
 function formatDate(d: Date): string { return d.toISOString().slice(0,10); }
 function getChartDateRange(period: string, currentStart: string, currentEnd: string): { start: string; end: string } {
-  if (period === "Hoje") {
-    const today = new Date(); const monday = getMonday(today);
-    const endDate = new Date(today); endDate.setDate(today.getDate() + 1);
-    return { start: formatDate(monday), end: formatDate(endDate) };
-  }
-  if (period === "Semana") {
-    const today = new Date(); const currentSunday = getSunday(today);
-    const previousMonday = getMonday(today); previousMonday.setDate(previousMonday.getDate() - 7);
-    const endDate = new Date(currentSunday); endDate.setDate(currentSunday.getDate() + 1);
-    return { start: formatDate(previousMonday), end: formatDate(endDate) };
-  }
   return { start: currentStart, end: currentEnd };
-}
-function isWeekday(dateStr: string): boolean {
-  const date = new Date(dateStr + "T12:00:00Z"); const day = date.getUTCDay();
-  return day !== 0 && day !== 6;
 }
 
 // ========== Utilitários gerais ==========
@@ -276,7 +261,11 @@ export default function Analytics() {
         const startDate = new Date(Date.UTC(parseInt(chartDateRange.start.slice(0,4)), parseInt(chartDateRange.start.slice(5,7))-1, parseInt(chartDateRange.start.slice(8,10))));
         const endDate = new Date(Date.UTC(parseInt(chartDateRange.end.slice(0,4)), parseInt(chartDateRange.end.slice(5,7))-1, parseInt(chartDateRange.end.slice(8,10))));
         const current = new Date(startDate);
-        while (current < endDate) { const dateStr = current.toISOString().split('T')[0]; if (period === "Semana") { if (isWeekday(dateStr)) allDates.push(dateStr); } else allDates.push(dateStr); current.setUTCDate(current.getUTCDate() + 1); }
+        while (current < endDate) {
+        const dateStr = current.toISOString().split('T')[0];
+         allDates.push(dateStr);
+         current.setUTCDate(current.getUTCDate() + 1);
+        }
         if (allDates.length === 0 && chartDateRange.start && chartDateRange.end) { const today = new Date(endDate); today.setUTCDate(today.getUTCDate()-1); allDates.push(today.toISOString().split('T')[0]); }
         const chartArray = allDates.map(date => {
           const values = dataMap.get(date) || { leads:0, assinados:0, ganhos:0, protocolados:0, perdidos:0 };
