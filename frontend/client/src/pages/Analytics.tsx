@@ -325,23 +325,26 @@ export default function Analytics() {
   const taxaConversaoGeral = totalLeads>0 ? (totalAssinados/totalLeads)*100 : 0;
   const mediaDiariaVendas = dailyChartData.length>0 ? totalAssinados/dailyChartData.length : 0;
 
-  const funnelChartData = [
+const funnelChartData = [
+    { name:"Leads", value: totalLeads, color:"#3b82f6" },       // cor azul clara para leads
     { name:"Emitidos", value:totals.emitidos, color:"#2F6FED" },
     { name:"Assinados", value:totals.assinados, color:"#16A34A" },
-    { name:"Protocolados", value:totals.protocolados, color:"#8B5CF6" },
     { name:"Ganhos", value:totals.ganhos, color:"#EA8C1D" },
+    { name:"Protocolados", value:totals.protocolados, color:"#8B5CF6" },
     { name:"Perdidos", value:totals.perdidos, color:"#DC2626" },
   ].filter(item=>item.value>0);
   const conversionByStage = useMemo(() => {
+    const leads = totalLeads;
     const e=totals.emitidos,a=totals.assinados,p=totals.protocolados,g=totals.ganhos,pe=totals.perdidos;
     return [
+      { stage:"Leads Recebidos → Emitidos", value: leads>0?+((e/leads)*100).toFixed(1):0 },
       { stage:"Emitidos → Assinados", value: e>0?+((a/e)*100).toFixed(1):0 },
       { stage:"Assinados → Protocolados", value: a>0?+((p/a)*100).toFixed(1):0 },
       { stage:"Protocolados → Ganhos", value: p>0?+((g/p)*100).toFixed(1):0 },
       { stage:"Assinados → Ganhos", value: a>0?+((g/a)*100).toFixed(1):0 },
       { stage:"Ganhos → Perdidos", value: g>0?+((pe/g)*100).toFixed(1):0 },
     ];
-  }, [totals]);
+  }, [totals, totalLeads]);
   const hasActiveFilters = equipe!=="todas"||colaborador!=="todos"||produto!=="Todos";
 
   const renderBonusCard = () => {
@@ -457,19 +460,38 @@ export default function Analytics() {
             )}
           </div>
 
-          {/* Distribuição + Conversão */}
+          {/* Distribuição (agora barras) + Conversão */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
             <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "480ms" }}>
               <h3 className="text-sm font-bold text-[#0f172a] mb-4">Distribuição por Etapa</h3>
               {funnelChartData.length > 0 ? (
                 <ResponsiveContainer width="100%" height={320}>
-                  <PieChart><Pie data={funnelChartData} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={2} dataKey="value" label={({name,percent})=>`${name}: ${(percent*100).toFixed(0)}%`} labelLine={true}>{funnelChartData.map((entry,index)=><Cell key={index} fill={entry.color} />)}</Pie><Tooltip content={<CustomTooltip />} /></PieChart>
+                  <BarChart data={funnelChartData} margin={{ top: 10, right: 30, left: 0, bottom: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <XAxis dataKey="name" tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                    <YAxis tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} width={30} />
+                    <Tooltip content={<CustomTooltip />} />
+                    <Bar dataKey="value" radius={[4, 4, 0, 0]} barSize={36}>
+                      {funnelChartData.map((entry, index) => (
+                        <Cell key={index} fill={entry.color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
                 </ResponsiveContainer>
-              ) : <div className="h-[260px] text-center text-[#94a3b8] text-sm">Nenhum dado disponível</div>}
+              ) : (
+                <div className="h-[260px] text-center text-[#94a3b8] text-sm">Nenhum dado disponível</div>
+              )}
               <div className="flex flex-wrap justify-center gap-3 mt-3">
-                {funnelChartData.map((item,i) => (<div key={i} className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 rounded-full" style={{ background: item.color }} /><span className="text-[10px] text-[#64748b]">{item.name}</span><span className="text-[10px] font-bold text-[#0f172a]">{formatInt(item.value)}</span></div>))}
+                {funnelChartData.map((item,i) => (
+                  <div key={i} className="flex items-center gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded-full" style={{ background: item.color }} />
+                    <span className="text-[10px] text-[#64748b]">{item.name}</span>
+                    <span className="text-[10px] font-bold text-[#0f172a]">{formatInt(item.value)}</span>
+                  </div>
+                ))}
               </div>
             </div>
+
             <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "560ms" }}>
               <h3 className="text-sm font-bold text-[#0f172a] mb-4">Taxa de Conversão por Estágio</h3>
               <ResponsiveContainer width="100%" height={350}>
@@ -490,7 +512,7 @@ export default function Analytics() {
           <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "640ms" }}>
             <h3 className="text-sm font-bold text-[#0f172a] mb-4">Resumo de Comissões e Metas</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Metas Batidas</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">suas metas batidas</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Gols</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">suas metas batidas</div></div>
               {renderBonusCard()}
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div><div className="text-xs text-[#94a3b8]">meta: {formatInt(targetAssinados)}</div></div>
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>

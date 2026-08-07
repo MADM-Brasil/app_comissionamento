@@ -383,15 +383,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               </div>
             )}
 
-            <button
-              onClick={() => window.location.reload()}
-              className="p-2 rounded-lg hover:bg-[#f1f5f9] transition-colors text-[#64748b]"
-              aria-label="Atualizar dados"
-              title="Atualizar dados"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-
             <div className="w-8 h-8 rounded-full bg-[#2F6FED] text-white flex items-center justify-center text-xs font-bold flex-shrink-0" aria-label="Avatar do usuário">
               {displayAvatar}
             </div>

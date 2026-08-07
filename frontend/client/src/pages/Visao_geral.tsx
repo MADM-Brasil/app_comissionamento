@@ -19,8 +19,8 @@ import {
   Trophy,
   UserX,
   Gauge,
-  RefreshCw,
   Loader2,
+  Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { KpiCard } from "@/components/kpi/KpiCard";
@@ -44,6 +44,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
+import { fetchLeadsRecebidos } from "@/lib/api";
 
 // ========== CONSTANTES DE EXCLUSÃO ==========
 const EXCLUDED_TEAMS = [
@@ -164,7 +165,36 @@ export default function VisaoGeral() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [modalAberto, setModalAberto] = useState<"discador" | "judit" | null>(null);
-  const initialLoadDone = useRef(false);
+  const [totalLeads, setTotalLeads] = useState(0);
+
+  const lastFetchLeads = useRef<number>(0);
+  const LEADS_CACHE_TTL = 60000;
+
+  // Busca leads totais do período
+  const fetchLeadsData = useCallback(async () => {
+    if (!currentStartDate || !currentEndDate) return;
+    const now = Date.now();
+    if (totalLeads > 0 && (now - lastFetchLeads.current) < LEADS_CACHE_TTL) return;
+
+    try {
+      const equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
+      const colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
+      const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
+      const params = {
+        start: currentStartDate,
+        end: currentEndDate,
+        equipe: equipeApi,
+        colaborador: colaboradorApi,
+        produto: produtoApi,
+      };
+      const leadsData = await fetchLeadsRecebidos(params);
+      const total = leadsData.reduce((sum: number, item: any) => sum + (Number(item.total) || 0), 0);
+      setTotalLeads(total);
+      lastFetchLeads.current = Date.now();
+    } catch (err) {
+      console.error("Erro ao buscar leads:", err);
+    }
+  }, [currentStartDate, currentEndDate, filters, totalLeads]);
 
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate) return;
@@ -188,20 +218,21 @@ export default function VisaoGeral() {
         colaboradorId: colaboradorIdApi,
         produto: produtoApi,
       });
+
+      await fetchLeadsData();
     } catch (err) {
       console.error("Erro ao carregar dados da Visão Geral:", err);
     } finally {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [filters, currentStartDate, currentEndDate, rawCollaborators.length, loadCollaborators, loadMetricsForPeriod, loadRawMetrics]);
+  }, [filters, currentStartDate, currentEndDate, rawCollaborators.length, loadCollaborators, loadMetricsForPeriod, loadRawMetrics, fetchLeadsData]);
 
   useEffect(() => {
-    if (initialLoadDone.current) return;
-    initialLoadDone.current = true;
+    if (!currentStartDate || !currentEndDate) return;
     setLoading(true);
-    void fetchData();
-  }, [fetchData]);
+    fetchData();
+  }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFilterChange = (newFilters: typeof filters) => {
     setFilters(newFilters);
@@ -259,9 +290,12 @@ export default function VisaoGeral() {
   // Totais gerais
   const totalAssinados = rawMetrics.assinados;
   const totalProtocolados = rawMetrics.protocolados;
-  const totalGanhos = rawMetrics.ganhos; 
-  const totalRecebidos = rawMetrics.emitidos;
-  const conversaoGeral = totalRecebidos > 0 ? (totalAssinados / totalRecebidos) * 100 : 0;
+  const totalGanhos = rawMetrics.ganhos;
+  const totalEmitidos = rawMetrics.emitidos;
+  const totalPerdidos = rawMetrics.perdidos;
+
+  // Conversão geral: Assinados / Leads
+  const conversaoGeral = totalLeads > 0 ? (totalAssinados / totalLeads) * 100 : 0;
 
   const periodoSelecionado = { inicio: currentStartDate, fim: currentEndDate };
   const diasUteisPeriodoSelecionado = useMemo(() => contarDiasUteis(periodoSelecionado), [periodoSelecionado]);
@@ -319,26 +353,28 @@ export default function VisaoGeral() {
 
   const alertas = useMemo(() => {
     const lista: { id: number; prioridade: string; mensagem: string; titulo: string }[] = [];
-    if (conversaoGeral < 50 && totalRecebidos > 0) {
+    if (conversaoGeral < 50 && totalLeads > 0) {
       lista.push({ id: 1, prioridade: 'critico', mensagem: `Conversão geral de ${formatPct(conversaoGeral, 1)} está abaixo do esperado.`, titulo: 'Baixa conversão' });
     }
-    if (totalAssinados === 0 && totalRecebidos > 0) {
+    if (totalAssinados === 0 && totalLeads > 0) {
       lista.push({ id: 2, prioridade: 'critico', mensagem: 'Nenhum assinado no período, apesar de haver leads recebidos.', titulo: 'Sem conversão' });
     }
     return lista;
-  }, [conversaoGeral, totalAssinados, totalRecebidos]);
+  }, [conversaoGeral, totalAssinados, totalLeads]);
 
   const alertasCriticos = alertas.filter(a => a.prioridade === 'critico').slice(0, 2);
   const atingimentoMetaPeriodo = metaMensalDiscador > 0 ? (totalAssinadosDiscador / metaMensalDiscador) * 100 : 0;
   const metaComprometida = atingimentoMetaPeriodo < 90;
 
+  // Funil com Leads e ordem correta
   const funnelStages = useMemo(() => [
+    { stage: "Leads", count: totalLeads, color: "#3b82f6", icon: Users },
     { stage: "Emitidos", count: rawMetrics.emitidos, color: "#09175b", icon: FileText },
     { stage: "Assinados", count: rawMetrics.assinados, color: "#34a853", icon: CheckCircle },
-    { stage: "Protocolados", count: rawMetrics.protocolados, color: "#045b5b", icon: Archive },
     { stage: "Ganhos", count: rawMetrics.ganhos, color: "#f59e0b", icon: DollarSign },
+    { stage: "Protocolados", count: rawMetrics.protocolados, color: "#045b5b", icon: Archive },
     { stage: "Perdidos", count: rawMetrics.perdidos, color: "#ef4444", icon: XCircle },
-  ], [rawMetrics]);
+  ], [rawMetrics, totalLeads]);
 
   return (
     <DashboardLayout title="Visão Geral" subtitle={`Panorama executivo da operação comercial — Período ${period}`}>
@@ -353,13 +389,12 @@ export default function VisaoGeral() {
 
       {!loading && rawCollaborators.length === 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
-          Nenhum colaborador disponível no momento. Verifique sua conexão ou contate o suporte.
+          Nenhum colaborador disponível no momento.
         </div>
       )}
 
       {!loading && rawCollaborators.length > 0 && (
         <>
-
           {/* Cards de resumo: Discador e Judit */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
             <ResumoMesCard
@@ -402,13 +437,13 @@ export default function VisaoGeral() {
             />
           )}
 
-          {/* KPIs principais */}
+          {/* KPIs principais – ordem solicitada */}
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
+            <KpiCard titulo="Leads" valor={formatNumero(totalLeads)} icon={Users} accent="info" />
             <KpiCard titulo="Venda Ganha" valor={formatNumero(totalGanhos)} icon={Award} accent="brand" />
-            <KpiCard titulo="Recebidos" valor={formatNumero(totalRecebidos)} icon={Inbox} accent="info" />
             <KpiCard titulo="Protocolados" valor={formatNumero(totalProtocolados)} icon={FileCheck2} accent="success" />
             <KpiCard titulo="Conversão Geral" valor={formatPct(conversaoGeral)} icon={Percent} accent="brand" />
-            <KpiCard titulo="Perdidos" valor={formatNumero(rawMetrics.perdidos)} icon={XCircle} accent="danger" />
+            <KpiCard titulo="Perdidos" valor={formatNumero(totalPerdidos)} icon={XCircle} accent="danger" />
           </div>
 
           {/* Resumo textual (Discador) */}
@@ -486,7 +521,7 @@ export default function VisaoGeral() {
             </Card>
           </div>
 
-          {/* Plano de Ação (novo componente) */}
+          {/* Plano de Ação */}
           <div className="mt-6">
             <PlanoAcaoColaboradores
               colaboradores={collaborators}

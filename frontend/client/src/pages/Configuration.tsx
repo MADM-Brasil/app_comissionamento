@@ -720,7 +720,7 @@ export default function Configuration() {
                   <th>Colaborador</th>
                   <th>Equipe</th>
                   <th className="text-center">Meta (A/G) {selectedPeriod === 'diario' ? '(diário)' : selectedPeriod === 'semanal' ? '(semanal)' : '(mensal)'}</th>
-                  <th className="text-center">Metas Batidas</th>
+                  <th className="text-center">Gols</th>
                   <th className="text-center">Bônus Ciclo</th>
                   <th className="text-center">Bônus Estimado</th>
                   <th className="text-center">Ações</th>
