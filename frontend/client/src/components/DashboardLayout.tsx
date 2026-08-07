@@ -72,20 +72,17 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
     }
 
-        if (permissions.canAccessRanking) {
+    if (permissions.canAccessRanking) {
       items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
     }
 
     // Grupo Dashboard (expansível) – aparece se tiver acesso a qualquer subpágina
     const dashboardChildren: NavChild[] = [];
-    if (permissions.canViewTeam) {
-    if (permissions.canAccessReports) {
+    if (permissions.canViewTeam && permissions.canAccessReports) {
       dashboardChildren.push({ path: "/Vgeral", label: "Visão Geral", icon: BarChart3 });
       dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
       dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
-      //dashboardChildren.push({ path: "/gargalos", label: "Gargalos", icon: BarChart3 });
       dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
-    }
     }
 
     if (dashboardChildren.length > 0) {
@@ -383,14 +380,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               </div>
             )}
 
-            <button
-              onClick={() => window.location.reload()}
-              className="p-2 rounded-lg hover:bg-[#f1f5f9] transition-colors text-[#64748b]"
-              aria-label="Atualizar dados"
-              title="Atualizar dados"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
+            {/* BOTÃO DE RELOAD REMOVIDO */}
 
             <div className="w-8 h-8 rounded-full bg-[#2F6FED] text-white flex items-center justify-center text-xs font-bold flex-shrink-0" aria-label="Avatar do usuário">
               {displayAvatar}
