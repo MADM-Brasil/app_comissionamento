@@ -41,7 +41,7 @@ class ExtractBD {
         let sql = `
             SELECT COUNT(*) as total
             FROM madm.view_app_emitidos_e_assinados
-            WHERE data_assinatura BETWEEN $1 AND $2
+            WHERE data_assinatura BETWEEN $1 AND $2 
         `;
         const params = [start, end];
         let paramIndex = 3;

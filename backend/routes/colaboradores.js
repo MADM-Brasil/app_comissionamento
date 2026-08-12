@@ -4,6 +4,13 @@ import db from '../services/db.js';
 
 const router = express.Router();
 
+// Lista de e‑mails dos Supervisores SR (configure aqui)
+const SUPERVISORES_SR_EMAILS = [
+  'supervisor.sr1@email.com',
+  'sr2@email.com',
+  // ... adicione outros e‑mails conforme necessário
+];
+
 function requireAuth(req, res, next) {
   if (!req.session.isAuthenticated || !req.session.userId) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
@@ -28,7 +35,6 @@ function parseMesToDataMetrica(mesParam) {
 
 // Mapeamento de cargo para produto (usado no retorno)
 function mapGrupoToProduto(cargo, classificacaoOperacional) {
-  // Se for Judit, usa 'Judit' como produto (ou mantém o mapeamento específico)
   if (classificacaoOperacional && classificacaoOperacional.toLowerCase() === 'judit') {
     return 'Judit';
   }
@@ -55,8 +61,6 @@ function normalize(str) {
 
 // ============================================================
 // GET /api/collaborators
-// Agora integra colaboradores Judit da view de métricas,
-// mesmo que não existam em core.view_app_colaboradores.
 // ============================================================
 router.get('/collaborators', requireAuth, async (req, res) => {
   const mesParam = req.query.mes;
@@ -64,11 +68,6 @@ router.get('/collaborators', requireAuth, async (req, res) => {
   console.log(`📅 Buscando colaboradores para data_metrica: ${dataMetrica}`);
 
   try {
-    // Primeiro, buscar todos os colaboradores com métricas na data, incluindo classificacao_operacional
-    // Usamos LEFT JOIN para incluir colaboradores que podem não estar em core.view_app_colaboradores,
-    // mas que estão em view_app_metricas_assessores (ex: Judit recém criados).
-    // Se o colaborador não existir em core, os campos de nome_equipe, cargo, status virão nulos,
-    // então tratamos com COALESCE.
     const query = `
       SELECT 
         COALESCE(c.email, m.email) AS email,
@@ -85,7 +84,6 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
         AND (c.status IS NULL OR LOWER(c.status) != 'desativado')
         AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')
-        -- Para colaboradores Judit, mesmo que não tenham cargo/equipe, incluímos
         AND (m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != '')
     `;
     const result = await db.query(query, [dataMetrica]);
@@ -95,8 +93,6 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       return res.json({ success: true, data: [] });
     }
 
-    // Buscar métricas do mês para popular pesos e bônus (já temos na mesma view, mas podemos reaproveitar)
-    // Para simplificar, vamos buscar novamente todas as métricas para mapear por email.
     const metricas = await db.query(`
       SELECT email, data_metrica,
              COALESCE(peso_meta_assinados_diario, 3)   AS meta_diario_assinados,
@@ -105,7 +101,9 @@ router.get('/collaborators', requireAuth, async (req, res) => {
              COALESCE(peso_meta_ganho_semanal, 3)      AS meta_semanal_ganhos,
              COALESCE(peso_meta_assinados_mensal, 10)  AS meta_mensal_assinados,
              COALESCE(peso_meta_ganho_mensal, 10)      AS meta_mensal_ganhos,
-             COALESCE(comissao_bonus, 0)               AS bonus_comissao
+             COALESCE(comissao_bonus, 0)               AS bonus_comissao,
+             COALESCE(meta_gols_assinados, 0)          AS meta_gols_assinados,
+             COALESCE(meta_gols_ganhos, 0)             AS meta_gols_ganhos
       FROM app_comissionamento.view_app_metricas_assessores
       WHERE data_metrica::date = $1::date
     `, [dataMetrica]);
@@ -115,17 +113,16 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       metricsByEmail.set(normalize(m.email), m);
     }
 
-    // Montar resposta
     const colaboradores = colabsArray.map(colab => {
       const emailNormalizado = normalize(colab.email);
       const metrica = metricsByEmail.get(emailNormalizado);
 
-      // Determinar canal: se classificacao_operacional for 'Judit', então canal = 'Judit', senão 'Discadora'
       const isJudit = colab.classificacao_operacional && colab.classificacao_operacional.toLowerCase() === 'judit';
       const canal = isJudit ? 'Judit' : 'Discadora';
-
-      // Produto: se Judit, produto = 'Judit', senão usa mapeamento de cargo
       const produto = isJudit ? 'Judit' : mapGrupoToProduto(colab.cargo, colab.classificacao_operacional);
+
+      // Verifica se o e‑mail está na lista de Supervisores SR
+      const isSupervisorSR = SUPERVISORES_SR_EMAILS.includes(colab.email);
 
       return {
         id: colab.email,
@@ -149,6 +146,8 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         metaSemanalGanhos: metrica ? Number(metrica.meta_semanal_ganhos) : 15,
         metaMensalAssinados: metrica ? Number(metrica.meta_mensal_assinados) : 60,
         metaMensalGanhos: metrica ? Number(metrica.meta_mensal_ganhos) : 60,
+        metaGolsAssinados: metrica ? Number(metrica.meta_gols_assinados) : 3,
+        metaGolsGanhos: metrica ? Number(metrica.meta_gols_ganhos) : 3,
         comissao: metrica ? Number(metrica.bonus_comissao) : 0,
         bonusComissao: metrica ? Number(metrica.bonus_comissao) : 0,
         metaAssinados: 3,
@@ -156,9 +155,9 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         bonusPorCiclo: 0,
         bonusRecebido: 0,
         produto,
-        // Campos adicionais para identificar Judit
         classificacaoOperacional: colab.classificacao_operacional || '',
-        canal, // 'Judit' ou 'Discadora'
+        canal,
+        isSupervisorSR,
       };
     });
 
@@ -171,7 +170,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
 });
 
 // ============================================================
-// GET /api/equipes (sem alterações, mas pode incluir Judit)
+// GET /api/equipes
 // ============================================================
 router.get('/equipes', requireAuth, async (req, res) => {
   const mesParam = req.query.mes;
@@ -201,4 +200,7 @@ router.get('/equipes', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================
+// IMPORTANTE: export default no final
+// ============================================================
 export default router;

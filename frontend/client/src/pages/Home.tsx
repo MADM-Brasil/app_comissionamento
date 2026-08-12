@@ -4,7 +4,8 @@ import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, formatCurrency, Collaborator } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
-import { getCollaboratorMeta, calculateTotalCommission } from "@/lib/metricsHelper";
+import { calculator } from "@/lib/calculator";
+import { fetchDailyMetrics } from "@/lib/metrics";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -43,7 +44,7 @@ const EXCLUDED_CARGOS_FOR_DISPLAY = [
 ];
 
 // ============================================================
-// CONFIGURAÇÃO DE PESOS
+// CONFIGURAÇÃO DE PESOS (mantida para ranking/score)
 // ============================================================
 const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', number> = {
   ganhos: 4,
@@ -72,7 +73,7 @@ const isDesativado = (c: any) => {
 };
 
 // ============================================================
-// PONTUAÇÃO PONDERADA
+// PONTUAÇÃO PONDERADA (mantida para ranking)
 // ============================================================
 function calculateWeightedScore(
   item: { ganhos: number; assinados: number; protocolados: number; emitidos: number }
@@ -85,7 +86,7 @@ function calculateWeightedScore(
   return score;
 }
 
-// ========== UTILITÁRIOS DE DATAS UTC ==========
+// ========== UTILITÁRIOS DE DATAS UTC (mantidos) ==========
 function parseUTCDate(dateStr: string): Date {
   if (!dateStr) return new Date(NaN);
   if (dateStr.includes('T') || dateStr.includes('Z')) {
@@ -163,7 +164,7 @@ function countWeekdaysUTC(startDate: string, endDate: string): number {
 // ========== FORMATAÇÃO ==========
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
-// ========== HOOKS E COMPONENTES AUXILIARES ==========
+// ========== HOOKS E COMPONENTES AUXILIARES (mantidos) ==========
 function useCountUp(target: number, duration = 1200) {
   const [value, setValue] = useState(0);
   useEffect(() => {
@@ -200,20 +201,23 @@ function GoalArc({ percent, label }: { percent: number; label?: string }) {
 
 function KpiCard({
   label, value, target, unit, icon: Icon, color, delay = 0, simple = false,
+  hideValues = false,
 }: {
   label: string; value: number; target: number; unit: string;
   icon: React.ElementType; color: string; delay?: number;
   simple?: boolean;
+  hideValues?: boolean;
 }) {
   const animated = useCountUp(value, 1000 + delay);
   const pct = target > 0 ? Math.round((value / target) * 100) : 0;
+  const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
   const displayValue = () => {
-    if (unit === "R$") return formatCurrency(animated);
+    if (unit === "R$") return displayCurrency(animated);
     if (unit === "%") return `${animated.toFixed(1)}%`;
     return formatInt(animated);
   };
   const displayTarget = () => {
-    if (unit === "R$") return formatCurrency(target);
+    if (unit === "R$") return displayCurrency(target);
     if (unit === "%") return `${target}%`;
     return formatInt(target);
   };
@@ -240,7 +244,7 @@ function KpiCard({
           <div className="flex justify-between mt-1.5">
             <span className="text-[10px] text-[#94a3b8]">Meta: {displayTarget()}</span>
             <span className="text-[10px] font-medium" style={{ color: pct >= 100 ? "#16A34A" : "#2F6FED" }}>
-              {pct >= 100 ? "✓ Atingida" : unit === "R$" ? `Faltam ${formatCurrency(target - value)}` : `Faltam ${formatInt(target - value)}`}
+              {pct >= 100 ? "✓ Atingida" : unit === "R$" ? `Faltam ${displayCurrency(target - value)}` : `Faltam ${formatInt(target - value)}`}
             </span>
           </div>
         </>
@@ -279,6 +283,10 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
+  // NOVO: estado para dados diários e comissão calculada
+  const [dailyMetrics, setDailyMetrics] = useState<any[]>([]);
+  const [calculatedCommission, setCalculatedCommission] = useState(0);
+
   const {
     currentStartDate, currentEndDate, period,
     bonusData,
@@ -287,6 +295,8 @@ export default function Home() {
     loadWeeklyPerformanceData,
     rawMetrics,
     loadRawMetrics,
+    hideValues,
+    tabelaComissoes, // NOVO
   } = useAppStore();
 
   const { hasPermission, currentUser: authUser } = useAccessControl();
@@ -308,7 +318,7 @@ export default function Home() {
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
 
   // ============================================================
-  // DEFINIÇÃO DE loadRankingData (ANTES de ser utilizada)
+  // DEFINIÇÃO DE loadRankingData (mantida)
   // ============================================================
   const loadRankingData = useCallback(async () => {
     if (!currentStartDate || !currentEndDate) return;
@@ -341,7 +351,7 @@ export default function Home() {
   }, [currentStartDate, currentEndDate, allCollaborators.length]);
 
   // ============================================================
-  // FUNÇÃO CENTRAL DE RECARGA
+  // FUNÇÃO CENTRAL DE RECARGA (ATUALIZADA)
   // ============================================================
   const reloadData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate) return;
@@ -359,6 +369,28 @@ export default function Home() {
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
       if (datesChanged) await loadRankingData();
 
+      // NOVO: Carregar dados diários para cálculo de comissão do usuário logado
+      if (currentUser) {
+        const userColab = collaborators.find(c => c.id === currentUser.id);
+        if (userColab) {
+          const isSupervisor = (userColab.cargo || '').toLowerCase() === 'supervisor';
+          const isQuinquenio = (userColab.produto || '').toLowerCase() === 'quinquenio';
+          if (!isSupervisor && !isQuinquenio) {
+            try {
+              const daily = await fetchDailyMetrics({
+                start: currentStartDate,
+                end: currentEndDate,
+                colaborador: userColab.name,
+              });
+              setDailyMetrics(daily);
+            } catch (err) {
+              console.error('Erro ao carregar dados diários:', err);
+              setDailyMetrics([]);
+            }
+          }
+        }
+      }
+
       lastDatesRef.current = { start: currentStartDate, end: currentEndDate };
     } catch (err) {
       console.error("Erro ao recarregar dados:", err);
@@ -368,7 +400,8 @@ export default function Home() {
     }
   }, [
     currentStartDate, currentEndDate, filters,
-    loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData
+    loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData,
+    currentUser, collaborators
   ]);
 
   const handleFilterChange = useCallback((newFilters: typeof filters) => {
@@ -394,12 +427,12 @@ export default function Home() {
   }, [filters, collaborators]);
 
   // ============================================================
-  // EFEITO QUE REAGE IMEDIATAMENTE A MUDANÇAS DE FILTROS/DATAS
+  // EFEITOS
   // ============================================================
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
-  }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentStartDate, currentEndDate, filters]);
 
   useEffect(() => {
     if (currentStartDate && currentEndDate && allCollaborators.length === 0) {
@@ -470,9 +503,46 @@ export default function Home() {
 
   const totals = rawMetrics;
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
-  const pesoAssKey = `meta${periodKey.charAt(0).toUpperCase() + periodKey.slice(1)}Assinados` as keyof Collaborator;
-  const pesoGanKey = `meta${periodKey.charAt(0).toUpperCase() + periodKey.slice(1)}Ganhos` as keyof Collaborator;
   const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos";
+
+  // NOVO: Cálculo da comissão do usuário logado
+  const userCommission = useMemo(() => {
+    if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) {
+      return 0;
+    }
+
+    const isSupervisor = (currentUserData.cargo || '').toLowerCase() === 'supervisor';
+    const isQuinquenio = (currentUserData.produto || '').toLowerCase() === 'quinquenio';
+    const isSR = calculator.isSupervisorSR(currentUserData.email);
+
+    if (isSupervisor) {
+      const equipeColabs = collaborators.filter(c => c.equipeNome === currentUserData.equipeNome);
+      const totalAssEquipe = equipeColabs.reduce((s, c) => s + (c.assinados || 0), 0);
+      return calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
+    }
+
+    if (isQuinquenio) {
+      return calculator.calculateQuinquenioCommission(currentUserData.assinados || 0, tabelaComissoes);
+    }
+
+    if (dailyMetrics.length > 0) {
+      const metaGolsAss = currentUserData.metaGolsAssinados ?? 3;
+      const metaGolsGan = currentUserData.metaGolsGanhos ?? 3;
+      const assinados = currentUserData.assinados || 0;
+      const productType = currentUserData.produto || 'AUXILIO ACIDENTE';
+      const result = calculator.calculateTotalCommission(
+        dailyMetrics,
+        metaGolsAss,
+        metaGolsGan,
+        assinados,
+        productType,
+        tabelaComissoes
+      );
+      return result.totalCommission;
+    }
+
+    return 0;
+  }, [currentUserData, tabelaComissoes, collaborators, dailyMetrics]);
 
   const { totalTargetAssinados, totalTargetGanhos, totalMetasBatidas } = useMemo(() => {
     if (isGlobalView) {
@@ -485,6 +555,8 @@ export default function Home() {
     }
     let sumAss = 0, sumGan = 0, metas = 0;
     displayCollaborators.forEach(c => {
+      const pesoAssKey = `meta${periodKey.charAt(0).toUpperCase() + periodKey.slice(1)}Assinados` as keyof Collaborator;
+      const pesoGanKey = `meta${periodKey.charAt(0).toUpperCase() + periodKey.slice(1)}Ganhos` as keyof Collaborator;
       const pesoAss = Number(c[pesoAssKey]) || 0, pesoGan = Number(c[pesoGanKey]) || 0;
       sumAss += pesoAss; sumGan += pesoGan;
       const assinados = c.assinados || 0, ganhos = isSpecialGroup ? 0 : (c.ganhos || 0);
@@ -493,7 +565,7 @@ export default function Home() {
       else metas += Math.floor(Math.min(assinados / pesoAss, ganhos / pesoGan));
     });
     return { totalTargetAssinados: sumAss, totalTargetGanhos: sumGan, totalMetasBatidas: metas };
-  }, [isGlobalView, displayCollaborators, pesoAssKey, pesoGanKey, rawMetrics, isSpecialGroup, periodKey]);
+  }, [isGlobalView, displayCollaborators, rawMetrics, isSpecialGroup, periodKey]);
 
   const goalProgress = useMemo(() => {
     const progressAss = totalTargetAssinados > 0 ? (totals.assinados / totalTargetAssinados) * 100 : 0;
@@ -502,22 +574,8 @@ export default function Home() {
     return Math.min(progressAss, progressGan, 100);
   }, [totalTargetAssinados, totalTargetGanhos, totals.assinados, totals.ganhos, isSpecialGroup]);
 
-  const userCommission = useMemo(() => {
-    if (!currentUserData) return { comissaoTotal: 0, metaBatida: 0, bonusPorCiclo: 150 };
-    const totalsUser = { assinados: currentUserData.assinados || 0, ganhos: isSpecialGroup ? 0 : (currentUserData.ganhos || 0) };
-    const { totalComissao } = calculateTotalCommission(currentUserData, totalsUser, authUser);
-    const periodoMeta = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
-    const pesoAss = getCollaboratorMeta(currentUserData, periodoMeta, 'assinados');
-    const pesoGan = getCollaboratorMeta(currentUserData, periodoMeta, 'ganhos');
-    let metasBatidasUser = 0;
-    if (pesoGan === 0) metasBatidasUser = Math.floor(totalsUser.assinados / (pesoAss || 1));
-    else metasBatidasUser = Math.floor(Math.min(totalsUser.assinados / (pesoAss || 1), totalsUser.ganhos / (pesoGan || 1)));
-    const bonusPorCicloUser = currentUserData.bonusComissao || globalConfig.valorBonus;
-    return { comissaoTotal: totalComissao, metaBatida: metasBatidasUser, bonusPorCiclo: bonusPorCicloUser };
-  }, [currentUserData, isSpecialGroup, period, globalConfig, authUser]);
-
   // ============================================================
-  // GRÁFICOS DE PERFORMANCE
+  // GRÁFICOS DE PERFORMANCE (mantidos)
   // ============================================================
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
@@ -634,8 +692,21 @@ export default function Home() {
 
   const conversaoPercentual = totals.assinados > 0 ? (totals.ganhos / totals.assinados) * 100 : 0;
 
+  const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
+
+  // NOVO: Valor alvo para o card de comissão (pode ser ajustado conforme faixa)
+  const comissaoTarget = useMemo(() => {
+    if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) return 5000;
+    // Busca a maior faixa do tipo correspondente como referência
+    const tipo = (currentUserData.cargo || '').toLowerCase() === 'supervisor' ? 'SUPERVISOR' : 'GOL';
+    const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
+    if (faixas.length === 0) return 5000;
+    const maxFaixa = faixas.reduce((max, f) => f.valor_comissao > max.valor_comissao ? f : max, faixas[0]);
+    return maxFaixa.valor_comissao || 5000;
+  }, [currentUserData, tabelaComissoes]);
+
   const kpiCards = [
-    { label: "Comissão do Mês", value: userCommission.comissaoTotal, target: 5000, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
+    { label: "Comissão do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
     { label: "Vendas Fechadas", value: totals.assinados, target: totalTargetAssinados, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
     { label: "Protocolados", value: totals.protocolados, target: 1200, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
@@ -676,7 +747,8 @@ export default function Home() {
                 {filters.equipe !== "todas" && ` ${filters.equipe}`}
                 {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
                 {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
-              </span>            </div>
+              </span>
+            </div>
           )}
 
           {bonusData.active && bonusData.bonusValue > 0 && (
@@ -686,13 +758,16 @@ export default function Home() {
                 <div className="flex items-center gap-2 mb-0.5"><span className="text-white font-bold text-sm">{bonusData.label || "Bônus"}</span><span className="badge success">ATIVO</span></div>
                 <p className="text-white/70 text-xs">{bonusData.description || "Complete a meta para ganhar bônus extra!"}</p>
               </div>
-              <div className="flex-shrink-0 text-right hidden sm:block"><div className="text-[#16A34A] font-black text-xl">{formatCurrency(bonusData.bonusValue)}</div><div className="text-white/50 text-xs">bônus extra</div></div>
+              <div className="flex-shrink-0 text-right hidden sm:block">
+                <div className="text-[#16A34A] font-black text-xl">{displayCurrency(bonusData.bonusValue)}</div>
+                <div className="text-white/50 text-xs">bônus extra</div>
+              </div>
               {canAccessCommissoes && <Link href="/comissoes"><button className="flex-shrink-0 flex items-center gap-1 text-[#16A34A] text-xs font-semibold hover:gap-2 transition-all">Ver <ArrowRight className="w-3.5 h-3.5" /></button></Link>}
             </div>
           )}
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            {kpiCards.map((kpi, i) => <KpiCard key={kpi.label} {...kpi} delay={i * 80} />)}
+            {kpiCards.map((kpi, i) => <KpiCard key={kpi.label} {...kpi} delay={i * 80} hideValues={hideValues} />)}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">

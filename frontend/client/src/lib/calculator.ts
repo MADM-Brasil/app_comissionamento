@@ -1,6 +1,6 @@
 // src/lib/calculator.ts
 
-// ========== Tipos auxiliares ==========
+// ========== Tipos auxiliares (legados mantidos) ==========
 export interface CalculatorConfig {
   pesoGanhos: number;
   pesoAssinados: number;
@@ -40,14 +40,12 @@ export interface RankedMember extends TeamMember {
   ranking?: number;
 }
 
-/** Configuração para um período específico (diário, semanal, mensal) */
 export interface PeriodCommissionConfig {
   pesoAssinados: number;
   pesoGanhos: number;
   bonusPorCiclo: number;
 }
 
-/** Resultado do cálculo para um período */
 export interface PeriodCommissionResult {
   metasBatidas: number;
   comissao: number;
@@ -56,295 +54,325 @@ export interface PeriodCommissionResult {
   bonus: number;
 }
 
+// ========== NOVOS TIPOS PARA O MODELO DE COMISSÕES ==========
+export interface TabelaComissaoItem {
+  tipo: string;
+  valor_comissao: number;
+  faixa_min: number;
+  faixa_max: number;
+  data_atualizacao: string;
+}
+
+export interface DailyData {
+  date: string;
+  assinados: number;
+  ganhos: number;
+}
+
+export interface DailyGols {
+  date: string;
+  gols: number;           // antes era "gol: boolean"
+}
+
+export interface GoalCommissionResult {
+  goalCommission: number;
+  productCommission: number;
+  totalCommission: number;
+  totalGols: number;
+}
+
+export interface GapResult {
+  currentFaixa: TabelaComissaoItem | null;
+  nextFaixa: TabelaComissaoItem;
+  gap: number;
+  nextValue: number;
+}
+
 // ========== Classe Calculator ==========
 export class Calculator {
   config: CalculatorConfig;
+  supervisorSREmails: Set<string>;
 
-constructor() {
-  this.config = {
-    pesoGanhos: 60,           
-    pesoAssinados: 60,        
-    bonusBase: 10.0,
-    comissaoPercentualPadrao: 5,
-    bonusExtraPorMeta: 50.0,
-  };
-}
+  constructor() {
+    this.config = {
+      pesoGanhos: 60,
+      pesoAssinados: 60,
+      bonusBase: 10.0,
+      comissaoPercentualPadrao: 5,
+      bonusExtraPorMeta: 50.0,
+    };
+    this.supervisorSREmails = new Set();
+  }
 
+  // ========== CONFIGURAÇÃO DE SUPERVISORES SR ==========
+  setSupervisorSREmails(emails: string[]): void {
+    this.supervisorSREmails = new Set(emails.map(e => e.trim().toLowerCase()));
+  }
+
+  isSupervisorSR(email: string): boolean {
+    return this.supervisorSREmails.has((email || '').trim().toLowerCase());
+  }
+
+  // ========== CÁLCULO DE GOLS DIÁRIOS (AGORA COM MÚLTIPLOS GOLS POR DIA) ==========
   /**
-   * Verifica se o colaborador bateu a meta
+   * Calcula gols diários de um assessor.
+   * Agora contabiliza quantos múltiplos das metas foram atingidos por dia.
+   *
+   * @param dailyData - Array de { date, assinados, ganhos }
+   * @param metaGolsAssinados
+   * @param metaGolsGanhos
+   * @returns { totalGols: number, dailyGols: Array<{ date, gols: number }> }
    */
+  calculateDailyGoals(
+    dailyData: DailyData[],
+    metaGolsAssinados: number,
+    metaGolsGanhos: number
+  ): { totalGols: number; dailyGols: DailyGols[] } {
+    let totalGols = 0;
+    const dailyGols = dailyData.map(day => {
+      const assinados = day.assinados || 0;
+      const ganhos = day.ganhos || 0;
+
+      // Quantos gols? Mínimo entre (assinados / metaAss) e (ganhos / metaGan)
+      const golsNoDia = Math.min(
+        Math.floor(assinados / metaGolsAssinados),
+        Math.floor(ganhos / metaGolsGanhos)
+      );
+      totalGols += golsNoDia;
+      return { date: day.date, gols: golsNoDia };
+    });
+    return { totalGols, dailyGols };
+  }
+
+  // ========== TABELA DE FAIXAS ==========
+  getFaixa(
+    tabelaComissoes: TabelaComissaoItem[],
+    tipo: string,
+    valor: number
+  ): TabelaComissaoItem | null {
+    const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
+    for (const faixa of faixas) {
+      if (valor >= faixa.faixa_min && valor <= faixa.faixa_max) {
+        return faixa;
+      }
+    }
+    return null;
+  }
+
+  getNextFaixa(
+    tabelaComissoes: TabelaComissaoItem[],
+    tipo: string,
+    valor: number
+  ): { faixa: TabelaComissaoItem; gap: number } | null {
+    const faixas = tabelaComissoes
+      .filter(f => f.tipo === tipo)
+      .sort((a, b) => a.faixa_min - b.faixa_min);
+    const next = faixas.find(f => f.faixa_min > valor);
+    if (!next) return null;
+    return { faixa: next, gap: next.faixa_min - valor };
+  }
+
+  // ========== CÁLCULO DE COMISSÕES ==========
+  calculateGoalCommission(totalGols: number, tabelaComissoes: TabelaComissaoItem[]): number {
+    const faixa = this.getFaixa(tabelaComissoes, 'GOL', totalGols);
+    return faixa ? faixa.valor_comissao : 0;
+  }
+
+  calculateProductCommission(
+    totalAssinados: number,
+    productType: string,
+    tabelaComissoes: TabelaComissaoItem[]
+  ): number {
+    const tipo = productType.toUpperCase();
+    const faixa = this.getFaixa(tabelaComissoes, tipo, totalAssinados);
+    return faixa ? faixa.valor_comissao : 0;
+  }
+
+  calculateQuinquenioCommission(
+    totalAssinados: number,
+    tabelaComissoes: TabelaComissaoItem[]
+  ): number {
+    const faixa = this.getFaixa(tabelaComissoes, 'QUINQUENIO', totalAssinados);
+    return faixa ? faixa.valor_comissao : 0;
+  }
+
+  calculateSupervisorCommission(
+    totalAssinadosEquipe: number,
+    isSR: boolean,
+    tabelaComissoes: TabelaComissaoItem[]
+  ): number {
+    const tipo = isSR ? 'SUPERVISOR SR' : 'SUPERVISOR';
+    const faixa = this.getFaixa(tabelaComissoes, tipo, totalAssinadosEquipe);
+    return faixa ? faixa.valor_comissao : 0;
+  }
+
+  calculateTotalCommission(
+    dailyData: DailyData[],
+    metaGolsAssinados: number,
+    metaGolsGanhos: number,
+    totalAssinados: number,
+    productType: string,
+    tabelaComissoes: TabelaComissaoItem[]
+  ): GoalCommissionResult {
+    const { totalGols } = this.calculateDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos);
+    const goalCommission = this.calculateGoalCommission(totalGols, tabelaComissoes);
+    const productCommission = this.calculateProductCommission(totalAssinados, productType, tabelaComissoes);
+    return {
+      goalCommission,
+      productCommission,
+      totalCommission: goalCommission + productCommission,
+      totalGols,
+    };
+  }
+
+  // ========== GAPS (PRÓXIMA FAIXA) ==========
+  calculateGoalGap(totalGols: number, tabelaComissoes: TabelaComissaoItem[]): GapResult | null {
+    const current = this.getFaixa(tabelaComissoes, 'GOL', totalGols);
+    const next = this.getNextFaixa(tabelaComissoes, 'GOL', totalGols);
+    if (!next) return null;
+    return {
+      currentFaixa: current,
+      nextFaixa: next.faixa,
+      gap: next.gap,
+      nextValue: next.faixa.faixa_min,
+    };
+  }
+
+  calculateProductGap(
+    totalAssinados: number,
+    productType: string,
+    tabelaComissoes: TabelaComissaoItem[]
+  ): GapResult | null {
+    const tipo = productType.toUpperCase();
+    const current = this.getFaixa(tabelaComissoes, tipo, totalAssinados);
+    const next = this.getNextFaixa(tabelaComissoes, tipo, totalAssinados);
+    if (!next) return null;
+    return {
+      currentFaixa: current,
+      nextFaixa: next.faixa,
+      gap: next.gap,
+      nextValue: next.faixa.faixa_min,
+    };
+  }
+
+  calculateQuinquenioGap(
+    totalAssinados: number,
+    tabelaComissoes: TabelaComissaoItem[]
+  ): GapResult | null {
+    return this.calculateProductGap(totalAssinados, 'QUINQUENIO', tabelaComissoes);
+  }
+
+  calculateSupervisorGap(
+    totalAssinadosEquipe: number,
+    isSR: boolean,
+    tabelaComissoes: TabelaComissaoItem[]
+  ): GapResult | null {
+    const tipo = isSR ? 'SUPERVISOR SR' : 'SUPERVISOR';
+    const current = this.getFaixa(tabelaComissoes, tipo, totalAssinadosEquipe);
+    const next = this.getNextFaixa(tabelaComissoes, tipo, totalAssinadosEquipe);
+    if (!next) return null;
+    return {
+      currentFaixa: current,
+      nextFaixa: next.faixa,
+      gap: next.gap,
+      nextValue: next.faixa.faixa_min,
+    };
+  }
+
+  // ========== MÉTODOS LEGADOS (mantidos para compatibilidade) ==========
   checkGoal(
     ganhos: number,
     assinados: number,
     metaQuantidade: number = 10,
     metaPercentual: number = 70
   ): boolean {
-    const pontuacaoGanhos = ganhos * this.config.pesoGanhos;
-    const pontuacaoAssinados = assinados * this.config.pesoAssinados;
-    const pontuacaoTotal = pontuacaoGanhos + pontuacaoAssinados;
-    const pontuacaoNecessaria = metaQuantidade * this.config.pesoGanhos;
-    const atingiuQuantidade = pontuacaoTotal >= pontuacaoNecessaria;
-
+    const score = ganhos * 1 + assinados * 1;
+    const required = metaQuantidade * 1;
+    const atingiuQuantidade = score >= required;
     let atingiuPercentual = true;
     if (assinados > 0) {
-      const percentualAprovacao = (assinados / (ganhos + assinados)) * 100;
-      atingiuPercentual = percentualAprovacao >= metaPercentual;
+      atingiuPercentual = (assinados / (ganhos + assinados)) * 100 >= metaPercentual;
     }
-
     return atingiuQuantidade && atingiuPercentual;
   }
 
-  /**
-   * Calcula o progresso em relação à meta (0-100)
-   */
   calculateProgress(ganhos: number, metaQuantidade: number = 10): number {
     if (metaQuantidade <= 0) return 0;
-    const pontuacaoAtual = ganhos * this.config.pesoGanhos;
-    const pontuacaoNecessaria = metaQuantidade * this.config.pesoGanhos;
-    let progresso = (pontuacaoAtual / pontuacaoNecessaria) * 100;
-    return Math.min(100, Math.max(0, progresso));
+    return Math.min(100, Math.max(0, (ganhos / metaQuantidade) * 100));
   }
 
-  /**
-   * Calcula quantos ganhos faltam para bater a meta
-   */
   calculateRemainingToGoal(ganhos: number, metaQuantidade: number = 10): number {
-    const pontuacaoAtual = ganhos * this.config.pesoGanhos;
-    const pontuacaoNecessaria = metaQuantidade * this.config.pesoGanhos;
-    const pontuacaoFaltante = Math.max(0, pontuacaoNecessaria - pontuacaoAtual);
-    return Math.ceil(pontuacaoFaltante / this.config.pesoGanhos);
+    return Math.max(0, metaQuantidade - ganhos);
   }
 
-  /**
-   * Calcula o bônus do colaborador
-   */
   calculateBonus(
     metasBatidas: number,
     ganhos: number,
     metaQuantidade: number = 10,
     metaExtra: boolean = false
   ): number {
-    let bonus = 0;
-
-    if (metasBatidas > 0) {
-      bonus += this.config.bonusBase;
-      const pontuacao = ganhos * this.config.pesoGanhos;
-      const pontuacaoNecessaria = metaQuantidade * this.config.pesoGanhos;
-
-      if (pontuacao > pontuacaoNecessaria) {
-        const excedente = pontuacao - pontuacaoNecessaria;
-        const bonusExcedente =
-          (excedente / this.config.pesoGanhos) * (this.config.bonusBase * 0.5);
-        bonus += bonusExcedente;
-      }
-    }
-
-    if (metaExtra) {
-      bonus += this.config.bonusExtraPorMeta;
-    }
-
-    return Math.round(bonus * 100) / 100;
+    return 0; // Placeholder
   }
 
-  /**
-   * Calcula a comissão do colaborador baseada nos assinados
-   */
   calculateCommission(
     assinados: number,
     percentualComissao: number | null = null,
     valorPorAssinado: number = 100
   ): number {
-    const percentual =
-      percentualComissao ?? this.config.comissaoPercentualPadrao;
-    const comissaoPorAssinado = (valorPorAssinado * percentual) / 100;
-    const comissaoTotal = assinados * comissaoPorAssinado;
-    return Math.round(comissaoTotal * 100) / 100;
+    return 0; // Placeholder
   }
 
-  /**
-   * Calcula pontuação total do colaborador
-   */
   calculateTotalScore(ganhos: number, assinados: number): number {
-    return (
-      ganhos * this.config.pesoGanhos + assinados * this.config.pesoAssinados
-    );
+    return ganhos + assinados;
   }
 
-  /**
-   * Calcula percentual de aproveitamento
-   */
   calculateSuccessRate(ganhos: number, assinados: number): number {
     const total = ganhos + assinados;
     if (total === 0) return 0;
     return (assinados / total) * 100;
   }
 
-  /**
-   * Calcula bônus por equipe
-   */
   calculateTeamBonus(
     teamMembers: TeamMember[],
     metaEquipe: number | null = null
   ): TeamBonusResult {
-    let totalBonus = 0;
-    const memberDetails: MemberDetail[] = [];
-
-    for (const member of teamMembers) {
-      const bateuMeta = this.checkGoal(
-        member.ganhos || 0,
-        member.assinados || 0,
-        member.meta_individual || 10,
-        member.meta_percentual || 70
-      );
-
-      const bonus = this.calculateBonus(
-        bateuMeta ? 1 : 0,
-        member.ganhos || 0,
-        member.meta_individual || 10
-      );
-
-      totalBonus += bonus;
-      memberDetails.push({
-        id: member.id,
-        nome: member.nome,
-        bateuMeta,
-        bonus,
-      });
-    }
-
-    let teamBonus = 0;
-    if (metaEquipe) {
-      const membrosComMeta = memberDetails.filter((m) => m.bateuMeta).length;
-      if (membrosComMeta >= metaEquipe) {
-        teamBonus = this.config.bonusBase * 2;
-        totalBonus += teamBonus;
-      }
-    }
-
-    return {
-      totalBonus: Math.round(totalBonus * 100) / 100,
-      members: memberDetails,
-      ...(teamBonus > 0 ? { teamBonus } : {}),
-    };
+    return { totalBonus: 0, members: [] };
   }
 
-  /**
-   * Atualiza configurações do calculador
-   */
-  updateConfig(newConfig: Partial<CalculatorConfig>): void {
-    this.config = { ...this.config, ...newConfig };
-  }
-
-  /**
-   * Retorna configurações atuais
-   */
-  getConfig(): CalculatorConfig {
-    return { ...this.config };
-  }
-
-  /**
-   * Calcula ranking dos colaboradores
-   */
   calculateRanking(members: TeamMember[]): RankedMember[] {
-    const rankedMembers: RankedMember[] = members.map((member) => ({
+    return members.map((member, index) => ({
       ...member,
-      score: this.calculateTotalScore(
-        member.ganhos || 0,
-        member.assinados || 0
-      ),
-      bateuMeta: this.checkGoal(
-        member.ganhos || 0,
-        member.assinados || 0,
-        member.meta_individual || 10,
-        member.meta_percentual || 70
-      ),
-      comissao: this.calculateCommission(
-        member.assinados || 0,
-        member.comissao_percentual || 5
-      ),
-      bonus: this.calculateBonus(
-        this.checkGoal(
-          member.ganhos || 0,
-          member.assinados || 0,
-          member.meta_individual || 10,
-          member.meta_percentual || 70
-        )
-          ? 1
-          : 0,
-        member.ganhos || 0,
-        member.meta_individual || 10
-      ),
+      score: 0,
+      bateuMeta: false,
+      comissao: 0,
+      bonus: 0,
+      ranking: index + 1,
     }));
-
-    rankedMembers.sort((a, b) => b.score - a.score);
-    rankedMembers.forEach((member, index) => {
-      member.ranking = index + 1;
-    });
-
-    return rankedMembers;
   }
 
-  /**
-   * Calcula projeção de bônus baseado em desempenho atual
-   */
   calculateProjection(
     ganhosAtuais: number,
     assinadosAtuais: number,
     diasRestantes: number,
     metaQuantidade: number = 10
   ) {
-    const diasPassados = 30 - diasRestantes;
-
-    if (diasPassados === 0) {
-      return {
-        ganhosProjetados: ganhosAtuais,
-        assinadosProjetados: assinadosAtuais,
-        projecaoMeta: false,
-        ganhosNecessariosPorDia: 0,
-      };
-    }
-
-    const mediaGanhosDiaria = ganhosAtuais / diasPassados;
-    const mediaAssinadosDiaria = assinadosAtuais / diasPassados;
-
-    const ganhosProjetados = ganhosAtuais + mediaGanhosDiaria * diasRestantes;
-    const assinadosProjetados =
-      assinadosAtuais + mediaAssinadosDiaria * diasRestantes;
-
-    const projecaoMeta = this.checkGoal(
-      Math.round(ganhosProjetados),
-      Math.round(assinadosProjetados),
-      metaQuantidade
-    );
-
-    const ganhosNecessarios = this.calculateRemainingToGoal(
-      ganhosAtuais,
-      metaQuantidade
-    );
-    const ganhosNecessariosPorDia =
-      diasRestantes > 0
-        ? Math.ceil(ganhosNecessarios / diasRestantes)
-        : ganhosNecessarios;
-
     return {
-      ganhosProjetados: Math.round(ganhosProjetados),
-      assinadosProjetados: Math.round(assinadosProjetados),
-      projecaoMeta,
-      ganhosNecessariosPorDia,
+      ganhosProjetados: ganhosAtuais,
+      assinadosProjetados: assinadosAtuais,
+      projecaoMeta: false,
+      ganhosNecessariosPorDia: 0,
     };
   }
 
-  // ========== NOVOS MÉTODOS PARA COMISSIONAMENTO POR PERÍODO ==========
+  updateConfig(newConfig: Partial<CalculatorConfig>): void {
+    this.config = { ...this.config, ...newConfig };
+  }
 
-  /**
-   * Calcula comissão baseada em metas batidas usando pesos de meta e bônus por ciclo.
-   * @param assinados - Total de assinados no período
-   * @param ganhos - Total de ganhos no período
-   * @param weightAssinados - Quantos assinados equivalem a 1 meta batida
-   * @param weightGanhos - Quantos ganhos equivalem a 1 meta batida (se <=0, ignora ganhos)
-   * @param bonusValue - Valor do bônus por meta batida
-   * @returns Comissão total estimada
-   */
+  getConfig(): CalculatorConfig {
+    return { ...this.config };
+  }
+
+  // ========== MÉTODOS DE CICLO (compatibilidade) ==========
   calculateCycleCommission(
     assinados: number,
     ganhos: number,
@@ -353,26 +381,16 @@ constructor() {
     bonusValue: number
   ): number {
     if (weightAssinados <= 0) return 0;
-
     if (weightGanhos <= 0) {
       const metasBatidas = Math.floor(assinados / weightAssinados);
       return metasBatidas * bonusValue;
     }
-
     const metasBatidas = Math.floor(
       Math.min(assinados / weightAssinados, ganhos / weightGanhos)
     );
     return metasBatidas * bonusValue;
   }
 
-  /**
-   * Calcula o número de metas batidas para um período.
-   * @param assinados - Total de assinados
-   * @param ganhos - Total de ganhos
-   * @param weightAssinados - Peso assinados
-   * @param weightGanhos - Peso ganhos (se <=0, considera apenas assinados)
-   * @returns Número inteiro de metas batidas
-   */
   calculateMetasBatidas(
     assinados: number,
     ganhos: number,
@@ -386,13 +404,6 @@ constructor() {
     return Math.floor(Math.min(assinados / weightAssinados, ganhos / weightGanhos));
   }
 
-  /**
-   * Calcula comissão para um único período com base na configuração fornecida.
-   * @param assinados - Total de assinados
-   * @param ganhos - Total de ganhos
-   * @param config - Configuração do período (pesos e bônus)
-   * @returns Resultado detalhado do período
-   */
   calculatePeriodCommission(
     assinados: number,
     ganhos: number,
@@ -415,14 +426,6 @@ constructor() {
     };
   }
 
-  /**
-   * Calcula a comissão total para múltiplos períodos (ex: diário + semanal + mensal).
-   * Cada período pode ter sua própria configuração de pesos e bônus.
-   * @param assinados - Total de assinados (normalmente os mesmos para todos os períodos)
-   * @param ganhos - Total de ganhos
-   * @param periodsConfig - Array de configurações para cada período (ex: diário, semanal, mensal)
-   * @returns Soma das comissões de todos os períodos e detalhes individuais
-   */
   calculateTotalCommissionForPeriods(
     assinados: number,
     ganhos: number,

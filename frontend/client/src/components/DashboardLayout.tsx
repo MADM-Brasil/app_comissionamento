@@ -1,5 +1,5 @@
 // src/components/DashboardLayout.tsx
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
@@ -7,30 +7,30 @@ import {
   GitBranch,
   BarChart3,
   Trophy,
-  Bell,
   Menu,
   X,
-  ChevronRight, 
+  ChevronRight,
   ChevronDown,
   Settings,
   LogOut,
   Calendar,
-  RefreshCw,
   Home,
+  Eye,
+  EyeOff,
+  Bell,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { logout } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import logoBranca from './img/LogoBranca.png';
+import logoBranca from "./img/LogoBranca.png";
 import { getUserPermissions } from "@/lib/accessControl";
 
-// Tipos auxiliares
 type NavChild = { path: string; label: string; icon: React.ComponentType<any> };
 type NavItem =
   | { path: string; label: string; icon: React.ComponentType<any>; children?: undefined }
   | { label: string; icon: React.ComponentType<any>; children: NavChild[] };
 
-const HIDE_PERIOD_FILTER_PATHS = ["/notificacoes", "/relatorio", "/configuration", "/suporte"];
+const HIDE_PERIOD_FILTER_PATHS = ["/configuration", "/suporte"];
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -39,12 +39,18 @@ interface DashboardLayoutProps {
 }
 
 export default function DashboardLayout({ children, title, subtitle }: DashboardLayoutProps) {
-  const [location, setLocation] = useLocation();
+  const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(0);
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [manualCloseChild, setManualCloseChild] = useState(false);
 
+  // Popout de notificações
+  const [showNotifications, setShowNotifications] = useState(false);
+  const notificationRef = useRef<HTMLDivElement>(null);
+
+  // Obtém os estados da store
+  const hideValues = useAppStore((state) => state.hideValues);
+  const toggleHideValues = useAppStore((state) => state.toggleHideValues);
   const {
     period,
     customStartDate,
@@ -58,45 +64,43 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     collaborators,
   } = useAppStore();
 
-  // Obtém permissões do usuário logado
+  const markNotificationAsRead = useAppStore(
+    (state) => (state as any).markNotificationAsRead
+  );
+
   const permissions = useMemo(() => getUserPermissions(currentUser ?? undefined), [currentUser]);
 
-  // Monta itens do menu lateral com base nas permissões
+  // Contagem de não lidas (usa 'read' ou fallback 'isRead')
+  const unreadCount = useMemo(() => {
+    if (!notifications) return 0;
+    return notifications.filter((n: any) => {
+      const isRead = n.read ?? n.isRead ?? false;
+      return !isRead;
+    }).length;
+  }, [notifications]);
+
+  // Navegação (inalterada)
   const navItems: NavItem[] = useMemo(() => {
     const items: NavItem[] = [];
+    if (permissions.canAccessDashboard) items.push({ path: "/", label: "Home", icon: Home });
+    if (permissions.canAccessComissoes) items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
+    if (permissions.canAccessRanking) items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
 
-    if (permissions.canAccessDashboard) {
-      items.push({ path: "/", label: "Home", icon: Home });
-    }
-    if (permissions.canAccessComissoes) {
-      items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
-    }
-
-    if (permissions.canAccessRanking) {
-      items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
-    }
-
-    // Grupo Dashboard (expansível) – aparece se tiver acesso a qualquer subpágina
     const dashboardChildren: NavChild[] = [];
     if (permissions.canViewTeam && permissions.canAccessReports) {
-      dashboardChildren.push({ path: "/Vgeral", label: "Visão Geral", icon: BarChart3 });
+      dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
       dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
       dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
     }
-
     if (dashboardChildren.length > 0) {
       items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
     }
-
-    if (permissions.canAccessConfiguration) {
+    if (permissions.canAccessConfiguration)
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
-    }
-
     return items;
   }, [permissions]);
 
-  // Menu mobile simplificado, também respeita permissões
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
     if (permissions.canAccessDashboard) flat.push({ path: "/", label: "Home", icon: Home });
@@ -104,26 +108,26 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (permissions.canViewTeam) flat.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
-      flat.push({ path: "/Vgeral", label: "V. Geral", icon: BarChart3 });
+      flat.push({ path: "/Visao_geral", label: "V. Geral", icon: BarChart3 });
       flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
       flat.push({ path: "/gargalos", label: "Gargalos", icon: BarChart3 });
     }
     if (permissions.canAccessRanking) flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
-    if (permissions.canAccessConfiguration) flat.push({ path: "/configuration", label: "Config.", icon: Settings });
-    return flat.slice(0, 5); // até 5 ícones no rodapé
+    if (permissions.canAccessConfiguration)
+      flat.push({ path: "/configuration", label: "Config.", icon: Settings });
+    return flat.slice(0, 5);
   }, [permissions]);
 
-  // Controle de expansão do grupo Dashboard
-  useEffect(() => {
-    setManualCloseChild(false);
-  }, [location]);
+  // Efeitos
+  useEffect(() => setManualCloseChild(false), [location]);
 
   useEffect(() => {
     const dashboardGroup = navItems.find(
-      (item): item is Extract<NavItem, { children: NavChild[] }> => "children" in item && item.label === "Dashboard"
+      (item): item is Extract<NavItem, { children: NavChild[] }> =>
+        "children" in item && item.label === "Dashboard"
     );
-    const isChildActive = dashboardGroup?.children.some((child) => child.path === location) ?? false;
-
+    const isChildActive =
+      dashboardGroup?.children.some((child) => child.path === location) ?? false;
     if (isChildActive && !manualCloseChild) {
       setExpandedGroup("Dashboard");
     } else if (!isChildActive) {
@@ -131,40 +135,61 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
   }, [location, manualCloseChild, navItems]);
 
-  // Notificações
-  useEffect(() => {
-    const count = notifications.filter((n) => !n.read).length;
-    setUnreadCount(count);
-  }, [notifications]);
-
-  // Carrega colaboradores se necessário
   useEffect(() => {
     if (currentUser && collaborators.length === 0) {
       loadCollaborators();
     }
   }, [currentUser, collaborators.length, loadCollaborators]);
 
-  // Fecha sidebar ao mudar de rota (mobile)
-  useEffect(() => {
-    setSidebarOpen(false);
-  }, [location]);
+  useEffect(() => setSidebarOpen(false), [location]);
 
-  // Fecha sidebar ao redimensionar para desktop
   useEffect(() => {
     const handleResize = () => {
-      if (window.innerWidth >= 1024) {
-        setSidebarOpen(false);
-      }
+      if (window.innerWidth >= 1024) setSidebarOpen(false);
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
+  // Fecha popout ao clicar fora
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (notificationRef.current && !notificationRef.current.contains(event.target as Node)) {
+        setShowNotifications(false);
+      }
+    };
+    if (showNotifications) {
+      document.addEventListener("mousedown", handleClickOutside);
+    } else {
+      document.removeEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showNotifications]);
+
+  // Handlers
   const handleLogout = async () => {
     if (window.confirm("Tem certeza que deseja sair do sistema?")) {
       await logout();
       setCurrentUser(null);
-      setLocation("/login");
+      window.location.href = "/login";
+    }
+  };
+
+  const handleMarkAsRead = (id: string) => {
+    if (markNotificationAsRead) {
+      markNotificationAsRead(id);
+    } else {
+      console.log(`[Notificação] Marcar como lida: ${id}`);
+      // Se quiser, implemente uma lógica local, ou apenas ignore
+    }
+  };
+
+  const handleMarkAllAsRead = () => {
+    if (notifications) {
+      notifications.forEach((n: any) => {
+        const isRead = n.read ?? n.isRead ?? false;
+        if (!isRead) handleMarkAsRead(n.id);
+      });
     }
   };
 
@@ -174,14 +199,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
   const shouldShowPeriodFilter = !HIDE_PERIOD_FILTER_PATHS.includes(location);
   const isCustomPeriod = period === "Custom";
-
-  const formatBadgeCount = (count: number): string => {
-    if (count === 0) return "";
-    if (count > 99) return "99+";
-    if (count > 9) return "9+";
-    return count.toString();
-  };
-  const badgeValue = formatBadgeCount(unreadCount);
 
   return (
     <div className="min-h-screen bg-[#f8fafc] flex">
@@ -194,7 +211,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
           sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
-        {/* Marca */}
+        {/* Logo */}
         <div className="flex items-center gap-3 px-5 py-5 border-b border-[#e2e8f0]">
           <img src={logoBranca} alt="MADM Brasil" className="w-10 h-10 object-contain" />
           <div>
@@ -224,7 +241,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
           </div>
         </div>
 
-        {/* Navegação dinâmica */}
+        {/* Navegação */}
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
             if (item.children) {
@@ -268,7 +285,9 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
                             <div className={cn("sidebar-item pl-9", childActive && "active")}>
                               <Icon className="w-4 h-4 flex-shrink-0" />
                               <span className="flex-1">{child.label}</span>
-                              {childActive && <ChevronRight className="w-3.5 h-3.5 opacity-60" />}
+                              {childActive && (
+                                <ChevronRight className="w-3.5 h-3.5 opacity-60" />
+                              )}
                             </div>
                           </Link>
                         );
@@ -282,7 +301,11 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
             const Icon = item.icon;
             const isActive = location === item.path;
             return (
-              <Link key={item.path} href={item.path} onClick={() => setSidebarOpen(false)}>
+              <Link
+                key={item.path}
+                href={item.path}
+                onClick={() => setSidebarOpen(false)}
+              >
                 <div className={cn("sidebar-item", isActive && "active")}>
                   <Icon className="w-4.5 h-4.5 flex-shrink-0" />
                   <span className="flex-1">{item.label}</span>
@@ -308,7 +331,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
       {/* Overlay mobile */}
       {sidebarOpen && (
-        <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setSidebarOpen(false)} />
+        <div
+          className="fixed inset-0 z-30 bg-black/50 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
       )}
 
       {/* Conteúdo principal */}
@@ -349,7 +375,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
                 <div className="w-px h-6 bg-[#cbd5e1] mx-1" />
                 <div className="flex items-center gap-1">
                   <div className="relative">
-                    <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]" aria-hidden="true" />
+                    <Calendar
+                      className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]"
+                      aria-hidden="true"
+                    />
                     <input
                       type="date"
                       value={customStartDate}
@@ -361,7 +390,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
                   </div>
                   <span className="text-[#94a3b8] text-xs" aria-hidden="true">—</span>
                   <div className="relative">
-                    <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]" aria-hidden="true" />
+                    <Calendar
+                      className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]"
+                      aria-hidden="true"
+                    />
                     <input
                       type="date"
                       value={customEndDate}
@@ -380,17 +412,107 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               </div>
             )}
 
-            {/* BOTÃO DE RELOAD REMOVIDO */}
+            {/* Botão ocultar valores */}
+            <button
+              onClick={toggleHideValues}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e2e8f0] bg-white text-[#475569] hover:bg-[#f1f5f9] transition-colors"
+              title={hideValues ? "Mostrar valores" : "Ocultar valores"}
+            >
+              {hideValues ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
 
-            <div className="w-8 h-8 rounded-full bg-[#2F6FED] text-white flex items-center justify-center text-xs font-bold flex-shrink-0" aria-label="Avatar do usuário">
+            {/* NOTIFICAÇÕES */}
+            <div className="relative" ref={notificationRef}>
+              <button
+                onClick={() => setShowNotifications((prev) => !prev)}
+                className="relative p-2 rounded-lg hover:bg-[#f1f5f9] transition-colors"
+                aria-label="Notificações"
+              >
+                <Bell className="w-5 h-5 text-[#334155]" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#DC2626] text-[10px] font-bold text-white">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {showNotifications && (
+                <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-lg shadow-lg border border-[#e2e8f0] overflow-hidden z-50">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-[#e2e8f0]">
+                    <h3 className="text-sm font-semibold text-[#0f172a]">Notificações</h3>
+                    {unreadCount > 0 && (
+                      <button
+                        onClick={handleMarkAllAsRead}
+                        className="text-xs text-[#2F6FED] hover:underline"
+                      >
+                        Marcar todas como lidas
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-[#f1f5f9]">
+                    {notifications && notifications.length > 0 ? (
+                      notifications.map((notif: any) => {
+                        const isRead = notif.read ?? notif.isRead ?? false;
+                        const message = notif.message ?? notif.text ?? notif.content ?? "Notificação";
+                        let dateLabel = "Data indisponível";
+                        if (notif.createdAt) {
+                          dateLabel = new Date(notif.createdAt).toLocaleDateString("pt-BR", {
+                            day: "2-digit",
+                            month: "short",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          });
+                        } else if (notif.date) {
+                          dateLabel = new Date(notif.date).toLocaleDateString("pt-BR", {
+                            day: "2-digit",
+                            month: "short",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          });
+                        }
+
+                        return (
+                          <div
+                            key={notif.id}
+                            className={cn(
+                              "px-4 py-3 hover:bg-[#f8fafc] transition-colors cursor-default",
+                              !isRead && "bg-[#eff6ff]"
+                            )}
+                            onClick={() => handleMarkAsRead(notif.id)}
+                          >
+                            <div className="flex items-start gap-2">
+                              <div
+                                className={cn(
+                                  "w-2 h-2 mt-1.5 rounded-full flex-shrink-0",
+                                  isRead ? "bg-[#cbd5e1]" : "bg-[#2F6FED]"
+                                )}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-[#0f172a] break-words">{message}</p>
+                                <span className="text-xs text-[#94a3b8]">{dateLabel}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="px-4 py-8 text-center text-sm text-[#94a3b8]">
+                        Nenhuma notificação
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Avatar */}
+            <div className="w-8 h-8 rounded-full bg-[#2F6FED] text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
               {displayAvatar}
             </div>
           </div>
         </header>
 
-        <main className="flex-1 p-4 lg:p-8 pb-24 lg:pb-8">
-          {children}
-        </main>
+        <main className="flex-1 p-4 lg:p-8 pb-24 lg:pb-8">{children}</main>
       </div>
 
       {/* Navegação mobile inferior */}
@@ -403,13 +525,20 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               <Link key={item.path} href={item.path}>
                 <div className="flex flex-col items-center gap-0.5 px-3 py-1.5 cursor-pointer">
                   <Icon
-                    className={cn("w-5 h-5 transition-colors", isActive ? "text-[#2F6FED]" : "text-[#94a3b8]")}
-                    aria-hidden="true"
+                    className={cn(
+                      "w-5 h-5 transition-colors",
+                      isActive ? "text-[#2F6FED]" : "text-[#94a3b8]"
+                    )}
                   />
-                  <span className={cn("text-[10px] font-medium transition-colors", isActive ? "text-[#2F6FED]" : "text-[#94a3b8]")}>
+                  <span
+                    className={cn(
+                      "text-[10px] font-medium transition-colors",
+                      isActive ? "text-[#2F6FED]" : "text-[#94a3b8]"
+                    )}
+                  >
                     {item.label}
                   </span>
-                  {isActive && <div className="w-1 h-1 rounded-full bg-[#2F6FED]" aria-hidden="true" />}
+                  {isActive && <div className="w-1 h-1 rounded-full bg-[#2F6FED]" />}
                 </div>
               </Link>
             );

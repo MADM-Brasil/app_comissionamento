@@ -9,25 +9,12 @@ const PLACEHOLDER_UUID = '00000000-0000-0000-0000-000000000000';
 
 const STATUS_MAP = {
   pendente: 'Aberto',
-  processando: 'Em Andamento',
+  processando: 'Em Andamento', 
   concluido: 'Concluído',
   suporte: 'Aguardando Suporte',
   aviso: 'Aviso',
   erro: 'Erro',
 };
-
-// ════════════════════════════════════════════════════════════════════════════
-// ANTES DE USAR, execute no banco de dados:
-//   ALTER TABLE app_comissionamento.tickets_suporte
-//     ADD COLUMN IF NOT EXISTS solicitante_nome TEXT,
-//     ADD COLUMN IF NOT EXISTS equipe_nome TEXT,
-//     ADD COLUMN IF NOT EXISTS observacao_sales_ops TEXT;
-//
-//   -- Se a coluna metadados permitir NULL, não precisa alterar.
-//   -- Mas para garantir consistência, defina um valor padrão:
-//   ALTER TABLE app_comissionamento.tickets_suporte
-//     ALTER COLUMN metadados SET DEFAULT '{}'::jsonb;
-// ════════════════════════════════════════════════════════════════════════════
 
 // ==================== REGISTO DE TICKET DE MOVIMENTAÇÃO ====================
 router.post('/ticket-movimentacao', async (req, res) => {
@@ -264,7 +251,7 @@ router.get('/tickets-movimentacao', async (req, res) => {
   }
 });
 
-// ==================== LISTAGEM DE TICKETS DE SUPORTE (NOVO) ====================
+// ==================== LISTAGEM DE TICKETS DE SUPORTE ====================
 router.get('/ticket-suporte', async (req, res) => {
   try {
     const { solicitante_nome, todos } = req.query;

@@ -6,4 +6,4 @@ declare const db: {
   pool: Pool;
 };
 
-export default db;
+export default db; 

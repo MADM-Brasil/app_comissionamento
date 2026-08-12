@@ -93,6 +93,21 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// NOVA ROTA: Tabela de Comissões (vw_tabela_comissoes)
+app.get('/api/tabela-comissoes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT tipo, valor_comissao, faixa_min, faixa_max, data_atualizacao
+       FROM app_comissionamento.vw_tabela_comissoes
+       ORDER BY tipo, faixa_min`
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Erro ao buscar tabela de comissões:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==================== INICIALIZAÇÃO ====================
 
 async function startServer() {
@@ -221,7 +236,6 @@ async function handleLogin(event) {
     }
 
     try {
-        // Usuário autenticado pela view core.view_app_colaboradores
         const userRes = await pool.query(
             `SELECT email, nome, nome_equipe, cargo, status, periodo
              FROM core.view_app_colaboradores
@@ -234,24 +248,19 @@ async function handleLogin(event) {
         }
         const user = userRes.rows[0];
 
-        // (ideal: verificar senha com bcrypt)
-        // if (!bcrypt.compareSync(password, user.senha)) ...
-
         const accessLevel = accessControl.getAccessLevel(user.cargo);
         if (accessLevel === 0) {
             showLoginStatus('Acesso negado. Usuário sem permissão.', 'error');
             return;
         }
 
-        // Enviar código 2FA
         const twoFactorResult = await twoFactorService.sendCode(user.email, user.nome);
         if (!twoFactorResult.success) {
             showLoginStatus(twoFactorResult.error || 'Erro ao enviar código', 'error');
             return;
         }
 
-        // Salvar dados na sessão
-        req.session.userId = user.email;           // identificador único = e-mail
+        req.session.userId = user.email;
         req.session.tempToken = twoFactorResult.tempToken;
         req.session.ip = req.ip;
         req.session.userAgent = req.headers['user-agent'];
@@ -263,7 +272,7 @@ async function handleLogin(event) {
             }
 
             currentUser = {
-                id: user.email,            // ID agora é o e-mail
+                id: user.email,
                 nome: user.nome,
                 email: user.email,
                 equipe: user.nome_equipe,
@@ -535,6 +544,28 @@ async function loadUserDashboard() {
         // Extração (agora usando as views)
         await extractBD.extractUserData(currentUser.id, selectedDate);
 
+        // Buscar metas de gols (novos campos)
+        try {
+            const mesAtual = selectedDate.substring(0, 7);
+            const golsRes = await pool.query(
+                `SELECT meta_gols_assinados, meta_gols_ganhos
+                 FROM app_comissionamento.view_app_metricas_assessores
+                 WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
+                   AND TO_CHAR(data_metrica::date, 'YYYY-MM') = $2`,
+                [currentUser.email, mesAtual]
+            );
+            if (golsRes.rows.length > 0) {
+                const golsData = golsRes.rows[0];
+                // Exibir nos elementos correspondentes (se existirem)
+                const golsAssElem = document.getElementById('metaGolsAssinados');
+                const golsGanElem = document.getElementById('metaGolsGanhos');
+                if (golsAssElem) golsAssElem.textContent = golsData.meta_gols_assinados || 0;
+                if (golsGanElem) golsGanElem.textContent = golsData.meta_gols_ganhos || 0;
+            }
+        } catch (golsErr) {
+            console.warn('Metas de gols não disponíveis:', golsErr.message);
+        }
+
     } catch (error) {
         console.error('Erro ao carregar dashboard:', error);
         alert('Erro ao carregar dados do dashboard. Tente novamente.');
@@ -590,7 +621,6 @@ async function loadTeamMembers() {
     if (!permissions.canViewTeam) return;
 
     try {
-        // Usar view de colaboradores
         const teamRes = await pool.query(
             `SELECT email, nome, nome_equipe, cargo, status, periodo
              FROM core.view_app_colaboradores
@@ -688,9 +718,6 @@ async function viewUserDetails(userId) {
         return;
     }
 
-    // Para detalhes, buscar métricas do dia via views (simplificado, sem tabela de métricas individuais)
-    // Usamos a mesma lógica do dashboard, mas com nome do colaborador.
-    // Precisamos do nome do colaborador a partir do userId (que agora é email).
     const colabRes = await pool.query(
         `SELECT nome FROM core.view_app_colaboradores WHERE email = $1`,
         [userId]

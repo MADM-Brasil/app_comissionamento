@@ -15,6 +15,7 @@ import {
   TrendingUp, TrendingDown, Target, Users,
   ShoppingBag, Award, DollarSign, FileCheck,
   BarChart2, Activity, Loader2,
+  Trophy,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -70,12 +71,14 @@ const CustomTooltip = ({ active, payload, label }: any) => {
   return null;
 };
 
-function KpiCard({ label, value, target, unit, icon: Icon, color, delay = 0, simple = false }: {
+function KpiCard({ label, value, target, unit, icon: Icon, color, delay = 0, simple = false, hideValues = false }: {
   label: string; value: number; target: number; unit: string;
   icon: React.ElementType; color: string; delay?: number; simple?: boolean;
+  hideValues?: boolean;
 }) {
   const pct = target > 0 ? Math.round((value / target) * 100) : 0;
-  const displayValue = unit === "R$" ? formatCurrency(value) : unit === "%" ? `${value.toFixed(1)}%` : formatInt(value);
+  const displayValue = unit === "R$" ? (hideValues ? "R$ ****" : formatCurrency(value)) : unit === "%" ? `${value.toFixed(1)}%` : formatInt(value);
+  const displayTarget = unit === "R$" ? (hideValues ? "R$ ****" : formatCurrency(target)) : formatInt(target);
   return (
     <div className="card animate-fade-in-up" style={{ animationDelay: `${delay}ms` }}>
       <div className="flex items-start justify-between mb-2">
@@ -94,7 +97,7 @@ function KpiCard({ label, value, target, unit, icon: Icon, color, delay = 0, sim
       {!simple && (
         <>
           <div className="progress-bar"><div className="progress-fill" style={{ width: `${Math.min(pct, 100)}%` }} /></div>
-          <div className="text-[10px] text-[#94a3b8] mt-1">Meta: {unit === "R$" ? formatCurrency(target) : formatInt(target)}</div>
+          <div className="text-[10px] text-[#94a3b8] mt-1">Meta: {displayTarget}</div>
         </>
       )}
     </div>
@@ -108,6 +111,7 @@ export default function Analytics() {
     collaborators, currentUser,
     loadCollaboratorsAndMetrics, loadWeeklyPerformanceData,
     rawMetrics, loadRawMetrics,
+    hideValues, // <-- NOVO: estado global de ocultação
   } = useAppStore();
   const { hasPermission } = useAccessControl();
 
@@ -329,10 +333,12 @@ const conversionByStage = useMemo(() => {
 }, [totals, totalLeads]);
   const hasActiveFilters = equipe!=="todas"||colaborador!=="todos"||produto!=="Todos";
 
+  const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
+
   const renderBonusCard = () => {
     if (isExcluded) return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-lg font-black text-[#0f172a]">--</div><div className="text-xs text-[#64748b]">Esse perfil não comissiona</div></div>);
     if (bonusLoading) return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-2xl font-black text-[#0f172a]">Carregando...</div></div>);
-    return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-2xl font-black text-[#0f172a]">{formatCurrency(userBonusCiclo)}</div><div className="text-xs text-[#64748b]">{bonusError||"valor do banco"}</div></div>);
+    return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-2xl font-black text-[#0f172a]">{displayCurrency(userBonusCiclo)}</div><div className="text-xs text-[#64748b]">{bonusError||"valor do banco"}</div></div>);
   };
 
   return (
@@ -381,10 +387,10 @@ const conversionByStage = useMemo(() => {
 
           {/* KPI Cards */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            <KpiCard label="Comissão Estimada" value={userMetasBatidas * userBonusCiclo} target={5000} unit="R$" icon={DollarSign} color="#2F6FED" simple />
-            <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.assinados : totals.ganhos} target={isSpecialGroup ? targetAssinados : targetGanhos} unit="" icon={FileCheck} color="#16A34A" />
-            <KpiCard label="Protocolados" value={totals.protocolados} target={60} unit="" icon={BarChart2} color="#8B5CF6" />
-            <KpiCard label="Progresso da Meta" value={goalProgress} target={100} unit="%" icon={Activity} color="#EA8C1D" />
+            <KpiCard label="Comissão Estimada" value={userMetasBatidas * userBonusCiclo} target={5000} unit="R$" icon={DollarSign} color="#2F6FED" simple hideValues={hideValues} />
+            <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.assinados : totals.ganhos} target={isSpecialGroup ? targetAssinados : targetGanhos} unit="" icon={FileCheck} color="#16A34A" hideValues={hideValues} />
+            <KpiCard label="Protocolados" value={totals.protocolados} target={60} unit="" icon={BarChart2} color="#8B5CF6" hideValues={hideValues} />
+            <KpiCard label="Progresso da Meta" value={goalProgress} target={100} unit="%" icon={Activity} color="#EA8C1D" hideValues={hideValues} />
           </div>
  
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -495,9 +501,9 @@ const conversionByStage = useMemo(() => {
             <h3 className="text-sm font-bold text-[#0f172a] mb-4">Resumo de Comissões e Metas</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Gols</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">Seus Gols</div></div>
-              {renderBonusCard()}
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div><div className="text-xs text-[#94a3b8]">meta: {formatInt(targetAssinados)}</div></div>
-              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Trophy className="w-4 h-4 text-[#ffcc00] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Protocolados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.protocolados)}</div></div>
             </div>
           </div>
         </>

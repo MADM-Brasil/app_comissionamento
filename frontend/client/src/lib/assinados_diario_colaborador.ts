@@ -11,13 +11,13 @@ function normalizarNome(nome: string): string {
 }
 
 export interface AssinadosDiarioColaboradorLinha {
-  dia: string; // ISO (YYYY-MM-DD)
+  dia: string;
   total: number;
 }
 
 interface LinhaBruta {
   dia: string;
-  colaborador: string | null;   // nome do colaborador conforme retornado pela API
+  colaborador: string | null;
   total: string | number;
 }
 
@@ -44,12 +44,6 @@ async function fetchComRetry(url: string, tentativas = 3): Promise<any> {
 
 /**
  * Assinados por dia de um único colaborador no intervalo.
- *
- * A API esperada é:
- *   GET /api/metrics/assinados-diario-colaborador?inicio=YYYY-MM-DD&fim=YYYY-MM-DD
- *
- * Retorna um array de registros diários (todos os colaboradores). O filtro pelo nome
- * é feito aqui no cliente, normalizando o nome do colaborador.
  */
 export async function fetchAssinadosDiarioColaborador(
   nomeColaborador: string,

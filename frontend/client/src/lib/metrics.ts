@@ -8,7 +8,7 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
 // ============================================================
 
 export async function fetchEmitidos(
-  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string }
+  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
   const url = new URL(`${API_BASE}/metrics/emitidos`);
   if (params.periodo) url.searchParams.append('periodo', params.periodo);
@@ -17,6 +17,7 @@ export async function fetchEmitidos(
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);
   if (params.equipe) url.searchParams.append('equipe', params.equipe);
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
+  if (params.granularity) url.searchParams.append('granularity', params.granularity);
   const res = await fetch(url.toString(), { credentials: 'include' });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar emitidos');
@@ -24,7 +25,7 @@ export async function fetchEmitidos(
 }
 
 export async function fetchAssinados(
-  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string }
+  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
   const url = new URL(`${API_BASE}/metrics/assinados`);
   if (params.periodo) url.searchParams.append('periodo', params.periodo);
@@ -33,6 +34,7 @@ export async function fetchAssinados(
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);
   if (params.equipe) url.searchParams.append('equipe', params.equipe);
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
+  if (params.granularity) url.searchParams.append('granularity', params.granularity);
   const res = await fetch(url.toString(), { credentials: 'include' });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar assinados');
@@ -40,7 +42,7 @@ export async function fetchAssinados(
 }
 
 export async function fetchProtocolados(
-  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string }
+  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
   const url = new URL(`${API_BASE}/metrics/protocolados`);
   if (params.periodo) url.searchParams.append('periodo', params.periodo);
@@ -49,6 +51,7 @@ export async function fetchProtocolados(
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);
   if (params.equipe) url.searchParams.append('equipe', params.equipe);
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
+  if (params.granularity) url.searchParams.append('granularity', params.granularity);
   const res = await fetch(url.toString(), { credentials: 'include' });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar protocolados');
@@ -56,7 +59,7 @@ export async function fetchProtocolados(
 }
 
 export async function fetchGanhos(
-  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string }
+  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
   const url = new URL(`${API_BASE}/metrics/ganhos`);
   if (params.periodo) url.searchParams.append('periodo', params.periodo);
@@ -65,6 +68,7 @@ export async function fetchGanhos(
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);
   if (params.equipe) url.searchParams.append('equipe', params.equipe);
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
+  if (params.granularity) url.searchParams.append('granularity', params.granularity);
   const res = await fetch(url.toString(), { credentials: 'include' });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar ganhos');
@@ -72,7 +76,7 @@ export async function fetchGanhos(
 }
 
 export async function fetchPerdidos(
-  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string }
+  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
   const url = new URL(`${API_BASE}/metrics/perdidos`);
   if (params.periodo) url.searchParams.append('periodo', params.periodo);
@@ -81,6 +85,7 @@ export async function fetchPerdidos(
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);
   if (params.equipe) url.searchParams.append('equipe', params.equipe);
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
+  if (params.granularity) url.searchParams.append('granularity', params.granularity);
   const res = await fetch(url.toString(), { credentials: 'include' });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar perdidos');
@@ -88,7 +93,7 @@ export async function fetchPerdidos(
 }
 
 export async function fetchLeadsRecebidos(
-  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string }
+  params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ data: string; total: number; colaborador: string }[]> {
   const url = new URL(`${API_BASE}/metrics/leads-recebidos`);
   if (params.periodo) url.searchParams.append('periodo', params.periodo);
@@ -97,6 +102,7 @@ export async function fetchLeadsRecebidos(
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);
   if (params.equipe) url.searchParams.append('equipe', params.equipe);
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
+  if (params.granularity) url.searchParams.append('granularity', params.granularity);
   const res = await fetch(url.toString(), { credentials: 'include' });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar leads');
@@ -113,6 +119,79 @@ export async function fetchWeeklyPerformance(
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar desempenho semanal');
   return data.data;
+}
+
+// ============================================================
+// NOVA FUNÇÃO: DADOS DIÁRIOS PARA CÁLCULO DE GOLS
+// ============================================================
+
+/**
+ * Busca métricas diárias (emitidos, assinados, ganhos, perdidos, protocolados)
+ * para um colaborador (ou equipe) em um período.
+ *
+ * @param params - start, end, colaborador (nome), equipe (opcional), produto (opcional)
+ * @returns Array de objetos diários com date (YYYY-MM-DD) e os totais do dia
+ */
+export async function fetchDailyMetrics(
+  params: { start: string; end: string; colaborador?: string; equipe?: string; produto?: string }
+): Promise<Array<{
+  date: string;
+  emitidos: number;
+  assinados: number;
+  ganhos: number;
+  perdidos: number;
+  protocolados: number;
+}>> {
+  const baseParams = {
+    start: params.start,
+    end: params.end,
+    colaborador: params.colaborador,
+    equipe: params.equipe,
+    produto: params.produto && params.produto !== 'Todos' ? params.produto : undefined,
+    granularity: 'daily' as const,
+  };
+
+  // Busca paralela de todas as métricas com granularidade diária
+  const [emitidos, assinados, ganhos, perdidos, protocolados] = await Promise.all([
+    fetchEmitidos(baseParams),
+    fetchAssinados(baseParams),
+    fetchGanhos(baseParams),
+    fetchPerdidos(baseParams),
+    fetchProtocolados(baseParams),
+  ]);
+
+  // Combina os dados em um mapa por data (campo "periodo" retornado pela API)
+  const dailyMap = new Map<string, any>();
+
+  const addToMap = (items: any[], metricKey: string) => {
+    for (const item of items) {
+      // A API retorna "periodo" quando granularity é usado
+      const date = item.periodo || item.data;
+      if (!date) continue;
+
+      if (!dailyMap.has(date)) {
+        dailyMap.set(date, {
+          date,
+          emitidos: 0,
+          assinados: 0,
+          ganhos: 0,
+          perdidos: 0,
+          protocolados: 0,
+        });
+      }
+      const entry = dailyMap.get(date);
+      entry[metricKey] = (entry[metricKey] || 0) + (Number(item.total) || 0);
+    }
+  };
+
+  addToMap(emitidos, 'emitidos');
+  addToMap(assinados, 'assinados');
+  addToMap(ganhos, 'ganhos');
+  addToMap(perdidos, 'perdidos');
+  addToMap(protocolados, 'protocolados');
+
+  // Ordena por data
+  return Array.from(dailyMap.values()).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 // ============================================================

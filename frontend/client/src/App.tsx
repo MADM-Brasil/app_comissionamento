@@ -15,8 +15,7 @@ import Ranking from "./pages/Ranking";
 import Configuration from "./pages/Configuration";
 import Suporte from "./pages/Suporte";
 import Login from "./pages/Login";
-import Vgeral from "./pages/Visao_geral";
-import Gargalos from "./pages/Gargalos";
+import Visao_geral from "./pages/Visao_geral";
 import Equipe from "./pages/Equipe";
 import Verify2FA from "./pages/ResetPassword/Verify2FA";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -27,6 +26,7 @@ import { useAppStore } from "@/lib/dataStore";
 import { fetchCurrentUser } from "@/lib/auth";
 import { Loader2 } from "lucide-react";
 import { getUserPermissions, type Permissions } from "@/lib/accessControl";
+
 
 /**
  * Redireciona usuário autenticado para Home ao acessar páginas públicas
@@ -139,21 +139,13 @@ function Router() {
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
-      <Route path="/Vgeral">
+      <Route path="/Visao_geral">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessReports">
-            <Vgeral />
+            <Visao_geral />
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
-      <Route path="/Gargalos">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canAccessReports">
-            <Gargalos />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
-
       {/* Equipe – requer permissão canViewTeam */}
       <Route path="/Equipe">
         <PeriodProvider>

@@ -49,7 +49,7 @@ router.post('/update-assessor-metrics', [
     }
 
     // UPDATE permanece na tabela original
-    const updateQuery = `
+    const updateQuery = ` 
       UPDATE app_comissionamento.metricas_assessores
       SET
         peso_meta_assinados_diario = COALESCE($1, peso_meta_assinados_diario),

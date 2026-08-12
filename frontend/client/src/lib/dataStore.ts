@@ -11,18 +11,19 @@ import {
   fetchLeadsRecebidos,
   fetchWeeklyPerformance,
   fetchCollaborators,
-  fetchEquipes,
+  fetchEquipes, 
   API_BASE,
 } from './api';
+import { calculator } from './calculator';
 
 // ============================================================
-// TIPOS ATUALIZADOS – id agora é string (e-mail)
+// TIPOS ATUALIZADOS – id agora é string (e-mail) 
 // ============================================================
 export interface KpiItem { value: number; target: number; unit: string; label: string; }
 export interface KpiData { comissaoMes: KpiItem; vendasFechadas: KpiItem; protocolados: KpiItem; taxaConversao: KpiItem; }
 export interface EquipeConfig { id: string; nome: string; pesoAssinados: number; pesoGanhos: number; pesoequipeAssinados: number; pesoequipeGanhos: number; bonus: number; }
 export interface Collaborator {
-  id: string;                      // agora é o e-mail
+  id: string;
   name: string;
   email: string;
   equipeId: string;
@@ -40,13 +41,16 @@ export interface Collaborator {
   status: "ativo" | "inativo";
   produto: string;
   cargo: string;
-  grupo?: string;                 // mantido para compatibilidade, mas preterido
+  grupo?: string;
   metaDiarioAssinados?: number;
   metaDiarioGanhos?: number;
   metaSemanalAssinados?: number;
   metaSemanalGanhos?: number;
   metaMensalAssinados?: number;
   metaMensalGanhos?: number;
+  metaGolsAssinados?: number;
+  metaGolsGanhos?: number;
+  isSupervisorSR?: boolean;
   comissao?: number;
   bonusComissao?: number;
   pesoDiarioAssinados: number;
@@ -66,7 +70,7 @@ export interface GlobalConfig {
   pesoMensalAssinados: number; pesoMensalGanhos: number;
 }
 export interface DailyData {
-  id: string;                     // `${colaboradorId}-${date}`, colaboradorId agora é string
+  id: string;
   colaboradorId: string;
   date: string;
   emitidos: number;
@@ -79,7 +83,7 @@ export interface BonusData { active: boolean; label: string; description: string
 export interface WeeklyPerformance { day: string; vendas: number; meta: number; }
 export interface DailyProduction { date: string; vendas: number; leads: number; }
 export interface User {
-  id: string;                    // e-mail
+  id: string;
   e_mail: string;
   nome: string;
   email: string;
@@ -104,6 +108,22 @@ export interface Notification { id: number; type: 'warning' | 'danger' | 'succes
 export interface InsightCard { icon: string; title: string; description: string; action: string; color: string; bg: string; urgency: string; urgencyColor: string; }
 export type Period = 'Hoje' | 'Semana' | 'Mês' | 'Custom';
 export interface RawMetrics { emitidos: number; assinados: number; protocolados: number; ganhos: number; perdidos: number; }
+export interface TabelaComissaoItem {
+  tipo: string;
+  valor_comissao: number;
+  faixa_min: number;
+  faixa_max: number;
+  data_atualizacao: string;
+}
+// NOVO: Interface para campanhas
+export interface Campaign {
+  tipo: string;
+  multiplicador: number;
+  produto: string;
+  data_publicacao: string;
+  descricao: string;
+  validacao_financeiro: boolean;
+}
 
 // ============================================================
 // FUNÇÕES AUXILIARES
@@ -230,6 +250,8 @@ const initialStatsCards: StatsCard[] = [
 const initialNotifications: Notification[] = [];
 const initialInsightCards: InsightCard[] = [];
 const initialRawMetrics: RawMetrics = { emitidos: 0, assinados: 0, protocolados: 0, ganhos: 0, perdidos: 0 };
+const initialTabelaComissoes: TabelaComissaoItem[] = [];
+const initialCampaigns: Campaign[] = [];
 
 // ============================================================
 // INTERFACE DA STORE
@@ -244,6 +266,12 @@ interface AppStore {
   globalConfig: GlobalConfig; dailyData: DailyData[]; equipeConfigs: EquipeConfig[];
   period: Period; customStartDate: string; customEndDate: string; currentStartDate: string; currentEndDate: string;
   rawMetrics: RawMetrics;
+  hideValues: boolean;  
+  toggleHideValues: () => void;
+  tabelaComissoes: TabelaComissaoItem[];
+  loadTabelaComissoes: () => Promise<void>;
+  campaigns: Campaign[];
+  loadCampaigns: (mes?: string) => Promise<void>;
 
   resetStore: () => void;
   setKpiData: (data: KpiData) => void; setBonusData: (data: BonusData) => void; setWeeklyPerformance: (data: WeeklyPerformance[]) => void;
@@ -322,6 +350,10 @@ export const useAppStore = create<AppStore>()(
       currentStartDate: '',
       currentEndDate: '',
       rawMetrics: initialRawMetrics,
+      hideValues: true,
+      toggleHideValues: () => set((state) => ({ hideValues: !state.hideValues })),
+      tabelaComissoes: initialTabelaComissoes,
+      campaigns: initialCampaigns,
 
       // ========== PERÍODO ==========
       setPeriod: (period) => {
@@ -374,6 +406,9 @@ export const useAppStore = create<AppStore>()(
         currentStartDate: '',
         currentEndDate: '',
         rawMetrics: initialRawMetrics,
+        hideValues: true,
+        tabelaComissoes: initialTabelaComissoes,
+        campaigns: initialCampaigns,
       }),
 
       // ========== SETTERS BÁSICOS ==========
@@ -508,7 +543,41 @@ export const useAppStore = create<AppStore>()(
       setNotifications: (data) => set({ notifications: data }),
       setInsightCards: (data) => set({ insightCards: data }),
 
-      // ========== CARREGAMENTOS (CORRIGIDOS) ==========
+      // ========== CARREGAMENTOS ==========
+      loadTabelaComissoes: async () => {
+        try {
+          const res = await fetch(`${API_BASE}/tabela-comissoes`, { credentials: 'include' });
+          if (!res.ok) throw new Error('Erro ao carregar tabela de comissões');
+          const data = await res.json();
+          if (data.success && Array.isArray(data.data)) {
+            set({ tabelaComissoes: data.data.map((item: any) => ({
+              tipo: item.tipo,
+              valor_comissao: Number(item.valor_comissao) || 0,
+              faixa_min: Number(item.faixa_min) || 0,
+              faixa_max: Number(item.faixa_max) || 0,
+              data_atualizacao: item.data_atualizacao || '',
+            }))});
+          }
+        } catch (err) {
+          console.error('Erro ao carregar tabela de comissões:', err);
+        }
+      },
+
+      loadCampaigns: async (mes) => {
+        try {
+          const url = new URL(`${API_BASE}/campanhas`, window.location.origin);
+          if (mes) url.searchParams.append('mes', mes);
+          const res = await fetch(url.toString(), { credentials: 'include' });
+          if (!res.ok) throw new Error('Erro ao carregar campanhas');
+          const data = await res.json();
+          if (data.success) {
+            set({ campaigns: data.data });
+          }
+        } catch (err) {
+          console.error('Erro ao carregar campanhas:', err);
+        }
+      },
+
       loadCollaborators: async () => {
         try {
           console.log('🔄 [loadCollaborators] Iniciando...');
@@ -547,6 +616,9 @@ export const useAppStore = create<AppStore>()(
             metaSemanalGanhos: c.metaSemanalGanhos ?? 15,
             metaMensalAssinados: c.metaMensalAssinados ?? 60,
             metaMensalGanhos: c.metaMensalGanhos ?? 60,
+            metaGolsAssinados: c.metaGolsAssinados ?? 0,
+            metaGolsGanhos: c.metaGolsGanhos ?? 0,
+            isSupervisorSR: c.isSupervisorSR ?? false,
             comissao: c.comissao ?? 0,
             bonusComissao: c.bonusComissao ?? 0,
             pesoDiarioAssinados: c.pesoDiarioAssinados ?? 3,
@@ -586,6 +658,8 @@ export const useAppStore = create<AppStore>()(
                     colab.pesoSemanalGanhos = metrics.peso_meta_ganho_semanal ?? colab.pesoSemanalGanhos;
                     colab.pesoMensalAssinados = metrics.peso_meta_assinados_mensal ?? colab.pesoMensalAssinados;
                     colab.pesoMensalGanhos = metrics.peso_meta_ganho_mensal ?? colab.pesoMensalGanhos;
+                    colab.metaGolsAssinados = metrics.meta_gols_assinados ?? colab.metaGolsAssinados;   
+                    colab.metaGolsGanhos = metrics.meta_gols_ganhos ?? colab.metaGolsGanhos;
                   }
                 }
               }
@@ -595,6 +669,13 @@ export const useAppStore = create<AppStore>()(
           }
 
           set({ collaborators: baseCollaborators });
+
+          // Sincronizar Supervisores SR com o Calculator
+          const srEmails = baseCollaborators
+            .filter(c => c.isSupervisorSR)
+            .map(c => c.email);
+          calculator.setSupervisorSREmails(srEmails);
+
           console.log('💾 [loadCollaborators] Estado atualizado com sucesso');
         } catch (err) {
           console.error('❌ [loadCollaborators] Erro:', err);
@@ -610,6 +691,10 @@ export const useAppStore = create<AppStore>()(
 
       loadCollaboratorsAndMetrics: async (equipeNome, colaboradorNome, colaboradorId, produto) => {
         if (get().collaborators.length === 0) { await get().loadCollaborators(); await get().loadEquipeConfigs(); }
+        await get().loadTabelaComissoes();
+        // NOVO: carrega campanhas do mês atual
+        const mesAtual = get().currentStartDate?.substring(0, 7);
+        if (mesAtual) await get().loadCampaigns(mesAtual);
         await get().loadMetricsForPeriod({ equipeNome, colaboradorNome, colaboradorId, produto });
         await get().loadWeeklyPerformanceData();
       },
