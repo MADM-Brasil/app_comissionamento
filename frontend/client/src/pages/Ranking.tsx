@@ -90,7 +90,7 @@ const isDesativado = (c: any) => {
 
 const teamToProductMapping: Record<string, string> = {
   "Equipe Concomitante": "Concomitante",
-  "Equipe Quinquenio": "Quinquenio",
+  "Equipe Tatiane": "Quinquenio",
   "Equipe Quinquênio": "Quinquenio",
 };
 

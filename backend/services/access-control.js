@@ -4,11 +4,12 @@
 class AccessControl {
     constructor() {
         this.LEVELS = {
-            NONE: 0,            // sem acesso
+            NONE: 0,            
             ASSESSOR: 1,
             SUPERVISAO: 2,
             COORDENADOR: 3,
-            ADMINISTRATIVO: 4
+            ADMINISTRATIVO: 4,
+            SUPER_ADMIN: 5
         };
 
         // Mapeamento de cargos normalizados → nível
@@ -33,12 +34,14 @@ class AccessControl {
 
             // Administrativo
             'salesops': this.LEVELS.ADMINISTRATIVO,
-            'ceo': this.LEVELS.ADMINISTRATIVO,
             'analista de crm': this.LEVELS.ADMINISTRATIVO,
-            'desenvolvedor': this.LEVELS.ADMINISTRATIVO,
-            'diretora': this.LEVELS.ADMINISTRATIVO,
             'analista de dados': this.LEVELS.ADMINISTRATIVO,
-            'desenvolvedor make': this.LEVELS.ADMINISTRATIVO
+            'desenvolvedor make': this.LEVELS.ADMINISTRATIVO,
+
+            // Super Admin
+            'ceo': this.LEVELS.SUPER_ADMIN,
+            'desenvolvedor': this.LEVELS.SUPER_ADMIN,
+            'diretora': this.LEVELS.SUPER_ADMIN,
         };
 
         // Permissões por nível
@@ -107,7 +110,21 @@ class AccessControl {
                 lockedTeam: false,
                 lockedCollaborator: false,
                 description: 'Acesso total'
+            },
+            [this.LEVELS.SUPER_ADMIN]: {
+                canAccessReports: true,
+                canAccessConfiguration: true,
+                canViewTeam: true,
+                canEditConfiguration: true,
+                canEditBonus: true,
+                canGenerateNextMonth: true,
+                canExportData: true,
+                filterLocked: false,
+                lockedTeam: false,
+                lockedCollaborator: false,
+                description: 'Acesso total'
             }
+
         };
     }
 

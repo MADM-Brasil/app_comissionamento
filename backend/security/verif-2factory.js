@@ -84,6 +84,7 @@ async function sendCode(email, userName) {
     try {
       await sendViaSendgrid(email, userName, code, false);
       console.log(`✅ [2FA] E-mail enviado via SendGrid para ${email}`);
+      console.log(`📧 [2FA] Código: ${code}`);
       return { success: true, tempToken: email };
     } catch (err) {
       console.error(`❌ [2FA] SendGrid falhou: ${err.message}`);
@@ -102,6 +103,7 @@ async function sendCode(email, userName) {
                <p>Este código expira em 5 minutos.</p>`,
       });
       console.log(`✅ [2FA] E-mail enviado via SMTP para ${email}`);
+      console.log(`📧 [2FA] Código: ${code}`);
       return { success: true, tempToken: email };
     } catch (err) {
       console.error(`❌ [2FA] SMTP falhou: ${err.message}`);
@@ -127,6 +129,7 @@ async function sendPasswordResetCode(email, userName) {
     try {
       await sendViaSendgrid(email, userName, code, true); // isReset = true
       console.log(`✅ [RESET] E-mail enviado via SendGrid para ${email}`);
+      console.log(`📧 [RESET] Código: ${code}`);
       return { success: true, tempToken: userName };
     } catch (err) {
       console.error(`❌ [RESET] SendGrid falhou: ${err.message}`);
@@ -145,6 +148,7 @@ async function sendPasswordResetCode(email, userName) {
                <p>Este código expira em 5 minutos.</p>`,
       });
       console.log(`✅ [RESET] E-mail enviado via SMTP para ${email}`);
+      console.log(`📧 [RESET] Código: ${code}`);
       return { success: true, tempToken: userName };
     } catch (err) {
       console.error(`❌ [RESET] SMTP falhou: ${err.message}`);

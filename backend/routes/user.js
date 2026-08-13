@@ -48,7 +48,9 @@ router.get('/metricas-assessores', async (req, res) => {
         peso_meta_assinados_semanal,
         peso_meta_ganho_semanal,
         peso_meta_assinados_mensal,
-        peso_meta_ganho_mensal
+        peso_meta_ganho_mensal,
+        meta_gols_assinados,   -- ✅ adicionado
+        meta_gols_ganhos       -- ✅ adicionado
       FROM app_comissionamento.view_app_metricas_assessores
       WHERE TO_CHAR(data_metrica::date, 'YYYY-MM') = $1
     `;
@@ -193,7 +195,9 @@ router.get('/config', async (req, res) => {
          peso_meta_assinados_semanal,
          peso_meta_ganho_semanal,
          peso_meta_assinados_mensal,
-         peso_meta_ganho_mensal
+         peso_meta_ganho_mensal,
+         meta_gols_assinados,   -- ✅ adicionado
+         meta_gols_ganhos       -- ✅ adicionado
        FROM app_comissionamento.view_app_metricas_assessores
        WHERE email = $1`,
       [user.email]
@@ -211,6 +215,8 @@ router.get('/config', async (req, res) => {
         peso_meta_ganho_semanal: 3,
         peso_meta_assinados_mensal: 10,
         peso_meta_ganho_mensal: 10,
+        meta_gols_assinados: 20,   // ✅ valor padrão
+        meta_gols_ganhos: 20       // ✅ valor padrão
       });
     }
   } catch (err) {
@@ -235,6 +241,8 @@ router.post('/config', async (req, res) => {
       peso_meta_ganho_semanal,
       peso_meta_assinados_mensal,
       peso_meta_ganho_mensal,
+      meta_gols_assinados,   // ✅ adicionado
+      meta_gols_ganhos       // ✅ adicionado
     } = req.body;
 
     const campos = [
@@ -245,6 +253,8 @@ router.post('/config', async (req, res) => {
       peso_meta_ganho_semanal,
       peso_meta_assinados_mensal,
       peso_meta_ganho_mensal,
+      meta_gols_assinados,   // ✅ adicionado
+      meta_gols_ganhos       // ✅ adicionado
     ];
 
     if (campos.some(v => v === undefined || isNaN(Number(v)) || Number(v) < 0)) {
@@ -265,8 +275,10 @@ router.post('/config', async (req, res) => {
         peso_meta_ganho_semanal = $5,
         peso_meta_assinados_mensal = $6,
         peso_meta_ganho_mensal = $7,
+        meta_gols_assinados = $8,   -- ✅ adicionado
+        meta_gols_ganhos = $9,      -- ✅ adicionado
         updated_at = NOW()
-      WHERE email = $8
+      WHERE email = $10
       RETURNING id_assessor
     `;
 
@@ -278,6 +290,8 @@ router.post('/config', async (req, res) => {
       peso_meta_ganho_semanal,
       peso_meta_assinados_mensal,
       peso_meta_ganho_mensal,
+      meta_gols_assinados,  
+      meta_gols_ganhos,      
       user.email,
     ];
 

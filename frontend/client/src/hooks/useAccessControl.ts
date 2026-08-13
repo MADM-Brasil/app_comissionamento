@@ -3,8 +3,8 @@ import { useAppStore } from '@/lib/dataStore';
 import {
   LEVELS,
   getAccessLevel as getLevel,
-  hasPermission as checkPermission,
-  getUserPermissions as getPermissions,
+  hasPermission as checkPermission, 
+  getUserPermissions as getPermissions, 
   getUIConfig as getUIConfigFromLib,
   filterTeamData as filterTeam,
   getFilterRestrictions,
@@ -18,7 +18,7 @@ function normalizeUser(raw: any) {
   if (!raw) return raw;
   // Se a view nova já traz 'cargo', nada a fazer.
   if (raw.cargo !== undefined) return raw;
-  // Senão, mapeia 'grupo' → 'cargo' (compatibilidade com código legado).
+  // Senão, mapeia 'grupo' → 'cargo'.
   if (raw.grupo !== undefined) {
     return { ...raw, cargo: raw.grupo };
   }

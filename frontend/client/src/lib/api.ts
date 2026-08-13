@@ -7,8 +7,8 @@ async function handleResponse(response: Response, defaultErrorMessage: string) {
     if (response.status === 403) {
       throw new Error('Token CSRF inválido. Recarregue a página e tente novamente.');
     }
-    return {};
-  }
+    return {};  
+  } 
 
   let text;
   try {

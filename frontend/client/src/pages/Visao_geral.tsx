@@ -228,6 +228,13 @@ export default function VisaoGeral() {
   }, [filters, currentStartDate, currentEndDate, rawCollaborators.length, loadCollaborators, loadMetricsForPeriod, loadRawMetrics, fetchLeadsData]);
 
   // -----------------------------------------------------------
+  //  HANDLE REFRESH (para o botão no FilterBar)
+  // -----------------------------------------------------------
+  const handleRefresh = useCallback(async () => {
+    await fetchData(true);
+  }, [fetchData]);
+
+  // -----------------------------------------------------------
   //  EFEITO PRINCIPAL (com dependências completas e proteção contra loops)
   // -----------------------------------------------------------
   useEffect(() => {
@@ -369,7 +376,12 @@ export default function VisaoGeral() {
 
   return (
     <DashboardLayout title="Visão Geral" subtitle={`Panorama executivo da operação comercial — Período ${period}`}>
-      <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter className="mb-6" />
+      <FilterBar
+        onFilterChange={handleFilterChange}
+        showColaboradorFilter
+        className="mb-6"
+        onRefresh={handleRefresh}
+      />
 
       {loading && (
         <div className="flex justify-center items-center py-4">

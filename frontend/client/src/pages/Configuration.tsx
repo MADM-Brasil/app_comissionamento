@@ -5,25 +5,38 @@ import DashboardLayout from "@/components/DashboardLayout";
 import {
   Search, Filter, Users, Award, FileText, CheckCircle, XCircle,
   Edit2, Save, X, ChevronDown, ChevronUp, Settings, Briefcase, User, Archive,
-  CalendarPlus, Calendar, RefreshCw, AlertTriangle,
+  CalendarPlus, Calendar, RefreshCw, AlertTriangle, Megaphone,
+  Eye, EyeOff, Check, X as XIcon,
 } from "lucide-react";
-import { useAppStore, formatCurrency } from "@/lib/dataStore";
-import { fetchCollaborators, fetchEquipes, API_BASE } from "@/lib/api";
+import { useAppStore } from "@/lib/dataStore";
+import {
+  fetchCollaborators, fetchEquipes, API_BASE
+} from "@/lib/api";
+import {
+  fetchEmitidos, fetchAssinados, fetchGanhos, fetchPerdidos, fetchProtocolados
+} from "@/lib/metrics";
 import { recalculateHierarchyWeights } from "@/lib/metrics";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { calculator } from "@/lib/calculator";
 
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda', 'Equipe Reciclagem'
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
+  'Equipe Reciclagem',''
 ];
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
 type CicloPeriodo = 'diario' | 'semanal' | 'mensal';
 
+const PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante"];
+
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
+
+const normalize = (str: string): string =>
+  (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 function formatMonthYear(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '--';
@@ -40,7 +53,7 @@ export default function Configuration() {
   const {
     currentStartDate, currentEndDate, collaborators, globalConfig,
     updateGlobalConfig, setCollaborators, equipeConfigs, setEquipeConfigs,
-    loadMetricsForPeriod,
+    loadMetricsForPeriod, hideValues,
   } = useAppStore();
 
   const { hasPermission, getAccessLevel, LEVELS, currentUser } = useAccessControl();
@@ -55,25 +68,60 @@ export default function Configuration() {
   const canEditConfiguration = hasPermission("canEditConfiguration");
   const canEditBonus = hasPermission("canEditBonus");
   const canGenerateNextMonth = hasPermission("canGenerateNextMonth");
-  const isAdminOnly = userLevel === LEVELS.ADMINISTRATIVO;
+  const isAdminOnly = userLevel === LEVELS.ADMINISTRATIVO || userLevel === LEVELS.SUPER_ADMIN;
 
   // ========== ESTADOS ==========
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedEquipe, setSelectedEquipe] = useState("Todas");
   const [selectedPeriod, setSelectedPeriod] = useState<CicloPeriodo>('mensal');
+  const [periodoTabela, setPeriodoTabela] = useState<CicloPeriodo>('mensal');
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<{ assinados?: number; ganhos?: number }>({});
-  const [editingBonusId, setEditingBonusId] = useState<string | null>(null);
-  const [editBonusValue, setEditBonusValue] = useState<number>(0);
+  const [editForm, setEditForm] = useState<{
+    pesoAssinados?: number;
+    pesoGanhos?: number;
+    metaGolsAssinados?: number;
+    metaGolsGanhos?: number;
+  }>({});
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [recalculating, setRecalculating] = useState(false);
 
+  const [configTab, setConfigTab] = useState<'global' | 'equipes'>('global');
+
   const [teamSelected, setTeamSelected] = useState<string>("");
   const [teamPeriod, setTeamPeriod] = useState<CicloPeriodo>('mensal');
-  const [teamAssinados, setTeamAssinados] = useState<number>(60);
-  const [teamGanhos, setTeamGanhos] = useState<number>(60);
+  const [teamPesoAssinados, setTeamPesoAssinados] = useState<number>(60);
+  const [teamPesoGanhos, setTeamPesoGanhos] = useState<number>(60);
+  const [teamMetaGolsAssinados, setTeamMetaGolsAssinados] = useState<number>(20);
+  const [teamMetaGolsGanhos, setTeamMetaGolsGanhos] = useState<number>(20);
   const [teamBonus, setTeamBonus] = useState<number>(150);
+
+  const [campanhaCategoria, setCampanhaCategoria] = useState<string>("outros");
+  const [campanhaMultiplicador, setCampanhaMultiplicador] = useState<number>(2.0);
+  const [campanhaProduto, setCampanhaProduto] = useState<string>("Todos");
+  const [campanhaDescricao, setCampanhaDescricao] = useState<string>("");
+
+  const [mostrarCampanhas, setMostrarCampanhas] = useState(false);
+  const [campanhasRegistradas, setCampanhasRegistradas] = useState<Array<{
+    id: string;
+    data: string;
+    categoria: string;
+    multiplicador: number;
+    produto: string;
+    descricao: string;
+    aprovada: boolean;
+  }>>([]);
+
+  const isAssinados = campanhaCategoria === "Assinados";
+  useEffect(() => {
+    if (isAssinados) {
+      setCampanhaMultiplicador(1.0);
+    } else {
+      if (campanhaMultiplicador === 1.0) {
+        setCampanhaMultiplicador(2.0);
+      }
+    }
+  }, [campanhaCategoria]);
 
   // ---------- CONTROLE DE MÊS ----------
   const [now, setNow] = useState(new Date());
@@ -101,7 +149,6 @@ export default function Configuration() {
   const isBonusEditable = canEditBonus && !isLocked;
   const isAllDisabled = !canEditConfiguration || isLocked;
 
-  // ========== CACHE DE COLABORADORES POR MÊS ==========
   const collaboratorsCache = useRef<Map<string, any[]>>(new Map());
 
   // ========== API MESES ==========
@@ -138,10 +185,10 @@ export default function Configuration() {
   useEffect(() => { refreshMonths(); }, []);
   useEffect(() => { if (!monthsError) refreshMonths(); }, [selectedMonth]);
 
-  // ========== CARREGAMENTO DE COLABORADORES (COM CACHE) ==========
+  // ========== CARREGAMENTO DE COLABORADORES E MÉTRICAS DO MÊS ==========
   const loadCollaboratorsForMonth = async (month: string) => {
     if (!month || !/^\d{4}-\d{2}-\d{2}$/.test(month)) return;
-    
+
     if (collaboratorsCache.current.has(month)) {
       const cached = collaboratorsCache.current.get(month)!;
       setCollaborators(cached);
@@ -157,6 +204,100 @@ export default function Configuration() {
         if (!uniqueMap.has(key)) uniqueMap.set(key, c);
       });
       const uniqueCollabs = Array.from(uniqueMap.values());
+
+      // Normaliza campos de meta de gols
+      uniqueCollabs.forEach((c: any) => {
+        c.metaGolsAssinados = c.meta_gols_assinados ?? c.metaGolsAssinados ?? 20;
+        c.metaGolsGanhos = c.meta_gols_ganhos ?? c.metaGolsGanhos ?? 20;
+      });
+
+      // Carrega métricas do mês selecionado
+      const start = month;
+      const year = parseInt(month.substring(0, 4), 10);
+      const monthIdx = parseInt(month.substring(5, 7), 10) - 1;
+      const lastDay = new Date(year, monthIdx + 1, 0).getDate();
+      const end = `${month.substring(0, 7)}-${String(lastDay).padStart(2, '0')}`;
+
+      // Totais (para os campos de emitidos, assinados, etc.)
+      const [emitidos, assinados, ganhos, perdidos, protocolados] = await Promise.all([
+        fetchEmitidos({ start, end }),
+        fetchAssinados({ start, end }),
+        fetchGanhos({ start, end }),
+        fetchPerdidos({ start, end }),
+        fetchProtocolados({ start, end }),
+      ]);
+
+      // Dados diários para calcular Gols (mesma lógica da página Comissões)
+      const [dailyAssinados, dailyGanhos] = await Promise.all([
+        fetchAssinados({ start, end, granularity: 'daily' }),
+        fetchGanhos({ start, end, granularity: 'daily' }),
+      ]);
+
+      // Mapa de totais por colaborador
+      const metricsMap = new Map<string, { emitidos: number; assinados: number; ganhos: number; perdidos: number; protocolados: number }>();
+      const aggregate = (data: any[], key: 'emitidos' | 'assinados' | 'ganhos' | 'perdidos' | 'protocolados') => {
+        data.forEach((item: any) => {
+          const name = normalize(item.colaborador);
+          if (!name) return;
+          if (!metricsMap.has(name)) {
+            metricsMap.set(name, { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0, protocolados: 0 });
+          }
+          const entry = metricsMap.get(name)!;
+          entry[key] += Number(item.total) || 0;
+        });
+      };
+      aggregate(emitidos, 'emitidos');
+      aggregate(assinados, 'assinados');
+      aggregate(ganhos, 'ganhos');
+      aggregate(perdidos, 'perdidos');
+      aggregate(protocolados, 'protocolados');
+
+      // Mapa de dados diários por colaborador
+      const dailyMap = new Map<string, Map<string, { assinados: number; ganhos: number }>>();
+      const processDaily = (data: any[], key: 'assinados' | 'ganhos') => {
+        data.forEach((item: any) => {
+          const name = normalize(item.colaborador);
+          const date = (item.periodo || item.data || '').slice(0, 10);
+          if (!name || !date) return;
+          if (!dailyMap.has(name)) dailyMap.set(name, new Map());
+          const dayMap = dailyMap.get(name)!;
+          if (!dayMap.has(date)) dayMap.set(date, { assinados: 0, ganhos: 0 });
+          dayMap.get(date)![key] += Number(item.total) || 0;
+        });
+      };
+      processDaily(dailyAssinados, 'assinados');
+      processDaily(dailyGanhos, 'ganhos');
+
+      // Atualiza colaboradores com métricas e total de gols
+      uniqueCollabs.forEach((c: any) => {
+        const name = normalize(c.name);
+        const metrics = metricsMap.get(name) || { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0, protocolados: 0 };
+        c.emitidos = metrics.emitidos;
+        c.assinados = metrics.assinados;
+        c.ganhos = metrics.ganhos;
+        c.perdidos = metrics.perdidos;
+        c.protocolados = metrics.protocolados;
+
+        // Calcula gols diários
+        const dailyData = dailyMap.get(name);
+        if (dailyData) {
+          const dias = Array.from(dailyData.keys()).sort();
+          const dailyArray = dias.map(date => ({
+            date,
+            assinados: dailyData.get(date)!.assinados,
+            ganhos: dailyData.get(date)!.ganhos,
+          }));
+          const golsResult = calculator.calculateDailyGoals(
+            dailyArray,
+            c.metaGolsAssinados ?? 3,
+            c.metaGolsGanhos ?? 3
+          );
+          c.totalGols = golsResult.totalGols;
+        } else {
+          c.totalGols = 0;
+        }
+      });
+
       collaboratorsCache.current.set(month, uniqueCollabs);
       setCollaborators(uniqueCollabs);
       if (uniqueCollabs.length === 0) toast.warning('Nenhum colaborador encontrado para este mês.');
@@ -181,6 +322,7 @@ export default function Configuration() {
           nome: eq.nome || 'Equipe sem nome',
           pesoAssinados: 3, pesoGanhos: 3,
           pesoequipeAssinados: 0, pesoequipeGanhos: 0, bonus: 150,
+          metaGolsAssinados: 20, metaGolsGanhos: 20,
         })));
         equipesLoaded.current = true;
       } catch (error: any) {
@@ -194,7 +336,24 @@ export default function Configuration() {
   // ========== LISTAS ==========
   const filteredEquipeConfigs = useMemo(() => equipeConfigs.filter(e => !isExcludedTeam(e.nome)), [equipeConfigs]);
   const equipeNomes = useMemo(() => ["Todas", ...filteredEquipeConfigs.map(e => e.nome)], [filteredEquipeConfigs]);
-  useEffect(() => { if (filteredEquipeConfigs.length && !teamSelected) setTeamSelected(filteredEquipeConfigs[0].nome); }, [filteredEquipeConfigs, teamSelected]);
+
+  useEffect(() => {
+    if (filteredEquipeConfigs.length && !teamSelected) {
+      setTeamSelected(filteredEquipeConfigs[0].nome);
+    }
+  }, [filteredEquipeConfigs, teamSelected]);
+
+  useEffect(() => {
+    if (!teamSelected) return;
+    const equipe = equipeConfigs.find(e => e.nome === teamSelected);
+    if (equipe) {
+      setTeamPesoAssinados(equipe.pesoAssinados ?? 3);
+      setTeamPesoGanhos(equipe.pesoGanhos ?? 3);
+      setTeamMetaGolsAssinados((equipe as any).metaGolsAssinados ?? 20);
+      setTeamMetaGolsGanhos((equipe as any).metaGolsGanhos ?? 20);
+      setTeamBonus(equipe.bonus ?? 150);
+    }
+  }, [teamSelected, equipeConfigs]);
 
   const filteredCollaborators = useMemo(() => {
     return collaborators.filter(c => {
@@ -214,27 +373,33 @@ export default function Configuration() {
   };
 
   // ========== FUNÇÕES AUXILIARES ==========
-  const getCycleMetaForPeriod = (collab: any, periodo: CicloPeriodo) => {
+  const getPesoForPeriod = (collab: any, periodo: CicloPeriodo) => {
     switch (periodo) {
-      case 'diario': return { assinados: Number(collab.metaDiarioAssinados) ?? 3, ganhos: Number(collab.metaDiarioGanhos) ?? 3 };
-      case 'semanal': return { assinados: Number(collab.metaSemanalAssinados) ?? 15, ganhos: Number(collab.metaSemanalGanhos) ?? 15 };
-      default: return { assinados: Number(collab.metaMensalAssinados) ?? 60, ganhos: Number(collab.metaMensalGanhos) ?? 60 };
+      case 'diario': 
+        return { 
+          assinados: Number(collab.pesoDiarioAssinados ?? collab.metaDiarioAssinados ?? 3), 
+          ganhos: Number(collab.pesoDiarioGanhos ?? collab.metaDiarioGanhos ?? 3) 
+        };
+      case 'semanal': 
+        return { 
+          assinados: Number(collab.pesoSemanalAssinados ?? collab.metaSemanalAssinados ?? 15), 
+          ganhos: Number(collab.pesoSemanalGanhos ?? collab.metaSemanalGanhos ?? 15) 
+        };
+      default: 
+        return { 
+          assinados: Number(collab.pesoMensalAssinados ?? collab.metaMensalAssinados ?? 60), 
+          ganhos: Number(collab.pesoMensalGanhos ?? collab.metaMensalGanhos ?? 60) 
+        };
     }
   };
-  const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
-    const meta = getCycleMetaForPeriod(collab, periodo);
-    const assinados = Number(collab.assinados) || 0;
-    const ganhos = Number(collab.ganhos) || 0;
-    if (meta.assinados === 0 || meta.ganhos === 0) return 0;
-    return Math.floor(Math.min(assinados / meta.assinados, ganhos / meta.ganhos));
+
+  const getMetaGolsForPeriod = (collab: any) => {
+    return {
+      assinados: Number(collab.metaGolsAssinados ?? collab.meta_gols_assinados ?? 20),
+      ganhos: Number(collab.metaGolsGanhos ?? collab.meta_gols_ganhos ?? 20),
+    };
   };
-  const getBonusPorCiclo = (collab: any) => {
-    if (collab.bonusComissao !== undefined && collab.bonusComissao !== null && Number(collab.bonusComissao) > 0) {
-      return Number(collab.bonusComissao);
-    }
-    const equipeConfig = filteredEquipeConfigs.find(e => e.nome === collab.equipeNome);
-    return equipeConfig?.bonus || Number(globalConfig.valorBonus);
-  };
+
   const toggleExpand = (id: string) => setExpandedId(prev => (prev === id ? null : id));
 
   const isIndividualEditable = (collab: any) => {
@@ -286,6 +451,8 @@ export default function Configuration() {
         periodo: selectedPeriod,
         peso_assinados: pesoAssinados,
         peso_ganhos: pesoGanhos,
+        meta_gols_assinados: 20,
+        meta_gols_ganhos: 20,
         bonus: Number(globalConfig.valorBonus),
         data_metrica: selectedMonth,
       };
@@ -310,8 +477,10 @@ export default function Configuration() {
     const body = {
       equipe: teamSelected.trim(),
       periodo: teamPeriod,
-      peso_assinados: Number(teamAssinados),
-      peso_ganhos: Number(teamGanhos),
+      peso_assinados: Number(teamPesoAssinados),
+      peso_ganhos: Number(teamPesoGanhos),
+      meta_gols_assinados: Number(teamMetaGolsAssinados),
+      meta_gols_ganhos: Number(teamMetaGolsGanhos),
       bonus: Number(teamBonus),
       data_metrica: selectedMonth,
     };
@@ -335,26 +504,32 @@ export default function Configuration() {
     }
   };
 
-  const saveEdit = async (id: string) => {
-    if (editForm.assinados === undefined || editForm.ganhos === undefined || !isEditable) return;
+  const saveRow = async (id: string) => {
     const collab = collaborators.find(c => c.id === id);
-    if (!collab) return;
+    if (!collab || !isEditable) return;
     setSavingId(id);
-    
-    const payload = {
+
+    const payload: any = {
       email: collab.email || collab.id,
       data_metrica: selectedMonth,
-      meta_diario_assinados: selectedPeriod === 'diario' ? Number(editForm.assinados) : undefined,
-      meta_diario_ganhos: selectedPeriod === 'diario' ? Number(editForm.ganhos) : undefined,
-      meta_semanal_assinados: selectedPeriod === 'semanal' ? Number(editForm.assinados) : undefined,
-      meta_semanal_ganhos: selectedPeriod === 'semanal' ? Number(editForm.ganhos) : undefined,
-      meta_mensal_assinados: selectedPeriod === 'mensal' ? Number(editForm.assinados) : undefined,
-      meta_mensal_ganhos: selectedPeriod === 'mensal' ? Number(editForm.ganhos) : undefined,
-      comissao_bonus: Number(collab.bonusComissao) || 0,
     };
-    
-    console.log('📤 [saveEdit] Payload enviado:', payload);
-    
+
+    if (periodoTabela === 'diario') {
+      if (editForm.pesoAssinados !== undefined) payload.meta_diario_assinados = Number(editForm.pesoAssinados);
+      if (editForm.pesoGanhos !== undefined) payload.meta_diario_ganhos = Number(editForm.pesoGanhos);
+    } else if (periodoTabela === 'semanal') {
+      if (editForm.pesoAssinados !== undefined) payload.meta_semanal_assinados = Number(editForm.pesoAssinados);
+      if (editForm.pesoGanhos !== undefined) payload.meta_semanal_ganhos = Number(editForm.pesoGanhos);
+    } else {
+      if (editForm.pesoAssinados !== undefined) payload.meta_mensal_assinados = Number(editForm.pesoAssinados);
+      if (editForm.pesoGanhos !== undefined) payload.meta_mensal_ganhos = Number(editForm.pesoGanhos);
+    }
+
+    if (editForm.metaGolsAssinados !== undefined) payload.meta_gols_assinados = Number(editForm.metaGolsAssinados);
+    if (editForm.metaGolsGanhos !== undefined) payload.meta_gols_ganhos = Number(editForm.metaGolsGanhos);
+
+    console.log('📤 [saveRow] Payload:', payload);
+
     try {
       const headers = await getCsrfHeaders();
       const res = await fetch(`${API_BASE}/admin/update-assessor-metrics`, {
@@ -365,7 +540,7 @@ export default function Configuration() {
       });
       const data = await res.json();
       if (data.success) {
-        toast.success(`Meta ${selectedPeriod} de ${collab.name} atualizada!`);
+        toast.success(`Dados de ${collab.name} atualizados!`);
         collaboratorsCache.current.delete(selectedMonth);
         await loadCollaboratorsForMonth(selectedMonth);
       } else {
@@ -382,60 +557,23 @@ export default function Configuration() {
     }
   };
 
-  const saveBonusEdit = async (id: string) => {
-    if (!isBonusEditable) return;
-    const collab = collaborators.find(c => c.id === id);
-    if (!collab) return;
-    setSavingId(id);
-    
-    const payload = {
-      email: collab.email || collab.id,
-      data_metrica: selectedMonth,
-      comissao_bonus: Number(editBonusValue),
-    };
-    
-    console.log('📤 [saveBonusEdit] Payload enviado:', payload);
-    
-    try {
-      const headers = await getCsrfHeaders();
-      const res = await fetch(`${API_BASE}/admin/update-assessor-metrics`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        credentials: 'include',
-      });
-      const data = await res.json();
-      if (data.success) {
-        toast.success(`Bônus de ${collab.name} atualizado para ${formatCurrency(editBonusValue)}`);
-        collaboratorsCache.current.delete(selectedMonth);
-        await loadCollaboratorsForMonth(selectedMonth);
-      } else {
-        toast.error(data.error || 'Erro ao salvar bônus');
-        console.error('❌ Erro do backend:', data);
-      }
-    } catch (err) {
-      console.error(err);
-      toast.error('Erro de conexão');
-    } finally {
-      setSavingId(null);
-      setEditingBonusId(null);
-      setEditBonusValue(0);
-    }
+  const startEditRow = (collab: any) => {
+    if (!isIndividualEditable(collab)) return;
+    const peso = getPesoForPeriod(collab, periodoTabela);
+    const metaGols = getMetaGolsForPeriod(collab);
+    setEditingId(collab.id);
+    setEditForm({
+      pesoAssinados: peso.assinados,
+      pesoGanhos: peso.ganhos,
+      metaGolsAssinados: metaGols.assinados,
+      metaGolsGanhos: metaGols.ganhos,
+    });
   };
 
-  const startEdit = (collab: any) => {
-    if (!isIndividualEditable(collab)) return;
-    const meta = getCycleMetaForPeriod(collab, selectedPeriod);
-    setEditingId(collab.id);
-    setEditForm({ assinados: meta.assinados, ganhos: meta.ganhos });
+  const cancelEditRow = () => {
+    setEditingId(null);
+    setEditForm({});
   };
-  const startEditBonus = (collab: any) => {
-    if (!isBonusEditable) return;
-    setEditingBonusId(collab.id);
-    setEditBonusValue(collab.bonusComissao || getBonusPorCiclo(collab));
-  };
-  const cancelEdit = () => { setEditingId(null); setEditForm({}); };
-  const cancelEditBonus = () => { setEditingBonusId(null); setEditBonusValue(0); };
 
   const generateNextMonth = async () => {
     try {
@@ -469,9 +607,47 @@ export default function Configuration() {
     }
   };
 
+  // ========== CAMPANHA COMERCIAL ==========
+  const handleRegistrarCampanha = () => {
+    const novaCampanha = {
+      id: Date.now().toString(),
+      data: new Date().toLocaleDateString('pt-BR'),
+      categoria: campanhaCategoria,
+      multiplicador: campanhaMultiplicador,
+      produto: campanhaProduto,
+      descricao: campanhaDescricao || 'Sem descrição',
+      aprovada: false,
+    };
+    setCampanhasRegistradas(prev => [novaCampanha, ...prev]);
+    toast.success(`Campanha registrada com sucesso!`);
+    setCampanhaDescricao('');
+  };
+
+  const handleAprovarCampanha = (id: string) => {
+    if (!isAdminOnly) {
+      toast.error('Apenas administradores podem aprovar campanhas.');
+      return;
+    }
+    setCampanhasRegistradas(prev =>
+      prev.map(camp => camp.id === id ? { ...camp, aprovada: true } : camp)
+    );
+    toast.success('Campanha aprovada!');
+  };
+
+  const handleRejeitarCampanha = (id: string) => {
+    if (!isAdminOnly) {
+      toast.error('Apenas administradores podem rejeitar campanhas.');
+      return;
+    }
+    setCampanhasRegistradas(prev =>
+      prev.map(camp => camp.id === id ? { ...camp, aprovada: false } : camp)
+    );
+    toast.info('Campanha rejeitada.');
+  };
+
   // ========== RENDER ==========
   return (
-    <DashboardLayout title="Configurações" subtitle="Gerencie metas e bônus do sistema">
+    <DashboardLayout title="Configurações" subtitle="Gerencie metas e pesos do sistema">
       <div className="space-y-6">
         {/* AVISO DE BLOQUEIO + BOTÃO GERAR PRÓXIMO MÊS */}
         {isLocked && (
@@ -526,137 +702,364 @@ export default function Configuration() {
           {isLocked && <span className="badge warning">Bloqueado</span>}
         </div>
 
-        {/* CONFIGURAÇÕES GLOBAIS */}
-        <div className="card">
-          <div className="px-5 py-3 border-b border-[#e2e8f0]">
-            <div className="flex items-center gap-2">
-              <Settings className="w-4 h-4 text-[#2F6FED]" />
-              <h3 className="text-sm font-bold text-[#0f172a]">Configurações Globais</h3>
-            </div>
-          </div>
-          <div className="p-4 space-y-4">
-            <div>
-              <span className="text-xs font-medium text-[#64748b]">Aplicar para o período:</span>
-              <div className="flex gap-2 mt-1">
-                {(['diario','semanal','mensal'] as CicloPeriodo[]).map(p => (
-                  <button key={p} onClick={() => setSelectedPeriod(p)}
-                    className={cn("filter-pill", selectedPeriod === p && "active")}>
-                    {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
-                  </button>
-                ))}
+        {/* CARD: REGISTRAR CAMPANHA COMERCIAL (apenas admin) */}
+        {isAdminOnly && (
+          <div className="card">
+            <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Megaphone className="w-4 h-4 text-[#EA8C1D]" />
+                <h3 className="text-sm font-bold text-[#0f172a]">Registrar Campanha Comercial</h3>
               </div>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-[#f8fafc] rounded-lg p-3">
-                <label htmlFor="globalPesoAssinados" className="block text-xs font-medium text-[#64748b] mb-1">Peso de Assinados</label>
-                <input id="globalPesoAssinados" type="number" min="1"
-                  value={selectedPeriod === 'diario' ? globalConfig.pesoDiarioAssinados : selectedPeriod === 'semanal' ? globalConfig.pesoSemanalAssinados : globalConfig.pesoMensalAssinados}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value) || 1;
-                    if (selectedPeriod === 'diario') updateGlobalConfig({ pesoDiarioAssinados: v });
-                    else if (selectedPeriod === 'semanal') updateGlobalConfig({ pesoSemanalAssinados: v });
-                    else updateGlobalConfig({ pesoMensalAssinados: v });
-                  }}
-                  disabled={isAllDisabled}
-                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
-                  aria-label="Peso de assinados" />
-              </div>
-              <div className="bg-[#f8fafc] rounded-lg p-3">
-                <label htmlFor="globalPesoGanhos" className="block text-xs font-medium text-[#64748b] mb-1">Peso de Ganhos</label>
-                <input id="globalPesoGanhos" type="number" min="1"
-                  value={selectedPeriod === 'diario' ? globalConfig.pesoDiarioGanhos : selectedPeriod === 'semanal' ? globalConfig.pesoSemanalGanhos : globalConfig.pesoMensalGanhos}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value) || 1;
-                    if (selectedPeriod === 'diario') updateGlobalConfig({ pesoDiarioGanhos: v });
-                    else if (selectedPeriod === 'semanal') updateGlobalConfig({ pesoSemanalGanhos: v });
-                    else updateGlobalConfig({ pesoMensalGanhos: v });
-                  }}
-                  disabled={isAllDisabled}
-                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
-                  aria-label="Peso de ganhos" />
-              </div>
-              <div className="bg-[#f8fafc] rounded-lg p-3">
-                <label htmlFor="globalBonus" className="block text-xs font-medium text-[#64748b] mb-1">Bônus por Ciclo (R$)</label>
-                <input id="globalBonus" type="number" min="1"
-                  value={globalConfig.valorBonus}
-                  onChange={(e) => updateGlobalConfig({ valorBonus: parseInt(e.target.value) || 1 })}
-                  disabled={!isBonusEditable}
-                  className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
-                  aria-label="Valor do bônus por ciclo" />
-              </div>
-            </div>
-            <div className="flex justify-end">
-              <button onClick={saveGlobalConfig} disabled={!isEditable}
-                className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 flex items-center gap-1.5">
-                <Save className="w-3.5 h-3.5" /> Aplicar a todos
+              <button
+                onClick={() => setMostrarCampanhas(!mostrarCampanhas)}
+                className="flex items-center gap-1 text-xs font-medium text-[#64748b] hover:text-[#0f172a] transition-colors"
+              >
+                {mostrarCampanhas ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                {mostrarCampanhas ? "Ocultar campanhas" : "Ver campanhas registradas"}
+                <span className="ml-1 bg-[#f1f5f9] px-1.5 py-0.5 rounded-full text-[10px]">
+                  {campanhasRegistradas.length}
+                </span>
               </button>
             </div>
-          </div>
-        </div>
 
-        {/* METAS POR EQUIPE */}
-        {filteredEquipeConfigs.length > 0 && (
-          <div className="card">
-            <div className="px-5 py-3 border-b border-[#e2e8f0]">
-              <div className="flex items-center gap-2">
-                <Briefcase className="w-4 h-4 text-[#16A34A]" />
-                <h3 className="text-sm font-bold text-[#0f172a]">Metas por Equipe</h3>
-              </div>
-            </div>
             <div className="p-4">
-              <div className="flex flex-wrap items-end gap-4">
-                <div className="bg-[#f8fafc] rounded-lg p-2">
-                  <label htmlFor="teamSelect" className="block text-xs font-medium text-[#64748b] mb-1">Equipe</label>
-                  <select id="teamSelect" value={teamSelected} onChange={(e) => setTeamSelected(e.target.value)}
-                    className="px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white" aria-label="Selecionar equipe">
-                    {filteredEquipeConfigs.map(eq => <option key={eq.id} value={eq.nome}>{eq.nome}</option>)}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label htmlFor="campanhaCategoria" className="block text-xs font-medium text-[#64748b] mb-1">
+                    Categoria
+                  </label>
+                  <select
+                    id="campanhaCategoria"
+                    value={campanhaCategoria}
+                    onChange={(e) => setCampanhaCategoria(e.target.value)}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                  >
+                    <option value="outros">Outros</option>
+                    <option value="Gols">Gols</option>
+                    <option value="Assinados">Assinados</option>
                   </select>
                 </div>
+                <div>
+                  <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
+                    {isAssinados ? "Assinados = Gol" : "Multiplicador (1.5 – 2.0)"}
+                  </label>
+                  {isAssinados ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        value={campanhaMultiplicador}
+                        disabled
+                        className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-gray-100 text-center disabled:opacity-50 cursor-not-allowed"
+                      />
+                      <span className="text-xs text-[#64748b] whitespace-nowrap">(fixo)</span>
+                    </div>
+                  ) : (
+                    <input
+                      id="campanhaMultiplicador"
+                      type="number"
+                      min={1.5}
+                      max={2.0}
+                      step={0.1}
+                      value={campanhaMultiplicador}
+                      onChange={(e) => setCampanhaMultiplicador(parseFloat(e.target.value) || 1.5)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label htmlFor="campanhaProduto" className="block text-xs font-medium text-[#64748b] mb-1">
+                    Produto
+                  </label>
+                  <select
+                    id="campanhaProduto"
+                    value={campanhaProduto}
+                    onChange={(e) => setCampanhaProduto(e.target.value)}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                  >
+                    {PRODUCT_OPTIONS.map((prod) => (
+                      <option key={prod} value={prod}>{prod}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="mt-4">
+                <label htmlFor="campanhaDescricao" className="block text-xs font-medium text-[#64748b] mb-1">
+                  Descrição
+                </label>
+                <textarea
+                  id="campanhaDescricao"
+                  value={campanhaDescricao}
+                  onChange={(e) => setCampanhaDescricao(e.target.value)}
+                  rows={3}
+                  placeholder="Detalhes da campanha comercial..."
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                />
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={handleRegistrarCampanha}
+                  className="px-5 py-2 rounded-lg text-sm font-semibold bg-[#EA8C1D] text-white hover:bg-[#EA8C1D]/90 flex items-center gap-2"
+                >
+                  <Megaphone className="w-4 h-4" />
+                  Registrar Campanha
+                </button>
+              </div>
+            </div>
+
+            {mostrarCampanhas && (
+              <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs font-medium text-[#64748b]">
+                    {campanhasRegistradas.length} campanha(s) registrada(s)
+                  </span>
+                </div>
+
+                {campanhasRegistradas.length === 0 ? (
+                  <div className="text-center py-6 text-sm text-[#94a3b8]">
+                    Nenhuma campanha registrada neste mês.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="simple-table">
+                      <thead>
+                        <tr>
+                          <th className="text-left">Data</th>
+                          <th className="text-left">Categoria</th>
+                          <th className="text-center">Multiplicador</th>
+                          <th className="text-left">Produto</th>
+                          <th className="text-left">Descrição</th>
+                          <th className="text-center">Aprovada</th>
+                          <th className="text-center">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {campanhasRegistradas.map((camp) => (
+                          <tr key={camp.id}>
+                            <td className="text-xs text-[#64748b]">{camp.data}</td>
+                            <td className="text-xs font-medium">{camp.categoria}</td>
+                            <td className="text-center text-xs font-bold">
+                              {camp.multiplicador.toFixed(1)}x
+                              {camp.categoria === "Assinados" && " (1:1)"}
+                            </td>
+                            <td className="text-xs">{camp.produto}</td>
+                            <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
+                              {camp.descricao}
+                            </td>
+                            <td className="text-center">
+                              {camp.aprovada ? (
+                                <span className="inline-flex items-center gap-1 text-[#16A34A] bg-[#dcfce7] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                  <Check className="w-3 h-3" /> Aprovada
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-[#DC2626] bg-[#fee2e2] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                  <XIcon className="w-3 h-3" /> Pendente
+                                </span>
+                              )}
+                            </td>
+                            <td className="text-center">
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  onClick={() => handleAprovarCampanha(camp.id)}
+                                  disabled={camp.aprovada}
+                                  className={cn(
+                                    "p-1 rounded transition-colors",
+                                    camp.aprovada
+                                      ? "text-gray-300 cursor-not-allowed"
+                                      : "text-[#16A34A] hover:bg-green-50"
+                                  )}
+                                  title={camp.aprovada ? "Já aprovada" : "Aprovar campanha"}
+                                >
+                                  <Check className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleRejeitarCampanha(camp.id)}
+                                  disabled={!camp.aprovada}
+                                  className={cn(
+                                    "p-1 rounded transition-colors",
+                                    !camp.aprovada
+                                      ? "text-gray-300 cursor-not-allowed"
+                                      : "text-[#DC2626] hover:bg-red-50"
+                                  )}
+                                  title={!camp.aprovada ? "Já rejeitada" : "Rejeitar campanha"}
+                                >
+                                  <XIcon className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* CARD: CONFIGURAÇÕES DE METAS */}
+        <div className="card">
+          <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center gap-2">
+            <Settings className="w-4 h-4 text-[#2F6FED]" />
+            <h3 className="text-sm font-bold text-[#0f172a]">Configurações de Metas</h3>
+          </div>
+          <div className="p-4">
+            <div className="flex gap-1 bg-[#f8fafc] p-0.5 rounded-lg mb-4 w-fit">
+              <button
+                onClick={() => setConfigTab('global')}
+                className={cn(
+                  "px-3 py-1 text-xs font-medium rounded-md transition-colors",
+                  configTab === 'global'
+                    ? "bg-white text-[#0f172a] shadow-sm"
+                    : "text-[#64748b] hover:text-[#0f172a]"
+                )}
+              >
+                Globais
+              </button>
+              <button
+                onClick={() => setConfigTab('equipes')}
+                className={cn(
+                  "px-3 py-1 text-xs font-medium rounded-md transition-colors",
+                  configTab === 'equipes'
+                    ? "bg-white text-[#0f172a] shadow-sm"
+                    : "text-[#64748b] hover:text-[#0f172a]"
+                )}
+              >
+                Equipes
+              </button>
+            </div>
+
+            {configTab === 'global' && (
+              <div className="flex flex-wrap items-end gap-4">
                 <div className="bg-[#f8fafc] rounded-lg p-2">
                   <span className="block text-xs font-medium text-[#64748b] mb-1">Período</span>
                   <div className="flex gap-2">
                     {(['diario','semanal','mensal'] as CicloPeriodo[]).map(p => (
-                      <button key={p} onClick={() => setTeamPeriod(p)}
-                        className={cn("filter-pill", teamPeriod === p && "active")}>
+                      <button key={p} onClick={() => setSelectedPeriod(p)}
+                        className={cn("filter-pill", selectedPeriod === p && "active")}>
                         {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
                       </button>
                     ))}
                   </div>
                 </div>
+
                 <div className="bg-[#f8fafc] rounded-lg p-2">
-                  <label htmlFor="teamAssinados" className="block text-xs font-medium text-[#64748b] mb-1">Peso Assinados</label>
-                  <input id="teamAssinados" type="number" min="1" value={teamAssinados}
-                    onChange={(e) => setTeamAssinados(parseInt(e.target.value) || 1)}
+                  <label className="block text-xs font-medium text-[#64748b] mb-1">Peso Assinados</label>
+                  <input type="number" min="1"
+                    value={selectedPeriod === 'diario' ? globalConfig.pesoDiarioAssinados : selectedPeriod === 'semanal' ? globalConfig.pesoSemanalAssinados : globalConfig.pesoMensalAssinados}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value) || 1;
+                      if (selectedPeriod === 'diario') updateGlobalConfig({ pesoDiarioAssinados: v });
+                      else if (selectedPeriod === 'semanal') updateGlobalConfig({ pesoSemanalAssinados: v });
+                      else updateGlobalConfig({ pesoMensalAssinados: v });
+                    }}
                     disabled={isAllDisabled}
-                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
-                    aria-label="Peso assinados equipe" />
+                    className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
                 </div>
+
                 <div className="bg-[#f8fafc] rounded-lg p-2">
-                  <label htmlFor="teamGanhos" className="block text-xs font-medium text-[#64748b] mb-1">Peso Ganhos</label>
-                  <input id="teamGanhos" type="number" min="1" value={teamGanhos}
-                    onChange={(e) => setTeamGanhos(parseInt(e.target.value) || 0)}
+                  <label className="block text-xs font-medium text-[#64748b] mb-1">Peso Ganhos</label>
+                  <input type="number" min="1"
+                    value={selectedPeriod === 'diario' ? globalConfig.pesoDiarioGanhos : selectedPeriod === 'semanal' ? globalConfig.pesoSemanalGanhos : globalConfig.pesoMensalGanhos}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value) || 1;
+                      if (selectedPeriod === 'diario') updateGlobalConfig({ pesoDiarioGanhos: v });
+                      else if (selectedPeriod === 'semanal') updateGlobalConfig({ pesoSemanalGanhos: v });
+                      else updateGlobalConfig({ pesoMensalGanhos: v });
+                    }}
                     disabled={isAllDisabled}
-                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
-                    aria-label="Peso ganhos equipe" />
+                    className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
                 </div>
+
                 <div className="bg-[#f8fafc] rounded-lg p-2">
-                  <label htmlFor="teamBonus" className="block text-xs font-medium text-[#64748b] mb-1">Bônus (R$)</label>
-                  <input id="teamBonus" type="number" min="1" value={teamBonus}
-                    onChange={(e) => setTeamBonus(parseInt(e.target.value) || 1)}
+                  <label className="block text-xs font-medium text-[#64748b] mb-1">Bônus por Gol (R$)</label>
+                  <input type="number" min="1"
+                    value={globalConfig.valorBonus}
+                    onChange={(e) => updateGlobalConfig({ valorBonus: parseInt(e.target.value) || 1 })}
                     disabled={!isBonusEditable}
-                    className="w-24 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50"
-                    aria-label="Bônus equipe" />
+                    className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
                 </div>
+
                 <div>
-                  <button onClick={saveTeamMetrics} disabled={!isEditable}
+                  <button onClick={saveGlobalConfig} disabled={!isEditable}
                     className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 flex items-center gap-1.5">
-                    <Save className="w-3.5 h-3.5" /> Salvar
+                    <Save className="w-3.5 h-3.5" /> Aplicar para todos
                   </button>
                 </div>
               </div>
-            </div>
+            )}
+
+            {configTab === 'equipes' && (
+              <div>
+                {filteredEquipeConfigs.length > 0 ? (
+                  <div className="flex flex-wrap items-end gap-4">
+                    <div className="bg-[#f8fafc] rounded-lg p-2">
+                      <label htmlFor="teamSelect" className="block text-xs font-medium text-[#64748b] mb-1">Equipe</label>
+                      <select id="teamSelect" value={teamSelected} onChange={(e) => setTeamSelected(e.target.value)}
+                        className="px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white" aria-label="Selecionar equipe">
+                        {filteredEquipeConfigs.map(eq => <option key={eq.id} value={eq.nome}>{eq.nome}</option>)}
+                      </select>
+                    </div>
+                    <div className="bg-[#f8fafc] rounded-lg p-2">
+                      <span className="block text-xs font-medium text-[#64748b] mb-1">Período</span>
+                      <div className="flex gap-2">
+                        {(['diario','semanal','mensal'] as CicloPeriodo[]).map(p => (
+                          <button key={p} onClick={() => setTeamPeriod(p)}
+                            className={cn("filter-pill", teamPeriod === p && "active")}>
+                            {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="bg-[#f8fafc] rounded-lg p-2">
+                      <label className="block text-xs font-medium text-[#64748b] mb-1">Peso Assin.</label>
+                      <input type="number" min="1" value={teamPesoAssinados}
+                        onChange={(e) => setTeamPesoAssinados(parseInt(e.target.value) || 1)}
+                        disabled={isAllDisabled}
+                        className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
+                    </div>
+                    <div className="bg-[#f8fafc] rounded-lg p-2">
+                      <label className="block text-xs font-medium text-[#64748b] mb-1">Peso Ganhos</label>
+                      <input type="number" min="1" value={teamPesoGanhos}
+                        onChange={(e) => setTeamPesoGanhos(parseInt(e.target.value) || 0)}
+                        disabled={isAllDisabled}
+                        className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
+                    </div>
+                    <div className="bg-[#f8fafc] rounded-lg p-2">
+                      <label className="block text-xs font-medium text-[#64748b] mb-1">Meta Gols (Assinados)</label>
+                      <input type="number" min="1" value={teamMetaGolsAssinados}
+                        onChange={(e) => setTeamMetaGolsAssinados(parseInt(e.target.value) || 1)}
+                        disabled={isAllDisabled}
+                        className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
+                    </div>
+                    <div className="bg-[#f8fafc] rounded-lg p-2">
+                      <label className="block text-xs font-medium text-[#64748b] mb-1">Meta Gols (Ganhos)</label>
+                      <input type="number" min="1" value={teamMetaGolsGanhos}
+                        onChange={(e) => setTeamMetaGolsGanhos(parseInt(e.target.value) || 1)}
+                        disabled={isAllDisabled}
+                        className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
+                    </div>
+                    <div className="bg-[#f8fafc] rounded-lg p-2">
+                      <label className="block text-xs font-medium text-[#64748b] mb-1">Bônus (R$)</label>
+                      <input type="number" min="1" value={teamBonus}
+                        onChange={(e) => setTeamBonus(parseInt(e.target.value) || 1)}
+                        disabled={!isBonusEditable}
+                        className="w-20 text-sm px-2 py-1.5 rounded-lg border border-[#e2e8f0] text-center disabled:opacity-50" />
+                    </div>
+                    <div>
+                      <button onClick={saveTeamMetrics} disabled={!isEditable}
+                        className="px-4 py-2 rounded-lg text-sm font-semibold bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90 disabled:opacity-50 flex items-center gap-1.5">
+                        <Save className="w-3.5 h-3.5" /> Salvar
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-[#64748b]">Nenhuma equipe disponível.</p>
+                )}
+              </div>
+            )}
           </div>
-        )}
+        </div>
 
         {/* VISÃO GERAL */}
         <div className="grid grid-cols-2 gap-4">
@@ -692,25 +1095,28 @@ export default function Configuration() {
           </div>
         </div>
 
-        {/* SELETOR DE PERÍODO */}
-        <div className="card p-3 flex items-center gap-3">
-          <span className="text-xs font-medium text-[#64748b]">Exibir metas para:</span>
-          <div className="flex gap-2">
-            {(['diario','semanal','mensal'] as CicloPeriodo[]).map(p => (
-              <button key={p} onClick={() => setSelectedPeriod(p)}
-                className={cn("filter-pill", selectedPeriod === p && "active")}>
-                {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
-              </button>
-            ))}
-          </div>
-        </div>
-
         {/* TABELA DE METAS POR COLABORADOR */}
         <div className="card">
           <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
             <div className="flex items-center gap-2">
               <User className="w-4 h-4 text-[#2F6FED]" />
               <h3 className="text-sm font-bold text-[#0f172a]">Metas por Colaborador</h3>
+            </div>
+            <div className="flex items-center gap-1 bg-[#f8fafc] p-0.5 rounded-lg">
+              {(['diario', 'semanal', 'mensal'] as CicloPeriodo[]).map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setPeriodoTabela(p)}
+                  className={cn(
+                    "px-2.5 py-1 text-xs font-medium rounded-md transition-colors",
+                    periodoTabela === p
+                      ? "bg-white text-[#0f172a] shadow-sm"
+                      : "text-[#64748b] hover:text-[#0f172a]"
+                  )}
+                >
+                  {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
+                </button>
+              ))}
             </div>
           </div>
           <div className="overflow-x-auto">
@@ -719,22 +1125,19 @@ export default function Configuration() {
                 <tr>
                   <th>Colaborador</th>
                   <th>Equipe</th>
-                  <th className="text-center">Meta (A/G) {selectedPeriod === 'diario' ? '(diário)' : selectedPeriod === 'semanal' ? '(semanal)' : '(mensal)'}</th>
+                  <th className="text-center">Peso Metas (A/G)</th>
+                  <th className="text-center">Meta Gols (A/G)</th>
                   <th className="text-center">Gols</th>
-                  <th className="text-center">Bônus Ciclo</th>
-                  <th className="text-center">Bônus Estimado</th>
                   <th className="text-center">Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredCollaborators.map((collab) => {
                   const isEditing = editingId === collab.id;
-                  const isEditingBonus = editingBonusId === collab.id;
                   const isExpanded = expandedId === collab.id;
-                  const currentMeta = getCycleMetaForPeriod(collab, selectedPeriod);
-                  const ciclosCompletos = getCiclosCompletos(collab, selectedPeriod);
-                  const bonusPorCiclo = getBonusPorCiclo(collab);
-                  const bonusEstimado = ciclosCompletos * bonusPorCiclo;
+                  const peso = getPesoForPeriod(collab, periodoTabela);
+                  const metaGols = getMetaGolsForPeriod(collab);
+                  const totalGols = Number((collab as any).totalGols || 0);
                   const individualEditable = isIndividualEditable(collab);
                   return (
                     <React.Fragment key={collab.id}>
@@ -752,69 +1155,53 @@ export default function Configuration() {
                         <td className="text-center">
                           {isEditing ? (
                             <div className="flex items-center justify-center gap-1">
-                              <input type="number" min="1" value={editForm.assinados ?? currentMeta.assinados}
-                                onChange={(e) => setEditForm(prev => ({ ...prev, assinados: parseInt(e.target.value) || 1 }))}
-                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" aria-label="Meta de assinados" />
+                              <input type="number" min="1" value={editForm.pesoAssinados ?? peso.assinados}
+                                onChange={(e) => setEditForm(prev => ({ ...prev, pesoAssinados: parseInt(e.target.value) || 1 }))}
+                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" />
                               <span className="text-xs">/</span>
-                              <input type="number" min="1" value={editForm.ganhos ?? currentMeta.ganhos}
-                                onChange={(e) => setEditForm(prev => ({ ...prev, ganhos: parseInt(e.target.value) || 1 }))}
-                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" aria-label="Meta de ganhos" />
+                              <input type="number" min="1" value={editForm.pesoGanhos ?? peso.ganhos}
+                                onChange={(e) => setEditForm(prev => ({ ...prev, pesoGanhos: parseInt(e.target.value) || 1 }))}
+                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" />
                             </div>
                           ) : (
-                            <div className="flex flex-col items-center">
-                              <span className="text-xs font-medium">{formatInt(currentMeta.assinados)}/{formatInt(currentMeta.ganhos)}</span>
-                              <div className="progress-bar w-12 mt-0.5">
-                                <div className="progress-fill" style={{ width: `${Math.min((collab.assinados / currentMeta.assinados) * 100, 100)}%` }} />
-                              </div>
-                            </div>
+                            <span className="text-xs font-medium">{formatInt(peso.assinados)}/{formatInt(peso.ganhos)}</span>
                           )}
                         </td>
-                        <td className="text-center font-bold text-[#0f172a]">{formatInt(ciclosCompletos)}</td>
                         <td className="text-center">
-                          {isEditingBonus ? (
+                          {isEditing ? (
                             <div className="flex items-center justify-center gap-1">
-                              <input type="number" min="1" value={editBonusValue} onChange={(e) => setEditBonusValue(parseInt(e.target.value) || 1)}
-                                className="w-20 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" aria-label="Novo valor do bônus" />
-                              <button onClick={() => saveBonusEdit(collab.id)} disabled={savingId === collab.id}
-                                className="p-0.5 rounded hover:bg-green-50" aria-label="Salvar novo bônus">
-                                <Save className="w-3.5 h-3.5 text-[#16A34A]" />
-                              </button>
-                              <button onClick={cancelEditBonus} className="p-0.5 rounded hover:bg-red-50" aria-label="Cancelar">
-                                <X className="w-3.5 h-3.5 text-[#DC2626]" />
-                              </button>
+                              <input type="number" min="1" value={editForm.metaGolsAssinados ?? metaGols.assinados}
+                                onChange={(e) => setEditForm(prev => ({ ...prev, metaGolsAssinados: parseInt(e.target.value) || 1 }))}
+                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" />
+                              <span className="text-xs">/</span>
+                              <input type="number" min="1" value={editForm.metaGolsGanhos ?? metaGols.ganhos}
+                                onChange={(e) => setEditForm(prev => ({ ...prev, metaGolsGanhos: parseInt(e.target.value) || 1 }))}
+                                className="w-12 text-center text-xs px-1 py-0.5 rounded border border-[#e2e8f0]" />
                             </div>
                           ) : (
-                            <div className="flex items-center justify-center gap-1">
-                              <span className="text-sm font-bold text-[#16A34A]">{formatCurrency(bonusPorCiclo)}</span>
-                              {isBonusEditable && (
-                                <button onClick={() => startEditBonus(collab)} className="p-0.5 rounded hover:bg-[#f1f5f9]" aria-label="Editar bônus">
-                                  <Edit2 className="w-3 h-3 text-[#64748b]" />
-                                </button>
-                              )}
-                            </div>
+                            <span className="text-xs font-medium">{formatInt(metaGols.assinados)}/{formatInt(metaGols.ganhos)}</span>
                           )}
                         </td>
-                        <td className="text-center font-bold text-[#16A34A]">{formatCurrency(bonusEstimado)}</td>
+                        <td className="text-center font-bold text-[#0f172a]">{formatInt(totalGols)}</td>
                         <td className="text-center">
                           <div className="flex items-center justify-center gap-1">
                             {isEditing ? (
                               <>
-                                <button onClick={() => saveEdit(collab.id)} disabled={!individualEditable || savingId === collab.id}
-                                  className="p-0.5 rounded hover:bg-green-50 disabled:opacity-50" aria-label="Salvar edição">
+                                <button onClick={() => saveRow(collab.id)} disabled={!individualEditable || savingId === collab.id}
+                                  className="p-0.5 rounded hover:bg-green-50 disabled:opacity-50" title="Salvar alterações">
                                   <Save className="w-3.5 h-3.5 text-[#16A34A]" />
                                 </button>
-                                <button onClick={cancelEdit} className="p-0.5 rounded hover:bg-red-50" aria-label="Cancelar">
+                                <button onClick={cancelEditRow} className="p-0.5 rounded hover:bg-red-50" title="Cancelar">
                                   <X className="w-3.5 h-3.5 text-[#DC2626]" />
                                 </button>
                               </>
                             ) : (
-                              <button onClick={() => startEdit(collab)} disabled={!individualEditable}
-                                className="p-0.5 rounded hover:bg-[#f1f5f9] disabled:opacity-50"
-                                aria-label={individualEditable ? `Editar meta de ${collab.name}` : "Metas automáticas"}>
+                              <button onClick={() => startEditRow(collab)} disabled={!individualEditable}
+                                className="p-0.5 rounded hover:bg-[#f1f5f9] disabled:opacity-50" title="Editar linha">
                                 <Edit2 className="w-3.5 h-3.5 text-[#64748b]" />
                               </button>
                             )}
-                            <button onClick={() => toggleExpand(collab.id)} className="p-0.5 rounded hover:bg-[#f1f5f9]" aria-label={isExpanded ? "Recolher detalhes" : "Expandir detalhes"}>
+                            <button onClick={() => toggleExpand(collab.id)} className="p-0.5 rounded hover:bg-[#f1f5f9]" title="Expandir">
                               {isExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
                             </button>
                           </div>
@@ -822,7 +1209,7 @@ export default function Configuration() {
                       </tr>
                       {isExpanded && (
                         <tr className="bg-[#f8fafc]">
-                          <td colSpan={7} className="px-4 py-2">
+                          <td colSpan={6} className="px-4 py-2">
                             <div className="grid grid-cols-5 gap-2 text-center">
                               <div className="bg-white rounded p-2">
                                 <FileText className="w-3 h-3 text-[#2F6FED] mx-auto mb-0.5" />

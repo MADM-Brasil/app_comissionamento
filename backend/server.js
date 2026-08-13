@@ -5,7 +5,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import session from 'express-session';
 import crypto from 'crypto';
-import bcrypt from 'bcrypt'; // <-- adicionado para hash da nova senha
+import bcrypt from 'bcrypt';
 
 import { pool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
@@ -14,9 +14,11 @@ import twoFactorService from './security/verif-2factory.js';
 // Importa os routers protegidos
 import colaboradoresRoutes from './routes/colaboradores.js';
 import metricsRouter from './routes/metrics.js';
+import tabelaComissoesRoutes from './routes/tabela-comissoes.js';
 import adminRoutes from './routes/admin.js';
 import userRouter from './routes/user.js';
 import suporteRouter from './routes/suporte.js';
+import campanhasRoutes from './routes/campanhas.js';
 
 const app = express();
 const PORT = process.env.PORT || 3007;
@@ -268,7 +270,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     }
 
     const user = result.rows[0];
-    // Método adicionado ao twoFactorService para enviar código de reset
     const sendResult = await twoFactorService.sendPasswordResetCode(user.email, user.nome);
     if (!sendResult.success) {
       return res.status(500).json({ success: false, error: sendResult.error });
@@ -325,7 +326,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
     const email = req.session.resetEmail;
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // UPDATE na tabela original (não na view)
     const updateResult = await pool.query(
       `UPDATE app_comissionamento.metricas_assessores
        SET senha_colaborador_hash = $1, updated_at = NOW()
@@ -338,7 +338,6 @@ app.post('/api/auth/reset-password', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
     }
 
-    // Limpa dados de reset da sessão
     delete req.session.resetToken;
     delete req.session.resetEmail;
     delete req.session.resetName;
@@ -360,7 +359,9 @@ app.use((req, res, next) => {
   return res.status(401).json({ success: false, error: 'Não autenticado' });
 });
 
-// ========== ROTAS PROTEGIDAS (a partir daqui, token CSRF obrigatório) ==========
+// ========== ROTAS PROTEGIDAS ==========
+
+// GET /api/metricas-assessores (CORRIGIDA: vírgula extra removida, novos campos adicionados)
 app.get('/api/metricas-assessores', async (req, res) => {
   try {
     const { mes, email, colaborador_id } = req.query;
@@ -371,7 +372,8 @@ app.get('/api/metricas-assessores', async (req, res) => {
              comissao_bonus,
              peso_meta_assinados_diario, peso_meta_ganho_diario,
              peso_meta_assinados_semanal, peso_meta_ganho_semanal,
-             peso_meta_assinados_mensal, peso_meta_ganho_mensal
+             peso_meta_assinados_mensal, peso_meta_ganho_mensal,
+             meta_gols_assinados, meta_gols_ganhos
       FROM app_comissionamento.view_app_metricas_assessores
       WHERE TO_CHAR(data_metrica::date, 'YYYY-MM') = $1
     `;
@@ -389,12 +391,16 @@ app.get('/api/metricas-assessores', async (req, res) => {
   }
 });
 
+// Registro das rotas protegidas
 app.use('/api', colaboradoresRoutes);
 app.use('/api/metrics', metricsRouter);
+app.use('/api/tabela-comissoes', tabelaComissoesRoutes);
+app.use('/api/campanhas', campanhasRoutes); 
 app.use('/api/admin', adminRoutes);
 app.use('/api/user', userRouter);
 app.use('/api/suporte', suporteRouter);
 
+// GET /api/admin/months
 app.get('/api/admin/months', async (req, res) => {
   try {
     const result = await pool.query(
@@ -413,6 +419,7 @@ app.get('/api/admin/months', async (req, res) => {
   }
 });
 
+// Health checks
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 

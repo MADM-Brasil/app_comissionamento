@@ -18,7 +18,6 @@ interface FilterBarProps {
   initialEquipe?: string;
   initialColaborador?: string;
   initialProduto?: string;
-  /** Callback opcional para recarregar os dados manualmente */
   onRefresh?: () => Promise<void>;
 }
 
@@ -27,7 +26,7 @@ const normalize = (str: string): string => (str || '').trim().toLowerCase();
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia', 'Equipe Reciclagem'
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia', 'Equipe Reciclagem',
 ];
 
 const isExcludedTeam = (teamName: string): boolean => {
@@ -38,11 +37,29 @@ const isExcludedTeam = (teamName: string): boolean => {
 
 const TEAM_TO_PRODUCT: Record<string, string> = {
   "Equipe Concomitante": "Concomitante",
-  "Equipe Quinquenio": "Quinquenio",
+  "Equipe Tatiane": "Quinquenio",
   "Equipe Quinquênio": "Quinquenio",
 };
 
 const PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante"];
+
+const STORAGE_KEY = "madm_filterBar_state_v1";
+
+function getStoredFilters(): { equipe: string; colaborador: string; produto: string; searchTerm: string } {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        equipe: parsed.equipe || "todas",
+        colaborador: parsed.colaborador || "todos",
+        produto: parsed.produto || "Todos",
+        searchTerm: parsed.searchTerm || "",
+      };
+    }
+  } catch (e) { /* ignore */ }
+  return { equipe: "todas", colaborador: "todos", produto: "Todos", searchTerm: "" };
+}
 
 export default function FilterBar({
   onFilterChange,
@@ -56,10 +73,13 @@ export default function FilterBar({
   const { collaborators, equipeConfigs, setCollaborators, setEquipeConfigs } = useAppStore();
   const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
 
-  const [selectedEquipe, setSelectedEquipe] = useState(initialEquipe);
-  const [selectedColaborador, setSelectedColaborador] = useState(initialColaborador);
-  const [selectedProduto, setSelectedProduto] = useState(initialProduto);
-  const [searchTerm, setSearchTerm] = useState("");
+  // Inicializa estados com valores persistidos (uma única vez)
+  const [initialStored] = useState(getStoredFilters);
+
+  const [selectedEquipe, setSelectedEquipe] = useState(initialStored.equipe);
+  const [selectedColaborador, setSelectedColaborador] = useState(initialStored.colaborador);
+  const [selectedProduto, setSelectedProduto] = useState(initialStored.produto);
+  const [searchTerm, setSearchTerm] = useState(initialStored.searchTerm);
   const [loadingEquipes, setLoadingEquipes] = useState(false);
   const [loadingCollaborators, setLoadingCollaborators] = useState(false);
   const [colabError, setColabError] = useState<string | null>(null);
@@ -72,6 +92,20 @@ export default function FilterBar({
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
 
+  // Obtém a equipe do usuário com fallback para o registro em collaborators
+  const userTeam = useMemo(() => {
+    if (!currentUser) return '';
+    // 1. Tenta os campos diretos do currentUser
+    const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
+    if (direct) return direct;
+    // 2. Fallback: busca nos colaboradores carregados
+    if (collaborators.length > 0) {
+      const colab = collaborators.find(c => c.id === currentUser.id || c.email === currentUser.email);
+      if (colab && colab.equipeNome) return colab.equipeNome.trim();
+    }
+    return '';
+  }, [currentUser, collaborators]);
+
   // Atualiza a hora quando os dados ficam prontos
   useEffect(() => {
     if (isReady) {
@@ -79,7 +113,7 @@ export default function FilterBar({
     }
   }, [isReady]);
 
-  // ========== TIMEOUT DE SEGURANÇA ==========
+  // Timeout de segurança
   useEffect(() => {
     const timeout = setTimeout(() => {
       if (!isReady) {
@@ -90,7 +124,7 @@ export default function FilterBar({
     return () => clearTimeout(timeout);
   }, [isReady]);
 
-  // ========== CARREGA EQUIPES (fallback) ==========
+  // Carrega equipes (fallback)
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -111,7 +145,7 @@ export default function FilterBar({
             }))
           );
         }
-      } catch (_) { /* ignora */ } finally {
+      } catch (_) { /* ignore */ } finally {
         if (mounted) setLoadingEquipes(false);
       }
     };
@@ -119,7 +153,7 @@ export default function FilterBar({
     return () => { mounted = false; };
   }, [equipeConfigs.length, setEquipeConfigs]);
 
-  // ========== CARREGA COLABORADORES (fallback) ==========
+  // Carrega colaboradores (fallback)
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -152,7 +186,7 @@ export default function FilterBar({
     return () => { mounted = false; };
   }, [collaborators.length, setCollaborators]);
 
-  // ========== APLICA RESTRIÇÕES DE ACESSO ==========
+  // Aplica restrições de acesso (uma única vez)
   useEffect(() => {
     if (!currentUser) return;
     if (hasAppliedRestrictions) return;
@@ -160,19 +194,31 @@ export default function FilterBar({
     console.log('🔒 FilterBar: aplicando restrições de acesso para', currentUser.cargo);
 
     if (isAssessor) {
-      if (currentUser.equipe) setSelectedEquipe(currentUser.equipe);
+      if (userTeam) setSelectedEquipe(userTeam);
       if (currentUser.nome) setSelectedColaborador(currentUser.nome);
     } else if (isSupervisor) {
-      if (currentUser.equipe) setSelectedEquipe(currentUser.equipe);
+      if (userTeam) setSelectedEquipe(userTeam);
       setSelectedColaborador("todos");
     } else {
-      setSelectedEquipe(initialEquipe);
-      setSelectedColaborador(initialColaborador);
+      // Administrador: mantém valores persistidos
+      setSelectedEquipe(initialStored.equipe);
+      setSelectedColaborador(initialStored.colaborador);
+      setSelectedProduto(initialStored.produto);
+      setSearchTerm(initialStored.searchTerm);
     }
     setHasAppliedRestrictions(true);
-  }, [currentUser, isAssessor, isSupervisor, initialEquipe, initialColaborador, hasAppliedRestrictions]);
+  }, [currentUser, isAssessor, isSupervisor, hasAppliedRestrictions, userTeam, initialStored]);
 
-  // ========== Sincronia equipe ⇄ produto ==========
+  // Efeito de sincronização forçada: garante que a equipe do supervisor/assessor fique sempre correta
+  useEffect(() => {
+    if (!currentUser) return;
+    if (!isAssessor && !isSupervisor) return;
+    if (userTeam && selectedEquipe !== userTeam) {
+      setSelectedEquipe(userTeam);
+    }
+  }, [currentUser, isAssessor, isSupervisor, userTeam, selectedEquipe]);
+
+  // Sincronia equipe ⇄ produto
   useEffect(() => {
     if (selectedEquipe && TEAM_TO_PRODUCT[selectedEquipe]) {
       const mapped = TEAM_TO_PRODUCT[selectedEquipe];
@@ -180,17 +226,16 @@ export default function FilterBar({
     }
   }, [selectedEquipe]);
 
-  // ========== LISTA DE EQUIPES ==========
+  // Lista de equipes disponíveis
   const equipesDisponiveis = useMemo(() => {
     let nomes = equipeConfigs.map((eq) => eq.nome).filter((nome) => !isExcludedTeam(nome));
-    if ((isAssessor || isSupervisor) && currentUser?.equipe) {
-      const normUserEquipe = normalize(currentUser.equipe);
-      nomes = nomes.filter((nome) => normalize(nome) === normUserEquipe);
+    if ((isAssessor || isSupervisor) && currentUser) {
+      nomes = nomes.filter((nome) => normalize(nome) === normalize(userTeam));
     }
     return ["todas", ...nomes];
-  }, [equipeConfigs, isAssessor, isSupervisor, currentUser]);
+  }, [equipeConfigs, isAssessor, isSupervisor, currentUser, userTeam]);
 
-  // ========== COLABORADORES FILTRADOS ==========
+  // Colaboradores filtrados
   const filteredColaboradores = useMemo(() => {
     if (!isReady || !collaborators.length) return [];
     let filtered = [...collaborators];
@@ -198,8 +243,8 @@ export default function FilterBar({
     filtered = filtered.filter((c) => normalize(c.cargo) !== 'administrativo');
 
     let effectiveEquipe = selectedEquipe;
-    if ((isAssessor || isSupervisor) && currentUser?.equipe) {
-      effectiveEquipe = currentUser.equipe;
+    if ((isAssessor || isSupervisor) && currentUser) {
+      effectiveEquipe = userTeam;
     }
 
     if (effectiveEquipe && effectiveEquipe !== "todas") {
@@ -217,9 +262,9 @@ export default function FilterBar({
       );
     }
     return filtered;
-  }, [collaborators, selectedEquipe, isAssessor, isSupervisor, currentUser, searchTerm, isReady]);
+  }, [collaborators, selectedEquipe, isAssessor, isSupervisor, currentUser, searchTerm, isReady, userTeam]);
 
-  // ========== NOTIFICAR O PARENT (IMEDIATO) ==========
+  // Notifica o pai imediatamente
   const onFilterChangeRef = useRef(onFilterChange);
   useEffect(() => {
     onFilterChangeRef.current = onFilterChange;
@@ -236,14 +281,13 @@ export default function FilterBar({
     let finalEquipe = equipe;
     let finalColaborador = colaborador;
     if (isAssessor && currentUser) {
-      finalEquipe = currentUser.equipe || "todas";
+      finalEquipe = userTeam || "todas";
       finalColaborador = currentUser.nome || "todos";
     } else if (isSupervisor && currentUser) {
-      finalEquipe = currentUser.equipe || "todas";
+      finalEquipe = userTeam || "todas";
       finalColaborador = colaborador;
     }
 
-    // Se o colaborador foi selecionado, buscar o ID correspondente
     const colaboradorId =
       finalColaborador !== "todos"
         ? collaborators.find((c) => c.name === finalColaborador)?.id
@@ -257,11 +301,29 @@ export default function FilterBar({
     });
   };
 
-  // ========== HANDLERS DE MUDANÇA (acionam o pai imediatamente) ==========
+  // Persistência no localStorage
+  useEffect(() => {
+    const state = {
+      equipe: selectedEquipe,
+      colaborador: selectedColaborador,
+      produto: selectedProduto,
+      searchTerm,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }, [selectedEquipe, selectedColaborador, selectedProduto, searchTerm]);
+
+  // Notifica o pai após ready + restrições
+  const initialNotifyDone = useRef(false);
+  useEffect(() => {
+    if (isReady && hasAppliedRestrictions && !initialNotifyDone.current) {
+      initialNotifyDone.current = true;
+      notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
+    }
+  }, [isReady, hasAppliedRestrictions, selectedEquipe, selectedColaborador, selectedProduto, searchTerm]);
+
+  // Handlers de mudança
   const handleEquipeChange = (novaEquipe: string) => {
     setSelectedEquipe(novaEquipe);
-    // Se a equipe mudou para uma que força produto, o produto será atualizado via useEffect,
-    // mas como queremos notificar imediatamente, passamos o produto atual ou o mapeado.
     const produtoMapeado = TEAM_TO_PRODUCT[novaEquipe] || selectedProduto;
     if (TEAM_TO_PRODUCT[novaEquipe]) {
       setSelectedProduto(produtoMapeado);
@@ -281,15 +343,14 @@ export default function FilterBar({
 
   const handleSearchChange = (novoTermo: string) => {
     setSearchTerm(novoTermo);
-    // Notifica o pai com o termo de busca, mas sem reaplicar restrições desnecessárias
     if (!isReady || !hasAppliedRestrictions || !currentUser) return;
     let finalEquipe = selectedEquipe;
     let finalColaborador = selectedColaborador;
     if (isAssessor && currentUser) {
-      finalEquipe = currentUser.equipe || "todas";
+      finalEquipe = userTeam || "todas";
       finalColaborador = currentUser.nome || "todos";
     } else if (isSupervisor && currentUser) {
-      finalEquipe = currentUser.equipe || "todas";
+      finalEquipe = userTeam || "todas";
     }
     const colaboradorId =
       finalColaborador !== "todos"
@@ -304,7 +365,6 @@ export default function FilterBar({
     });
   };
 
-  // ========== LIMPAR FILTROS ==========
   const clearFilters = () => {
     if (!isReady) return;
     if (isAssessor && currentUser) {
@@ -324,7 +384,6 @@ export default function FilterBar({
     }
   };
 
-  // ========== AÇÃO DE ATUALIZAR ==========
   const handleRefresh = async () => {
     if (refreshing || !onRefresh) return;
     setRefreshing(true);
@@ -338,7 +397,6 @@ export default function FilterBar({
     }
   };
 
-  // Filtros ativos (agora apenas indicador visual, sem bloquear notificações)
   const hasActiveFilters = useMemo(() => {
     if (!isReady) return false;
     if (isAssessor) return selectedProduto !== "Todos";
@@ -356,7 +414,7 @@ export default function FilterBar({
   const isColaboradorDisabled = isAssessor || loadingCollaborators || !isReady;
   const isProdutoDisabled = !!selectedEquipe && TEAM_TO_PRODUCT[selectedEquipe] !== undefined;
 
-  // ========== RENDER ==========
+  // Render
   if (!isReady || loadingEquipes || loadingCollaborators) {
     return (
       <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
@@ -389,7 +447,6 @@ export default function FilterBar({
 
   return (
     <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
-
       <div className="flex flex-col gap-4">
         {collaborators.length > 5 && !isAssessor && showColaboradorFilter && (
           <div className="relative">
@@ -506,30 +563,30 @@ export default function FilterBar({
           )}
         </div>
 
-              {/* Botão e indicador de atualização */}
-      {onRefresh && (
-        <div className="flex items-center justify-end gap-2 mb-2">
-          {refreshing && (
-            <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-              <span>Atualizando dados...</span>
-            </div>
-          )}
-          <span className="text-[10px] text-gray-400">
-            Atualizado {lastUpdated || new Date().toLocaleTimeString()}
-          </span>
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
-            aria-label="Atualizar dados manualmente"
-            title="Clique para recarregar os dados mantendo os filtros atuais"
-          >
-            <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
-            Atualizar Dados
-          </button>
-        </div>
-      )}
+        {/* Botão e indicador de atualização */}
+        {onRefresh && (
+          <div className="flex items-center justify-end gap-2 mb-2">
+            {refreshing && (
+              <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Atualizando dados...</span>
+              </div>
+            )}
+            <span className="text-[10px] text-gray-400">
+              Atualizado {lastUpdated || new Date().toLocaleTimeString()}
+            </span>
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
+              aria-label="Atualizar dados manualmente"
+              title="Clique para recarregar os dados mantendo os filtros atuais"
+            >
+              <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+              Atualizar Dados
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
