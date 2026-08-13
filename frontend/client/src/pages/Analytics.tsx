@@ -5,7 +5,6 @@ import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, formatCurrency } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
-import { getCollaboratorMeta } from "@/lib/metricsHelper";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -49,6 +48,14 @@ function isExcludedTeam(teamName: string): boolean { return EXCLUDED_TEAMS.inclu
 function isExcludedGroup(group: string): boolean {
   const normalized = (group || '').trim().toLowerCase();
   return EXCLUDED_GROUPS.some(g => g.toLowerCase() === normalized);
+}
+
+// ========== Função local para obter meta do colaborador ==========
+// Substitui a antiga getCollaboratorMeta (obsoleta) importada de metricsHelper
+type PeriodoMeta = 'diario' | 'semanal' | 'mensal';
+function getMeta(c: any, periodo: PeriodoMeta, tipo: 'assinados' | 'ganhos'): number {
+  const key = `meta${periodo.charAt(0).toUpperCase() + periodo.slice(1)}${tipo.charAt(0).toUpperCase() + tipo.slice(1)}`;
+  return Number(c?.[key] ?? 0);
 }
 
 // ========== Utilitários de datas ==========
@@ -111,7 +118,7 @@ export default function Analytics() {
     collaborators, currentUser,
     loadCollaboratorsAndMetrics, loadWeeklyPerformanceData,
     rawMetrics, loadRawMetrics,
-    hideValues, // <-- NOVO: estado global de ocultação
+    hideValues,
   } = useAppStore();
   const { hasPermission } = useAccessControl();
 
@@ -164,7 +171,6 @@ export default function Analytics() {
         loadWeeklyPerformanceData(),
       ]);
 
-      // Força a atualização dos leads limpando o cache local
       setDailyChartData([]);
       setTotalLeads(0);
     } catch (err: any) {
@@ -184,13 +190,12 @@ export default function Analytics() {
     await reloadData(true);
   }, [reloadData]);
 
-  // ========== EFEITO QUE REAGE A MUDANÇAS DE FILTROS/DATAS ==========
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
   }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ========== BUSCA DO BÔNUS (independente) ==========
+  // ========== BUSCA DO BÔNUS ==========
   useEffect(() => {
     if (!currentUser?.id) { setBonusLoading(false); setUserBonus(0); return; }
     if (isExcluded) { setBonusLoading(false); setUserBonus(0); return; }
@@ -222,7 +227,7 @@ export default function Analytics() {
     fetchBonus();
   }, [currentUser, currentStartDate, isExcluded]);
 
-  // ========== GRÁFICO DE EVOLUÇÃO DIÁRIA (inclui leads) ==========
+  // ========== GRÁFICO DE EVOLUÇÃO DIÁRIA ==========
   const chartDateRange = useMemo(() => getChartDateRange(period, currentStartDate, currentEndDate), [period, currentStartDate, currentEndDate]);
   const isFetchingRef = useRef(false);
   const lastFetchChartTime = useRef<number>(0);
@@ -291,7 +296,10 @@ export default function Analytics() {
       return { targetAssinados:2000, targetGanhos:2000 };
     }
     const periodoMeta='mensal';
-    return { targetAssinados: baseCollaborators.reduce((sum,c)=>sum+getCollaboratorMeta(c,periodoMeta,'assinados'),0), targetGanhos: baseCollaborators.reduce((sum,c)=>sum+getCollaboratorMeta(c,periodoMeta,'ganhos'),0) };
+    return {
+      targetAssinados: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'assinados'),0),
+      targetGanhos: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'ganhos'),0)
+    };
   }, [baseCollaborators, equipe, colaborador, currentStartDate, currentEndDate]);
   const percentAssinados = targetAssinados>0 ? (totals.assinados/targetAssinados)*100 : 0;
   const percentGanhos = targetGanhos>0 ? (totals.ganhos/targetGanhos)*100 : 100;
@@ -302,8 +310,8 @@ export default function Analytics() {
     if (!currentUserData) return 0;
     const assinados = currentUserData.assinados||0;
     const ganhos = isSpecialGroup ? 0 : (currentUserData.ganhos||0);
-    const pesoAss = getCollaboratorMeta(currentUserData, periodoMetaUser, 'assinados');
-    const pesoGan = getCollaboratorMeta(currentUserData, periodoMetaUser, 'ganhos');
+    const pesoAss = getMeta(currentUserData, periodoMetaUser, 'assinados');
+    const pesoGan = getMeta(currentUserData, periodoMetaUser, 'ganhos');
     if (pesoGan===0) return Math.floor(assinados/(pesoAss||1));
     return Math.floor(Math.min(assinados/(pesoAss||1), ganhos/(pesoGan||1)));
   }, [currentUserData, periodoMetaUser, isSpecialGroup]);
@@ -383,12 +391,12 @@ const conversionByStage = useMemo(() => {
                 {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
                 {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
               </span>            </div>
-          )}
+          )} 
 
           {/* KPI Cards */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <KpiCard label="Comissão Estimada" value={userMetasBatidas * userBonusCiclo} target={5000} unit="R$" icon={DollarSign} color="#2F6FED" simple hideValues={hideValues} />
-            <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.assinados : totals.ganhos} target={isSpecialGroup ? targetAssinados : targetGanhos} unit="" icon={FileCheck} color="#16A34A" hideValues={hideValues} />
+            <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.assinados : totals.assinados} target={isSpecialGroup ? targetAssinados : targetAssinados} unit="" icon={FileCheck} color="#16A34A" hideValues={hideValues} />
             <KpiCard label="Protocolados" value={totals.protocolados} target={60} unit="" icon={BarChart2} color="#8B5CF6" hideValues={hideValues} />
             <KpiCard label="Progresso da Meta" value={goalProgress} target={100} unit="%" icon={Activity} color="#EA8C1D" hideValues={hideValues} />
           </div>

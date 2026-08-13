@@ -5,13 +5,13 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
 
 // ============================================================
 // MÉTRICAS DE DESEMPENHO (EMITIDOS, ASSINADOS, ETC.)
-// ============================================================
-
+// ============================================================ 
+ 
 export async function fetchEmitidos(
   params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
   const url = new URL(`${API_BASE}/metrics/emitidos`);
-  if (params.periodo) url.searchParams.append('periodo', params.periodo);
+  if (params.periodo) url.searchParams.append('periodo', params.periodo); 
   if (params.start) url.searchParams.append('start', params.start);
   if (params.end) url.searchParams.append('end', params.end);
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);

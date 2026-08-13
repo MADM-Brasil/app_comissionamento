@@ -3,7 +3,7 @@ import { useAppStore } from '@/lib/dataStore';
 import {
   LEVELS,
   getAccessLevel as getLevel,
-  hasPermission as checkPermission,
+  hasPermission as checkPermission, 
   getUserPermissions as getPermissions, 
   getUIConfig as getUIConfigFromLib,
   filterTeamData as filterTeam,

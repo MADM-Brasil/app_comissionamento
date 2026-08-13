@@ -18,6 +18,7 @@ import {
   FilePenLine,
   FileCheck2,
   Award,
+  AlertTriangle,
 } from "lucide-react";
 import {
   CartesianGrid,
@@ -130,7 +131,10 @@ const EXCLUDED_CARGOS = [
 ];
 const normalize = (str: string): string =>
   (str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
+
+// ========== FUNÇÕES DE EXCLUSÃO NORMALIZADAS ==========
+const isExcludedTeam = (teamName: string) =>
+  EXCLUDED_TEAMS.some((t) => normalize(t) === normalize(teamName));
 const isExcludedCargo = (cargo: string) =>
   EXCLUDED_CARGOS.some((g) => normalize(g) === normalize(cargo));
 const isDesativado = (c: Collaborator) =>
@@ -293,16 +297,23 @@ export default function Equipe() {
 
   const [busca, setBusca] = useState("");
   const [initialLoading, setInitialLoading] = useState(true);
+  const [loadingError, setLoadingError] = useState<string | null>(null);
 
   useEffect(() => {
     updateCurrentDates();
     const load = async () => {
-      if (rawCollaborators.length === 0) {
-        await loadCollaborators();
+      try {
+        if (rawCollaborators.length === 0) {
+          await loadCollaborators();
+        }
+        await loadMetricsForPeriod();
+        await loadRawMetrics();
+      } catch (err: any) {
+        console.error("Erro ao carregar dados:", err);
+        setLoadingError("Falha ao carregar dados. Tente novamente.");
+      } finally {
+        setInitialLoading(false);
       }
-      await loadMetricsForPeriod();
-      await loadRawMetrics();
-      setInitialLoading(false);
     };
     load();
   }, []);
@@ -312,6 +323,20 @@ export default function Equipe() {
     loadMetricsForPeriod();
     loadRawMetrics();
   }, [currentStartDate, currentEndDate]);
+
+  // 🔧 Correção: obtém a equipe do supervisor com fallback
+  const userTeam = useMemo(() => {
+    if (!currentUser) return '';
+    // Tenta campos diretos
+    const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
+    if (direct) return direct;
+    // Fallback: busca nos colaboradores carregados
+    if (rawCollaborators.length > 0) {
+      const colab = rawCollaborators.find(c => c.email === currentUser.email || c.id === currentUser.id);
+      if (colab && colab.equipeNome) return colab.equipeNome.trim();
+    }
+    return '';
+  }, [currentUser, rawCollaborators]);
 
   const supervisor = useMemo(() => {
     const pathMatch = location.match(/^\/equipe\/(.+)$/);
@@ -326,21 +351,30 @@ export default function Equipe() {
     return undefined;
   }, [location]);
 
+  // Redirecionamento robusto para supervisor/assessor
   useEffect(() => {
     if (!currentUser) return;
-    if (isSupervisor && supervisor && normalize(supervisor) !== normalize(currentUser.equipe || "")) {
-      window.location.href = `/equipe/${encodeURIComponent(currentUser.equipe || "")}`;
+    if (isSupervisor) {
+      if (!userTeam) return;
+      if (supervisor && normalize(supervisor) !== normalize(userTeam)) {
+        window.location.href = `/equipe/${encodeURIComponent(userTeam)}`;
+        return;
+      }
+      if (!supervisor) {
+        window.location.href = `/equipe/${encodeURIComponent(userTeam)}`;
+      }
     }
     if (isAssessor && supervisor) {
       const col = rawCollaborators.find(c => c.email === currentUser.email);
       if (col) window.location.href = `/colaboradores/${col.id}`;
     }
-  }, [currentUser, isSupervisor, isAssessor, supervisor, rawCollaborators]);
+  }, [currentUser, isSupervisor, isAssessor, supervisor, rawCollaborators, userTeam]);
 
+  // 🔧 Correção: normaliza o status e a equipe nos filtros
   const colaboradores = useMemo(() => {
     let filtered = rawCollaborators.filter(
       (c) =>
-        c.status === "ativo" &&
+        normalize(c.status) === "ativo" &&
         !isDesativado(c) &&
         !isExcludedTeam(c.equipeNome) &&
         !isExcludedCargo(c.cargo)
@@ -348,13 +382,14 @@ export default function Equipe() {
     if (isAssessor) {
       filtered = filtered.filter(c => c.email === currentUser?.email);
     } else if (isSupervisor) {
-      const userTeam = currentUser?.equipe;
       if (userTeam) {
         filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(userTeam));
+      } else {
+        filtered = [];
       }
     }
     return filtered;
-  }, [rawCollaborators, currentUser, isAssessor, isSupervisor]);
+  }, [rawCollaborators, currentUser, isAssessor, isSupervisor, userTeam]);
 
   const labelPeriodo = useMemo(
     () => (period === "Custom" ? `${currentStartDate} a ${currentEndDate}` : period),
@@ -383,6 +418,23 @@ export default function Equipe() {
     );
   }
 
+  if (loadingError) {
+    return (
+      <DashboardLayout title={titulo} subtitle={subtitulo}>
+        <div className="flex flex-col items-center justify-center h-64">
+          <AlertTriangle className="w-8 h-8 text-red-500 mb-2" />
+          <p className="text-slate-600 mb-4">{loadingError}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700"
+          >
+            Recarregar página
+          </button>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout title={titulo} subtitle={subtitulo}>
       {!supervisor && !colaboradorId && canSeeAll ? (
@@ -394,7 +446,7 @@ export default function Equipe() {
       ) : isAssessor ? (
         <DetalhesColaborador colaboradorId={colaboradores[0]?.id} colaboradores={colaboradores} />
       ) : isSupervisor ? (
-        <ColaboradoresDaEquipe equipe={currentUser?.equipe || ""} colaboradores={colaboradores} />
+        <ColaboradoresDaEquipe equipe={userTeam} colaboradores={colaboradores} />
       ) : (
         <ListaEquipes colaboradores={colaboradores} busca={busca} setBusca={setBusca} />
       )}
@@ -491,8 +543,9 @@ function ListaEquipes({
   const diarioPorTime = useMemo(() => {
     const mapa = new Map<string, Map<string, number>>();
     for (const linha of diario) {
-      if (!mapa.has(linha.time!)) mapa.set(linha.time!, new Map());
-      mapa.get(linha.time!)!.set(linha.dia, linha.total);
+      if (!linha.time) continue;
+      if (!mapa.has(linha.time)) mapa.set(linha.time, new Map());
+      mapa.get(linha.time)!.set(linha.dia, linha.total);
     }
     return mapa;
   }, [diario]);
@@ -539,6 +592,27 @@ function ListaEquipes({
   const resultadosBusca = buscaNormalizada
     ? colaboradores.filter((c) => normalizarNome(c.name).includes(buscaNormalizada))
     : null;
+
+  // 🔧 Mensagem quando não há equipes/colaboradores
+  if (colaboradores.length === 0 && !loadingDiario && times.length === 0) {
+    return (
+      <div className="text-center py-12">
+        <Users className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+        <h3 className="text-lg font-semibold text-slate-700 mb-1">Nenhuma equipe encontrada</h3>
+        <p className="text-sm text-slate-500 mb-4">
+          Não há colaboradores ativos para exibir no momento.
+        </p>
+        <button
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+        >
+          {refreshing ? <Loader2 size={16} className="animate-spin" /> : <RefreshCw size={16} />}
+          {refreshing ? "Atualizando..." : "Tentar novamente"}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -784,16 +858,10 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
 //  COLABORADORES DA EQUIPE
 // ============================================================
 function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; colaboradores: Collaborator[] }) {
-  const { currentUser } = useAccessControl();
-  const userLevel = getAccessLevel(currentUser?.cargo, currentUser?.status);
-  const isSupervisor = userLevel === LEVELS.SUPERVISAO;
-
   const membros = useMemo(() => {
-    if (isSupervisor) {
-      return colaboradores.filter(c => normalize(c.equipeNome) === normalize(currentUser?.equipe || ""));
-    }
-    return colaboradores.filter(c => c.equipeNome === equipe);
-  }, [colaboradores, equipe, isSupervisor, currentUser]);
+    if (!equipe) return [];
+    return colaboradores.filter(c => normalize(c.equipeNome) === normalize(equipe));
+  }, [colaboradores, equipe]);
 
   return (
     <div>
@@ -801,7 +869,11 @@ function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; cola
         <ArrowLeft size={15} /> Voltar para equipes
       </Link>
       {membros.length === 0 ? (
-        <p className="text-slate-500">Nenhum colaborador encontrado na equipe {equipe}.</p>
+        <div className="text-center py-12">
+          <Users className="w-12 h-12 text-slate-300 mx-auto mb-3" />
+          <h3 className="text-lg font-semibold text-slate-700">Nenhum colaborador encontrado</h3>
+          <p className="text-sm text-slate-500">Não há membros ativos na equipe {equipe}.</p>
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {membros.map((c) => (
@@ -929,7 +1001,6 @@ function DetalhesColaborador({
   const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
   const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
 
-  // cores para os anéis de eficiência – apenas indicativo visual, não classificação de status
   const corConversaoGeral = taxaConversaoGeral >= 60 ? "#22c55e" : taxaConversaoGeral >= 40 ? "#f59e0b" : "#ef4444";
   const corConversaoProtocolados = taxaConversaoProtocolados >= 60 ? "#22c55e" : taxaConversaoProtocolados >= 40 ? "#f59e0b" : "#ef4444";
 
@@ -965,7 +1036,6 @@ function DetalhesColaborador({
     ];
   }, [recebidos, assinados, protocolados, ganhos, taxaConversaoGeral, mediaEquipe]);
 
-  // Recomendações baseadas apenas em thresholds numéricos, sem classificação de status
   const recomendacoes: string[] = [];
   if (pace && metaMensal > 0) {
     const gapRatio = pace.projecao / metaMensal;
@@ -1014,7 +1084,6 @@ function DetalhesColaborador({
         <ArrowLeft size={15} /> Voltar para a equipe
       </Link>
 
-      {/* Cabeçalho sem StatusPill */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div className="flex items-center gap-4">
           <Avatar nome={colaborador.name} size={56} />
@@ -1028,7 +1097,6 @@ function DetalhesColaborador({
         </div>
       </div>
 
-      {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
         <KpiCard titulo="Recebidos" valor={formatNumero(recebidos)} icon={FileStack} accent="info" />
         <KpiCard
@@ -1049,7 +1117,6 @@ function DetalhesColaborador({
         />
       </div>
 
-      {/* Pace sem classificação de status – cor fixa azul */}
       {metaMensal > 0 && pace && (
         <Card className="mb-6 border-l-4 border-l-blue-500">
           <div className="flex items-center justify-between mb-3">
@@ -1082,7 +1149,6 @@ function DetalhesColaborador({
         </Card>
       )}
 
-      {/* Evolução e Eficiência */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
         <Card className="xl:col-span-2">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">
@@ -1140,7 +1206,6 @@ function DetalhesColaborador({
           )}
         </Card>
 
-        {/* Eficiência com dois anéis */}
         <Card className="flex flex-col items-center justify-center">
           <h3 className="text-sm font-semibold text-slate-700 self-start mb-2">Eficiência</h3>
           <div className="grid grid-cols-2 gap-4 w-full">
@@ -1198,7 +1263,6 @@ function DetalhesColaborador({
         </Card>
       </div>
 
-      {/* Radar e Recomendações */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
         <Card className="xl:col-span-1">
           <h3 className="text-sm font-semibold text-slate-700 mb-3">Comparação com a equipe</h3>

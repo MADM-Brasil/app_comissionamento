@@ -4,9 +4,9 @@ import { persist } from 'zustand/middleware';
 import { formatCurrency as formatCurrencyUtil, formatPercent as formatPercentUtil } from './utils';
 import {
   fetchEmitidos,
-  fetchAssinados,
+  fetchAssinados, 
   fetchProtocolados,
-  fetchGanhos,
+  fetchGanhos, 
   fetchPerdidos,
   fetchLeadsRecebidos,
   fetchWeeklyPerformance,
@@ -59,6 +59,7 @@ export interface Collaborator {
   pesoSemanalGanhos: number;
   pesoMensalAssinados: number;
   pesoMensalGanhos: number;
+  totalGols?: number;
   classificacaoOperacional: string; 
   canal: string;                    
 }

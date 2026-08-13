@@ -10,7 +10,7 @@ export interface CalculatorConfig {
 }
 
 export interface TeamMember {
-  id?: string | number;
+  id?: string | number; 
   nome?: string;
   ganhos?: number;
   assinados?: number;

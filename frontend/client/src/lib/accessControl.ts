@@ -6,6 +6,7 @@ export const LEVELS = {
   SUPERVISAO: 2,          //Acesso nivel 2
   COORDENADOR: 3,         //Acesso nivel 3
   ADMINISTRATIVO: 4,      //Acesso nivel 4
+  SUPER_ADMIN: 5,         //Acesso nivel 5
 } as const;
 
 type Level = typeof LEVELS[keyof typeof LEVELS];
@@ -87,13 +88,15 @@ const GROUP_MAPPING: Record<string, Level> = {
 
   // Administrativo
   'salesops': LEVELS.ADMINISTRATIVO,
-  'ceo': LEVELS.ADMINISTRATIVO,
   'analista de crm': LEVELS.ADMINISTRATIVO,
-  'desenvolvedor': LEVELS.ADMINISTRATIVO,
-  'diretora': LEVELS.ADMINISTRATIVO,
   'analista de dados': LEVELS.ADMINISTRATIVO,
   'desenvolvedor make': LEVELS.ADMINISTRATIVO,
   'analista de discadora': LEVELS.ADMINISTRATIVO,
+
+  // Super Admin
+  'desenvolvedor': LEVELS.SUPER_ADMIN,
+  'diretora': LEVELS.SUPER_ADMIN,
+  'ceo': LEVELS.SUPER_ADMIN,
 };
 
 const PERMISSIONS: Record<Level, FullPermissions> = {
@@ -177,6 +180,22 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     lockedCollaborator: false,
     description: 'Acesso total',
   },
+  [LEVELS.SUPER_ADMIN]: {
+    canAccessDashboard: true,
+    canAccessComissoes: true,
+    canAccessRanking: true,
+    canAccessReports: true,
+    canAccessConfiguration: true,
+    canViewTeam: true,
+    canEditConfiguration: true,
+    canEditBonus: true,
+    canGenerateNextMonth: true,
+    canExportData: true,
+    filterLocked: false,
+    lockedTeam: false,
+    lockedCollaborator: false,
+    description: 'Acesso total',
+  }
 };
 
 export function getAccessLevel(cargo: string | undefined, status?: string): Level {
@@ -237,6 +256,7 @@ function getLevelName(level: Level): string {
     [LEVELS.SUPERVISAO]: 'SUPERVISAO',
     [LEVELS.COORDENADOR]: 'COORDENADOR',
     [LEVELS.ADMINISTRATIVO]: 'ADMINISTRATIVO',
+    [LEVELS.SUPER_ADMIN]: 'SUPER ADMIN',
   };
   return names[level] || 'SEM ACESSO';
 }

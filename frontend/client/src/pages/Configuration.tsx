@@ -9,11 +9,17 @@ import {
   Eye, EyeOff, Check, X as XIcon,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
-import { fetchCollaborators, fetchEquipes, API_BASE } from "@/lib/api";
+import {
+  fetchCollaborators, fetchEquipes, API_BASE
+} from "@/lib/api";
+import {
+  fetchEmitidos, fetchAssinados, fetchGanhos, fetchPerdidos, fetchProtocolados
+} from "@/lib/metrics";
 import { recalculateHierarchyWeights } from "@/lib/metrics";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { calculator } from "@/lib/calculator";
 
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
@@ -28,6 +34,9 @@ type CicloPeriodo = 'diario' | 'semanal' | 'mensal';
 const PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante"];
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
+
+const normalize = (str: string): string =>
+  (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 function formatMonthYear(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '--';
@@ -59,12 +68,13 @@ export default function Configuration() {
   const canEditConfiguration = hasPermission("canEditConfiguration");
   const canEditBonus = hasPermission("canEditBonus");
   const canGenerateNextMonth = hasPermission("canGenerateNextMonth");
-  const isAdminOnly = userLevel === LEVELS.ADMINISTRATIVO;
+  const isAdminOnly = userLevel === LEVELS.ADMINISTRATIVO || userLevel === LEVELS.SUPER_ADMIN;
 
   // ========== ESTADOS ==========
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedEquipe, setSelectedEquipe] = useState("Todas");
   const [selectedPeriod, setSelectedPeriod] = useState<CicloPeriodo>('mensal');
+  const [periodoTabela, setPeriodoTabela] = useState<CicloPeriodo>('mensal');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<{
     pesoAssinados?: number;
@@ -175,7 +185,7 @@ export default function Configuration() {
   useEffect(() => { refreshMonths(); }, []);
   useEffect(() => { if (!monthsError) refreshMonths(); }, [selectedMonth]);
 
-  // ========== CARREGAMENTO DE COLABORADORES (COM CACHE) ==========
+  // ========== CARREGAMENTO DE COLABORADORES E MÉTRICAS DO MÊS ==========
   const loadCollaboratorsForMonth = async (month: string) => {
     if (!month || !/^\d{4}-\d{2}-\d{2}$/.test(month)) return;
 
@@ -194,10 +204,100 @@ export default function Configuration() {
         if (!uniqueMap.has(key)) uniqueMap.set(key, c);
       });
       const uniqueCollabs = Array.from(uniqueMap.values());
+
+      // Normaliza campos de meta de gols
       uniqueCollabs.forEach((c: any) => {
         c.metaGolsAssinados = c.meta_gols_assinados ?? c.metaGolsAssinados ?? 20;
         c.metaGolsGanhos = c.meta_gols_ganhos ?? c.metaGolsGanhos ?? 20;
       });
+
+      // Carrega métricas do mês selecionado
+      const start = month;
+      const year = parseInt(month.substring(0, 4), 10);
+      const monthIdx = parseInt(month.substring(5, 7), 10) - 1;
+      const lastDay = new Date(year, monthIdx + 1, 0).getDate();
+      const end = `${month.substring(0, 7)}-${String(lastDay).padStart(2, '0')}`;
+
+      // Totais (para os campos de emitidos, assinados, etc.)
+      const [emitidos, assinados, ganhos, perdidos, protocolados] = await Promise.all([
+        fetchEmitidos({ start, end }),
+        fetchAssinados({ start, end }),
+        fetchGanhos({ start, end }),
+        fetchPerdidos({ start, end }),
+        fetchProtocolados({ start, end }),
+      ]);
+
+      // Dados diários para calcular Gols (mesma lógica da página Comissões)
+      const [dailyAssinados, dailyGanhos] = await Promise.all([
+        fetchAssinados({ start, end, granularity: 'daily' }),
+        fetchGanhos({ start, end, granularity: 'daily' }),
+      ]);
+
+      // Mapa de totais por colaborador
+      const metricsMap = new Map<string, { emitidos: number; assinados: number; ganhos: number; perdidos: number; protocolados: number }>();
+      const aggregate = (data: any[], key: 'emitidos' | 'assinados' | 'ganhos' | 'perdidos' | 'protocolados') => {
+        data.forEach((item: any) => {
+          const name = normalize(item.colaborador);
+          if (!name) return;
+          if (!metricsMap.has(name)) {
+            metricsMap.set(name, { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0, protocolados: 0 });
+          }
+          const entry = metricsMap.get(name)!;
+          entry[key] += Number(item.total) || 0;
+        });
+      };
+      aggregate(emitidos, 'emitidos');
+      aggregate(assinados, 'assinados');
+      aggregate(ganhos, 'ganhos');
+      aggregate(perdidos, 'perdidos');
+      aggregate(protocolados, 'protocolados');
+
+      // Mapa de dados diários por colaborador
+      const dailyMap = new Map<string, Map<string, { assinados: number; ganhos: number }>>();
+      const processDaily = (data: any[], key: 'assinados' | 'ganhos') => {
+        data.forEach((item: any) => {
+          const name = normalize(item.colaborador);
+          const date = (item.periodo || item.data || '').slice(0, 10);
+          if (!name || !date) return;
+          if (!dailyMap.has(name)) dailyMap.set(name, new Map());
+          const dayMap = dailyMap.get(name)!;
+          if (!dayMap.has(date)) dayMap.set(date, { assinados: 0, ganhos: 0 });
+          dayMap.get(date)![key] += Number(item.total) || 0;
+        });
+      };
+      processDaily(dailyAssinados, 'assinados');
+      processDaily(dailyGanhos, 'ganhos');
+
+      // Atualiza colaboradores com métricas e total de gols
+      uniqueCollabs.forEach((c: any) => {
+        const name = normalize(c.name);
+        const metrics = metricsMap.get(name) || { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0, protocolados: 0 };
+        c.emitidos = metrics.emitidos;
+        c.assinados = metrics.assinados;
+        c.ganhos = metrics.ganhos;
+        c.perdidos = metrics.perdidos;
+        c.protocolados = metrics.protocolados;
+
+        // Calcula gols diários
+        const dailyData = dailyMap.get(name);
+        if (dailyData) {
+          const dias = Array.from(dailyData.keys()).sort();
+          const dailyArray = dias.map(date => ({
+            date,
+            assinados: dailyData.get(date)!.assinados,
+            ganhos: dailyData.get(date)!.ganhos,
+          }));
+          const golsResult = calculator.calculateDailyGoals(
+            dailyArray,
+            c.metaGolsAssinados ?? 3,
+            c.metaGolsGanhos ?? 3
+          );
+          c.totalGols = golsResult.totalGols;
+        } else {
+          c.totalGols = 0;
+        }
+      });
+
       collaboratorsCache.current.set(month, uniqueCollabs);
       setCollaborators(uniqueCollabs);
       if (uniqueCollabs.length === 0) toast.warning('Nenhum colaborador encontrado para este mês.');
@@ -236,7 +336,24 @@ export default function Configuration() {
   // ========== LISTAS ==========
   const filteredEquipeConfigs = useMemo(() => equipeConfigs.filter(e => !isExcludedTeam(e.nome)), [equipeConfigs]);
   const equipeNomes = useMemo(() => ["Todas", ...filteredEquipeConfigs.map(e => e.nome)], [filteredEquipeConfigs]);
-  useEffect(() => { if (filteredEquipeConfigs.length && !teamSelected) setTeamSelected(filteredEquipeConfigs[0].nome); }, [filteredEquipeConfigs, teamSelected]);
+
+  useEffect(() => {
+    if (filteredEquipeConfigs.length && !teamSelected) {
+      setTeamSelected(filteredEquipeConfigs[0].nome);
+    }
+  }, [filteredEquipeConfigs, teamSelected]);
+
+  useEffect(() => {
+    if (!teamSelected) return;
+    const equipe = equipeConfigs.find(e => e.nome === teamSelected);
+    if (equipe) {
+      setTeamPesoAssinados(equipe.pesoAssinados ?? 3);
+      setTeamPesoGanhos(equipe.pesoGanhos ?? 3);
+      setTeamMetaGolsAssinados((equipe as any).metaGolsAssinados ?? 20);
+      setTeamMetaGolsGanhos((equipe as any).metaGolsGanhos ?? 20);
+      setTeamBonus(equipe.bonus ?? 150);
+    }
+  }, [teamSelected, equipeConfigs]);
 
   const filteredCollaborators = useMemo(() => {
     return collaborators.filter(c => {
@@ -256,45 +373,32 @@ export default function Configuration() {
   };
 
   // ========== FUNÇÕES AUXILIARES ==========
-const getPesoForPeriod = (collab: any, periodo: CicloPeriodo) => {
-  switch (periodo) {
-    case 'diario': 
-      return { 
-        assinados: Number(collab.pesoDiarioAssinados || collab.metaDiarioAssinados || 3), 
-        ganhos: Number(collab.pesoDiarioGanhos || collab.metaDiarioGanhos || 3) 
-      };
-    case 'semanal': 
-      return { 
-        assinados: Number(collab.pesoSemanalAssinados || collab.metaSemanalAssinados || 15), 
-        ganhos: Number(collab.pesoSemanalGanhos || collab.metaSemanalGanhos || 15) 
-      };
-    default: 
-      return { 
-        assinados: Number(collab.pesoMensalAssinados || collab.metaMensalAssinados || 60), 
-        ganhos: Number(collab.pesoMensalGanhos || collab.metaMensalGanhos || 60) 
-      };
-  }
-};
+  const getPesoForPeriod = (collab: any, periodo: CicloPeriodo) => {
+    switch (periodo) {
+      case 'diario': 
+        return { 
+          assinados: Number(collab.pesoDiarioAssinados ?? collab.metaDiarioAssinados ?? 3), 
+          ganhos: Number(collab.pesoDiarioGanhos ?? collab.metaDiarioGanhos ?? 3) 
+        };
+      case 'semanal': 
+        return { 
+          assinados: Number(collab.pesoSemanalAssinados ?? collab.metaSemanalAssinados ?? 15), 
+          ganhos: Number(collab.pesoSemanalGanhos ?? collab.metaSemanalGanhos ?? 15) 
+        };
+      default: 
+        return { 
+          assinados: Number(collab.pesoMensalAssinados ?? collab.metaMensalAssinados ?? 60), 
+          ganhos: Number(collab.pesoMensalGanhos ?? collab.metaMensalGanhos ?? 60) 
+        };
+    }
+  };
 
   const getMetaGolsForPeriod = (collab: any) => {
-    // No novo modelo, meta de gols é apenas mensal
     return {
       assinados: Number(collab.metaGolsAssinados ?? collab.meta_gols_assinados ?? 20),
       ganhos: Number(collab.metaGolsGanhos ?? collab.meta_gols_ganhos ?? 20),
     };
   };
-
-const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
-  const peso = getPesoForPeriod(collab, periodo);
-  const assinados = Number(collab.assinados) || 0;
-  const ganhos = Number(collab.ganhos) || 0;
-  
-  // Garantir que os divisores sejam > 0
-  const divisorAssinados = peso.assinados > 0 ? peso.assinados : 1;
-  const divisorGanhos = peso.ganhos > 0 ? peso.ganhos : 1;
-  
-  return Math.floor(Math.min(assinados / divisorAssinados, ganhos / divisorGanhos));
-};
 
   const toggleExpand = (id: string) => setExpandedId(prev => (prev === id ? null : id));
 
@@ -347,8 +451,8 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
         periodo: selectedPeriod,
         peso_assinados: pesoAssinados,
         peso_ganhos: pesoGanhos,
-        meta_gols_assinados: 20, // valor padrão
-        meta_gols_ganhos: 20,    // valor padrão
+        meta_gols_assinados: 20,
+        meta_gols_ganhos: 20,
         bonus: Number(globalConfig.valorBonus),
         data_metrica: selectedMonth,
       };
@@ -410,10 +514,10 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
       data_metrica: selectedMonth,
     };
 
-    if (selectedPeriod === 'diario') {
+    if (periodoTabela === 'diario') {
       if (editForm.pesoAssinados !== undefined) payload.meta_diario_assinados = Number(editForm.pesoAssinados);
       if (editForm.pesoGanhos !== undefined) payload.meta_diario_ganhos = Number(editForm.pesoGanhos);
-    } else if (selectedPeriod === 'semanal') {
+    } else if (periodoTabela === 'semanal') {
       if (editForm.pesoAssinados !== undefined) payload.meta_semanal_assinados = Number(editForm.pesoAssinados);
       if (editForm.pesoGanhos !== undefined) payload.meta_semanal_ganhos = Number(editForm.pesoGanhos);
     } else {
@@ -421,7 +525,6 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
       if (editForm.pesoGanhos !== undefined) payload.meta_mensal_ganhos = Number(editForm.pesoGanhos);
     }
 
-    // Meta de gols (apenas mensal, sem sufixo)
     if (editForm.metaGolsAssinados !== undefined) payload.meta_gols_assinados = Number(editForm.metaGolsAssinados);
     if (editForm.metaGolsGanhos !== undefined) payload.meta_gols_ganhos = Number(editForm.metaGolsGanhos);
 
@@ -456,7 +559,7 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
 
   const startEditRow = (collab: any) => {
     if (!isIndividualEditable(collab)) return;
-    const peso = getPesoForPeriod(collab, selectedPeriod);
+    const peso = getPesoForPeriod(collab, periodoTabela);
     const metaGols = getMetaGolsForPeriod(collab);
     setEditingId(collab.id);
     setEditForm({
@@ -599,165 +702,160 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
           {isLocked && <span className="badge warning">Bloqueado</span>}
         </div>
 
-        {/* CARD: REGISTRAR CAMPANHA COMERCIAL */}
-        <div className="card">
-          <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Megaphone className="w-4 h-4 text-[#EA8C1D]" />
-              <h3 className="text-sm font-bold text-[#0f172a]">Registrar Campanha Comercial</h3>
-            </div>
-            <button
-              onClick={() => setMostrarCampanhas(!mostrarCampanhas)}
-              className="flex items-center gap-1 text-xs font-medium text-[#64748b] hover:text-[#0f172a] transition-colors"
-            >
-              {mostrarCampanhas ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              {mostrarCampanhas ? "Ocultar campanhas" : "Ver campanhas registradas"}
-              <span className="ml-1 bg-[#f1f5f9] px-1.5 py-0.5 rounded-full text-[10px]">
-                {campanhasRegistradas.length}
-              </span>
-            </button>
-          </div>
-
-          <div className="p-4">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label htmlFor="campanhaCategoria" className="block text-xs font-medium text-[#64748b] mb-1">
-                  Categoria
-                </label>
-                <select
-                  id="campanhaCategoria"
-                  value={campanhaCategoria}
-                  onChange={(e) => setCampanhaCategoria(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-                >
-                  <option value="outros">Outros</option>
-                  <option value="Gols">Gols</option>
-                  <option value="Assinados">Assinados</option>
-                </select>
+        {/* CARD: REGISTRAR CAMPANHA COMERCIAL (apenas admin) */}
+        {isAdminOnly && (
+          <div className="card">
+            <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Megaphone className="w-4 h-4 text-[#EA8C1D]" />
+                <h3 className="text-sm font-bold text-[#0f172a]">Registrar Campanha Comercial</h3>
               </div>
-              <div>
-                <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
-                  {isAssinados ? "Assinados = Gol" : "Multiplicador (1.5 – 2.0)"}
-                </label>
-                {isAssinados ? (
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      value={campanhaMultiplicador}
-                      disabled
-                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-gray-100 text-center disabled:opacity-50 cursor-not-allowed"
-                    />
-                    <span className="text-xs text-[#64748b] whitespace-nowrap">(fixo)</span>
-                  </div>
-                ) : (
-                  <input
-                    id="campanhaMultiplicador"
-                    type="number"
-                    min={1.5}
-                    max={2.0}
-                    step={0.1}
-                    value={campanhaMultiplicador}
-                    onChange={(e) => setCampanhaMultiplicador(parseFloat(e.target.value) || 1.5)}
-                    className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-                  />
-                )}
-              </div>
-              <div>
-                <label htmlFor="campanhaProduto" className="block text-xs font-medium text-[#64748b] mb-1">
-                  Produto
-                </label>
-                <select
-                  id="campanhaProduto"
-                  value={campanhaProduto}
-                  onChange={(e) => setCampanhaProduto(e.target.value)}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-                >
-                  {PRODUCT_OPTIONS.map((prod) => (
-                    <option key={prod} value={prod}>{prod}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="mt-4">
-              <label htmlFor="campanhaDescricao" className="block text-xs font-medium text-[#64748b] mb-1">
-                Descrição
-              </label>
-              <textarea
-                id="campanhaDescricao"
-                value={campanhaDescricao}
-                onChange={(e) => setCampanhaDescricao(e.target.value)}
-                rows={3}
-                placeholder="Detalhes da campanha comercial..."
-                className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-              />
-            </div>
-            <div className="mt-4 flex justify-end">
               <button
-                onClick={handleRegistrarCampanha}
-                className="px-5 py-2 rounded-lg text-sm font-semibold bg-[#EA8C1D] text-white hover:bg-[#EA8C1D]/90 flex items-center gap-2"
+                onClick={() => setMostrarCampanhas(!mostrarCampanhas)}
+                className="flex items-center gap-1 text-xs font-medium text-[#64748b] hover:text-[#0f172a] transition-colors"
               >
-                <Megaphone className="w-4 h-4" />
-                Registrar Campanha
+                {mostrarCampanhas ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                {mostrarCampanhas ? "Ocultar campanhas" : "Ver campanhas registradas"}
+                <span className="ml-1 bg-[#f1f5f9] px-1.5 py-0.5 rounded-full text-[10px]">
+                  {campanhasRegistradas.length}
+                </span>
               </button>
             </div>
-          </div>
 
-          {mostrarCampanhas && (
-            <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-medium text-[#64748b]">
-                  {campanhasRegistradas.length} campanha(s) registrada(s)
-                </span>
-                {!isAdminOnly && (
-                  <span className="text-xs text-[#94a3b8] bg-[#f8fafc] px-2 py-0.5 rounded-full">
-                    Visualização apenas
-                  </span>
-                )}
-              </div>
-
-              {campanhasRegistradas.length === 0 ? (
-                <div className="text-center py-6 text-sm text-[#94a3b8]">
-                  Nenhuma campanha registrada neste mês.
+            <div className="p-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label htmlFor="campanhaCategoria" className="block text-xs font-medium text-[#64748b] mb-1">
+                    Categoria
+                  </label>
+                  <select
+                    id="campanhaCategoria"
+                    value={campanhaCategoria}
+                    onChange={(e) => setCampanhaCategoria(e.target.value)}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                  >
+                    <option value="outros">Outros</option>
+                    <option value="Gols">Gols</option>
+                    <option value="Assinados">Assinados</option>
+                  </select>
                 </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="simple-table">
-                    <thead>
-                      <tr>
-                        <th className="text-left">Data</th>
-                        <th className="text-left">Categoria</th>
-                        <th className="text-center">Multiplicador</th>
-                        <th className="text-left">Produto</th>
-                        <th className="text-left">Descrição</th>
-                        <th className="text-center">Aprovada</th>
-                        {isAdminOnly && <th className="text-center">Ações</th>}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {campanhasRegistradas.map((camp) => (
-                        <tr key={camp.id}>
-                          <td className="text-xs text-[#64748b]">{camp.data}</td>
-                          <td className="text-xs font-medium">{camp.categoria}</td>
-                          <td className="text-center text-xs font-bold">
-                            {camp.multiplicador.toFixed(1)}x
-                            {camp.categoria === "Assinados" && " (1:1)"}
-                          </td>
-                          <td className="text-xs">{camp.produto}</td>
-                          <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
-                            {camp.descricao}
-                          </td>
-                          <td className="text-center">
-                            {camp.aprovada ? (
-                              <span className="inline-flex items-center gap-1 text-[#16A34A] bg-[#dcfce7] px-2 py-0.5 rounded-full text-[10px] font-medium">
-                                <Check className="w-3 h-3" /> Aprovada
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 text-[#DC2626] bg-[#fee2e2] px-2 py-0.5 rounded-full text-[10px] font-medium">
-                                <XIcon className="w-3 h-3" /> Pendente
-                              </span>
-                            )}
-                          </td>
-                          {isAdminOnly && (
+                <div>
+                  <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
+                    {isAssinados ? "Assinados = Gol" : "Multiplicador (1.5 – 2.0)"}
+                  </label>
+                  {isAssinados ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        value={campanhaMultiplicador}
+                        disabled
+                        className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-gray-100 text-center disabled:opacity-50 cursor-not-allowed"
+                      />
+                      <span className="text-xs text-[#64748b] whitespace-nowrap">(fixo)</span>
+                    </div>
+                  ) : (
+                    <input
+                      id="campanhaMultiplicador"
+                      type="number"
+                      min={1.5}
+                      max={2.0}
+                      step={0.1}
+                      value={campanhaMultiplicador}
+                      onChange={(e) => setCampanhaMultiplicador(parseFloat(e.target.value) || 1.5)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label htmlFor="campanhaProduto" className="block text-xs font-medium text-[#64748b] mb-1">
+                    Produto
+                  </label>
+                  <select
+                    id="campanhaProduto"
+                    value={campanhaProduto}
+                    onChange={(e) => setCampanhaProduto(e.target.value)}
+                    className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                  >
+                    {PRODUCT_OPTIONS.map((prod) => (
+                      <option key={prod} value={prod}>{prod}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              <div className="mt-4">
+                <label htmlFor="campanhaDescricao" className="block text-xs font-medium text-[#64748b] mb-1">
+                  Descrição
+                </label>
+                <textarea
+                  id="campanhaDescricao"
+                  value={campanhaDescricao}
+                  onChange={(e) => setCampanhaDescricao(e.target.value)}
+                  rows={3}
+                  placeholder="Detalhes da campanha comercial..."
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                />
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={handleRegistrarCampanha}
+                  className="px-5 py-2 rounded-lg text-sm font-semibold bg-[#EA8C1D] text-white hover:bg-[#EA8C1D]/90 flex items-center gap-2"
+                >
+                  <Megaphone className="w-4 h-4" />
+                  Registrar Campanha
+                </button>
+              </div>
+            </div>
+
+            {mostrarCampanhas && (
+              <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-xs font-medium text-[#64748b]">
+                    {campanhasRegistradas.length} campanha(s) registrada(s)
+                  </span>
+                </div>
+
+                {campanhasRegistradas.length === 0 ? (
+                  <div className="text-center py-6 text-sm text-[#94a3b8]">
+                    Nenhuma campanha registrada neste mês.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="simple-table">
+                      <thead>
+                        <tr>
+                          <th className="text-left">Data</th>
+                          <th className="text-left">Categoria</th>
+                          <th className="text-center">Multiplicador</th>
+                          <th className="text-left">Produto</th>
+                          <th className="text-left">Descrição</th>
+                          <th className="text-center">Aprovada</th>
+                          <th className="text-center">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {campanhasRegistradas.map((camp) => (
+                          <tr key={camp.id}>
+                            <td className="text-xs text-[#64748b]">{camp.data}</td>
+                            <td className="text-xs font-medium">{camp.categoria}</td>
+                            <td className="text-center text-xs font-bold">
+                              {camp.multiplicador.toFixed(1)}x
+                              {camp.categoria === "Assinados" && " (1:1)"}
+                            </td>
+                            <td className="text-xs">{camp.produto}</td>
+                            <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
+                              {camp.descricao}
+                            </td>
+                            <td className="text-center">
+                              {camp.aprovada ? (
+                                <span className="inline-flex items-center gap-1 text-[#16A34A] bg-[#dcfce7] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                  <Check className="w-3 h-3" /> Aprovada
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-[#DC2626] bg-[#fee2e2] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                  <XIcon className="w-3 h-3" /> Pendente
+                                </span>
+                              )}
+                            </td>
                             <td className="text-center">
                               <div className="flex items-center justify-center gap-1">
                                 <button
@@ -788,16 +886,16 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
                                 </button>
                               </div>
                             </td>
-                          )}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* CARD: CONFIGURAÇÕES DE METAS */}
         <div className="card">
@@ -1004,6 +1102,22 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
               <User className="w-4 h-4 text-[#2F6FED]" />
               <h3 className="text-sm font-bold text-[#0f172a]">Metas por Colaborador</h3>
             </div>
+            <div className="flex items-center gap-1 bg-[#f8fafc] p-0.5 rounded-lg">
+              {(['diario', 'semanal', 'mensal'] as CicloPeriodo[]).map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setPeriodoTabela(p)}
+                  className={cn(
+                    "px-2.5 py-1 text-xs font-medium rounded-md transition-colors",
+                    periodoTabela === p
+                      ? "bg-white text-[#0f172a] shadow-sm"
+                      : "text-[#64748b] hover:text-[#0f172a]"
+                  )}
+                >
+                  {p === 'diario' ? 'Diário' : p === 'semanal' ? 'Semanal' : 'Mensal'}
+                </button>
+              ))}
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="simple-table">
@@ -1021,9 +1135,9 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
                 {filteredCollaborators.map((collab) => {
                   const isEditing = editingId === collab.id;
                   const isExpanded = expandedId === collab.id;
-                  const peso = getPesoForPeriod(collab, selectedPeriod);
+                  const peso = getPesoForPeriod(collab, periodoTabela);
                   const metaGols = getMetaGolsForPeriod(collab);
-                  const ciclosCompletos = getCiclosCompletos(collab, selectedPeriod);
+                  const totalGols = Number((collab as any).totalGols || 0);
                   const individualEditable = isIndividualEditable(collab);
                   return (
                     <React.Fragment key={collab.id}>
@@ -1068,7 +1182,7 @@ const getCiclosCompletos = (collab: any, periodo: CicloPeriodo) => {
                             <span className="text-xs font-medium">{formatInt(metaGols.assinados)}/{formatInt(metaGols.ganhos)}</span>
                           )}
                         </td>
-                        <td className="text-center font-bold text-[#0f172a]">{formatInt(ciclosCompletos)}</td>
+                        <td className="text-center font-bold text-[#0f172a]">{formatInt(totalGols)}</td>
                         <td className="text-center">
                           <div className="flex items-center justify-center gap-1">
                             {isEditing ? (

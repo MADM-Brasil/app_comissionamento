@@ -7,6 +7,7 @@ import { useAccessControl } from "@/hooks/useAccessControl";
 import {
   DollarSign, Award, FileCheck, Target, Loader2, RefreshCw,
   FileText, Archive, XCircle, CalendarDays, TrendingUp, TrendingDown,
+  Users,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -22,7 +23,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
   'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
   'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro', 'Equipe Reciclagem'
+  'Equipe Thales','Financeiro', 'Equipe Reciclagem',''
 ];
 
 const EXCLUDED_CARGOS = [
@@ -33,11 +34,49 @@ const EXCLUDED_CARGOS = [
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 
+/**
+ * Verifica se o colaborador pertence a grupo especial (Quinquênio ou Concomitante)
+ * considerando produto, cargo e equipe.
+ */
 function isSpecialGroupColaborador(colaborador: any): boolean {
   const produto = (colaborador.produto || '').toLowerCase();
   const cargo = (colaborador.cargo || '').toLowerCase();
+  const equipe = (colaborador.equipeNome || '').toLowerCase();
+
+  const equipeQuinquenio = equipe.includes('quinquenio') || equipe.includes('quinquênio') || equipe.includes('tatiane');
+  const equipeConcomitante = equipe.includes('concomitante');
+
   return produto === 'quinquenio' || produto === 'concomitante' ||
-         cargo === 'quinquenio' || cargo === 'concomitante';
+         cargo === 'quinquenio' || cargo === 'concomitante' ||
+         equipeQuinquenio || equipeConcomitante;
+}
+
+/**
+ * Retorna o tipo de produto para a tabela de comissões,
+ * mapeando JUDIT/DISCADORA para AUXILIO ACIDENTE e reconhecendo equipes Quinquênio/Concomitante.
+ */
+function getFaixaProductType(colab: any): string {
+  const rawProduct = (colab?.produto || '').toUpperCase().trim();
+  if (rawProduct === 'JUDIT' || rawProduct === 'DISCADORA') {
+    return 'AUXILIO ACIDENTE';
+  }
+  if (rawProduct === 'QUINQUENIO' || rawProduct === 'CONCOMITANTE') {
+    return rawProduct;
+  }
+
+  const cargoNormalizado = (colab?.cargo || '').toLowerCase().trim();
+  if (cargoNormalizado === 'quinquenio') return 'QUINQUENIO';
+  if (cargoNormalizado === 'concomitante') return 'CONCOMITANTE';
+
+  const equipeNormalizada = (colab?.equipeNome || '').toLowerCase().trim();
+  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiane')) {
+    return 'QUINQUENIO';
+  }
+  if (equipeNormalizada.includes('concomitante')) {
+    return 'CONCOMITANTE';
+  }
+
+  return 'AUXILIO ACIDENTE';
 }
 
 const SimpleTooltip = ({ active, payload, label }: any) => {
@@ -72,7 +111,7 @@ const CustomTooltip = ({ active, payload, label, hideValues }: any) => {
   return null;
 };
 
-const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, metaGolsGanhos, onClose }: any) => {
+const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, metaGolsGanhos, isSupervisor, onClose }: any) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden">
@@ -99,19 +138,23 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                   <div key={idx} className={`p-4 rounded-xl border ${temCampanhas ? 'border-[#2F6FED] bg-[#eff6ff]' : 'border-[#e2e8f0]'}`}>
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-[#0f172a]">{dateKey}</span>
+                        <span className="text-sm font-semibold text-[#0f172a]">{dateKey.slice(0, 10)}</span>
                       </div>
                       {temCampanhas && <span className="badge success text-xs">Campanha ativa</span>}
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
                       <div><p className="text-[#64748b]">Assinados</p><p className="font-bold">{formatInt(day.assinados || 0)}</p></div>
                       <div><p className="text-[#64748b]">Ganhos</p><p className="font-bold">{formatInt(day.ganhos || 0)}</p></div>
-                      <div><p className="text-[#64748b]">Meta Ass.</p><p className="font-bold text-[#2F6FED]">{formatInt(metaGolsAssinados)}</p></div>
-                      <div><p className="text-[#64748b]">Meta Gan.</p><p className="font-bold text-[#16A34A]">{formatInt(metaGolsGanhos)}</p></div>
+                      {!isSupervisor && (
+                        <>
+                          <div><p className="text-[#64748b]">Meta Ass.</p><p className="font-bold text-[#2F6FED]">{formatInt(Math.round(Number(metaGolsAssinados)))}</p></div>
+                          <div><p className="text-[#64748b]">Meta Gan.</p><p className="font-bold text-[#16A34A]">{formatInt(Math.round(Number(metaGolsGanhos)))}</p></div>
+                        </>
+                      )}
                     </div>
                     <div className="mt-3 pt-3 border-t border-[#e2e8f0] flex justify-between items-center">
-                      <span className="text-xs font-semibold">Gols do dia</span>
-                      <span className={`text-lg font-black ${golsDoDia > 0 ? 'text-[#16A34A]' : 'text-[#94a3b8]'}`}>{golsDoDia}</span>
+                      <span className="text-xs font-semibold">{isSupervisor ? "Total de assinados" : "Gols do dia"}</span>
+                      <span className={`text-lg font-black ${golsDoDia > 0 ? 'text-[#16A34A]' : 'text-[#94a3b8]'}`}>{isSupervisor ? formatInt(day.assinados || 0) : golsDoDia}</span>
                     </div>
                     {temCampanhas && (
                       <div className="mt-3 pt-3 border-t border-[#e2e8f0]">
@@ -152,7 +195,7 @@ export default function Comissoes() {
   } = useAppStore();
 
   const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
-  const isAdmin = getAccessLevel() === LEVELS.ADMINISTRATIVO;
+  const isAdmin = getAccessLevel() === LEVELS.ADMINISTRATIVO || getAccessLevel() === LEVELS.SUPER_ADMIN;
 
   const [filters, setFilters] = useState<{
     equipe: string;
@@ -166,6 +209,8 @@ export default function Comissoes() {
   const [error, setError] = useState<string | null>(null);
   const [dailyMetrics, setDailyMetrics] = useState<any[]>([]);
   const [dailyGols, setDailyGols] = useState<any[]>([]);
+  const [weeklyMetrics, setWeeklyMetrics] = useState<any[]>([]);
+  const [weeklyGols, setWeeklyGols] = useState<any[]>([]);
   const [loadingDaily, setLoadingDaily] = useState(false);
   const [showExtrato, setShowExtrato] = useState(false);
 
@@ -181,10 +226,32 @@ export default function Comissoes() {
     setError(null);
 
     try {
-      const equipeApi = isAdmin && filters.equipe !== "todas" ? filters.equipe : undefined;
-      const colaboradorApi = isAdmin && filters.colaborador !== "todos" ? filters.colaborador : undefined;
-      const colaboradorIdApi = isAdmin && filters.colaboradorId ? filters.colaboradorId : currentUser.id;
+      let equipeApi: string | undefined;
+      let colaboradorApi: string | undefined;
+      let colaboradorIdApi: string | number | undefined;
       const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
+
+      if (isAdmin) {
+        equipeApi = filters.equipe !== "todas" ? filters.equipe : undefined;
+        colaboradorApi = filters.colaborador !== "todos" ? filters.colaborador : undefined;
+        colaboradorIdApi = filters.colaboradorId;
+      } else {
+        const userColab = storeColabs.find(c => c.id === currentUser.id);
+        if (userColab) {
+          const isSupervisorUser = (userColab.cargo || '').toLowerCase() === 'supervisor';
+          if (isSupervisorUser) {
+            equipeApi = userColab.equipeNome;
+            colaboradorApi = undefined;
+            colaboradorIdApi = undefined;
+          } else {
+            equipeApi = undefined;
+            colaboradorApi = userColab.name;
+            colaboradorIdApi = currentUser.id;
+          }
+        } else {
+          colaboradorIdApi = currentUser.id;
+        }
+      }
 
       await Promise.all([
         loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi),
@@ -192,11 +259,73 @@ export default function Comissoes() {
         loadWeeklyPerformanceData(),
       ]);
 
-      const targetColab = storeColabs.find(c => c.id === colaboradorIdApi || c.name === colaboradorApi);
+      const colaboradoresAtualizados = useAppStore.getState().collaborators;
+      let targetColab: any;
+
+      if (isAdmin) {
+        targetColab = colaboradoresAtualizados.find(c => c.id === colaboradorIdApi || c.name === colaboradorApi);
+      } else {
+        targetColab = colaboradoresAtualizados.find(c => c.id === currentUser.id);
+      }
+
+      setDailyMetrics([]);
+      setDailyGols([]);
+      setWeeklyMetrics([]);
+      setWeeklyGols([]);
+
       if (targetColab) {
         const isSupervisor = (targetColab.cargo || '').toLowerCase() === 'supervisor';
-        const isQuinquenio = (targetColab.produto || '').toLowerCase() === 'quinquenio';
-        if (!isSupervisor && !isQuinquenio) {
+        const isQuinquenio = (() => {
+          const produto = (targetColab.produto || '').toLowerCase();
+          const cargo = (targetColab.cargo || '').toLowerCase();
+          const equipe = (targetColab.equipeNome || '').toLowerCase();
+          return produto === 'quinquenio' || cargo === 'quinquenio' ||
+                 equipe.includes('quinquenio') || equipe.includes('quinquênio') || equipe.includes('tatiane');
+        })();
+        const isConcomitante = (() => {
+          const produto = (targetColab.produto || '').toLowerCase();
+          const cargo = (targetColab.cargo || '').toLowerCase();
+          const equipe = (targetColab.equipeNome || '').toLowerCase();
+          return produto === 'concomitante' || cargo === 'concomitante' || equipe.includes('concomitante');
+        })();
+
+        if (isSupervisor) {
+          setLoadingDaily(true);
+          try {
+            const equipeMembros = colaboradoresAtualizados.filter(c => c.equipeNome === targetColab.equipeNome && c.id !== targetColab.id);
+            if (equipeMembros.length > 0) {
+              const allDaily: any[] = [];
+              for (const membro of equipeMembros) {
+                const dailyMembro = await fetchDailyMetrics({
+                  start: currentStartDate,
+                  end: currentEndDate,
+                  colaborador: membro.name,
+                });
+                allDaily.push(...dailyMembro);
+              }
+              const aggregated = new Map<string, any>();
+              allDaily.forEach(day => {
+                const key = day.date;
+                if (!aggregated.has(key)) {
+                  aggregated.set(key, { date: key, assinados: 0, ganhos: 0, perdidos: 0, emitidos: 0, protocolados: 0 });
+                }
+                const entry = aggregated.get(key)!;
+                entry.assinados += day.assinados || 0;
+                entry.ganhos += day.ganhos || 0;
+                entry.perdidos += day.perdidos || 0;
+                entry.emitidos += day.emitidos || 0;
+                entry.protocolados += day.protocolados || 0;
+              });
+              const dailyAgregado = Array.from(aggregated.values()).sort((a, b) => a.date.localeCompare(b.date));
+              setDailyMetrics(dailyAgregado);
+              setDailyGols([]);
+            }
+          } catch (err) {
+            console.error('Erro ao carregar dados diários da equipe:', err);
+          } finally {
+            setLoadingDaily(false);
+          }
+        } else if (!isQuinquenio && !isConcomitante) {
           setLoadingDaily(true);
           try {
             const daily = await fetchDailyMetrics({
@@ -209,14 +338,34 @@ export default function Comissoes() {
             const metaGan = targetColab.metaGolsGanhos ?? 3;
             const golsResult = calculator.calculateDailyGoals(daily, metaAss, metaGan);
             setDailyGols(golsResult.dailyGols);
+
+            const now = new Date();
+            const dayOfWeek = now.getDay();
+            const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+            const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+            const sunday = new Date(monday);
+            sunday.setDate(monday.getDate() + 6);
+
+            const formatDateKey = (date: Date) => {
+              const y = date.getFullYear();
+              const m = String(date.getMonth() + 1).padStart(2, '0');
+              const d = String(date.getDate()).padStart(2, '0');
+              return `${y}-${m}-${d}`;
+            };
+
+            const weekly = await fetchDailyMetrics({
+              start: formatDateKey(monday),
+              end: formatDateKey(sunday),
+              colaborador: targetColab.name,
+            });
+            setWeeklyMetrics(weekly);
+            const weeklyGolsResult = calculator.calculateDailyGoals(weekly, metaAss, metaGan);
+            setWeeklyGols(weeklyGolsResult.dailyGols);
           } catch (err) {
             console.error('Erro ao carregar dados diários:', err);
-            setDailyMetrics([]);
           } finally {
             setLoadingDaily(false);
           }
-        } else {
-          setDailyMetrics([]);
         }
       }
     } catch (err: any) {
@@ -255,13 +404,34 @@ export default function Comissoes() {
     return filtered;
   }, [storeColabs, currentUser, filters, isAdmin]);
 
+  const userColab = useMemo(() => {
+    if (isAdmin) {
+      return filteredColabs.find(c => c.id === (filters.colaboradorId || filters.colaborador));
+    }
+    return filteredColabs.find(c => c.id === currentUser?.id);
+  }, [filteredColabs, currentUser, filters, isAdmin]);
+
+  const isSupervisorUser = (userColab?.cargo || '').toLowerCase() === 'supervisor';
+  const isSpecialUser = userColab ? isSpecialGroupColaborador(userColab) : false;
+
   const commissionData = useMemo(() => {
-    const userColab = filteredColabs.find(c => c.id === (filters.colaboradorId || currentUser?.id));
     if (!userColab) return [];
 
     const isSpecial = isSpecialGroupColaborador(userColab);
     const isSupervisor = (userColab.cargo || '').toLowerCase() === 'supervisor';
-    const isQuinquenio = (userColab.produto || '').toLowerCase() === 'quinquenio';
+    const isQuinquenio = (() => {
+      const produto = (userColab.produto || '').toLowerCase();
+      const cargo = (userColab.cargo || '').toLowerCase();
+      const equipe = (userColab.equipeNome || '').toLowerCase();
+      return produto === 'quinquenio' || cargo === 'quinquenio' ||
+             equipe.includes('quinquenio') || equipe.includes('quinquênio') || equipe.includes('tatiane');
+    })();
+    const isConcomitante = (() => {
+      const produto = (userColab.produto || '').toLowerCase();
+      const cargo = (userColab.cargo || '').toLowerCase();
+      const equipe = (userColab.equipeNome || '').toLowerCase();
+      return produto === 'concomitante' || cargo === 'concomitante' || equipe.includes('concomitante');
+    })();
     const isSR = calculator.isSupervisorSR(userColab.email);
 
     let totalCommission = 0;
@@ -270,25 +440,22 @@ export default function Comissoes() {
     let comissaoGols = 0;
 
     if (isSupervisor) {
-      const equipeColabs = storeColabs.filter(c => c.equipeNome === userColab.equipeNome);
+      const equipeColabs = storeColabs.filter(c => c.equipeNome === userColab.equipeNome && c.id !== userColab.id);
       const totalAssEquipe = equipeColabs.reduce((s, c) => s + (c.assinados || 0), 0);
       totalCommission = calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
       comissaoAssinados = totalCommission;
-    } else if (isQuinquenio) {
-      totalCommission = calculator.calculateQuinquenioCommission(userColab.assinados || 0, tabelaComissoes);
+      totalGols = 0;
+      comissaoGols = 0;
+    } else if (isQuinquenio || isConcomitante) {
+      const tipoTabela = isQuinquenio ? 'QUINQUENIO' : 'CONCOMITANTE';
+      totalCommission = calculator.calculateProductCommission(userColab.assinados || 0, tipoTabela, tabelaComissoes);
       comissaoAssinados = totalCommission;
     } else {
       if (dailyMetrics.length > 0) {
         const metaAss = userColab.metaGolsAssinados ?? 3;
         const metaGan = userColab.metaGolsGanhos ?? 3;
         const assinados = userColab.assinados || 0;
-        const rawProduct = userColab?.produto?.toUpperCase() || '';
-        const productType = 
-          rawProduct === 'JUDIT' || rawProduct === 'DISCADORA'
-          ? 'AUXILIO ACIDENTE'
-          : rawProduct || 
-          (userColab?.cargo?.toLowerCase() === 'quinquenio' ? 'QUINQUENIO' : 
-          userColab?.cargo?.toLowerCase() === 'concomitante' ? 'CONCOMITANTE' : 'AUXILIO ACIDENTE');
+        const productType = getFaixaProductType(userColab);
         const result = calculator.calculateTotalCommission(dailyMetrics, metaAss, metaGan, assinados, productType, tabelaComissoes);
         totalCommission = result.totalCommission;
         comissaoGols = result.goalCommission;
@@ -314,7 +481,12 @@ export default function Comissoes() {
       perdidos: userColab.perdidos || 0,
       originalColab: userColab,
     }];
-  }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics]);
+  }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics, userColab]);
+
+  const teamMembers = useMemo(() => {
+    if (!isSupervisorUser || !userColab) return [];
+    return storeColabs.filter(c => c.equipeNome === userColab.equipeNome && c.id !== userColab.id);
+  }, [isSupervisorUser, userColab, storeColabs]);
 
   const totals = useMemo(() => {
     const comissao = commissionData.reduce((s, i) => s + i.totalCommission, 0);
@@ -348,14 +520,11 @@ export default function Comissoes() {
   const ganhos = userData?.ganhos || 0;
   const perdidos = userData?.perdidos || 0;
 
-  const userColab = filteredColabs.find(c => c.id === (filters.colaboradorId || currentUser?.id));
   const metaGolsAss = userColab?.metaGolsAssinados ?? 3;
   const metaGolsGan = userColab?.metaGolsGanhos ?? 3;
 
   const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
   const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
-  const corConversaoGeral = taxaConversaoGeral >= 60 ? "#16A34A" : taxaConversaoGeral >= 40 ? "#EA8C1D" : "#DC2626";
-  const corConversaoProtocolados = taxaConversaoProtocolados >= 60 ? "#16A34A" : taxaConversaoProtocolados >= 40 ? "#EA8C1D" : "#DC2626";
 
   const recomendacoes: string[] = [];
   if (userData) {
@@ -375,21 +544,71 @@ export default function Comissoes() {
 
   const calcPercent = (value: number, target: number) => target > 0 ? Math.min((value / target) * 100, 100) : 0;
 
+  // Evolução Diária apenas para assessores comuns
+  const evolucaoDiariaData = useMemo(() => {
+    if (!weeklyMetrics.length) return [];
+
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+    const diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+
+    const days = Array.from({ length: 5 }, (_, i) => {
+      const date = new Date(monday);
+      date.setDate(monday.getDate() + i);
+      return date;
+    });
+
+    const formatKey = (date: Date) => {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    };
+
+    const formatLabel = (date: Date) => {
+      const dayName = diasSemana[date.getDay()];
+      const dd = String(date.getDate()).padStart(2, '0');
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      return `${dayName} ${dd}/${mm}`;
+    };
+
+    const metricsMap = new Map(
+      weeklyMetrics.map(d => [d.date?.slice(0, 10), d])
+    );
+    const golsMap = new Map(
+      weeklyGols.map(g => [g.date?.slice(0, 10), g.gols])
+    );
+
+    return days.map(date => {
+      const key = formatKey(date);
+      const metricas = metricsMap.get(key) || {};
+      return {
+        label: formatLabel(date),
+        assinados: metricas.assinados || 0,
+        ganhos: metricas.ganhos || 0,
+        goals: golsMap.get(key) || 0,
+      };
+    });
+  }, [weeklyMetrics, weeklyGols]);
+
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Suas comissões, calculadas pela soma de Gols diários, semanais e mensais">
       {isAdmin && (
         <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" onRefresh={handleRefresh} />
       )}
 
-      <div className="flex flex-wrap items-end gap-3 mb-6">
-        <button onClick={handleRefresh} disabled={refreshing || loading} className="h-9 px-4 inline-flex items-center gap-1.5 text-xs font-semibold rounded-lg bg-[#2F6FED] text-white hover:bg-[#2563eb] disabled:opacity-50 transition-colors shadow-sm">
-          <RefreshCw className={`w-4 h-4 ${(refreshing || loading) ? "animate-spin" : ""}`} />
-          {refreshing || loading ? "Atualizando..." : "Atualizar dados"}
-        </button>
-      </div>
-
       {showExtrato && (
-        <ExtratoDialog dailyMetrics={dailyMetrics} dailyGols={dailyGols} campaigns={campaigns} metaGolsAssinados={metaGolsAss} metaGolsGanhos={metaGolsGan} onClose={() => setShowExtrato(false)} />
+        <ExtratoDialog
+          dailyMetrics={dailyMetrics}
+          dailyGols={dailyGols}
+          campaigns={campaigns}
+          metaGolsAssinados={metaGolsAss}
+          metaGolsGanhos={metaGolsGan}
+          isSupervisor={isSupervisorUser}
+          onClose={() => setShowExtrato(false)}
+        />
       )}
 
       {loading && (
@@ -412,285 +631,327 @@ export default function Comissoes() {
 
       {!loading && filteredColabs.length > 0 && (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            {summaryCards.map((card, idx) => {
-              const Icon = card.icon;
-              let displayValue = card.isPercent ? `${card.value.toFixed(1)}%` : card.isCurrency ? displayCurrency(card.value) : formatInt(card.value);
-              return (
-                <div key={card.label} className="card animate-fade-in-up" style={{ animationDelay: `${idx * 80}ms` }}>
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: `${card.color}15` }}>
-                      <Icon className="w-4.5 h-4.5" style={{ color: card.color }} />
-                    </div>
-                    <span className="text-xs text-[#64748b] font-medium">{card.label}</span>
-                  </div>
-                  <div className="kpi-value mb-1" style={{ color: "#0f172a" }}>{displayValue}</div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-            <div className="card p-5 flex flex-col">
-              <h3 className="text-sm font-bold mb-4">Comissão Total do Colaborador</h3>
-              {commissionData.length === 0 ? (
-                <div className="text-center text-[#94a3b8] py-8">Nenhum dado disponível.</div>
-              ) : (
-                <>
-                  <div className="flex-1" style={{ minHeight: '300px' }}>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <BarChart data={commissionData} margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                        <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#64748b" }} />
-                        <YAxis tick={{ fontSize: 11, fill: "#64748b" }} tickFormatter={v => hideValues ? "***" : formatCurrency(v)} />
-                        <Tooltip content={<CustomTooltip hideValues={hideValues} />} />
-                        <Legend wrapperStyle={{ fontSize: 12 }} />
-                        <Bar dataKey="comissaoAssinados" fill="#2F6FED" name="Comissão Assinados" radius={[4, 4, 0, 0]} />
-                        <Bar dataKey="comissaoGols" fill="#16A34A" name="Comissão Gols" radius={[4, 4, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  {commissionData.map((item) => {
-                    const colab = item.originalColab;
-                    const productType = colab?.produto?.toUpperCase() || 
-                                        (colab?.cargo?.toLowerCase() === 'quinquenio' ? 'QUINQUENIO' : 
-                                         colab?.cargo?.toLowerCase() === 'concomitante' ? 'CONCOMITANTE' : 
-                                         'AUXILIO ACIDENTE');
-
-                    const faixas = tabelaComissoes
-                      .filter(f => f.tipo === productType)
-                      .sort((a, b) => a.faixa_min - b.faixa_min);
-
-                    const goalGap = calculator.calculateGoalGap(item.totalCycles, tabelaComissoes);
-
-                    let productGapInfo: { gap: number; nextValue: number } | null = null;
-
-                    if (faixas.length > 0) {
-                      const proximaFaixa = faixas.find(f => f.faixa_min > item.assinados);
-                      if (proximaFaixa) {
-                        productGapInfo = {
-                          gap: proximaFaixa.faixa_min - item.assinados,
-                          nextValue: proximaFaixa.faixa_min,
-                        };
-                      } else if (item.assinados < faixas[0].faixa_min) {
-                        productGapInfo = {
-                          gap: faixas[0].faixa_min - item.assinados,
-                          nextValue: faixas[0].faixa_min,
-                        };
-                      }
-                    }
-
-                    return (
-                      <div key={item.id} className="mt-4 p-3 bg-[#f8fafc] rounded-lg text-xs space-y-2">
-                        {goalGap ? (
-                          <p><span className="font-semibold text-[#8B5CF6]">Gols:</span> faltam <span className="font-bold">{formatInt(goalGap.gap)}</span> gols para a próxima faixa (mín. {formatInt(goalGap.nextValue)}).</p>
-                        ) : (
-                          <p className="text-[#94a3b8]">Você já está na faixa máxima de gols.</p>
-                        )}
-
-                        {productGapInfo ? (
-                          <p><span className="font-semibold text-[#2F6FED]">Assinados:</span> faltam <span className="font-bold">{formatInt(productGapInfo.gap)}</span> assinados para a próxima faixa (mín. {formatInt(productGapInfo.nextValue)}).</p>
-                        ) : (
-                          <p className="text-[#94a3b8]">
-                            {faixas.length === 0 
-                              ? `Nenhuma faixa de assinados configurada para ${productType}.`
-                              : "Você já está na faixa máxima de assinados."}
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </>
-              )}
-
-              {dailyMetrics.length > 0 && (
-                <button onClick={() => setShowExtrato(true)} className="mt-4 w-full py-2 px-4 inline-flex items-center justify-center gap-2 text-xs font-semibold rounded-lg border border-[#2F6FED] text-[#2F6FED] hover:bg-[#eff6ff] transition-colors">
-                  <CalendarDays className="w-4 h-4" />
-                  Ver Extrato de Gols e Campanhas
-                </button>
-              )}
-            </div>
-
-            {/* METAS VS REALIZADO */}
-            <div className="card p-5">
-              <h3 className="text-sm font-bold mb-4">Metas vs Realizado</h3>
-              <div className="space-y-5 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
-                {commissionData.map((item) => {
-                  const colabOriginal = item.originalColab;
-                  const metaDiarioAss = Number(colabOriginal?.pesoDiarioAssinados ?? colabOriginal?.metaDiarioAssinados ?? 3);
-                  const metaDiarioGan = Number(colabOriginal?.pesoDiarioGanhos ?? colabOriginal?.metaDiarioGanhos ?? 3);
-                  const metaSemanalAss = Number(colabOriginal?.pesoSemanalAssinados ?? colabOriginal?.metaSemanalAssinados ?? 15);
-                  const metaSemanalGan = Number(colabOriginal?.pesoSemanalGanhos ?? colabOriginal?.metaSemanalGanhos ?? 15);
-                  const metaMensalAss = Number(colabOriginal?.pesoMensalAssinados ?? colabOriginal?.metaMensalAssinados ?? 60);
-                  const metaMensalGan = Number(colabOriginal?.pesoMensalGanhos ?? colabOriginal?.metaMensalGanhos ?? 60);
-                  const metaGolsAss = Number(colabOriginal?.metaGolsAssinados ?? 3);
-                  const metaGolsGan = Number(colabOriginal?.metaGolsGanhos ?? 3);
-
-                  const now = new Date();
-                  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-                  const dayOfWeek = now.getDay();
-                  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
-                  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
-                  const sunday = new Date(monday);
-                  sunday.setDate(monday.getDate() + 6);
-                  const mondayStr = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
-                  const sundayStr = `${sunday.getFullYear()}-${String(sunday.getMonth() + 1).padStart(2, '0')}-${String(sunday.getDate()).padStart(2, '0')}`;
-                  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-                  const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-                  const monthStartStr = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}-${String(monthStart.getDate()).padStart(2, '0')}`;
-                  const monthEndStr = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`;
-
-                  const dailyDataDiario = dailyMetrics.filter(d => d.date && d.date.slice(0,10) === todayStr);
-                  const dailyDataSemanal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= mondayStr && d.date.slice(0,10) <= sundayStr);
-                  const dailyDataMensal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= monthStartStr && d.date.slice(0,10) <= monthEndStr);
-
-                  const assinadosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
-                  const ganhosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-                  const assinadosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
-                  const ganhosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-                  const assinadosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
-                  const ganhosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-
-                  const periodos = [
-                    { label: "Diário (hoje)", metaAss: metaDiarioAss, metaGan: metaDiarioGan, atualAss: assinadosDiario, atualGan: ganhosDiario, colorAss: "#2F6FED", colorGan: "#16A34A" },
-                    { label: "Semanal (semana atual)", metaAss: metaSemanalAss, metaGan: metaSemanalGan, atualAss: assinadosSemanal, atualGan: ganhosSemanal, colorAss: "#EA8C1D", colorGan: "#16A34A" },
-                    { label: "Mensal (mês atual)", metaAss: metaMensalAss, metaGan: metaMensalGan, atualAss: assinadosMensal, atualGan: ganhosMensal, colorAss: "#8B5CF6", colorGan: "#16A34A" },
-                  ];
-
-                  const golsDiario = calculator.calculateDailyGoals(dailyDataDiario, metaGolsAss, metaGolsGan).totalGols;
-
+          {userColab ? (
+            <>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                {summaryCards.map((card, idx) => {
+                  const Icon = card.icon;
+                  let displayValue = card.isPercent ? `${card.value.toFixed(1)}%` : card.isCurrency ? displayCurrency(card.value) : formatInt(card.value);
                   return (
-                    <div key={item.id || item.name}>
+                    <div key={card.label} className="card animate-fade-in-up" style={{ animationDelay: `${idx * 80}ms` }}>
                       <div className="flex items-center gap-3 mb-3">
-                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center text-xs font-bold">{item.avatar}</div>
-                        <div><span className="font-medium text-[#0f172a] text-sm">{item.name}</span></div>
+                        <div className="w-9 h-9 rounded-lg flex items-center justify-center" style={{ background: `${card.color}15` }}>
+                          <Icon className="w-4.5 h-4.5" style={{ color: card.color }} />
+                        </div>
+                        <span className="text-xs text-[#64748b] font-medium">{card.label}</span>
+                      </div>
+                      <div className="kpi-value mb-1" style={{ color: "#0f172a" }}>{displayValue}</div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
+                <div className="card p-5 flex flex-col">
+                  <h3 className="text-sm font-bold mb-4">Comissão Total do Colaborador</h3>
+                  {commissionData.length === 0 ? (
+                    <div className="text-center text-[#94a3b8] py-8">Nenhum dado disponível.</div>
+                  ) : (
+                    <>
+                      <div className="flex-1" style={{ minHeight: '300px' }}>
+                        <ResponsiveContainer width="100%" height={300}>
+                          <BarChart data={commissionData} margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                            <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#64748b" }} />
+                            <YAxis
+                              domain={[0, 10000]}
+                              ticks={[0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000]}
+                              tickFormatter={v => hideValues ? "***" : formatCurrency(v)}
+                              tick={{ fontSize: 11, fill: "#64748b" }}
+                            />
+                            <Tooltip content={<CustomTooltip hideValues={hideValues} />} />
+                            <Legend wrapperStyle={{ fontSize: 12 }} />
+                            <Bar dataKey="comissaoAssinados" fill="#2F6FED" name="Comissão Assinados" radius={[4, 4, 0, 0]} />
+                            {!commissionData[0]?.isSpecial && !isSupervisorUser && (
+                              <Bar dataKey="comissaoGols" fill="#16A34A" name="Comissão Gols" radius={[4, 4, 0, 0]} />
+                            )}
+                          </BarChart>
+                        </ResponsiveContainer>
                       </div>
 
-                      {periodos.map((p) => {
-                        const pctAss = calcPercent(p.atualAss, p.metaAss);
-                        const pctGan = p.metaGan > 0 ? calcPercent(p.atualGan, p.metaGan) : 0;
-                        const faltaAss = Math.max(0, p.metaAss - p.atualAss);
-                        const faltaGan = Math.max(0, p.metaGan - p.atualGan);
+                      {commissionData.map((item) => {
+                        const colab = item.originalColab;
+                        const productType = getFaixaProductType(colab);
+                        const faixas = tabelaComissoes
+                          .filter(f => f.tipo === productType)
+                          .sort((a, b) => a.faixa_min - b.faixa_min);
+                        const goalGap = calculator.calculateGoalGap(item.totalCycles, tabelaComissoes);
+
+                        let productGapInfo: { gap: number; nextValue: number } | null = null;
+                        if (faixas.length > 0) {
+                          const proximaFaixa = faixas.find(f => f.faixa_min > item.assinados);
+                          if (proximaFaixa) {
+                            productGapInfo = { gap: proximaFaixa.faixa_min - item.assinados, nextValue: proximaFaixa.faixa_min };
+                          } else if (item.assinados < faixas[0].faixa_min) {
+                            productGapInfo = { gap: faixas[0].faixa_min - item.assinados, nextValue: faixas[0].faixa_min };
+                          }
+                        }
+
+                        let supervisorGapInfo: { gap: number; nextValue: number } | null = null;
+                        if (isSupervisorUser) {
+                          const equipeColabs = storeColabs.filter(c => c.equipeNome === colab.equipeNome && c.id !== colab.id);
+                          const totalAssEquipe = equipeColabs.reduce((s, c) => s + (c.assinados || 0), 0);
+                          const isSR = calculator.isSupervisorSR(colab.email);
+                          supervisorGapInfo = calculator.calculateSupervisorGap(totalAssEquipe, isSR, tabelaComissoes);
+                        }
 
                         return (
-                          <div key={p.label} className="mb-3 last:mb-0">
-                            <p className="text-xs font-semibold text-[#475569] mb-1">{p.label}</p>
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
-                              <div className="flex-1 progress-bar h-2">
-                                <div className="progress-fill" style={{ width: `${pctAss}%`, background: p.colorAss }} />
-                              </div>
-                              <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualAss)}/{formatInt(p.metaAss)}</span>
-                              <span className="text-[10px] font-medium" style={{ color: p.colorAss }}>{pctAss.toFixed(0)}%</span>
-                            </div>
-                            <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaAss > 0 ? `Faltam ${formatInt(faltaAss)}` : "Atingido"}</div>
-                            {!item.isSpecial && (
+                          <div key={item.id} className="mt-4 p-3 bg-[#f8fafc] rounded-lg text-xs space-y-2">
+                            {isSupervisorUser ? (
                               <>
-                                <div className="flex items-center gap-2 mb-1">
-                                  <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
-                                  <div className="flex-1 progress-bar h-2">
-                                    <div className="progress-fill" style={{ width: `${pctGan}%`, background: p.colorGan }} />
-                                  </div>
-                                  <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualGan)}/{formatInt(p.metaGan)}</span>
-                                  <span className="text-[10px] font-medium" style={{ color: p.colorGan }}>{pctGan.toFixed(0)}%</span>
-                                </div>
-                                <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaGan > 0 ? `Faltam ${formatInt(faltaGan)}` : "Atingido"}</div>
+                                <p><span className="font-semibold text-[#2F6FED]">Assinados da equipe:</span> {formatInt(item.assinados)}</p>
+                                {supervisorGapInfo ? (
+                                  <p>
+                                    <span className="font-semibold text-[#8B5CF6]">Próxima faixa:</span>{' '}
+                                    faltam <span className="font-bold">{formatInt(supervisorGapInfo.gap)}</span> assinados para a faixa mínima de {formatInt(supervisorGapInfo.nextValue)}.
+                                  </p>
+                                ) : (
+                                  <p className="text-[#94a3b8]">Você já está na faixa máxima de supervisor.</p>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                {goalGap ? (
+                                  <p><span className="font-semibold text-[#8B5CF6]">Gols:</span> faltam <span className="font-bold">{formatInt(goalGap.gap)}</span> gols para a próxima faixa (mín. {formatInt(goalGap.nextValue)}).</p>
+                                ) : (
+                                  <p className="text-[#94a3b8]">Você já está na faixa máxima de gols.</p>
+                                )}
+
+                                {productGapInfo ? (
+                                  <p><span className="font-semibold text-[#2F6FED]">Assinados:</span> faltam <span className="font-bold">{formatInt(productGapInfo.gap)}</span> assinados para a próxima faixa (mín. {formatInt(productGapInfo.nextValue)}).</p>
+                                ) : (
+                                  <p className="text-[#94a3b8]">
+                                    {faixas.length === 0 ? `Nenhuma faixa de assinados configurada para ${productType}.` : "Você já está na faixa máxima de assinados."}
+                                  </p>
+                                )}
                               </>
                             )}
                           </div>
                         );
                       })}
+                    </>
+                  )}
 
-                      <div className="mt-3 pt-3 border-t border-[#e2e8f0]">
-                        <p className="text-xs font-semibold text-[#475569] mb-1">Gols (hoje)</p>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
-                          <div className="flex-1 progress-bar h-2">
-                            <div className="progress-fill" style={{ width: `${calcPercent(assinadosDiario, metaGolsAss)}%`, background: "#2F6FED" }} />
-                          </div>
-                          <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(assinadosDiario)}/{formatInt(metaGolsAss)}</span>
-                          <span className="text-[10px] font-medium" style={{ color: "#2F6FED" }}>{calcPercent(assinadosDiario, metaGolsAss).toFixed(0)}%</span>
-                        </div>
-                        {!item.isSpecial && (
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
-                            <div className="flex-1 progress-bar h-2">
-                              <div className="progress-fill" style={{ width: `${calcPercent(ganhosDiario, metaGolsGan)}%`, background: "#16A34A" }} />
+                  {dailyMetrics.length > 0 && (
+                    <button onClick={() => setShowExtrato(true)} className="mt-4 w-full py-2 px-4 inline-flex items-center justify-center gap-2 text-xs font-semibold rounded-lg border border-[#2F6FED] text-[#2F6FED] hover:bg-[#eff6ff] transition-colors">
+                      <CalendarDays className="w-4 h-4" />
+                      Ver Extrato de Gols e Campanhas
+                    </button>
+                  )}
+                </div>
+
+                {!isSupervisorUser && (
+                  <div className="card p-5">
+                    <h3 className="text-sm font-bold mb-4">Metas vs Realizado</h3>
+                    <div className="space-y-5 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
+                      {commissionData.map((item) => {
+                        const colabOriginal = item.originalColab;
+                        const metaDiarioAss = Number(colabOriginal?.pesoDiarioAssinados ?? colabOriginal?.metaDiarioAssinados ?? 3);
+                        const metaDiarioGan = Number(colabOriginal?.pesoDiarioGanhos ?? colabOriginal?.metaDiarioGanhos ?? 3);
+                        const metaSemanalAss = Number(colabOriginal?.pesoSemanalAssinados ?? colabOriginal?.metaSemanalAssinados ?? 15);
+                        const metaSemanalGan = Number(colabOriginal?.pesoSemanalGanhos ?? colabOriginal?.metaSemanalGanhos ?? 15);
+                        const metaMensalAss = Number(colabOriginal?.pesoMensalAssinados ?? colabOriginal?.metaMensalAssinados ?? 60);
+                        const metaMensalGan = Number(colabOriginal?.pesoMensalGanhos ?? colabOriginal?.metaMensalGanhos ?? 60);
+                        const metaGolsAss = Number(colabOriginal?.metaGolsAssinados ?? 3);
+                        const metaGolsGan = Number(colabOriginal?.metaGolsGanhos ?? 3);
+
+                        const now = new Date();
+                        const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+                        const dayOfWeek = now.getDay();
+                        const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+                        const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() + mondayOffset);
+                        const sunday = new Date(monday);
+                        sunday.setDate(monday.getDate() + 6);
+                        const mondayStr = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+                        const sundayStr = `${sunday.getFullYear()}-${String(sunday.getMonth() + 1).padStart(2, '0')}-${String(sunday.getDate()).padStart(2, '0')}`;
+                        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+                        const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+                        const monthStartStr = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}-${String(monthStart.getDate()).padStart(2, '0')}`;
+                        const monthEndStr = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`;
+
+                        const dailyDataDiario = dailyMetrics.filter(d => d.date && d.date.slice(0,10) === todayStr);
+                        const dailyDataSemanal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= mondayStr && d.date.slice(0,10) <= sundayStr);
+                        const dailyDataMensal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= monthStartStr && d.date.slice(0,10) <= monthEndStr);
+
+                        const assinadosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                        const ganhosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
+                        const assinadosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                        const ganhosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
+                        const assinadosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                        const ganhosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
+
+                        const periodos = [
+                          { label: "Diário (hoje)", metaAss: metaDiarioAss, metaGan: metaDiarioGan, atualAss: assinadosDiario, atualGan: ganhosDiario, colorAss: "#2F6FED", colorGan: "#16A34A" },
+                          { label: "Semanal (semana atual)", metaAss: metaSemanalAss, metaGan: metaSemanalGan, atualAss: assinadosSemanal, atualGan: ganhosSemanal, colorAss: "#EA8C1D", colorGan: "#16A34A" },
+                          { label: "Mensal (mês atual)", metaAss: metaMensalAss, metaGan: metaMensalGan, atualAss: assinadosMensal, atualGan: ganhosMensal, colorAss: "#8B5CF6", colorGan: "#16A34A" },
+                        ];
+
+                        return (
+                          <div key={item.id || item.name}>
+                            <div className="flex items-center gap-3 mb-3">
+                              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center text-xs font-bold">{item.avatar}</div>
+                              <div><span className="font-medium text-[#0f172a] text-sm">{item.name}</span></div>
                             </div>
-                            <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(ganhosDiario)}/{formatInt(metaGolsGan)}</span>
-                            <span className="text-[10px] font-medium" style={{ color: "#16A34A" }}>{calcPercent(ganhosDiario, metaGolsGan).toFixed(0)}%</span>
+
+                            {periodos.map((p) => {
+                              const pctAss = calcPercent(p.atualAss, p.metaAss);
+                              const pctGan = p.metaGan > 0 ? calcPercent(p.atualGan, p.metaGan) : 0;
+                              const faltaAss = Math.max(0, p.metaAss - p.atualAss);
+                              const faltaGan = Math.max(0, p.metaGan - p.atualGan);
+
+                              return (
+                                <div key={p.label} className="mb-3 last:mb-0">
+                                  <p className="text-xs font-semibold text-[#475569] mb-1">{p.label}</p>
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
+                                    <div className="flex-1 progress-bar h-2">
+                                      <div className="progress-fill" style={{ width: `${pctAss}%`, background: p.colorAss }} />
+                                    </div>
+                                    <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualAss)}/{formatInt(p.metaAss)}</span>
+                                    <span className="text-[10px] font-medium" style={{ color: p.colorAss }}>{pctAss.toFixed(0)}%</span>
+                                  </div>
+                                  <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaAss > 0 ? `Faltam ${formatInt(faltaAss)}` : "Atingido"}</div>
+                                  {!item.isSpecial && (
+                                    <>
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
+                                        <div className="flex-1 progress-bar h-2">
+                                          <div className="progress-fill" style={{ width: `${pctGan}%`, background: p.colorGan }} />
+                                        </div>
+                                        <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualGan)}/{formatInt(p.metaGan)}</span>
+                                        <span className="text-[10px] font-medium" style={{ color: p.colorGan }}>{pctGan.toFixed(0)}%</span>
+                                      </div>
+                                      <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaGan > 0 ? `Faltam ${formatInt(faltaGan)}` : "Atingido"}</div>
+                                    </>
+                                  )}
+                                </div>
+                              );
+                            })}
+
+                            <div className="mt-3 pt-3 border-t border-[#e2e8f0]">
+                              <p className="text-xs font-semibold text-[#475569] mb-1">Gols (hoje)</p>
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
+                                <div className="flex-1 progress-bar h-2">
+                                  <div className="progress-fill" style={{ width: `${calcPercent(assinadosDiario, metaGolsAss)}%`, background: "#2F6FED" }} />
+                                </div>
+                                <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(assinadosDiario)}/{formatInt(metaGolsAss)}</span>
+                                <span className="text-[10px] font-medium" style={{ color: "#2F6FED" }}>{calcPercent(assinadosDiario, metaGolsAss).toFixed(0)}%</span>
+                              </div>
+                              {!item.isSpecial && (
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
+                                  <div className="flex-1 progress-bar h-2">
+                                    <div className="progress-fill" style={{ width: `${calcPercent(ganhosDiario, metaGolsGan)}%`, background: "#16A34A" }} />
+                                  </div>
+                                  <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(ganhosDiario)}/{formatInt(metaGolsGan)}</span>
+                                  <span className="text-[10px] font-medium" style={{ color: "#16A34A" }}>{calcPercent(ganhosDiario, metaGolsGan).toFixed(0)}%</span>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                        )}
-                      </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
+                  </div>
+                )}
+
+                {isSupervisorUser && (
+                  <div className="card p-5">
+                    <h3 className="text-sm font-bold mb-4">Equipe (Assinados)</h3>
+                    <div className="space-y-2 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
+                      {teamMembers.length > 0 ? (
+                        teamMembers.map(member => (
+                          <div key={member.id} className="flex items-center justify-between text-xs p-2 bg-[#f8fafc] rounded-lg">
+                            <div className="flex items-center gap-2">
+                              <div className="w-6 h-6 rounded-full bg-blue-100 flex items-center justify-center font-bold text-[10px]">
+                                {member.avatar || member.name.charAt(0).toUpperCase()}
+                              </div>
+                              <span className="font-medium text-[#0f172a]">{member.name}</span>
+                            </div>
+                            <div className="flex items-center gap-4">
+                              <span>Ass: <b>{formatInt(member.assinados)}</b></span>
+                              <span>Ganhos: <b>{formatInt(member.ganhos)}</b></span>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-center text-[#94a3b8] py-4 text-xs">Nenhum membro na equipe.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          </div>
 
-          {/* SEUS NÚMEROS */}
-          <div className="card p-5 mb-6">
-            <h3 className="text-sm font-bold mb-4">Seus Números</h3>
-            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
-              <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><FileText className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><p className="text-[11px]">Emitidos</p><p className="text-base font-semibold">{formatInt(recebidos)}</p></div>
-              <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><FileCheck className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><p className="text-[11px]">Assinados</p><p className="text-base font-semibold">{formatInt(assinados)}</p></div>
-              <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><Award className="w-4 h-4 text-[#EA8C1D] mx-auto mb-1" /><p className="text-[11px]">Ganhos</p><p className="text-base font-semibold">{formatInt(ganhos)}</p></div>
-              <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><Archive className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><p className="text-[11px]">Protocolados</p><p className="text-base font-semibold">{formatInt(protocolados)}</p></div>
-              <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><XCircle className="w-4 h-4 text-[#DC2626] mx-auto mb-1" /><p className="text-[11px]">Perdidos</p><p className="text-base font-semibold">{formatInt(perdidos)}</p></div>
-            </div>
-          </div>
+              <div className="card p-5 mb-6">
+                <h3 className="text-sm font-bold mb-4">Seus Números</h3>
+                <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
+                  <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><FileText className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><p className="text-[11px]">Emitidos</p><p className="text-base font-semibold">{formatInt(recebidos)}</p></div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><FileCheck className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><p className="text-[11px]">Assinados</p><p className="text-base font-semibold">{formatInt(assinados)}</p></div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><Award className="w-4 h-4 text-[#EA8C1D] mx-auto mb-1" /><p className="text-[11px]">Ganhos</p><p className="text-base font-semibold">{formatInt(ganhos)}</p></div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><Archive className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><p className="text-[11px]">Protocolados</p><p className="text-base font-semibold">{formatInt(protocolados)}</p></div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3 text-center"><XCircle className="w-4 h-4 text-[#DC2626] mx-auto mb-1" /><p className="text-[11px]">Perdidos</p><p className="text-base font-semibold">{formatInt(perdidos)}</p></div>
+                </div>
+              </div>
 
-          {/* EVOLUÇÃO DIÁRIA */}
-          <div className="card p-5 mb-6">
-            <h3 className="text-sm font-bold mb-4">Evolução Diária</h3>
-            {rawMetrics.assinados > 0 ? (
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={[
-                  { name: "Seg", assinados: Math.round(rawMetrics.assinados * 0.2), ganhos: Math.round(rawMetrics.ganhos * 0.2), goals: Math.round(totals.ciclos * 0.2) },
-                  { name: "Ter", assinados: Math.round(rawMetrics.assinados * 0.25), ganhos: Math.round(rawMetrics.ganhos * 0.25), goals: Math.round(totals.ciclos * 0.25) },
-                  { name: "Qua", assinados: Math.round(rawMetrics.assinados * 0.18), ganhos: Math.round(rawMetrics.ganhos * 0.18), goals: Math.round(totals.ciclos * 0.18) },
-                  { name: "Qui", assinados: Math.round(rawMetrics.assinados * 0.22), ganhos: Math.round(rawMetrics.ganhos * 0.22), goals: Math.round(totals.ciclos * 0.22) },
-                  { name: "Sex", assinados: Math.round(rawMetrics.assinados * 0.15), ganhos: Math.round(rawMetrics.ganhos * 0.15), goals: Math.round(totals.ciclos * 0.15) },
-                ]}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                  <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 11 }} width={28} allowDecimals={false} />
-                  <Tooltip content={<SimpleTooltip />} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  <Bar dataKey="assinados" fill="#2F6FED" name="Assinados" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="ganhos" fill="#16A34A" name="Ganhos" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="goals" fill="#8B5CF6" name="Goals" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="text-center text-[#94a3b8] py-8">Dados de evolução diária indisponíveis.</div>
-            )}
-          </div>
+              {!isSupervisorUser && !isSpecialUser && (
+                <div className="card p-5 mb-6">
+                  <h3 className="text-sm font-bold mb-4">Evolução Diária</h3>
+                  {evolucaoDiariaData.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={evolucaoDiariaData}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                        <XAxis dataKey="label" tick={{ fontSize: 10 }} />
+                        <YAxis tick={{ fontSize: 11 }} width={28} allowDecimals={false} />
+                        <Tooltip content={<SimpleTooltip />} />
+                        <Legend wrapperStyle={{ fontSize: 12 }} />
+                        <Bar dataKey="assinados" fill="#2F6FED" name="Assinados" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="ganhos" fill="#16A34A" name="Ganhos" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="goals" fill="#8B5CF6" name="Goals" radius={[4, 4, 0, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="text-center text-[#94a3b8] py-8">Dados de evolução diária indisponíveis.</div>
+                  )}
+                </div>
+              )}
 
-          {/* RECOMENDAÇÕES */}
-          {recomendacoes.length > 0 && (
-            <div className="card p-5 mb-6">
-              <h3 className="text-sm font-bold mb-3">Recomendações</h3>
-              <ul className="space-y-2">
-                {recomendacoes.map((r, i) => (
-                  <li key={i} className="flex gap-2 text-[13px] text-[#475569] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg p-3"><span className="text-[#2F6FED]">→</span>{r}</li>
-                ))}
-              </ul>
+              {recomendacoes.length > 0 && (
+                <div className="card p-5 mb-6">
+                  <h3 className="text-sm font-bold mb-3">Recomendações</h3>
+                  <ul className="space-y-2">
+                    {recomendacoes.map((r, i) => (
+                      <li key={i} className="flex gap-2 text-[13px] text-[#475569] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg p-3"><span className="text-[#2F6FED]">→</span>{r}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="card p-5 mb-6">
+                <h3 className="text-sm font-bold mb-3">Como a comissão é calculada</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos de apuração:</span> Diário, semanal e mensal.</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Gols por período:</span> mínimo entre assinados e ganhos.</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma das faixas de assinados + gols.</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Segurança:</span> informações protegidas e auditáveis.</div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-gray-500">
+              Selecione um colaborador no filtro acima para visualizar as comissões.
             </div>
           )}
-
-          {/* Explicação do cálculo */}
-          <div className="card p-5 mb-6">
-            <h3 className="text-sm font-bold mb-3">Como a comissão é calculada</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
-              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos de apuração:</span> Diário, semanal e mensal.</div>
-              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Gols por período:</span> mínimo entre assinados e ganhos.</div>
-              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma das faixas de assinados + gols.</div>
-              <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Segurança:</span> informações protegidas e auditáveis.</div>
-            </div>
-          </div>
         </>
       )}
     </DashboardLayout>

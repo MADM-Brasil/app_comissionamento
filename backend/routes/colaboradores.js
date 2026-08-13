@@ -6,9 +6,7 @@ const router = express.Router();
 
 // Lista de e‑mails dos Supervisores SR (configure aqui)
 const SUPERVISORES_SR_EMAILS = [
-  'supervisor.sr1@email.com',
-  'sr2@email.com',
-  // ... adicione outros e‑mails conforme necessário
+  'felipe.uzuelli@madmbrasil.com.br',
 ];
 
 function requireAuth(req, res, next) {

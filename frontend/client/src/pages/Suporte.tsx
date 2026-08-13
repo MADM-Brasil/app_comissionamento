@@ -148,7 +148,7 @@ export default function Suporte() {
 
   const isAdmin = useMemo(() => {
     const level = getAccessLevel();
-    return level === LEVELS.ADMINISTRATIVO;
+    return level === LEVELS.ADMINISTRATIVO || level === LEVELS.SUPER_ADMIN;
   }, [getAccessLevel, LEVELS]);
 
   return (

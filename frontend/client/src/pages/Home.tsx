@@ -44,7 +44,50 @@ const EXCLUDED_CARGOS_FOR_DISPLAY = [
 ];
 
 // ============================================================
-// CONFIGURAÇÃO DE PESOS (mantida para ranking/score)
+// FUNÇÕES AUXILIARES (mesmas da Comissões)
+// ============================================================
+const normalize = (str: string): string =>
+  (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+function isSpecialGroupColaborador(colaborador: any): boolean {
+  const produto = (colaborador.produto || '').toLowerCase();
+  const cargo = (colaborador.cargo || '').toLowerCase();
+  const equipe = (colaborador.equipeNome || '').toLowerCase();
+
+  const equipeQuinquenio = equipe.includes('quinquenio') || equipe.includes('quinquênio') || equipe.includes('tatiane');
+  const equipeConcomitante = equipe.includes('concomitante');
+
+  return produto === 'quinquenio' || produto === 'concomitante' ||
+         cargo === 'quinquenio' || cargo === 'concomitante' ||
+         equipeQuinquenio || equipeConcomitante;
+}
+
+function getFaixaProductType(colab: any): string {
+  const rawProduct = (colab?.produto || '').toUpperCase().trim();
+  if (rawProduct === 'JUDIT' || rawProduct === 'DISCADORA') {
+    return 'AUXILIO ACIDENTE';
+  }
+  if (rawProduct === 'QUINQUENIO' || rawProduct === 'CONCOMITANTE') {
+    return rawProduct;
+  }
+
+  const cargoNormalizado = (colab?.cargo || '').toLowerCase().trim();
+  if (cargoNormalizado === 'quinquenio') return 'QUINQUENIO';
+  if (cargoNormalizado === 'concomitante') return 'CONCOMITANTE';
+
+  const equipeNormalizada = (colab?.equipeNome || '').toLowerCase().trim();
+  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiane')) {
+    return 'QUINQUENIO';
+  }
+  if (equipeNormalizada.includes('concomitante')) {
+    return 'CONCOMITANTE';
+  }
+
+  return 'AUXILIO ACIDENTE';
+}
+
+// ============================================================
+// CONFIGURAÇÃO DE PESOS (ranking/score)
 // ============================================================
 const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', number> = {
   ganhos: 4,
@@ -59,9 +102,6 @@ const GLOBAL_META = {
   mensal: { assinados: 2000, ganhos: 2000 },
 };
 
-const normalize = (str: string): string =>
-  (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
 const isExcludedCargoForDisplay = (cargo: string) =>
   EXCLUDED_CARGOS_FOR_DISPLAY.some(g => normalize(g) === normalize(cargo));
@@ -72,9 +112,6 @@ const isDesativado = (c: any) => {
   return cargo === 'desativado' || equipe.includes('desativado');
 };
 
-// ============================================================
-// PONTUAÇÃO PONDERADA (mantida para ranking)
-// ============================================================
 function calculateWeightedScore(
   item: { ganhos: number; assinados: number; protocolados: number; emitidos: number }
 ): number {
@@ -86,7 +123,7 @@ function calculateWeightedScore(
   return score;
 }
 
-// ========== UTILITÁRIOS DE DATAS UTC (mantidos) ==========
+// ========== UTILITÁRIOS DE DATAS UTC ==========
 function parseUTCDate(dateStr: string): Date {
   if (!dateStr) return new Date(NaN);
   if (dateStr.includes('T') || dateStr.includes('Z')) {
@@ -161,10 +198,9 @@ function countWeekdaysUTC(startDate: string, endDate: string): number {
   return count;
 }
 
-// ========== FORMATAÇÃO ==========
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
-// ========== HOOKS E COMPONENTES AUXILIARES (mantidos) ==========
+// ========== HOOKS E COMPONENTES AUXILIARES ==========
 function useCountUp(target: number, duration = 1200) {
   const [value, setValue] = useState(0);
   useEffect(() => {
@@ -282,10 +318,7 @@ export default function Home() {
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-
-  // NOVO: estado para dados diários e comissão calculada
   const [dailyMetrics, setDailyMetrics] = useState<any[]>([]);
-  const [calculatedCommission, setCalculatedCommission] = useState(0);
 
   const {
     currentStartDate, currentEndDate, period,
@@ -296,7 +329,7 @@ export default function Home() {
     rawMetrics,
     loadRawMetrics,
     hideValues,
-    tabelaComissoes, // NOVO
+    tabelaComissoes,
   } = useAppStore();
 
   const { hasPermission, currentUser: authUser } = useAccessControl();
@@ -318,7 +351,7 @@ export default function Home() {
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
 
   // ============================================================
-  // DEFINIÇÃO DE loadRankingData (mantida)
+  // CARREGAMENTO DE DADOS PARA RANKING
   // ============================================================
   const loadRankingData = useCallback(async () => {
     if (!currentStartDate || !currentEndDate) return;
@@ -351,7 +384,7 @@ export default function Home() {
   }, [currentStartDate, currentEndDate, allCollaborators.length]);
 
   // ============================================================
-  // FUNÇÃO CENTRAL DE RECARGA (ATUALIZADA)
+  // FUNÇÃO CENTRAL DE RECARGA
   // ============================================================
   const reloadData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate) return;
@@ -369,13 +402,14 @@ export default function Home() {
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
       if (datesChanged) await loadRankingData();
 
-      // NOVO: Carregar dados diários para cálculo de comissão do usuário logado
+      // Carregar dados diários somente para assessores comuns
       if (currentUser) {
-        const userColab = collaborators.find(c => c.id === currentUser.id);
+        const allColabs = useAppStore.getState().collaborators;
+        const userColab = allColabs.find(c => c.id === currentUser.id);
         if (userColab) {
           const isSupervisor = (userColab.cargo || '').toLowerCase() === 'supervisor';
-          const isQuinquenio = (userColab.produto || '').toLowerCase() === 'quinquenio';
-          if (!isSupervisor && !isQuinquenio) {
+          const isEspecial = isSpecialGroupColaborador(userColab);
+          if (!isSupervisor && !isEspecial) {
             try {
               const daily = await fetchDailyMetrics({
                 start: currentStartDate,
@@ -387,6 +421,8 @@ export default function Home() {
               console.error('Erro ao carregar dados diários:', err);
               setDailyMetrics([]);
             }
+          } else {
+            setDailyMetrics([]);
           }
         }
       }
@@ -398,11 +434,7 @@ export default function Home() {
       setRefreshing(false);
       setLoading(false);
     }
-  }, [
-    currentStartDate, currentEndDate, filters,
-    loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData,
-    currentUser, collaborators
-  ]);
+  }, [currentStartDate, currentEndDate, filters, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData, currentUser]);
 
   const handleFilterChange = useCallback((newFilters: typeof filters) => {
     setFilters(newFilters);
@@ -467,7 +499,12 @@ export default function Home() {
     return sorted.map((item, idx) => ({ ...item, position: idx + 1 }));
   }, [allCollaborators, metricsData]);
 
-  const currentUserData = useMemo(() => currentUser?.id ? collaborators.find(c => c.id === currentUser.id) : null, [collaborators, currentUser]);
+  const currentUserData = useMemo(() => {
+    if (!currentUser?.id) return null;
+    const allColabs = useAppStore.getState().collaborators;
+    return allColabs.find(c => c.id === currentUser.id) || collaborators.find(c => c.id === currentUser.id);
+  }, [currentUser, collaborators]);
+
   const userRank = useMemo(() => {
     if (!currentUserData) return 0;
     const found = globalRanking.find(item => item.id === currentUserData.id || item.name === currentUserData.name);
@@ -487,7 +524,11 @@ export default function Home() {
     return aboveUser.score - (globalRanking[currentIndex]?.score || 0);
   }, [aboveUser, currentIndex, globalRanking]);
 
-  const isSpecialGroup = filters.produto === 'Quinquenio' || filters.produto === 'Concomitante';
+  // Grupo especial baseado no colaborador logado ou filtro
+  const isSpecialGroup = useMemo(() => {
+    if (filters.produto === 'Quinquenio' || filters.produto === 'Concomitante') return true;
+    return currentUserData ? isSpecialGroupColaborador(currentUserData) : false;
+  }, [filters.produto, currentUserData]);
 
   const filteredCollaborators = useMemo(() => collaborators.filter(c => {
     if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
@@ -505,31 +546,36 @@ export default function Home() {
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
   const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos";
 
-  // NOVO: Cálculo da comissão do usuário logado
+  // ============================================================
+  // CÁLCULO DA COMISSÃO DO USUÁRIO LOGADO
+  // ============================================================
   const userCommission = useMemo(() => {
     if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) {
       return 0;
     }
 
     const isSupervisor = (currentUserData.cargo || '').toLowerCase() === 'supervisor';
-    const isQuinquenio = (currentUserData.produto || '').toLowerCase() === 'quinquenio';
     const isSR = calculator.isSupervisorSR(currentUserData.email);
+    const isEspecial = isSpecialGroupColaborador(currentUserData);
 
     if (isSupervisor) {
-      const equipeColabs = collaborators.filter(c => c.equipeNome === currentUserData.equipeNome);
-      const totalAssEquipe = equipeColabs.reduce((s, c) => s + (c.assinados || 0), 0);
+      // currentUserData.assinados já é a soma da equipe (hierarquia)
+      const totalAssEquipe = currentUserData.assinados || 0;
       return calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
     }
 
-    if (isQuinquenio) {
-      return calculator.calculateQuinquenioCommission(currentUserData.assinados || 0, tabelaComissoes);
+    if (isEspecial) {
+      // Quinquênio ou Concomitante
+      const productType = getFaixaProductType(currentUserData);
+      return calculator.calculateProductCommission(currentUserData.assinados || 0, productType, tabelaComissoes);
     }
 
+    // Assessor comum
     if (dailyMetrics.length > 0) {
       const metaGolsAss = currentUserData.metaGolsAssinados ?? 3;
       const metaGolsGan = currentUserData.metaGolsGanhos ?? 3;
       const assinados = currentUserData.assinados || 0;
-      const productType = currentUserData.produto || 'AUXILIO ACIDENTE';
+      const productType = getFaixaProductType(currentUserData);
       const result = calculator.calculateTotalCommission(
         dailyMetrics,
         metaGolsAss,
@@ -542,7 +588,7 @@ export default function Home() {
     }
 
     return 0;
-  }, [currentUserData, tabelaComissoes, collaborators, dailyMetrics]);
+  }, [currentUserData, tabelaComissoes, dailyMetrics]);
 
   const { totalTargetAssinados, totalTargetGanhos, totalMetasBatidas } = useMemo(() => {
     if (isGlobalView) {
@@ -575,7 +621,7 @@ export default function Home() {
   }, [totalTargetAssinados, totalTargetGanhos, totals.assinados, totals.ganhos, isSpecialGroup]);
 
   // ============================================================
-  // GRÁFICOS DE PERFORMANCE (mantidos)
+  // GRÁFICOS DE PERFORMANCE
   // ============================================================
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
@@ -694,10 +740,9 @@ export default function Home() {
 
   const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
 
-  // NOVO: Valor alvo para o card de comissão (pode ser ajustado conforme faixa)
+  // Valor alvo para o card de comissão
   const comissaoTarget = useMemo(() => {
     if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) return 5000;
-    // Busca a maior faixa do tipo correspondente como referência
     const tipo = (currentUserData.cargo || '').toLowerCase() === 'supervisor' ? 'SUPERVISOR' : 'GOL';
     const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
     if (faixas.length === 0) return 5000;
