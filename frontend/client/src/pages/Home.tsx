@@ -399,6 +399,21 @@ export default function Home() {
       await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
       await loadWeeklyPerformanceData();
 
+      const leadsData = await fetchLeadsRecebidos({
+       start: currentStartDate,
+       end: currentEndDate,
+       equipe: equipeApi,
+       colaborador: colaboradorApi,
+       produto: produtoApi,
+      });
+      const totalLeadsRecebidos = (leadsData || []).reduce(
+       (acc, item) => acc + (Number(item.total) || 0),
+        0
+      );
+      setTotalLeads(totalLeadsRecebidos);
+
+      await loadWeeklyPerformanceData();
+
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
       if (datesChanged) await loadRankingData();
 
@@ -543,6 +558,7 @@ export default function Home() {
   }), [filteredCollaborators]);
 
   const totals = rawMetrics;
+  const [totalLeads, setTotalLeads] = useState(0);
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
   const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos";
 
@@ -735,8 +751,8 @@ export default function Home() {
     weeklyDetailed.forEach(d => { if (d.assinados > best.value) best = { day: d.day, value: d.assinados }; if (dailyTarget > 0 && d.assinados >= dailyTarget) daysWithMeta++; });
     return { totalAssinados, totalGanhos, performanceAssinados, performanceGanhos, bestDay: best, avgGanhos, daysWithMeta, totalDays };
   }, [isSpecialGroup, weeklyDetailed, displayCollaborators, totalTargetGanhos]);
-
-  const conversaoPercentual = totals.assinados > 0 ? (totals.ganhos / totals.assinados) * 100 : 0;
+  
+  const conversaoPercentual = totalLeads > 0 ? (totals.assinados / totalLeads) * 100 : 0;
 
   const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
 
@@ -941,7 +957,7 @@ export default function Home() {
                             <span className="font-bold text-[#2F6FED]">{formatInt(item.score)} pts</span>
                           </div>
                         );
-                      })}
+                      })} 
                     </div>
                   </div>
                 </>

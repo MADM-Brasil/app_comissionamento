@@ -227,16 +227,10 @@ export default function VisaoGeral() {
     }
   }, [filters, currentStartDate, currentEndDate, rawCollaborators.length, loadCollaborators, loadMetricsForPeriod, loadRawMetrics, fetchLeadsData]);
 
-  // -----------------------------------------------------------
-  //  HANDLE REFRESH (para o botão no FilterBar)
-  // -----------------------------------------------------------
   const handleRefresh = useCallback(async () => {
     await fetchData(true);
   }, [fetchData]);
 
-  // -----------------------------------------------------------
-  //  EFEITO PRINCIPAL (com dependências completas e proteção contra loops)
-  // -----------------------------------------------------------
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     if (isFetching.current) return;
@@ -317,7 +311,6 @@ export default function VisaoGeral() {
   const hoje = new Date().toISOString().slice(0, 10);
   const diasUteisDecorridos = useMemo(() => contarDiasUteis({ inicio: mesPeriodo.inicio, fim: hoje }), [mesPeriodo, hoje]);
 
-  // Pace (sem classificação de status)
   const paceDiscador = calcularPaceProjecao(totalAssinadosDiscador, metaMensalDiscador, diasUteisDecorridos, diasUteisTotaisMes);
   const paceJudit = calcularPaceProjecao(totalAssinadosJudit, metaMensalJudit, diasUteisDecorridos, diasUteisTotaisMes);
 
@@ -361,6 +354,7 @@ export default function VisaoGeral() {
   );
 
   const equipeSelecionada = filters.equipe !== "todas";
+  const isIndividualFilter = filters.colaborador !== "todos";
 
   const atingimentoMetaPeriodo = metaMensalDiscador > 0 ? (totalAssinadosDiscador / metaMensalDiscador) * 100 : 0;
 
@@ -398,7 +392,7 @@ export default function VisaoGeral() {
 
       {!loading && rawCollaborators.length > 0 && (
         <>
-          {/* Cards de resumo: Discador e Judit (sem statusPace) */}
+          {/* Cards de resumo: Discador e Judit */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
             <ResumoMesCard
               titulo="Discador · Assinados"
@@ -447,23 +441,27 @@ export default function VisaoGeral() {
             <KpiCard titulo="Perdidos" valor={formatNumero(totalPerdidos)} icon={XCircle} accent="danger" />
           </div>
 
-          {/* Resumo textual (Discador) */}
+          {/* Resumo textual adaptado para filtro individual */}
           <Card className="mb-6 p-4">
             <p className="text-sm font-semibold text-slate-900">
-              No período, a equipe Discador assinou {formatNumero(totalAssinadosDiscador)} e protocolou {formatNumero(totalProtocolados)}
+              {isIndividualFilter
+                ? `O colaborador selecionado assinou ${formatNumero(totalAssinadosDiscador)} e protocolou ${formatNumero(totalProtocolados)} no período.`
+                : `No período, a equipe Discador assinou ${formatNumero(totalAssinadosDiscador)} e protocolou ${formatNumero(totalProtocolados)}`}
             </p>
             <p className="mt-1 text-[13px] text-slate-600">
               Isso representa {formatPct(atingimentoMetaPeriodo, 1)} da meta mensal de assinados.
             </p>
           </Card>
 
-          {/* Desempenho (gráfico de equipes ou radar) */}
+          {/* Desempenho: radar individual ou gráfico de equipes */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
             <Card className="xl:col-span-2">
               <h3 className="text-sm font-semibold text-slate-700 mb-3">
-                {equipeSelecionada ? `Desempenho · ${filters.equipe}` : "Desempenho das Equipes"}
+                {equipeSelecionada || isIndividualFilter
+                  ? `Desempenho · ${filters.colaborador !== "todos" ? filters.colaborador : filters.equipe}`
+                  : "Desempenho das Equipes"}
               </h3>
-              {equipeSelecionada ? (
+              {(equipeSelecionada || isIndividualFilter) ? (
                 <RadarConversaoLigacoes colaboradores={collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo')} />
               ) : (
                 <DesempenhoEquipes dados={dadosEquipes} />
@@ -500,30 +498,24 @@ export default function VisaoGeral() {
             </Card>
           </div>
 
-          {/* Comparativo por time */}
-          <div className="mt-6">
-            <Card className="xl:col-span-2">
-              <h3 className="text-sm font-semibold text-slate-700 mb-3">Comparativo por time</h3>
-              <div className="space-y-2">
-                {porTime.map(t => (
-                  <Link key={t.time} to={`/equipe/${encodeURIComponent(t.time)}`} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 hover:bg-slate-100 transition-colors">
-                    <span className="text-[13px] font-medium text-slate-700">{t.time} <span className="text-slate-400 font-normal">· {t.pessoas} pessoas</span></span>
-                    <span className="text-[13px] text-slate-400 text-center">{formatNumero(t.assinados)} assinados</span>
-                    <span className="text-[13px] font-semibold text-slate-900">{formatPct(t.taxa)}</span>
-                  </Link>
-                ))}
-                {porTime.length === 0 && <p className="text-sm text-slate-500">Nenhum time encontrado com os filtros atuais.</p>}
-              </div>
-            </Card>
-          </div>
-
-          {/* Plano de Ação 
-          <div className="mt-6">
-            <PlanoAcaoColaboradores
-              colaboradores={collaborators}
-              diasUteisPeriodo={diasUteisPeriodoSelecionado}
-            />
-          </div>*/}
+          {/* Comparativo por time (oculto no filtro individual) */}
+          {!isIndividualFilter && (
+            <div className="mt-6">
+              <Card className="xl:col-span-2">
+                <h3 className="text-sm font-semibold text-slate-700 mb-3">Comparativo por time</h3>
+                <div className="space-y-2">
+                  {porTime.map(t => (
+                    <Link key={t.time} to={`/equipe/${encodeURIComponent(t.time)}`} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 hover:bg-slate-100 transition-colors">
+                      <span className="text-[13px] font-medium text-slate-700">{t.time} <span className="text-slate-400 font-normal">· {t.pessoas} pessoas</span></span>
+                      <span className="text-[13px] text-slate-400 text-center">{formatNumero(t.assinados)} assinados</span>
+                      <span className="text-[13px] font-semibold text-slate-900">{formatPct(t.taxa)}</span>
+                    </Link>
+                  ))}
+                  {porTime.length === 0 && <p className="text-sm text-slate-500">Nenhum time encontrado com os filtros atuais.</p>}
+                </div>
+              </Card>
+            </div>
+          )}
         </>
       )}
     </DashboardLayout>
