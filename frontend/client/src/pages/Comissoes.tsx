@@ -195,7 +195,7 @@ export default function Comissoes() {
   } = useAppStore();
 
   const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
-  const isAdmin = getAccessLevel() === LEVELS.ADMINISTRATIVO || getAccessLevel() === LEVELS.SUPER_ADMIN;
+  const isAdmin = getAccessLevel() === LEVELS.SUPER_ADMIN;
 
   const [filters, setFilters] = useState<{
     equipe: string;
