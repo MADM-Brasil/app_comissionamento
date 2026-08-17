@@ -10,7 +10,7 @@ export interface CalculatorConfig {
 }
 
 export interface TeamMember {
-  id?: string | number; 
+  id?: string | number;
   nome?: string;
   ganhos?: number;
   assinados?: number;
@@ -71,7 +71,7 @@ export interface DailyData {
 
 export interface DailyGols {
   date: string;
-  gols: number;           // antes era "gol: boolean"
+  gols: number;
 }
 
 export interface GoalCommissionResult {
@@ -117,6 +117,7 @@ export class Calculator {
   /**
    * Calcula gols diários de um assessor.
    * Agora contabiliza quantos múltiplos das metas foram atingidos por dia.
+   * Normaliza a data para YYYY-MM-DD.
    *
    * @param dailyData - Array de { date, assinados, ganhos }
    * @param metaGolsAssinados
@@ -139,8 +140,79 @@ export class Calculator {
         Math.floor(ganhos / metaGolsGanhos)
       );
       totalGols += golsNoDia;
-      return { date: day.date, gols: golsNoDia };
+      return { date: day.date.slice(0, 10), gols: golsNoDia };
     });
+    return { totalGols, dailyGols };
+  }
+
+  // ========== APLICAÇÃO DE CAMPANHAS ==========
+  /**
+   * Aplica campanhas ativas (aprovadas) aos gols diários.
+   * 
+   * Regras:
+   * - Campanha GOLS: multiplica os gols do dia pelo multiplicador.
+   * - Campanha ASSINADOS: adiciona 1 gol por assinado no dia.
+   * 
+   * @param dailyData - Array de { date, assinados, ganhos }
+   * @param metaGolsAssinados
+   * @param metaGolsGanhos
+   * @param campanhasAtivas - Array de campanhas com { tipo, data_publicacao, multiplicador }
+   * @returns { totalGols: number, dailyGols: DailyGols[] }
+   */
+  applyCampaignsToDailyGoals(
+    dailyData: DailyData[],
+    metaGolsAssinados: number,
+    metaGolsGanhos: number,
+    campanhasAtivas: any[]
+  ): { totalGols: number; dailyGols: DailyGols[] } {
+    // Normaliza as datas dos dados diários
+    const normalizedDailyData = dailyData.map(d => ({
+      ...d,
+      date: d.date.slice(0, 10),
+    }));
+
+    // Calcula gols base (sem campanhas) usando os dados normalizados
+    const base = this.calculateDailyGoals(normalizedDailyData, metaGolsAssinados, metaGolsGanhos);
+
+    // Mapas por data (normalizada)
+    const golsMap = new Map<string, number>();       // multiplicador máximo de campanha GOLS
+    const assinadosMap = new Map<string, boolean>(); // data com campanha ASSINADOS
+
+    for (const camp of campanhasAtivas) {
+      const dateKey = (camp.data_publicacao || '').split('T')[0];
+      if (!dateKey) continue;
+      const tipo = (camp.tipo || '').toUpperCase();
+
+      if (tipo === 'GOLS') {
+        const atual = golsMap.get(dateKey) || 0;
+        const mult = Number(camp.multiplicador) || 1;
+        if (mult > atual) golsMap.set(dateKey, mult);
+      } else if (tipo === 'ASSINADOS') {
+        assinadosMap.set(dateKey, true);
+      }
+    }
+
+    let totalGols = 0;
+    const dailyGols = base.dailyGols.map(dayGol => {
+      const dateKey = dayGol.date;
+      let gols = dayGol.gols;
+
+      // Aplica multiplicador (campanha GOLS)
+      const mult = golsMap.get(dateKey);
+      if (mult) gols = gols * mult;
+
+      // Aplica campanha ASSINADOS (cada assinado = +1 gol)
+      if (assinadosMap.has(dateKey)) {
+        const dayData = normalizedDailyData.find(d => d.date === dateKey);
+        if (dayData) {
+          gols += dayData.assinados || 0;
+        }
+      }
+
+      totalGols += gols;
+      return { date: dateKey, gols };
+    });
+
     return { totalGols, dailyGols };
   }
 
@@ -212,9 +284,15 @@ export class Calculator {
     metaGolsGanhos: number,
     totalAssinados: number,
     productType: string,
-    tabelaComissoes: TabelaComissaoItem[]
+    tabelaComissoes: TabelaComissaoItem[],
+    campanhasAtivas: any[] = []
   ): GoalCommissionResult {
-    const { totalGols } = this.calculateDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos);
+    const { totalGols } = this.applyCampaignsToDailyGoals(
+      dailyData,
+      metaGolsAssinados,
+      metaGolsGanhos,
+      campanhasAtivas
+    );
     const goalCommission = this.calculateGoalCommission(totalGols, tabelaComissoes);
     const productCommission = this.calculateProductCommission(totalAssinados, productType, tabelaComissoes);
     return {

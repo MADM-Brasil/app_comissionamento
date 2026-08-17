@@ -15,6 +15,7 @@ import {
 } from "recharts";
 import { calculator } from "@/lib/calculator";
 import { fetchDailyMetrics } from "@/lib/metrics";
+import { toast } from "sonner";
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
@@ -112,6 +113,16 @@ const CustomTooltip = ({ active, payload, label, hideValues }: any) => {
 };
 
 const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, metaGolsGanhos, isSupervisor, onClose }: any) => {
+  const allDates = new Set<string>();
+  dailyMetrics.forEach((d: any) => allDates.add(d.date.slice(0, 10)));
+  (campaigns || []).forEach((c: any) => {
+    if (c.validacao_financeiro) {
+      allDates.add(c.data_publicacao.split('T')[0]);
+    }
+  });
+
+  const sortedDates = Array.from(allDates).sort();
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col overflow-hidden">
@@ -126,19 +137,33 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
         </div>
         <div className="p-6 overflow-y-auto flex-1">
           <div className="space-y-4">
-            {dailyMetrics.length > 0 ? (
-              dailyMetrics.map((day: any, idx: number) => {
-                const dateKey = day.date;
-                const golsInfo = dailyGols.find((g: any) => g.date === dateKey);
+            {sortedDates.length > 0 ? (
+              sortedDates.map((dateKey, idx) => {
+                const day = dailyMetrics.find((d: any) => d.date.slice(0, 10) === dateKey) || {
+                  date: dateKey,
+                  assinados: 0,
+                  ganhos: 0,
+                  perdidos: 0,
+                  emitidos: 0,
+                  protocolados: 0,
+                };
+                const golsInfo = dailyGols.find((g: any) => (g.date || '').slice(0, 10) === dateKey);
                 const golsDoDia = golsInfo?.gols || 0;
-                const campanhasGols = campaigns?.gols?.filter((c: any) => c.data_publicacao.split('T')[0] === dateKey) || [];
-                const campanhasAssinados = campaigns?.assinados?.filter((c: any) => c.data_publicacao.split('T')[0] === dateKey) || [];
+
+                const campanhasAprovadas = (campaigns || []).filter((c: any) => c.validacao_financeiro);
+                const campanhasGols = campanhasAprovadas.filter((c: any) =>
+                  c.tipo?.toUpperCase() === 'GOLS' && c.data_publicacao.split('T')[0] === dateKey
+                );
+                const campanhasAssinados = campanhasAprovadas.filter((c: any) =>
+                  c.tipo?.toUpperCase() === 'ASSINADOS' && c.data_publicacao.split('T')[0] === dateKey
+                );
                 const temCampanhas = campanhasGols.length > 0 || campanhasAssinados.length > 0;
+
                 return (
                   <div key={idx} className={`p-4 rounded-xl border ${temCampanhas ? 'border-[#2F6FED] bg-[#eff6ff]' : 'border-[#e2e8f0]'}`}>
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-[#0f172a]">{dateKey.slice(0, 10)}</span>
+                        <span className="text-sm font-semibold text-[#0f172a]">{dateKey}</span>
                       </div>
                       {temCampanhas && <span className="badge success text-xs">Campanha ativa</span>}
                     </div>
@@ -177,7 +202,7 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                 );
               })
             ) : (
-              <div className="text-center text-[#94a3b8] py-8">Nenhum dado diário disponível.</div>
+              <div className="text-center text-[#94a3b8] py-8">Nenhum dado diário ou campanha disponível.</div>
             )}
           </div>
         </div>
@@ -336,7 +361,10 @@ export default function Comissoes() {
             setDailyMetrics(daily);
             const metaAss = targetColab.metaGolsAssinados ?? 3;
             const metaGan = targetColab.metaGolsGanhos ?? 3;
-            const golsResult = calculator.calculateDailyGoals(daily, metaAss, metaGan);
+
+            const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
+
+            const golsResult = calculator.applyCampaignsToDailyGoals(daily, metaAss, metaGan, activeCampaigns);
             setDailyGols(golsResult.dailyGols);
 
             const now = new Date();
@@ -359,7 +387,7 @@ export default function Comissoes() {
               colaborador: targetColab.name,
             });
             setWeeklyMetrics(weekly);
-            const weeklyGolsResult = calculator.calculateDailyGoals(weekly, metaAss, metaGan);
+            const weeklyGolsResult = calculator.applyCampaignsToDailyGoals(weekly, metaAss, metaGan, activeCampaigns);
             setWeeklyGols(weeklyGolsResult.dailyGols);
           } catch (err) {
             console.error('Erro ao carregar dados diários:', err);
@@ -376,7 +404,7 @@ export default function Comissoes() {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, filters, currentUser, isAdmin, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, storeColabs]);
+  }, [currentStartDate, currentEndDate, filters, currentUser, isAdmin, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, storeColabs, campaigns]);
 
   const handleRefresh = useCallback(async () => { await reloadData(true); }, [reloadData]);
   const handleFilterChange = useCallback((newFilters: any) => { setFilters(newFilters); }, []);
@@ -456,11 +484,14 @@ export default function Comissoes() {
         const metaGan = userColab.metaGolsGanhos ?? 3;
         const assinados = userColab.assinados || 0;
         const productType = getFaixaProductType(userColab);
-        const result = calculator.calculateTotalCommission(dailyMetrics, metaAss, metaGan, assinados, productType, tabelaComissoes);
-        totalCommission = result.totalCommission;
-        comissaoGols = result.goalCommission;
-        comissaoAssinados = result.productCommission;
-        totalGols = result.totalGols;
+
+        const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
+
+        const golsResult = calculator.applyCampaignsToDailyGoals(dailyMetrics, metaAss, metaGan, activeCampaigns);
+        totalGols = golsResult.totalGols;
+        comissaoGols = calculator.calculateGoalCommission(totalGols, tabelaComissoes);
+        comissaoAssinados = calculator.calculateProductCommission(assinados, productType, tabelaComissoes);
+        totalCommission = comissaoGols + comissaoAssinados;
       }
     }
 
@@ -481,7 +512,7 @@ export default function Comissoes() {
       perdidos: userColab.perdidos || 0,
       originalColab: userColab,
     }];
-  }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics, userColab]);
+  }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics, userColab, campaigns]);
 
   const teamMembers = useMemo(() => {
     if (!isSupervisorUser || !userColab) return [];
@@ -544,10 +575,8 @@ export default function Comissoes() {
 
   const calcPercent = (value: number, target: number) => target > 0 ? Math.min((value / target) * 100, 100) : 0;
 
-  // Evolução Diária apenas para assessores comuns
+  // ========== EVOLUÇÃO DIÁRIA (CORRIGIDO) ==========
   const evolucaoDiariaData = useMemo(() => {
-    if (!weeklyMetrics.length) return [];
-
     const now = new Date();
     const dayOfWeek = now.getDay();
     const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
@@ -742,12 +771,19 @@ export default function Comissoes() {
                     </>
                   )}
 
-                  {dailyMetrics.length > 0 && (
-                    <button onClick={() => setShowExtrato(true)} className="mt-4 w-full py-2 px-4 inline-flex items-center justify-center gap-2 text-xs font-semibold rounded-lg border border-[#2F6FED] text-[#2F6FED] hover:bg-[#eff6ff] transition-colors">
-                      <CalendarDays className="w-4 h-4" />
-                      Ver Extrato de Gols e Campanhas
-                    </button>
-                  )}
+                  <button
+                    onClick={() => {
+                      if (dailyMetrics.length === 0) {
+                        toast.error('Nenhum dado diário disponível para exibir extrato.');
+                        return;
+                      }
+                      setShowExtrato(true);
+                    }}
+                    className="mt-4 w-full py-2 px-4 inline-flex items-center justify-center gap-2 text-xs font-semibold rounded-lg border border-[#2F6FED] text-[#2F6FED] hover:bg-[#eff6ff] transition-colors"
+                  >
+                    <CalendarDays className="w-4 h-4" />
+                    Ver Extrato de Gols e Campanhas
+                  </button>
                 </div>
 
                 {!isSupervisorUser && (
@@ -943,7 +979,7 @@ export default function Comissoes() {
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos de apuração:</span> Diário, semanal e mensal.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Gols por período:</span> mínimo entre assinados e ganhos.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma das faixas de assinados + gols.</div>
-                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Segurança:</span> informações protegidas e auditáveis.</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Campanhas aprovadas:</span> multiplicam gols (tipo GOLS) ou adicionam 1 gol por assinado (tipo ASSINADOS).</div>
                 </div>
               </div>
             </>

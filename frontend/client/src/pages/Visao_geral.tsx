@@ -65,6 +65,12 @@ const isExcludedCargo = (cargo: string) =>
 const isDesativado = (c: Collaborator) =>
   normalize(c.cargo) === 'desativado' || normalize(c.equipeNome).includes('desativado');
 
+// Função para identificar supervisores pelo cargo
+const isSupervisor = (c: Collaborator) => {
+  const cargo = normalize(c.cargo);
+  return cargo === 'supervisor' || cargo === 'supervisora' || cargo.includes('supervisor');
+};
+
 // ========== RADAR DE CONVERSÃO (colaboradores individuais) ==========
 function RadarConversaoLigacoes({ colaboradores }: { colaboradores: Collaborator[] }) {
   const dados = colaboradores.map((colab) => ({
@@ -245,13 +251,30 @@ export default function VisaoGeral() {
     setFilters(newFilters);
   };
 
-  // Colaboradores ativos após exclusões
+  // ================== FILTRO DE COLABORADORES (CORRIGIDO) ==================
   const collaborators = useMemo(() => {
-    let list = rawCollaborators.filter(
-      c => !isDesativado(c) && !isExcludedTeam(c.equipeNome) && !isExcludedCargo(c.cargo)
-    );
-    if (filters.equipe !== "todas") list = list.filter(c => c.equipeNome === filters.equipe);
-    if (filters.colaborador !== "todos") list = list.filter(c => c.name === filters.colaborador);
+    let list = rawCollaborators.filter(c => !isDesativado(c));
+
+    // Se uma equipe específica for selecionada, NÃO aplica exclusões globais
+    if (filters.equipe === "todas") {
+      list = list.filter(
+        c => !isExcludedTeam(c.equipeNome) && !isExcludedCargo(c.cargo)
+      );
+    }
+
+    // Filtro por equipe
+    if (filters.equipe !== "todas") {
+      const equipeNormalizada = normalize(filters.equipe);
+      list = list.filter(c => normalize(c.equipeNome) === equipeNormalizada);
+    }
+
+    // Filtro por colaborador
+    if (filters.colaborador !== "todos") {
+      const colaboradorNormalizado = normalize(filters.colaborador);
+      list = list.filter(c => normalize(c.name) === colaboradorNormalizado);
+    }
+
+    // Filtro por produto
     if (filters.produto !== "Todos") {
       const groupMap: Record<string, string> = {
         "Auxilio Acidente": "Elite",
@@ -259,8 +282,11 @@ export default function VisaoGeral() {
         "Concomitante": "Concomitante",
       };
       const group = groupMap[filters.produto];
-      if (group) list = list.filter(c => c.cargo === group);
+      if (group) {
+        list = list.filter(c => c.cargo === group);
+      }
     }
+
     return list;
   }, [rawCollaborators, filters]);
 
@@ -462,7 +488,9 @@ export default function VisaoGeral() {
                   : "Desempenho das Equipes"}
               </h3>
               {(equipeSelecionada || isIndividualFilter) ? (
-                <RadarConversaoLigacoes colaboradores={collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo')} />
+                <RadarConversaoLigacoes
+                  colaboradores={collaborators.filter(c => !isSupervisor(c) && c.status !== 'inativo')}
+                />
               ) : (
                 <DesempenhoEquipes dados={dadosEquipes} />
               )}

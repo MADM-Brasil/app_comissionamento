@@ -38,6 +38,10 @@ const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+// ✅ Função para normalizar cargos (remove acentos, minúsculas)
+const normalizeRole = (str: string): string =>
+  (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
 function formatMonthYear(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '--';
   const [year, month] = dateStr.split('-');
@@ -53,22 +57,56 @@ export default function Configuration() {
   const {
     currentStartDate, currentEndDate, collaborators, globalConfig,
     updateGlobalConfig, setCollaborators, equipeConfigs, setEquipeConfigs,
-    loadMetricsForPeriod, hideValues,
+    loadMetricsForPeriod, hideValues, currentUser,
   } = useAppStore();
 
-  const { hasPermission, getAccessLevel, LEVELS, currentUser } = useAccessControl();
+  const { getAccessLevel, LEVELS } = useAccessControl();
   const userLevel = getAccessLevel();
 
+  //Determinação de permissões baseada no cargo/nível
+  const normalizedCargo = normalizeRole(currentUser?.cargo || '');
+
+  const isSuperAdmin =
+    normalizedCargo === 'desenvoldor' ||
+    normalizedCargo === 'superadmin' ||
+    normalizedCargo === 'ceo' ||
+    normalizedCargo === 'diretoria' ||
+    userLevel === LEVELS.SUPER_ADMIN;
+
+  const isCoordenador =
+    normalizedCargo.includes('coordenador') ||
+    normalizedCargo.includes('coordenadora') ||
+    userLevel === LEVELS.COORDENADOR;
+
+  const isAdministrativo =
+    normalizedCargo.includes('administrativo') ||
+    userLevel === LEVELS.ADMINISTRATIVO;
+
+  const isSupervisor =
+    normalizedCargo.includes('supervisor') ||
+    userLevel === LEVELS.SUPERVISAO;
+
+  const isAssessor = !(isSuperAdmin || isCoordenador || isAdministrativo || isSupervisor);
+
+  // ✅ Acesso à página: todos exceto assessores
+  // Enquanto o currentUser não está carregado, permitimos (evita redirecionamento prematuro)
+  const canAccessConfig = currentUser ? !isAssessor : true;
+
+  // ✅ Permissão de edição: coordenadores, administrativos e super admins
+  const canEditConfig = isSuperAdmin || isCoordenador || isAdministrativo;
+  const canEditBonus = canEditConfig;
+  const canGenerateNextMonth = isSuperAdmin;
+
+  // ✅ Registro de campanhas: coordenadores, administrativos e super admins (não supervisores)
+  const canRegisterCampanha = isSuperAdmin || isCoordenador || isAdministrativo;
+
+  const isAdminOnly = canEditConfig;
+
   useEffect(() => {
-    if (!hasPermission("canAccessConfiguration")) {
+    if (currentUser && !canAccessConfig) {
       navigate("/");
     }
-  }, [hasPermission, navigate]);
-
-  const canEditConfiguration = hasPermission("canEditConfiguration");
-  const canEditBonus = hasPermission("canEditBonus");
-  const canGenerateNextMonth = hasPermission("canGenerateNextMonth");
-  const isAdminOnly = userLevel === LEVELS.ADMINISTRATIVO || userLevel === LEVELS.SUPER_ADMIN;
+  }, [currentUser, canAccessConfig, navigate]);
 
   // ========== ESTADOS ==========
   const [searchTerm, setSearchTerm] = useState("");
@@ -103,14 +141,14 @@ export default function Configuration() {
 
   const [mostrarCampanhas, setMostrarCampanhas] = useState(false);
   const [campanhasRegistradas, setCampanhasRegistradas] = useState<Array<{
-    id: string;
-    data: string;
-    categoria: string;
+    tipo: string;
     multiplicador: number;
     produto: string;
+    data_publicacao: string;
     descricao: string;
-    aprovada: boolean;
+    validacao_financeiro: boolean;
   }>>([]);
+  const [loadingCampanhas, setLoadingCampanhas] = useState(false);
 
   const isAssinados = campanhaCategoria === "Assinados";
   useEffect(() => {
@@ -145,9 +183,9 @@ export default function Configuration() {
   const nextMonthStr = nextMonthDate.toISOString().slice(0, 10);
   const isNextMonthGenerated = availableMonths.includes(nextMonthStr);
 
-  const isEditable = canEditConfiguration && !isLocked;
+  const isEditable = canEditConfig && !isLocked;
   const isBonusEditable = canEditBonus && !isLocked;
-  const isAllDisabled = !canEditConfiguration || isLocked;
+  const isAllDisabled = !canEditConfig || isLocked;
 
   const collaboratorsCache = useRef<Map<string, any[]>>(new Map());
 
@@ -218,7 +256,7 @@ export default function Configuration() {
       const lastDay = new Date(year, monthIdx + 1, 0).getDate();
       const end = `${month.substring(0, 7)}-${String(lastDay).padStart(2, '0')}`;
 
-      // Totais (para os campos de emitidos, assinados, etc.)
+      // Totais
       const [emitidos, assinados, ganhos, perdidos, protocolados] = await Promise.all([
         fetchEmitidos({ start, end }),
         fetchAssinados({ start, end }),
@@ -227,7 +265,7 @@ export default function Configuration() {
         fetchProtocolados({ start, end }),
       ]);
 
-      // Dados diários para calcular Gols (mesma lógica da página Comissões)
+      // Dados diários para calcular Gols
       const [dailyAssinados, dailyGanhos] = await Promise.all([
         fetchAssinados({ start, end, granularity: 'daily' }),
         fetchGanhos({ start, end, granularity: 'daily' }),
@@ -608,41 +646,125 @@ export default function Configuration() {
   };
 
   // ========== CAMPANHA COMERCIAL ==========
-  const handleRegistrarCampanha = () => {
-    const novaCampanha = {
-      id: Date.now().toString(),
-      data: new Date().toLocaleDateString('pt-BR'),
-      categoria: campanhaCategoria,
-      multiplicador: campanhaMultiplicador,
-      produto: campanhaProduto,
-      descricao: campanhaDescricao || 'Sem descrição',
-      aprovada: false,
-    };
-    setCampanhasRegistradas(prev => [novaCampanha, ...prev]);
-    toast.success(`Campanha registrada com sucesso!`);
-    setCampanhaDescricao('');
+  const loadCampanhas = async () => {
+    setLoadingCampanhas(true);
+    try {
+      const mes = selectedMonth.substring(0, 7);
+      const res = await fetch(`${API_BASE}/campanhas?mes=${mes}`, { credentials: 'include' });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.data)) {
+        setCampanhasRegistradas(data.data.map((c: any) => ({
+          tipo: c.tipo,
+          multiplicador: Number(c.multiplicador),
+          produto: c.produto || 'Todos',
+          data_publicacao: c.data_publicacao,
+          descricao: c.descricao,
+          validacao_financeiro: Boolean(c.validacao_financeiro),
+        })));
+      } else if (!res.ok) {
+        throw new Error(data.error || 'Erro ao carregar campanhas');
+      }
+    } catch (err: any) {
+      toast.error(`Falha ao carregar campanhas: ${err.message}`);
+    } finally {
+      setLoadingCampanhas(false);
+    }
   };
 
-  const handleAprovarCampanha = (id: string) => {
-    if (!isAdminOnly) {
-      toast.error('Apenas administradores podem aprovar campanhas.');
-      return;
+  useEffect(() => {
+    if (selectedMonth) {
+      loadCampanhas();
     }
-    setCampanhasRegistradas(prev =>
-      prev.map(camp => camp.id === id ? { ...camp, aprovada: true } : camp)
-    );
-    toast.success('Campanha aprovada!');
+  }, [selectedMonth]);
+
+  const handleRegistrarCampanha = async () => {
+    try {
+      const headers = await getCsrfHeaders();
+      const body = {
+        tipo: campanhaCategoria,
+        multiplicador: campanhaMultiplicador,
+        produto: campanhaProduto,
+        data_publicacao: new Date().toISOString().slice(0, 10),
+        descricao: campanhaDescricao || 'Sem descrição',
+      };
+
+      const res = await fetch(`${API_BASE}/campanhas`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success('Campanha registrada com sucesso!');
+        setCampanhaDescricao('');
+        await loadCampanhas();
+      } else {
+        throw new Error(data.error || 'Erro ao registrar campanha');
+      }
+    } catch (err: any) {
+      toast.error(`Falha ao registrar: ${err.message}`);
+    }
   };
 
-  const handleRejeitarCampanha = (id: string) => {
-    if (!isAdminOnly) {
-      toast.error('Apenas administradores podem rejeitar campanhas.');
+  const handleAprovarCampanha = async (camp: any) => {
+    if (!isSuperAdmin) {
+      toast.error('Apenas super administradores podem aprovar campanhas.');
       return;
     }
-    setCampanhasRegistradas(prev =>
-      prev.map(camp => camp.id === id ? { ...camp, aprovada: false } : camp)
-    );
-    toast.info('Campanha rejeitada.');
+    try {
+      const headers = await getCsrfHeaders();
+      const res = await fetch(`${API_BASE}/campanhas/validacao`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          tipo: camp.tipo,
+          data_publicacao: camp.data_publicacao,
+          produto: camp.produto,
+          validacao_financeiro: true,
+        }),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success('Campanha aprovada!');
+        await loadCampanhas();
+      } else {
+        throw new Error(data.error || 'Erro ao aprovar');
+      }
+    } catch (err: any) {
+      toast.error(`Falha ao aprovar: ${err.message}`);
+    }
+  };
+
+  const handleRejeitarCampanha = async (camp: any) => {
+    if (!isSuperAdmin) {
+      toast.error('Apenas super administradores podem rejeitar campanhas.');
+      return;
+    }
+    try {
+      const headers = await getCsrfHeaders();
+      const res = await fetch(`${API_BASE}/campanhas/validacao`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          tipo: camp.tipo,
+          data_publicacao: camp.data_publicacao,
+          produto: camp.produto,
+          validacao_financeiro: false,
+        }),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.info('Campanha rejeitada.');
+        await loadCampanhas();
+      } else {
+        throw new Error(data.error || 'Erro ao rejeitar');
+      }
+    } catch (err: any) {
+      toast.error(`Falha ao rejeitar: ${err.message}`);
+    }
   };
 
   // ========== RENDER ==========
@@ -702,8 +824,8 @@ export default function Configuration() {
           {isLocked && <span className="badge warning">Bloqueado</span>}
         </div>
 
-        {/* CARD: REGISTRAR CAMPANHA COMERCIAL (apenas admin) */}
-        {isAdminOnly && (
+        {/* CARD: REGISTRAR CAMPANHA COMERCIAL (coordenador, administrativo e super admin) */}
+        {canRegisterCampanha && (
           <div className="card">
             <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -782,6 +904,7 @@ export default function Configuration() {
                   </select>
                 </div>
               </div>
+
               <div className="mt-4">
                 <label htmlFor="campanhaDescricao" className="block text-xs font-medium text-[#64748b] mb-1">
                   Descrição
@@ -795,6 +918,7 @@ export default function Configuration() {
                   className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
                 />
               </div>
+
               <div className="mt-4 flex justify-end">
                 <button
                   onClick={handleRegistrarCampanha}
@@ -806,12 +930,14 @@ export default function Configuration() {
               </div>
             </div>
 
+            {/* Lista de campanhas */}
             {mostrarCampanhas && (
               <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-medium text-[#64748b]">
                     {campanhasRegistradas.length} campanha(s) registrada(s)
                   </span>
+                  {loadingCampanhas && <span className="text-xs text-[#94a3b8]">Carregando...</span>}
                 </div>
 
                 {campanhasRegistradas.length === 0 ? (
@@ -833,61 +959,70 @@ export default function Configuration() {
                         </tr>
                       </thead>
                       <tbody>
-                        {campanhasRegistradas.map((camp) => (
-                          <tr key={camp.id}>
-                            <td className="text-xs text-[#64748b]">{camp.data}</td>
-                            <td className="text-xs font-medium">{camp.categoria}</td>
-                            <td className="text-center text-xs font-bold">
-                              {camp.multiplicador.toFixed(1)}x
-                              {camp.categoria === "Assinados" && " (1:1)"}
-                            </td>
-                            <td className="text-xs">{camp.produto}</td>
-                            <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
-                              {camp.descricao}
-                            </td>
-                            <td className="text-center">
-                              {camp.aprovada ? (
-                                <span className="inline-flex items-center gap-1 text-[#16A34A] bg-[#dcfce7] px-2 py-0.5 rounded-full text-[10px] font-medium">
-                                  <Check className="w-3 h-3" /> Aprovada
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1 text-[#DC2626] bg-[#fee2e2] px-2 py-0.5 rounded-full text-[10px] font-medium">
-                                  <XIcon className="w-3 h-3" /> Pendente
-                                </span>
-                              )}
-                            </td>
-                            <td className="text-center">
-                              <div className="flex items-center justify-center gap-1">
-                                <button
-                                  onClick={() => handleAprovarCampanha(camp.id)}
-                                  disabled={camp.aprovada}
-                                  className={cn(
-                                    "p-1 rounded transition-colors",
-                                    camp.aprovada
-                                      ? "text-gray-300 cursor-not-allowed"
-                                      : "text-[#16A34A] hover:bg-green-50"
-                                  )}
-                                  title={camp.aprovada ? "Já aprovada" : "Aprovar campanha"}
-                                >
-                                  <Check className="w-4 h-4" />
-                                </button>
-                                <button
-                                  onClick={() => handleRejeitarCampanha(camp.id)}
-                                  disabled={!camp.aprovada}
-                                  className={cn(
-                                    "p-1 rounded transition-colors",
-                                    !camp.aprovada
-                                      ? "text-gray-300 cursor-not-allowed"
-                                      : "text-[#DC2626] hover:bg-red-50"
-                                  )}
-                                  title={!camp.aprovada ? "Já rejeitada" : "Rejeitar campanha"}
-                                >
-                                  <XIcon className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
+                        {campanhasRegistradas.map((camp) => {
+                          const chave = `${camp.tipo}-${camp.data_publicacao}-${camp.produto}`;
+                          return (
+                            <tr key={chave}>
+                              <td className="text-xs text-[#64748b]">
+                                {new Date(camp.data_publicacao).toLocaleDateString('pt-BR')}
+                              </td>
+                              <td className="text-xs font-medium">{camp.tipo}</td>
+                              <td className="text-center text-xs font-bold">
+                                {camp.multiplicador.toFixed(1)}x
+                                {camp.tipo === "Assinados" && " (1:1)"}
+                              </td>
+                              <td className="text-xs">{camp.produto}</td>
+                              <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
+                                {camp.descricao}
+                              </td>
+                              <td className="text-center">
+                                {camp.validacao_financeiro ? (
+                                  <span className="inline-flex items-center gap-1 text-[#16A34A] bg-[#dcfce7] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                    <Check className="w-3 h-3" /> Aprovada
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 text-[#DC2626] bg-[#fee2e2] px-2 py-0.5 rounded-full text-[10px] font-medium">
+                                    <XIcon className="w-3 h-3" /> Pendente
+                                  </span>
+                                )}
+                              </td>
+                              <td className="text-center">
+                                {isSuperAdmin ? (
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button
+                                      onClick={() => handleAprovarCampanha(camp)}
+                                      disabled={camp.validacao_financeiro}
+                                      className={cn(
+                                        "p-1 rounded transition-colors",
+                                        camp.validacao_financeiro
+                                          ? "text-gray-300 cursor-not-allowed"
+                                          : "text-[#16A34A] hover:bg-green-50"
+                                      )}
+                                      title={camp.validacao_financeiro ? "Já aprovada" : "Aprovar campanha"}
+                                    >
+                                      <Check className="w-4 h-4" />
+                                    </button>
+                                    <button
+                                      onClick={() => handleRejeitarCampanha(camp)}
+                                      disabled={!camp.validacao_financeiro}
+                                      className={cn(
+                                        "p-1 rounded transition-colors",
+                                        !camp.validacao_financeiro
+                                          ? "text-gray-300 cursor-not-allowed"
+                                          : "text-[#DC2626] hover:bg-red-50"
+                                      )}
+                                      title={!camp.validacao_financeiro ? "Já rejeitada" : "Rejeitar campanha"}
+                                    >
+                                      <XIcon className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-gray-400">—</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

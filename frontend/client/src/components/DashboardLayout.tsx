@@ -1,5 +1,5 @@
 // src/components/DashboardLayout.tsx
-import { useState, useEffect, useMemo, useRef } from "react"; 
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
@@ -22,6 +22,7 @@ import {
 import { useAppStore } from "@/lib/dataStore";
 import { logout } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { API_BASE } from "@/lib/api";
 import logoBranca from "./img/LogoBranca.png";
 import { getUserPermissions } from "@/lib/accessControl";
 
@@ -64,9 +65,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     collaborators,
   } = useAppStore();
 
-  const markNotificationAsRead = useAppStore(
-    (state) => (state as any).markNotificationAsRead
-  );
+  const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
   const permissions = useMemo(() => getUserPermissions(currentUser ?? undefined), [currentUser]);
 
@@ -78,6 +77,56 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       return !isRead;
     }).length;
   }, [notifications]);
+
+  // ================== SSE – NOTIFICAÇÕES EM TEMPO REAL ==================
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let eventSource: EventSource | null = null;
+
+    try {
+      eventSource = new EventSource(`${API_BASE}/notificacoes/stream`, {
+        withCredentials: true,
+      } as any);
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          // Filtra notificações direcionadas a outro usuário
+          if (data.destinatario && data.destinatario !== currentUser?.email) {
+            return;
+          }
+
+          useAppStore.getState().addNotification({
+            id: Date.now() + Math.floor(Math.random() * 1000),
+            type: data.tipo || "info",
+            title: data.titulo || "Notificação",
+            message: data.mensagem || "",
+            action: data.acao || "",
+            time: data.data
+              ? new Date(data.data).toLocaleString("pt-BR")
+              : new Date().toLocaleString("pt-BR"),
+            read: false,
+          });
+        } catch (err) {
+          console.error("Erro ao processar notificação SSE:", err);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        console.error("Erro na conexão SSE:", err);
+        // Opcional: reconectar após alguns segundos
+      };
+    } catch (err) {
+      console.error("Não foi possível criar EventSource:", err);
+    }
+
+    return () => {
+      if (eventSource) eventSource.close();
+    };
+  }, [currentUser]);
+  // ================================================================
 
   // Navegação (inalterada)
   const navItems: NavItem[] = useMemo(() => {
@@ -175,12 +224,11 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
   };
 
-  const handleMarkAsRead = (id: string) => {
-    if (markNotificationAsRead) {
-      markNotificationAsRead(id);
+  const handleMarkAsRead = (id: string | number) => {
+    if (markNotificationRead) {
+      markNotificationRead(id as number);
     } else {
       console.log(`[Notificação] Marcar como lida: ${id}`);
-      // Se quiser, implemente uma lógica local, ou apenas ignore
     }
   };
 
@@ -469,6 +517,8 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
                             hour: "2-digit",
                             minute: "2-digit",
                           });
+                        } else if (notif.time) {
+                          dateLabel = notif.time;
                         }
 
                         return (
