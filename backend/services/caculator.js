@@ -222,7 +222,7 @@ export class Calculator {
             projecaoMeta: false,
             ganhosNecessariosPorDia: 0
         };
-    }
+    } 
 
     updateConfig(newConfig) {
         this.config = { ...this.config, ...newConfig };

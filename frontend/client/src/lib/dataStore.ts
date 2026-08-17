@@ -253,7 +253,7 @@ const initialInsightCards: InsightCard[] = [];
 const initialRawMetrics: RawMetrics = { emitidos: 0, assinados: 0, protocolados: 0, ganhos: 0, perdidos: 0 };
 const initialTabelaComissoes: TabelaComissaoItem[] = [];
 const initialCampaigns: Campaign[] = [];
-
+ 
 // ============================================================
 // INTERFACE DA STORE
 // ============================================================

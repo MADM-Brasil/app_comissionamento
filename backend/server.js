@@ -19,6 +19,8 @@ import adminRoutes from './routes/admin.js';
 import userRouter from './routes/user.js';
 import suporteRouter from './routes/suporte.js';
 import campanhasRoutes from './routes/campanhas.js';
+import notificacoesRoutes from './routes/notificacoes.js'; // ✅ adicionado
+import { startNotificationEngine } from './services/notificationEngine.js'; // ✅ adicionado
 
 const app = express();
 const PORT = process.env.PORT || 3007;
@@ -361,7 +363,7 @@ app.use((req, res, next) => {
 
 // ========== ROTAS PROTEGIDAS ==========
 
-// GET /api/metricas-assessores (CORRIGIDA: vírgula extra removida, novos campos adicionados)
+// GET /api/metricas-assessores
 app.get('/api/metricas-assessores', async (req, res) => {
   try {
     const { mes, email, colaborador_id } = req.query;
@@ -395,10 +397,11 @@ app.get('/api/metricas-assessores', async (req, res) => {
 app.use('/api', colaboradoresRoutes);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/tabela-comissoes', tabelaComissoesRoutes);
-app.use('/api/campanhas', campanhasRoutes); 
+app.use('/api/campanhas', campanhasRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/user', userRouter);
 app.use('/api/suporte', suporteRouter);
+app.use('/api/notificacoes', notificacoesRoutes); // ✅ adicionado
 
 // GET /api/admin/months
 app.get('/api/admin/months', async (req, res) => {
@@ -437,6 +440,7 @@ app.use((err, req, res, next) => {
     console.log('✅ Conectado ao PostgreSQL');
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
+      startNotificationEngine(); 
     });
   } catch (error) {
     console.error('❌ Erro ao conectar ao banco:', error);

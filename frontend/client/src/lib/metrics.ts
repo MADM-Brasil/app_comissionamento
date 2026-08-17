@@ -35,7 +35,7 @@ export async function fetchAssinados(
   if (params.equipe) url.searchParams.append('equipe', params.equipe);
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
   if (params.granularity) url.searchParams.append('granularity', params.granularity);
-  const res = await fetch(url.toString(), { credentials: 'include' });
+  const res = await fetch(url.toString(), { credentials: 'include' }); 
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Erro ao carregar assinados');
   return data.data;

@@ -97,8 +97,18 @@ Exemplo:
 
     Para um dia único: meta diária = 3 × 1 = 3; meta semanal = 15 × 0.14 ≈ 2; meta mensal = 60 × 0.03 ≈ 2.
 
-    Nivel de acesso (hierarquia para tabela core) - cargo 
-       
+
+Calculo para desempenho do colaborador
+
+       Desempenho individual - A função RadarConversaoLigacoes transforma o número de assinados de cada colaborador em um índice de 0 a 100:
+
+       value = Math.max(0, Math.min(100, (colab.assinados || 0) * 10))
+
+Calculo para Melhor colaborador e Precisa de atenção
+
+       Melhor colaborador: aquele com maior número de assinados na lista filtrada.
+
+       Precisa de atenção: aquele com menor número de assinados.
 -------------------------------------------------------------------------------------------
 
 Mudança para views:
@@ -115,8 +125,10 @@ Mudança para views:
                            |
     Coordenador            | Coordenador
                            |
-    Administrativo         | Salesops, CEO, Analista de CRM,Desenvolvedor,Diretora,
+    Administrativo         | Salesops, Analista de CRM,Desenvolvedor,Diretora,
                            | Analista de dados, Desenvolvedor Make
+                           |
+    SUPER_ADMIN            | Desenvolvedor, CEO, diretora                                     
 
 Equipe.tsx
 
