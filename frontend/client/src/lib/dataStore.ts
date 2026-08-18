@@ -5,7 +5,7 @@ import { formatCurrency as formatCurrencyUtil, formatPercent as formatPercentUti
 import {
   fetchEmitidos,
   fetchAssinados, 
-  fetchProtocolados,
+  fetchProtocolados, 
   fetchGanhos, 
   fetchPerdidos,
   fetchLeadsRecebidos,
