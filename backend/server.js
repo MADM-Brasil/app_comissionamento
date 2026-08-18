@@ -6,6 +6,8 @@ import helmet from 'helmet';
 import session from 'express-session';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
+import path from 'path';                                
+import { fileURLToPath } from 'url';                   
 
 import { pool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
@@ -19,8 +21,11 @@ import adminRoutes from './routes/admin.js';
 import userRouter from './routes/user.js';
 import suporteRouter from './routes/suporte.js';
 import campanhasRoutes from './routes/campanhas.js';
-import notificacoesRoutes from './routes/notificacoes.js'; // ✅ adicionado
-import { startNotificationEngine } from './services/notificationEngine.js'; // ✅ adicionado
+import notificacoesRoutes from './routes/notificacoes.js';
+import { startNotificationEngine } from './services/notificationEngine.js';
+
+const __filename = fileURLToPath(import.meta.url);      
+const __dirname = path.dirname(__filename);          
 
 const app = express();
 const PORT = process.env.PORT || 3007;
@@ -40,6 +45,9 @@ app.use(cors({
 // ---------- Body parsers ----------
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// ---------- SERVE ARQUIVOS ESTÁTICOS (uploads) SEM AUTENTICAÇÃO ----------
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // ---------- Helmet ----------
 app.use(helmet({
@@ -401,7 +409,7 @@ app.use('/api/campanhas', campanhasRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/user', userRouter);
 app.use('/api/suporte', suporteRouter);
-app.use('/api/notificacoes', notificacoesRoutes); // ✅ adicionado
+app.use('/api/notificacoes', notificacoesRoutes);
 
 // GET /api/admin/months
 app.get('/api/admin/months', async (req, res) => {

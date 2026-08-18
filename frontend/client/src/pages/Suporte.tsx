@@ -15,6 +15,9 @@ import {
   FileText,
   Edit2,
   Save,
+  Upload,
+  Paperclip,
+  Ban,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
@@ -41,12 +44,14 @@ interface MovementItem {
 interface ReportItem {
   id: string;
   data: string;
+  titulo: string;
   assunto: string;
   descricao: string;
   descricaoResumida: string;
   solicitante: string;
   equipe: string;
-  status: "ENVIADO" | "SUSPEITO" | "CONCLUÍDO" | "ERRO" | "BLOQUEADO" | "REVISÃO";
+  status: "ENVIADO" | "SUSPEITO" | "CONCLUÍDO" | "ERRO" | "BLOQUEADO" | "REVISÃO" | "ANALISE" | "CANCELADO";
+  observacao_sales_ops: string;
   ultimaAtualizacao: string;
 }
 
@@ -72,6 +77,7 @@ interface TicketMovimentacao {
 interface TicketSuporte {
   id_ticket_suporte: number;
   assunto: string;
+  titulo: string;
   descricao: string;
   solicitante_nome: string;
   equipe_nome: string;
@@ -114,7 +120,9 @@ const getStatusInfo = (status: string) => {
     CONCLUÍDO: { label: "Concluído", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
     ERRO: { label: "Erro", icon: <AlertCircle className="w-3 h-3" />, className: "bg-red-50 text-red-700" },
     BLOQUEADO: { label: "Bloqueado", icon: <X className="w-3 h-3" />, className: "bg-red-100 text-red-800" },
+    ANALISE: { label: "Análise", icon: <Eye className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
     REVISÃO: { label: "Revisão", icon: <Eye className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
+    CANCELADO: { label: "Cancelado", icon: <Ban className="w-3 h-3" />, className: "bg-gray-100 text-gray-500" },
   };
   return map[status] || { label: status, icon: <FileText className="w-3 h-3" />, className: "bg-gray-100 text-gray-600" };
 };
@@ -387,13 +395,15 @@ function MovimentacaoTab() {
   );
 }
 
-// ---------------------- Aba Reportar (CORRIGIDA – persistência + validação de print + URL singular) ----------------------
+// ---------------------- Aba Reportar (CORRIGIDA – upload de arquivos via FormData + UI melhorada + coluna Observação + cancelamento + filtro por email) ----------------------
 function ReportarTab() {
   const { currentUser } = useAppStore();
 
+  const [titulo, setTitulo] = useState("");
   const [assunto, setAssunto] = useState("");
   const [descricao, setDescricao] = useState("");
   const [files, setFiles] = useState<File[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [reports, setReports] = useState<ReportItem[]>([]);
@@ -401,18 +411,17 @@ function ReportarTab() {
   const [loadingReports, setLoadingReports] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Carrega os reportes do utilizador a partir da API (GET /suporte/ticket-suporte)
+  // Carrega os reportes do usuário logado pelo e-mail
   const loadUserReports = async () => {
-    if (!currentUser?.nome) {
+    if (!currentUser?.email) {
       setLoadingReports(false);
       return;
     }
     try {
       setLoadingReports(true);
       setLoadError(null);
-      // 🔁 URL CORRIGIDA para singular
       const res = await fetch(
-        `${API_BASE}/suporte/ticket-suporte?solicitante_nome=${encodeURIComponent(currentUser.nome)}`,
+        `${API_BASE}/suporte/ticket-suporte?solicitante_email=${encodeURIComponent(currentUser.email)}`,
         { credentials: 'include' }
       );
       if (!res.ok) throw new Error(`Erro ${res.status}: ${res.statusText}`);
@@ -421,7 +430,8 @@ function ReportarTab() {
         const mapped: ReportItem[] = data.data.map((ticket: any) => ({
           id: `REP_${ticket.id_ticket_suporte}`,
           data: ticket.criado_em,
-          assunto: ticket.assunto,
+          titulo: ticket.titulo || ticket.assunto || '',
+          assunto: ticket.assunto || ticket.titulo || '',
           descricao: ticket.descricao || '',
           descricaoResumida: ticket.descricao
             ? ticket.descricao.length > 200
@@ -431,6 +441,7 @@ function ReportarTab() {
           solicitante: ticket.solicitante_nome,
           equipe: ticket.equipe_nome,
           status: ticket.status || "ENVIADO",
+          observacao_sales_ops: ticket.observacao_sales_ops || '',
           ultimaAtualizacao: ticket.criado_em,
         }));
         setReports(mapped);
@@ -446,15 +457,19 @@ function ReportarTab() {
   };
 
   useEffect(() => {
-    if (currentUser?.nome) {
+    if (currentUser?.email) {
       loadUserReports();
     } else {
       setLoadingReports(false);
     }
-  }, [currentUser?.nome]);
+  }, [currentUser?.email]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!titulo.trim()) {
+      setMessage({ text: "Preencha o título", type: "error" });
+      return;
+    }
     if (!assunto || !descricao.trim()) {
       setMessage({ text: "Preencha assunto e descrição", type: "error" });
       return;
@@ -463,7 +478,6 @@ function ReportarTab() {
       setMessage({ text: "Descrição muito curta", type: "error" });
       return;
     }
-    // 🚨 EXIGE PELO MENOS 1 PRINT
     if (files.length === 0) {
       setMessage({ text: "Necessário 1 print para o envio", type: "error" });
       return;
@@ -471,35 +485,43 @@ function ReportarTab() {
 
     setLoading(true);
     setMessage(null);
+
     try {
+      const formData = new FormData();
+      formData.append('titulo', titulo.trim());
+      formData.append('assunto', assunto);
+      formData.append('descricao', descricao);
+      formData.append('solicitante_nome', currentUser?.nome || '');
+      formData.append('solicitante_email', currentUser?.email || '');
+      formData.append('equipe_nome', currentUser?.equipe || '');
+
+      files.forEach((file) => {
+        formData.append('arquivos', file, file.name);
+      });
+
       const res = await fetch(`${API_BASE}/suporte/ticket-suporte`, {
         method: 'POST',
-        headers: getCsrfHeaders(),
         credentials: 'include',
-        body: JSON.stringify({
-          assunto,
-          descricao,
-          files: files.map(f => f.name), // adapte se o backend esperar o conteúdo binário
-        }),
+        headers: {
+          'x-csrf-token': localStorage.getItem('csrfToken') || '',
+        },
+        body: formData,
       });
+
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erro ao registrar ticket');
 
       setMessage({ text: "Reporte registado com sucesso.", type: "success" });
+      setTitulo("");
       setAssunto("");
       setDescricao("");
       setFiles([]);
       const fileInput = document.getElementById("reportar-arquivos") as HTMLInputElement;
       if (fileInput) fileInput.value = "";
 
-      // Recarrega a lista após envio bem‑sucedido
       await loadUserReports();
     } catch (err: any) {
-      if (err.message && err.message.includes('metadados')) {
-        setMessage({ text: "Necessário 1 print para o envio", type: "error" });
-      } else {
-        setMessage({ text: err.message, type: "error" });
-      }
+      setMessage({ text: err.message, type: "error" });
     } finally {
       setLoading(false);
     }
@@ -513,11 +535,50 @@ function ReportarTab() {
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const newFiles = Array.from(e.dataTransfer.files);
+      setFiles(prev => [...prev, ...newFiles]);
+      e.dataTransfer.clearData();
+    }
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const cancelRequest = async (id: string) => {
+    if (!confirm("Tem certeza que deseja cancelar esta solicitação?")) return;
+    try {
+      const numericId = id.replace("REP_", ""); // extrai o número do id
+      const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${numericId}`, {
+        method: 'PATCH',
+        headers: getCsrfHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({ status: 'CANCELADO' }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao cancelar solicitação');
+      setMessage({ text: "Solicitação cancelada com sucesso.", type: "success" });
+      await loadUserReports(); // recarrega a lista
+    } catch (err: any) {
+      setMessage({ text: err.message, type: "error" });
+    }
+  };
+
   const exportReports = () => {
     if (reports.length === 0) return;
-    const headers = ["Data", "Assunto", "Status", "Solicitante", "Equipe"];
+    const headers = ["Data", "Título", "Assunto", "Status", "Solicitante", "Equipe", "Obs. SalesOps"];
     const rows = reports.map(r =>
-      [new Date(r.data).toLocaleString("pt-BR"), `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`].join(";")
+      [new Date(r.data).toLocaleString("pt-BR"), `"${r.titulo}"`, `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`, `"${r.observacao_sales_ops}"`].join(";")
     );
     const csv = [headers.join(";"), ...rows].join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
@@ -528,10 +589,23 @@ function ReportarTab() {
   };
 
   const filteredReports = reports.filter(r => filterStatus === "todos" || r.status === filterStatus);
-  const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "REVISÃO"];
+  const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "ANALISE", "REVISÃO", "CANCELADO"];
 
+  // Detalhes mais completos no "olhinho"
   const viewDetails = (report: ReportItem) => {
-    alert(`Detalhes:\n${report.descricao}`);
+    const statusLabel = getStatusInfo(report.status).label;
+    const dataFormatada = new Date(report.data).toLocaleString("pt-BR");
+    const detalhes = `
+Título: ${report.titulo}
+Assunto: ${report.assunto}
+Solicitante: ${report.solicitante || "Não informado"}
+Equipe: ${report.equipe || "Não informada"}
+Data de criação: ${dataFormatada}
+Status: ${statusLabel}
+${report.descricao ? `\nDescrição:\n${report.descricao}` : ""}
+${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops}` : ""}
+`.trim();
+    alert(detalhes);
   };
 
   return (
@@ -539,6 +613,20 @@ function ReportarTab() {
       <div className="card p-5">
         <h2 className="text-lg font-bold text-[#0f172a] mb-4">Reportar Problema</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label htmlFor="rep-titulo" className="block text-sm font-medium text-[#0f172a] mb-1">Título *</label>
+            <input
+              type="text"
+              id="rep-titulo"
+              value={titulo}
+              onChange={e => setTitulo(e.target.value)}
+              className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+              placeholder="Ex.: Erro ao carregar relatório"
+              required
+              maxLength={150}
+            />
+          </div>
+
           <div>
             <label htmlFor="rep-assunto" className="block text-sm font-medium text-[#0f172a] mb-1">Assunto</label>
             <select id="rep-assunto" value={assunto} onChange={e => setAssunto(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>
@@ -551,32 +639,79 @@ function ReportarTab() {
               <option value="Outro">Outro</option>
             </select>
           </div>
+
           <div>
             <label htmlFor="rep-descricao" className="block text-sm font-medium text-[#0f172a] mb-1">Descrição</label>
             <textarea id="rep-descricao" value={descricao} onChange={e => setDescricao(e.target.value)} rows={5} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
             <div className="text-right text-xs text-[#94a3b8] mt-1">{descricao.length}/1000</div>
           </div>
+
+          {/* Área de anexos melhorada */}
           <div>
-            <label htmlFor="reportar-arquivos" className="block text-sm font-medium text-[#0f172a] mb-1">
-              Anexos (obrigatório pelo menos 1 print)
-            </label>
-            <input type="file" id="reportar-arquivos" multiple onChange={handleFileChange} className="w-full text-sm" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip" />
+            <span className="block text-sm font-medium text-[#0f172a] mb-1">
+              Anexos <span className="text-red-500">*</span> <span className="text-xs text-[#64748b]">(obrigatório pelo menos 1 print)</span>
+            </span>
+            
+            <div
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onClick={() => document.getElementById('reportar-arquivos')?.click()}
+              className={cn(
+                "flex flex-col items-center justify-center border-2 border-dashed rounded-lg p-6 cursor-pointer transition-colors",
+                isDragging ? "border-[#2F6FED] bg-[#eff6ff]" : "border-[#cbd5e1] bg-[#f8fafc] hover:border-[#2F6FED] hover:bg-[#f0f7ff]"
+              )}
+            >
+              <Upload className={cn("w-8 h-8 mb-2", isDragging ? "text-[#2F6FED]" : "text-[#94a3b8]")} />
+              <p className="text-sm text-[#475569]">
+                <span className="font-semibold text-[#2F6FED]">Clique para anexar</span> ou arraste os arquivos aqui
+              </p>
+              <p className="text-xs text-[#94a3b8] mt-1">PNG, JPG, PDF, DOC, XLS, ZIP (máx. 10 MB por arquivo)</p>
+            </div>
+
+            <input
+              type="file"
+              id="reportar-arquivos"
+              multiple
+              onChange={handleFileChange}
+              className="hidden"
+              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip"
+            />
+
             {files.length > 0 && (
-              <div className="mt-2 space-y-1">
+              <ul className="mt-3 space-y-2">
                 {files.map((f, idx) => (
-                  <div key={idx} className="flex items-center justify-between bg-[#f8fafc] p-2 rounded text-sm">
-                    <span className="truncate">{f.name} ({(f.size / 1024).toFixed(0)} KB)</span>
-                    <button type="button" onClick={() => removeFile(idx)} className="text-red-500 hover:text-red-700"><X className="w-4 h-4" /></button>
-                  </div>
+                  <li key={idx} className="flex items-center justify-between bg-white border border-[#e2e8f0] rounded-lg p-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Paperclip className="w-4 h-4 text-[#64748b] flex-shrink-0" />
+                      <div className="min-w-0">
+                        <p className="text-sm text-[#0f172a] truncate">{f.name}</p>
+                        <p className="text-xs text-[#94a3b8]">{(f.size / 1024).toFixed(0)} KB</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeFile(idx);
+                      }}
+                      className="p-1 rounded hover:bg-red-50 text-red-500 hover:text-red-700 flex-shrink-0"
+                      title="Remover arquivo"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </li>
                 ))}
-              </div>
+              </ul>
             )}
           </div>
+
           {message && (
             <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">
               {message.text}
             </div>
           )}
+
           <div className="flex justify-end">
             <button type="submit" disabled={loading} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
@@ -586,7 +721,7 @@ function ReportarTab() {
         </form>
       </div>
 
-      {/* Meus Reportes (persistente) */}
+      {/* Meus Reportes (com coluna Observação SalesOps e ação cancelar) */}
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
@@ -614,7 +749,8 @@ function ReportarTab() {
               <thead>
                 <tr>
                   <th>Data</th>
-                  <th>Assunto</th>
+                  <th>Título</th>
+                  <th>Obs. SalesOps</th>
                   <th>Status</th>
                   <th>Ações</th>
                 </tr>
@@ -622,15 +758,34 @@ function ReportarTab() {
               <tbody>
                 {filteredReports.map(r => {
                   const info = getStatusInfo(r.status);
+                  const canCancel = r.status === "ENVIADO" || r.status === "REVISÃO";
                   return (
                     <tr key={r.id}>
                       <td className="whitespace-nowrap">{new Date(r.data).toLocaleString("pt-BR")}</td>
-                      <td>{r.assunto}</td>
+                      <td>
+                        <div>{r.titulo}</div>
+                        {r.assunto && r.assunto !== r.titulo && <small className="text-[#94a3b8]">{r.assunto}</small>}
+                      </td>
+                      <td className="max-w-[200px] truncate" title={r.observacao_sales_ops}>
+                        {r.observacao_sales_ops || "—"}
+                      </td>
                       <td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td>
                       <td>
-                        <button type="button" onClick={() => viewDetails(r)} className="text-[#2F6FED] hover:text-[#2F6FED]/80">
-                          <Eye className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button type="button" onClick={() => viewDetails(r)} className="text-[#2F6FED] hover:text-[#2F6FED]/80" title="Ver detalhes">
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          {canCancel && (
+                            <button
+                              type="button"
+                              onClick={() => cancelRequest(r.id)}
+                              className="text-red-500 hover:text-red-700"
+                              title="Cancelar solicitação"
+                            >
+                              <Ban className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -646,14 +801,14 @@ function ReportarTab() {
 
 // ---------------------- Visão SalesOps com sub-tabs ----------------------
 function SalesOpsTab() {
-  const [subTab, setSubTab] = useState<"movimentacoes" | "reportes">("movimentacoes");
+  const [subTab, setSubTab] = useState<"movimentacoes" | "reportes">("reportes");
 
   return (
     <div className="space-y-4">
       <div className="flex gap-2 border-b border-[#e2e8f0] pb-2">
         {[
-          { id: "movimentacoes", label: "Movimentações" },
           { id: "reportes", label: "Reportes" },
+          { id: "movimentacoes", label: "Movimentações" },         
         ].map(tab => (
           <button
             key={tab.id}
@@ -861,7 +1016,6 @@ function ReportesSuporteTab() {
   useEffect(() => {
     const carregarReportes = async () => {
       try {
-        // 🔁 URL CORRIGIDA para singular + ?todos=1
         const res = await fetch(`${API_BASE}/suporte/ticket-suporte?todos=1`, { credentials: 'include' });
         const data = await res.json();
         if (data.success) setTickets(data.data);
@@ -934,7 +1088,9 @@ function ReportesSuporteTab() {
               <option value="CONCLUÍDO">Concluído</option>
               <option value="ERRO">Erro</option>
               <option value="BLOQUEADO">Bloqueado</option>
+              <option value="ANALISE">Análise</option>
               <option value="REVISÃO">Revisão</option>
+              <option value="CANCELADO">Cancelado</option>
             </select>
           </div>
         </div>
@@ -949,7 +1105,7 @@ function ReportesSuporteTab() {
                   <th>Data</th>
                   <th>Solicitante</th>
                   <th>Equipe</th>
-                  <th>Assunto</th>
+                  <th>Título</th>
                   <th>Status</th>
                   <th>Obs. SalesOps</th>
                   <th>Ações</th>
@@ -965,7 +1121,7 @@ function ReportesSuporteTab() {
                       <td className="whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
                       <td>{ticket.solicitante_nome}</td>
                       <td>{ticket.equipe_nome}</td>
-                      <td>{ticket.assunto}</td>
+                      <td>{ticket.titulo || ticket.assunto}</td>
                       <td>
                         {isEditing ? (
                           <select
@@ -978,7 +1134,9 @@ function ReportesSuporteTab() {
                             <option value="CONCLUÍDO">Concluído</option>
                             <option value="ERRO">Erro</option>
                             <option value="BLOQUEADO">Bloqueado</option>
+                            <option value="ANALISE">Análise</option>
                             <option value="REVISÃO">Revisão</option>
+                            <option value="CANCELADO">Cancelado</option>
                           </select>
                         ) : (
                           <span className={cn("badge", statusInfo.className)}>

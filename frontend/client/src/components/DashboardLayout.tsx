@@ -18,6 +18,12 @@ import {
   Eye,
   EyeOff,
   Bell,
+  HelpingHandIcon,
+  HelpCircle,
+  LucideHandHelping,
+  BadgeHelp,
+  HeartPulse,
+  CircleHelp,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { logout } from "@/lib/auth";
@@ -134,7 +140,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (permissions.canAccessDashboard) items.push({ path: "/", label: "Home", icon: Home });
     if (permissions.canAccessComissoes) items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
     if (permissions.canAccessRanking) items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
-
     const dashboardChildren: NavChild[] = [];
     if (permissions.canViewTeam && permissions.canAccessReports) {
       dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
@@ -146,6 +151,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
     }
     if (permissions.canAccessConfiguration)
+      items.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     return items;
   }, [permissions]);
@@ -159,10 +165,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
       flat.push({ path: "/Visao_geral", label: "V. Geral", icon: BarChart3 });
       flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
-      flat.push({ path: "/gargalos", label: "Gargalos", icon: BarChart3 });
     }
     if (permissions.canAccessRanking) flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
     if (permissions.canAccessConfiguration)
+      flat.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
     return flat.slice(0, 5);
   }, [permissions]);
