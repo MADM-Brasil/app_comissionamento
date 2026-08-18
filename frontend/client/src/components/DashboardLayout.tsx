@@ -1,5 +1,5 @@
 // src/components/DashboardLayout.tsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
@@ -7,34 +7,37 @@ import {
   GitBranch,
   BarChart3,
   Trophy,
-  Bell,
   Menu,
   X,
   ChevronRight,
-  TrendingUp,
+  ChevronDown,
   Settings,
   LogOut,
-  FileCheck,
   Calendar,
-  Headphones,
+  Home,
+  Eye,
+  EyeOff,
+  Bell,
+  HelpingHandIcon,
+  HelpCircle,
+  LucideHandHelping,
+  BadgeHelp,
+  HeartPulse,
+  CircleHelp,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { logout } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { API_BASE } from "@/lib/api";
+import logoBranca from "./img/LogoBranca.png";
+import { getUserPermissions } from "@/lib/accessControl";
 
-const navItems = [
-  { path: "/", label: "Dashboard", icon: LayoutDashboard },
-  { path: "/comissoes", label: "Comissões", icon: DollarSign },
-  { path: "/funil", label: "Funil de Vendas", icon: GitBranch },
-  { path: "/analytics", label: "Analytics", icon: BarChart3 },
-  { path: "/ranking", label: "Ranking", icon: Trophy },
-  { path: "/relatorio", label: "Relatório", icon: FileCheck },
-  //{ path: "/suporte", label: "Suporte", icon: Headphones },
-  { path: "/notificacoes", label: "Notificações", icon: Bell },
-  { path: "/configuration", label: "Configurações", icon: Settings },
-];
+type NavChild = { path: string; label: string; icon: React.ComponentType<any> };
+type NavItem =
+  | { path: string; label: string; icon: React.ComponentType<any>; children?: undefined }
+  | { label: string; icon: React.ComponentType<any>; children: NavChild[] };
 
-const HIDE_PERIOD_FILTER_PATHS = ["/notificacoes", "/relatorio", "/configuration", "/suporte"];
+const HIDE_PERIOD_FILTER_PATHS = ["/configuration", "/suporte"];
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -43,10 +46,18 @@ interface DashboardLayoutProps {
 }
 
 export default function DashboardLayout({ children, title, subtitle }: DashboardLayoutProps) {
-  const [location, setLocation] = useLocation();
+  const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [unreadCount, setUnreadCount] = useState(0);
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
+  const [manualCloseChild, setManualCloseChild] = useState(false);
 
+  // Popout de notificações
+  const [showNotifications, setShowNotifications] = useState(false);
+  const notificationRef = useRef<HTMLDivElement>(null);
+
+  // Obtém os estados da store
+  const hideValues = useAppStore((state) => state.hideValues);
+  const toggleHideValues = useAppStore((state) => state.toggleHideValues);
   const {
     period,
     customStartDate,
@@ -60,118 +71,298 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     collaborators,
   } = useAppStore();
 
-  // Atualiza a contagem de notificações não lidas
-  useEffect(() => {
-    const count = notifications.filter((n) => !n.read).length;
-    setUnreadCount(count);
+  const markNotificationRead = useAppStore((state) => state.markNotificationRead);
+
+  const permissions = useMemo(() => getUserPermissions(currentUser ?? undefined), [currentUser]);
+
+  // Contagem de não lidas (usa 'read' ou fallback 'isRead')
+  const unreadCount = useMemo(() => {
+    if (!notifications) return 0;
+    return notifications.filter((n: any) => {
+      const isRead = n.read ?? n.isRead ?? false;
+      return !isRead;
+    }).length;
   }, [notifications]);
 
-  // Carrega a lista de colaboradores assim que o usuário estiver logado e a lista estiver vazia
+  // ================== SSE – NOTIFICAÇÕES EM TEMPO REAL ==================
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let eventSource: EventSource | null = null;
+
+    try {
+      eventSource = new EventSource(`${API_BASE}/notificacoes/stream`, {
+        withCredentials: true,
+      } as any);
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          // Filtra notificações direcionadas a outro usuário
+          if (data.destinatario && data.destinatario !== currentUser?.email) {
+            return;
+          }
+
+          useAppStore.getState().addNotification({
+            id: Date.now() + Math.floor(Math.random() * 1000),
+            type: data.tipo || "info",
+            title: data.titulo || "Notificação",
+            message: data.mensagem || "",
+            action: data.acao || "",
+            time: data.data
+              ? new Date(data.data).toLocaleString("pt-BR")
+              : new Date().toLocaleString("pt-BR"),
+            read: false,
+          });
+        } catch (err) {
+          console.error("Erro ao processar notificação SSE:", err);
+        }
+      };
+
+      eventSource.onerror = (err) => {
+        console.error("Erro na conexão SSE:", err);
+        // Opcional: reconectar após alguns segundos
+      };
+    } catch (err) {
+      console.error("Não foi possível criar EventSource:", err);
+    }
+
+    return () => {
+      if (eventSource) eventSource.close();
+    };
+  }, [currentUser]);
+  // ================================================================
+
+  // Navegação (inalterada)
+  const navItems: NavItem[] = useMemo(() => {
+    const items: NavItem[] = [];
+    if (permissions.canAccessDashboard) items.push({ path: "/", label: "Home", icon: Home });
+    if (permissions.canAccessComissoes) items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
+    if (permissions.canAccessRanking) items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+    const dashboardChildren: NavChild[] = [];
+    if (permissions.canViewTeam && permissions.canAccessReports) {
+      dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
+      dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
+      dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+      dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
+    }
+    if (dashboardChildren.length > 0) {
+      items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
+    }
+    if (permissions.canAccessConfiguration)
+      items.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
+      items.push({ path: "/configuration", label: "Configurações", icon: Settings });
+    return items;
+  }, [permissions]);
+
+  const mobileNavItems = useMemo(() => {
+    const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
+    if (permissions.canAccessDashboard) flat.push({ path: "/", label: "Home", icon: Home });
+    if (permissions.canAccessComissoes) flat.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
+    if (permissions.canViewTeam) flat.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
+    if (permissions.canAccessReports) {
+      flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
+      flat.push({ path: "/Visao_geral", label: "V. Geral", icon: BarChart3 });
+      flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+    }
+    if (permissions.canAccessRanking) flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+    if (permissions.canAccessConfiguration)
+      flat.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
+      flat.push({ path: "/configuration", label: "Config.", icon: Settings });
+    return flat.slice(0, 5);
+  }, [permissions]);
+
+  // Efeitos
+  useEffect(() => setManualCloseChild(false), [location]);
+
+  useEffect(() => {
+    const dashboardGroup = navItems.find(
+      (item): item is Extract<NavItem, { children: NavChild[] }> =>
+        "children" in item && item.label === "Dashboard"
+    );
+    const isChildActive =
+      dashboardGroup?.children.some((child) => child.path === location) ?? false;
+    if (isChildActive && !manualCloseChild) {
+      setExpandedGroup("Dashboard");
+    } else if (!isChildActive) {
+      setExpandedGroup(null);
+    }
+  }, [location, manualCloseChild, navItems]);
+
   useEffect(() => {
     if (currentUser && collaborators.length === 0) {
       loadCollaborators();
     }
   }, [currentUser, collaborators.length, loadCollaborators]);
 
-  const formatBadgeCount = (count: number): string => {
-    if (count === 0) return "";
-    if (count > 99) return "99+";
-    if (count > 9) return "9+";
-    return count.toString();
-  };
+  useEffect(() => setSidebarOpen(false), [location]);
 
-  const badgeValue = formatBadgeCount(unreadCount);
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth >= 1024) setSidebarOpen(false);
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
+  // Fecha popout ao clicar fora
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (notificationRef.current && !notificationRef.current.contains(event.target as Node)) {
+        setShowNotifications(false);
+      }
+    };
+    if (showNotifications) {
+      document.addEventListener("mousedown", handleClickOutside);
+    } else {
+      document.removeEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showNotifications]);
+
+  // Handlers
   const handleLogout = async () => {
     if (window.confirm("Tem certeza que deseja sair do sistema?")) {
       await logout();
       setCurrentUser(null);
-      setLocation("/login");
+      window.location.href = "/login";
     }
   };
 
-  const displayName = currentUser?.name || "Carregando...";
-  const displayRole = currentUser?.grupo || currentUser?.role || "Colaborador";
+  const handleMarkAsRead = (id: string | number) => {
+    if (markNotificationRead) {
+      markNotificationRead(id as number);
+    } else {
+      console.log(`[Notificação] Marcar como lida: ${id}`);
+    }
+  };
+
+  const handleMarkAllAsRead = () => {
+    if (notifications) {
+      notifications.forEach((n: any) => {
+        const isRead = n.read ?? n.isRead ?? false;
+        if (!isRead) handleMarkAsRead(n.id);
+      });
+    }
+  };
+
+  const displayName = currentUser?.nome || "Carregando...";
+  const displayRole = currentUser?.cargo || "Colaborador";
   const displayAvatar = currentUser?.avatar || displayName.charAt(0).toUpperCase();
-  const displayRank = currentUser?.rank ? `#${currentUser.rank}` : "";
 
   const shouldShowPeriodFilter = !HIDE_PERIOD_FILTER_PATHS.includes(location);
-
-  const isCustomPeriod = period === 'Custom';
-  const dateInputDisabled = false;   // datas sempre editáveis
+  const isCustomPeriod = period === "Custom";
 
   return (
-    <div className="min-h-screen bg-[#f8f9fc] flex">
+    <div className="min-h-screen bg-[#f8fafc] flex">
       {/* Sidebar */}
       <aside
         className={cn(
           "fixed inset-y-0 left-0 z-40 w-64 flex-col transition-transform duration-300",
           "lg:flex",
+          "bg-white border-r border-[#e2e8f0]",
           sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
-        style={{ background: "#09175b" }}
       >
-        <div className="flex items-center gap-3 px-5 py-5 border-b border-white/10">
-          <div className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0" style={{ background: "#ffcc00" }}>
-            <TrendingUp className="w-5 h-5 text-[#09175b]" strokeWidth={2.5} />
-          </div>
+        {/* Logo */}
+        <div className="flex items-center gap-3 px-5 py-5 border-b border-[#e2e8f0]">
+          <img src={logoBranca} alt="MADM Brasil" className="w-10 h-10 object-contain" />
           <div>
-            <div className="text-white font-bold text-sm leading-tight">MADM Brasil</div>
-            <div className="text-white/50 text-xs">Performance & Comissões</div>
+            <div className="text-[#0f172a] font-bold text-sm leading-tight">MADM Brasil</div>
+            <div className="text-[#64748b] text-xs">Performance & Comissões</div>
           </div>
           <button
             type="button"
             onClick={() => setSidebarOpen(false)}
-            className="lg:hidden text-white/60 hover:text-white ml-auto"
+            className="lg:hidden text-[#64748b] hover:text-[#0f172a] ml-auto"
             aria-label="Fechar menu"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="px-4 py-4 border-b border-white/10">
+        {/* Perfil */}
+        <div className="px-4 py-4 border-b border-[#e2e8f0]">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0" style={{ background: "rgba(255,204,0,0.2)", color: "#ffcc00" }}>
+            <div className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 bg-[#2F6FED] text-white">
               {displayAvatar}
             </div>
             <div className="min-w-0">
-              <div className="text-white text-sm font-semibold truncate">{displayName}</div>
-              <div className="text-white/50 text-xs truncate">{displayRole}</div>
+              <div className="text-[#0f172a] text-sm font-semibold truncate">{displayName}</div>
+              <div className="text-[#64748b] text-xs truncate">{displayRole}</div>
             </div>
-            {displayRank && (
-              <div className="ml-auto text-xs font-bold px-2 py-0.5 rounded-full flex-shrink-0" style={{ background: "rgba(255,204,0,0.2)", color: "#ffcc00" }}>
-                {displayRank}
-              </div>
-            )}
           </div>
         </div>
 
+        {/* Navegação */}
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
+            if (item.children) {
+              const isActive = item.children.some((child) => location === child.path);
+              const isExpanded = expandedGroup === item.label;
+
+              return (
+                <div key={item.label}>
+                  <button
+                    onClick={() => {
+                      const currentExpanded = expandedGroup === item.label;
+                      const childActive = item.children.some((c) => c.path === location);
+                      if (currentExpanded && childActive) {
+                        setManualCloseChild(true);
+                      } else if (!currentExpanded && childActive) {
+                        setManualCloseChild(false);
+                      }
+                      setExpandedGroup((prev) => (prev === item.label ? null : item.label));
+                    }}
+                    className={cn("sidebar-item w-full", isActive && "active")}
+                  >
+                    <item.icon className="w-4.5 h-4.5 flex-shrink-0" />
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {isExpanded ? (
+                      <ChevronDown className="w-3.5 h-3.5 opacity-60" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 opacity-60" />
+                    )}
+                  </button>
+                  {isExpanded && (
+                    <div className="ml-4 mt-1 space-y-1">
+                      {item.children.map((child) => {
+                        const Icon = child.icon;
+                        const childActive = location === child.path;
+                        return (
+                          <Link
+                            key={child.path}
+                            href={child.path}
+                            onClick={() => setSidebarOpen(false)}
+                          >
+                            <div className={cn("sidebar-item pl-9", childActive && "active")}>
+                              <Icon className="w-4 h-4 flex-shrink-0" />
+                              <span className="flex-1">{child.label}</span>
+                              {childActive && (
+                                <ChevronRight className="w-3.5 h-3.5 opacity-60" />
+                              )}
+                            </div>
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
             const Icon = item.icon;
             const isActive = location === item.path;
-            const showBadge = item.path === "/notificacoes" && unreadCount > 0;
             return (
-              <Link key={item.path} href={item.path} onClick={() => setSidebarOpen(false)}>
-                <div
-                  className={cn(
-                    "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer",
-                    isActive
-                      ? "text-[#ffcc00] bg-[rgba(255,204,0,0.2)]"
-                      : "text-white/65 hover:text-white hover:bg-white/8"
-                  )}
-                  style={isActive ? { borderLeft: "3px solid #ffcc00", paddingLeft: "9px" } : {}}
-                >
+              <Link
+                key={item.path}
+                href={item.path}
+                onClick={() => setSidebarOpen(false)}
+              >
+                <div className={cn("sidebar-item", isActive && "active")}>
                   <Icon className="w-4.5 h-4.5 flex-shrink-0" />
                   <span className="flex-1">{item.label}</span>
-                  {showBadge && (
-                    <span
-                      className="text-xs font-bold min-w-[20px] h-5 px-1.5 rounded-full flex items-center justify-center flex-shrink-0"
-                      style={{ background: "#ef4444", color: "white" }}
-                    >
-                      {badgeValue}
-                    </span>
-                  )}
                   {isActive && <ChevronRight className="w-3.5 h-3.5 opacity-60" />}
                 </div>
               </Link>
@@ -179,41 +370,48 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
           })}
         </nav>
 
-        <div className="px-4 py-4 border-t border-white/10">
+        {/* Logout */}
+        <div className="px-4 py-4 border-t border-[#e2e8f0]">
           <button
             onClick={handleLogout}
-            className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 text-white/65 hover:text-white hover:bg-white/8"
+            className="sidebar-item w-full text-[#DC2626] hover:bg-red-50"
           >
             <LogOut className="w-4.5 h-4.5" />
             <span>Sair</span>
           </button>
-          <div className="text-white/30 text-xs text-center mt-2">MADM Brasil v1.0</div>
+          <div className="text-[#94a3b8] text-xs text-center mt-2">MADM Brasil v1.2</div>
         </div>
       </aside>
 
+      {/* Overlay mobile */}
       {sidebarOpen && (
-        <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setSidebarOpen(false)} />
+        <div
+          className="fixed inset-0 z-30 bg-black/50 lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
       )}
 
+      {/* Conteúdo principal */}
       <div className="flex-1 flex flex-col lg:ml-64">
-        <header className="sticky top-0 z-20 bg-white border-b border-border px-4 lg:px-8 py-4 flex items-center gap-4">
+        {/* Topbar */}
+        <header className="sticky top-0 z-20 bg-white border-b border-[#e2e8f0] px-4 lg:px-8 py-3 flex items-center gap-4">
           <button
             aria-label="Abrir menu"
             type="button"
-            className="lg:hidden p-2 rounded-lg hover:bg-gray-100 transition-colors"
+            className="lg:hidden p-2 rounded-lg hover:bg-[#f1f5f9] transition-colors"
             onClick={() => setSidebarOpen(true)}
           >
-            <Menu className="w-5 h-5 text-gray-600" />
+            <Menu className="w-5 h-5 text-[#334155]" />
           </button>
 
           <div className="flex-1 min-w-0">
-            <h1 className="text-lg font-bold text-[#09175b] leading-tight truncate">{title}</h1>
-            {subtitle && <p className="text-sm text-gray-500 truncate">{subtitle}</p>}
+            <h1 className="text-lg font-bold text-[#0f172a] leading-tight truncate">{title}</h1>
+            {subtitle && <p className="text-sm text-[#64748b] truncate">{subtitle}</p>}
           </div>
 
           <div className="flex items-center gap-3">
             {shouldShowPeriodFilter && (
-              <div className="hidden sm:flex items-center gap-2 bg-gray-100 rounded-lg p-1">
+              <div className="hidden sm:flex items-center gap-2 bg-[#f1f5f9] rounded-lg p-1">
                 {(["Hoje", "Semana", "Mês"] as const).map((p) => (
                   <button
                     key={p}
@@ -221,99 +419,182 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
                     className={cn(
                       "px-3 py-1.5 rounded-md text-xs font-semibold transition-all",
                       period === p
-                        ? "bg-white text-[#09175b] shadow-sm"
-                        : "text-gray-500 hover:text-gray-700"
+                        ? "bg-white text-[#2F6FED] shadow-sm"
+                        : "text-[#64748b] hover:text-[#0f172a]"
                     )}
                   >
                     {p}
                   </button>
                 ))}
-                <div className="w-px h-6 bg-gray-300 mx-1" />
+                <div className="w-px h-6 bg-[#cbd5e1] mx-1" />
                 <div className="flex items-center gap-1">
                   <div className="relative">
-                    <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
+                    <Calendar
+                      className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]"
+                      aria-hidden="true"
+                    />
                     <input
                       type="date"
                       value={customStartDate}
                       onChange={(e) => setCustomDateRange(e.target.value, customEndDate)}
-                      disabled={dateInputDisabled}
-                      className={cn(
-                        "pl-7 pr-2 py-1.5 text-xs rounded-md border border-gray-200 bg-white focus:outline-none focus:ring-1 focus:ring-[#09175b]",
-                        dateInputDisabled && "bg-gray-100 text-gray-500 cursor-not-allowed"
-                      )}
+                      className="pl-7 pr-2 py-1.5 text-xs rounded-md border border-[#e2e8f0] bg-white focus:outline-none focus:ring-1 focus:ring-[#2F6FED]"
                       title="Data inicial"
                       aria-label="Data inicial"
                     />
                   </div>
-                  <span className="text-gray-500 text-xs" aria-hidden="true">—</span>
+                  <span className="text-[#94a3b8] text-xs" aria-hidden="true">—</span>
                   <div className="relative">
-                    <Calendar className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" aria-hidden="true" />
+                    <Calendar
+                      className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]"
+                      aria-hidden="true"
+                    />
                     <input
                       type="date"
                       value={customEndDate}
                       onChange={(e) => setCustomDateRange(customStartDate, e.target.value)}
-                      disabled={dateInputDisabled}
-                      className={cn(
-                        "pl-7 pr-2 py-1.5 text-xs rounded-md border border-gray-200 bg-white focus:outline-none focus:ring-1 focus:ring-[#09175b]",
-                        dateInputDisabled && "bg-gray-100 text-gray-500 cursor-not-allowed"
-                      )}
+                      className="pl-7 pr-2 py-1.5 text-xs rounded-md border border-[#e2e8f0] bg-white focus:outline-none focus:ring-1 focus:ring-[#2F6FED]"
                       title="Data final"
                       aria-label="Data final"
                     />
                   </div>
                 </div>
                 {isCustomPeriod && (
-                  <span className="ml-1 text-[10px] font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                  <span className="ml-1 text-[10px] font-medium text-[#2F6FED] bg-[#eff6ff] px-2 py-0.5 rounded-full">
                     Personalizado
                   </span>
                 )}
               </div>
             )}
 
-            <Link href="/notificacoes">
-              <button className="relative p-2 rounded-lg hover:bg-gray-100 transition-colors" aria-label="Notificações">
-                <Bell className="w-5 h-5 text-gray-600" />
+            {/* Botão ocultar valores */}
+            <button
+              onClick={toggleHideValues}
+              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e2e8f0] bg-white text-[#475569] hover:bg-[#f1f5f9] transition-colors"
+              title={hideValues ? "Mostrar valores" : "Ocultar valores"}
+            >
+              {hideValues ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            </button>
+
+            {/* NOTIFICAÇÕES */}
+            <div className="relative" ref={notificationRef}>
+              <button
+                onClick={() => setShowNotifications((prev) => !prev)}
+                className="relative p-2 rounded-lg hover:bg-[#f1f5f9] transition-colors"
+                aria-label="Notificações"
+              >
+                <Bell className="w-5 h-5 text-[#334155]" />
                 {unreadCount > 0 && (
-                  <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] rounded-full text-[10px] font-bold flex items-center justify-center px-1" style={{ background: "#ef4444", color: "white" }}>
-                    {badgeValue}
+                  <span className="absolute -top-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#DC2626] text-[10px] font-bold text-white">
+                    {unreadCount > 9 ? "9+" : unreadCount}
                   </span>
                 )}
               </button>
-            </Link>
 
-            <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0" style={{ background: "#3e4612", color: "#ffcc00" }} aria-label="Avatar do usuário">
+              {showNotifications && (
+                <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white rounded-lg shadow-lg border border-[#e2e8f0] overflow-hidden z-50">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-[#e2e8f0]">
+                    <h3 className="text-sm font-semibold text-[#0f172a]">Notificações</h3>
+                    {unreadCount > 0 && (
+                      <button
+                        onClick={handleMarkAllAsRead}
+                        className="text-xs text-[#2F6FED] hover:underline"
+                      >
+                        Marcar todas como lidas
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-[#f1f5f9]">
+                    {notifications && notifications.length > 0 ? (
+                      notifications.map((notif: any) => {
+                        const isRead = notif.read ?? notif.isRead ?? false;
+                        const message = notif.message ?? notif.text ?? notif.content ?? "Notificação";
+                        let dateLabel = "Data indisponível";
+                        if (notif.createdAt) {
+                          dateLabel = new Date(notif.createdAt).toLocaleDateString("pt-BR", {
+                            day: "2-digit",
+                            month: "short",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          });
+                        } else if (notif.date) {
+                          dateLabel = new Date(notif.date).toLocaleDateString("pt-BR", {
+                            day: "2-digit",
+                            month: "short",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          });
+                        } else if (notif.time) {
+                          dateLabel = notif.time;
+                        }
+
+                        return (
+                          <div
+                            key={notif.id}
+                            className={cn(
+                              "px-4 py-3 hover:bg-[#f8fafc] transition-colors cursor-default",
+                              !isRead && "bg-[#eff6ff]"
+                            )}
+                            onClick={() => handleMarkAsRead(notif.id)}
+                          >
+                            <div className="flex items-start gap-2">
+                              <div
+                                className={cn(
+                                  "w-2 h-2 mt-1.5 rounded-full flex-shrink-0",
+                                  isRead ? "bg-[#cbd5e1]" : "bg-[#2F6FED]"
+                                )}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm text-[#0f172a] break-words">{message}</p>
+                                <span className="text-xs text-[#94a3b8]">{dateLabel}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="px-4 py-8 text-center text-sm text-[#94a3b8]">
+                        Nenhuma notificação
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Avatar */}
+            <div className="w-8 h-8 rounded-full bg-[#2F6FED] text-white flex items-center justify-center text-xs font-bold flex-shrink-0">
               {displayAvatar}
             </div>
           </div>
         </header>
 
-        {/* Conteúdo NÃO é remontado quando as datas mudam */}
-        <div className="flex-1 p-4 lg:p-8 pb-24 lg:pb-8">
-          {children}
-        </div>
+        <main className="flex-1 p-4 lg:p-8 pb-24 lg:pb-8">{children}</main>
       </div>
 
+      {/* Navegação mobile inferior */}
       <nav className="mobile-nav lg:hidden">
         <div className="flex items-center justify-around px-2 py-2">
-          {navItems.slice(0, 5).map((item) => {
+          {mobileNavItems.map((item) => {
             const Icon = item.icon;
             const isActive = location === item.path;
-            const showBadge = item.path === "/notificacoes" && unreadCount > 0;
             return (
               <Link key={item.path} href={item.path}>
                 <div className="flex flex-col items-center gap-0.5 px-3 py-1.5 cursor-pointer">
-                  <div className="relative">
-                    <Icon className={cn("w-5 h-5 transition-colors", isActive ? "text-[#09175b]" : "text-gray-400")} aria-hidden="true" />
-                    {showBadge && (
-                      <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] rounded-full text-[9px] font-bold flex items-center justify-center px-0.5" style={{ background: "#ef4444", color: "white" }}>
-                        {badgeValue}
-                      </span>
+                  <Icon
+                    className={cn(
+                      "w-5 h-5 transition-colors",
+                      isActive ? "text-[#2F6FED]" : "text-[#94a3b8]"
                     )}
-                  </div>
-                  <span className={cn("text-[10px] font-medium transition-colors", isActive ? "text-[#09175b]" : "text-gray-400")}>
-                    {item.label.split(" ")[0]}
+                  />
+                  <span
+                    className={cn(
+                      "text-[10px] font-medium transition-colors",
+                      isActive ? "text-[#2F6FED]" : "text-[#94a3b8]"
+                    )}
+                  >
+                    {item.label}
                   </span>
-                  {isActive && <div className="w-1 h-1 rounded-full bg-[#09175b]" aria-hidden="true" />}
+                  {isActive && <div className="w-1 h-1 rounded-full bg-[#2F6FED]" />}
                 </div>
               </Link>
             );

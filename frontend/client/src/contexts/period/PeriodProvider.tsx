@@ -2,11 +2,14 @@
 import { ReactNode, useState, useMemo } from 'react';
 import { Period, PeriodContext } from './PeriodContext';
 
-function getDateRangeForPeriod(period: Period, customStart?: string, customEnd?: string): { start: string; end: string } {
+function getDateRangeForPeriod(
+  period: Period,
+  customStart?: string,
+  customEnd?: string
+): { start: string; end: string } {
+  // Para Custom, usamos as datas exatamente como o usuário informou (inclusive)
   if (period === 'Custom' && customStart && customEnd) {
-    const endDate = new Date(customEnd);
-    endDate.setDate(endDate.getDate() + 1);
-    return { start: customStart, end: endDate.toISOString().slice(0, 10) };
+    return { start: customStart, end: customEnd };
   }
 
   const now = new Date();
@@ -14,7 +17,7 @@ function getDateRangeForPeriod(period: Period, customStart?: string, customEnd?:
 
   if (period === 'Hoje') {
     start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    end = new Date(start);
   } else if (period === 'Semana') {
     const day = now.getDay();
     const diffToMonday = day === 0 ? -6 : 1 - day;
@@ -22,11 +25,11 @@ function getDateRangeForPeriod(period: Period, customStart?: string, customEnd?:
     const friday = new Date(monday);
     friday.setDate(monday.getDate() + 4);
     start = monday;
-    end = new Date(friday);
-    end.setDate(friday.getDate() + 1);
-  } else { // Mês
+    end = friday;
+  } else {
+    // Mês
     start = new Date(now.getFullYear(), now.getMonth(), 1);
-    end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    end = new Date(now.getFullYear(), now.getMonth() + 1, 0); // último dia do mês
   }
 
   return {
@@ -43,7 +46,8 @@ export function PeriodProvider({ children }: { children: ReactNode }) {
   });
   const [customEndDate, setCustomEndDate] = useState<string>(() => {
     const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString().slice(0, 10);
+    // último dia do mês atual
+    return new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
   });
 
   const setPeriod = (newPeriod: Period) => {
@@ -52,7 +56,7 @@ export function PeriodProvider({ children }: { children: ReactNode }) {
       setPeriodState('Custom');
     } else {
       const { start, end } = getDateRangeForPeriod(newPeriod);
-      console.log('📅 Datas calculadas:', { start, end });
+      console.log('📅 Datas calculadas (inclusivas):', { start, end });
       setCustomStartDate(start);
       setCustomEndDate(end);
       setPeriodState(newPeriod);
@@ -61,10 +65,9 @@ export function PeriodProvider({ children }: { children: ReactNode }) {
 
   const setCustomDateRange = (start: string, end: string) => {
     console.log('📅 setCustomDateRange:', { start, end });
-    const endNext = new Date(end);
-    endNext.setDate(endNext.getDate() + 1);
+    // NÃO adianta a data final; mantém exatamente a escolha do usuário
     setCustomStartDate(start);
-    setCustomEndDate(endNext.toISOString().slice(0, 10));
+    setCustomEndDate(end);
     setPeriodState('Custom');
   };
 

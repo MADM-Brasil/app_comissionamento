@@ -1,71 +1,80 @@
-// main.js - Sistema MADM Comissionamento (Atualizado com 2FA, Calculator e Controle de Acesso)
+// main.js - Sistema MADM Comissionamento 
+
 import { Calculator } from './calculator.js';
 import { ExtractBD } from './services/extractBD.js';
-import { PostgresService } from './Postgree-Service.js';
-import { StartServer } from './start-server.js';
 import twoFactorService from './security/verif-2factory.js';
 import { accessControl } from './services/access-control.js';
 
-dotenv.config();
+// ─── POOL E SESSION STORE (substituem o antigo PostgresService) ───
+import { pool } from './services/db.js';
+import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 
-// Instâncias dos serviços
-const calculator = new Calculator();
-const extractBD = new ExtractBD();
-const postgresService = new PostgresService();
-const startServer = new StartServer();
+import 'dotenv/config';
+import express from 'express';
+import session from 'express-session';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3008;
 
-// Estado global da aplicação
+// ─── CONFIGURAÇÃO DA SESSÃO NO POSTGRESQL ───
+const sessionStore = new PostgreSqlSessionStore(pool);
+
+app.use(session({
+  store: sessionStore,
+  secret: process.env.SESSION_SECRET || 'chave-secreta-sessao',
+  resave: false,
+  saveUninitialized: false,
+  rolling: true,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax'
+  }
+}));
+
+// ─── MIDDLEWARES PADRÃO ───
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+// ─── ESTADO GLOBAL DA APLICAÇÃO ───
 let currentUser = null;
 let selectedDate = new Date().toISOString().split('T')[0];
 let twoFactorTimer = null;
-let currentConfig = null; // Armazenar configurações do usuário
-let isAuthenticated = false; // Flag de autenticação
+let currentConfig = null;
+let isAuthenticated = false;
 
-// Elementos DOM
+// Elementos DOM (mantidos como no original)
 const elements = {
-    // Login
     loginPanel: document.getElementById('loginPanel'),
     twoFactorVerifyPanel: document.getElementById('twoFactorVerifyPanel'),
     overlay: document.getElementById('overlay'),
-    
-    // User info
     userInfoNome: document.getElementById('userInfoNome'),
     userInfoEquipe: document.getElementById('userInfoEquipe'),
     userInfoGrupo: document.getElementById('userInfoGrupo'),
     userAccessLevel: document.getElementById('userAccessLevel'),
-    
-    // Indicators
     metaValue: document.getElementById('metaValue'),
     bonusValue: document.getElementById('bonusValue'),
     comissaoValue: document.getElementById('comissaoValue'),
     metaProgress: document.getElementById('metaProgress'),
     metaPercent: document.getElementById('metaPercent'),
     QTDAtMeta: document.getElementById('QTD-At-meta'),
-    
-    // Metrics
     emitidosValue: document.getElementById('emitidosValue'),
     assinadosValue: document.getElementById('assinadosValue'),
     ganhosValue: document.getElementById('ganhosValue'),
     perdidosValue: document.getElementById('perdidosValue'),
-    
-    // Date filter
     consultaDataMeta: document.getElementById('consultaDataMeta'),
     aplicarDataMetaBtn: document.getElementById('aplicarDataMetaBtn'),
-    
-    // Buttons
     logoutBtn: document.getElementById('logoutBtn'),
     closeLoginBtn: document.getElementById('closeLoginBtn'),
     closeVerifyBtn: document.getElementById('closeVerifyBtn'),
     verifyTwoFactorBtn: document.getElementById('verifyTwoFactorBtn'),
     cancelTwoFactorBtn: document.getElementById('cancelTwoFactorBtn'),
     resendCodeBtn: document.getElementById('resendCodeBtn'),
-    
-    // Team page elements
     tabelaColaboradoresBody: document.getElementById('tabelaColaboradoresBody'),
     totalColaboradores: document.getElementById('totalColaboradores'),
     totalComissoes: document.getElementById('totalComissoes'),
@@ -73,8 +82,6 @@ const elements = {
     atualizarBtn: document.getElementById('atualizarBtn'),
     linkEquipes: document.getElementById('linkEquipes'),
     linkIndex: document.getElementById('link-index'),
-    
-    // Main content
     mainContent: document.querySelector('main'),
     dashboardContainer: document.querySelector('.dashboard-container'),
     headerContent: document.querySelector('header')
@@ -82,25 +89,33 @@ const elements = {
 
 // ==================== ROTAS DA API ====================
 
-// (Opcional) Rota de teste para verificar se o servidor está online
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// NOVA ROTA: Tabela de Comissões (vw_tabela_comissoes)
+app.get('/api/tabela-comissoes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT tipo, valor_comissao, faixa_min, faixa_max, data_atualizacao
+       FROM app_comissionamento.vw_tabela_comissoes
+       ORDER BY tipo, faixa_min`
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Erro ao buscar tabela de comissões:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ==================== INICIALIZAÇÃO ====================
 
-// Instância do PostgresService (se precisar ser usada em outras rotas)
-const dbService = new PostgresService();
-
-// Conectar ao banco antes de iniciar o servidor
 async function startServer() {
   try {
-    await dbService.connect(); // supondo que exista um método connect()
+    await pool.query('SELECT 1');
     console.log('✅ Conectado ao PostgreSQL');
-
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT}`);
-      console.log(`   Endpoints de recuperação de senha disponíveis em /api/request-reset e /api/verify-code`);
     });
   } catch (error) {
     console.error('❌ Erro ao conectar ao banco:', error);
@@ -110,8 +125,7 @@ async function startServer() {
 
 startServer();
 
-// Exportar para uso em outros lugares (se necessário)
-export { app, dbService };
+export { app, pool };
 
 // ==================== FUNÇÕES DE UTILITÁRIO ====================
 
@@ -147,7 +161,6 @@ function showPanel(panel, show) {
     }
 }
 
-// Ocultar/Mostrar conteúdo principal baseado na autenticação
 function toggleMainContent(show) {
     if (elements.mainContent) {
         elements.mainContent.style.display = show ? 'block' : 'none';
@@ -161,11 +174,14 @@ function toggleMainContent(show) {
 
 async function loadUserConfigurations(userId) {
     try {
-        // Carregar configurações do usuário do banco de dados
-        const userConfig = await postgresService.getUserConfigurations(userId);
-        
+        // Configurações permanecem na tabela original (sem view)
+        const res = await pool.query(
+            'SELECT * FROM app_comissionamento.configuracoes_usuario WHERE usuario_id = $1',
+            [userId]
+        );
+        const userConfig = res.rows[0];
+
         if (userConfig) {
-            // Atualizar configurações do calculator
             calculator.updateConfig({
                 pesoGanhos: userConfig.peso_ganhos || 3,
                 pesoAssinados: userConfig.peso_assinados || 3,
@@ -173,14 +189,10 @@ async function loadUserConfigurations(userId) {
                 comissaoPercentualPadrao: userConfig.comissao_percentual_padrao || 5,
                 bonusExtraPorMeta: userConfig.bonus_extra_por_meta || 50.00
             });
-            
             currentConfig = calculator.getConfig();
         } else {
-            // Usar configurações padrão
-            console.log('Usando configurações padrão do calculator');
             currentConfig = calculator.getConfig();
         }
-        
         return currentConfig;
     } catch (error) {
         console.error('Erro ao carregar configurações:', error);
@@ -189,42 +201,23 @@ async function loadUserConfigurations(userId) {
     }
 }
 
-// Aplicar restrições de UI baseadas no nível de acesso
 function applyAccessRestrictions() {
     if (!currentUser) return;
-    
+
     const uiConfig = accessControl.getUIConfig(currentUser);
-    
-    // Aplicar restrições de visibilidade dos elementos da UI
+
     if (elements.linkEquipes) {
-        if (!uiConfig.showTeamPage) {
-            elements.linkEquipes.style.display = 'none';
-        } else {
-            elements.linkEquipes.style.display = 'inline-block';
-        }
+        elements.linkEquipes.style.display = uiConfig.showTeamPage ? 'inline-block' : 'none';
     }
-    
     if (elements.exportarBtn) {
         elements.exportarBtn.style.display = uiConfig.showExportButton ? 'inline-block' : 'none';
     }
-    
-    // Mostrar nível de acesso na interface
     if (elements.userAccessLevel) {
         elements.userAccessLevel.textContent = uiConfig.accessLevel;
         elements.userAccessLevel.title = `Grupo: ${uiConfig.group}`;
     }
-    
     if (elements.userInfoGrupo) {
-        elements.userInfoGrupo.textContent = currentUser.grupo || 'N/A';
-    }
-    
-    // Log de acesso para auditoria
-    console.log('Restrições de acesso aplicadas:', uiConfig);
-    
-    // Gerar relatório de auditoria se necessário
-    if (uiConfig.accessLevel === 'ADMINISTRATIVO') {
-        const auditReport = accessControl.generateAuditReport(currentUser);
-        console.log('Relatório de acesso:', auditReport);
+        elements.userInfoGrupo.textContent = currentUser.cargo || 'N/A';
     }
 }
 
@@ -232,61 +225,67 @@ function applyAccessRestrictions() {
 
 async function handleLogin(event) {
     event.preventDefault();
-    
-    const username = document.getElementById('username').value;
+
+    const email = document.getElementById('username').value;
     const password = document.getElementById('password').value;
-    
-    // Limpar status anterior
+
     const statusDiv = document.getElementById('loginStatus');
     if (statusDiv) {
         statusDiv.textContent = '';
         statusDiv.className = 'login-status';
     }
-    
+
     try {
-        const user = await postgresService.authenticateUser(username, password);
-        
-        if (user) {
-            // Verificar nível de acesso do usuário
-            const accessLevel = accessControl.getAccessLevel(user.grupo);
-            
-            // Se o usuário for DESCONSIDERAR, não permitir login
-            if (accessLevel === 0) {
-                showLoginStatus('Acesso negado. Usuário sem permissão.', 'error');
-                return;
-            }
-            
-            currentUser = user;
-            
-            // Carregar configurações do usuário
-            await loadUserConfigurations(user.id);
-            
-            // Buscar email do usuário
-            const userEmail = await postgresService.getUserEmail(user.id);
-            
-            if (!userEmail) {
-                showLoginStatus('Email não encontrado para este usuário', 'error');
-                return;
-            }
-            
-            // Enviar código 2FA
-            const result = await twoFactorService.sendCode(userEmail, user.nome || user.username);
-            
-            if (result.success) {
-                showPanel(elements.loginPanel, false);
-                showPanel(elements.twoFactorVerifyPanel, true);
-                
-                // Iniciar timer de expiração
-                startTwoFactorTimer();
-                
-                // Limpar campo de código
-                document.getElementById('twoFactorCode').value = '';
-            } else {
-                showLoginStatus(result.error || 'Erro ao enviar código de verificação', 'error');
-            }
-        } else {
+        const userRes = await pool.query(
+            `SELECT email, nome, nome_equipe, cargo, status, periodo
+             FROM core.view_app_colaboradores
+             WHERE email = $1`,
+            [email]
+        );
+        if (userRes.rows.length === 0) {
             showLoginStatus('Usuário ou senha inválidos', 'error');
+            return;
         }
+        const user = userRes.rows[0];
+
+        const accessLevel = accessControl.getAccessLevel(user.cargo);
+        if (accessLevel === 0) {
+            showLoginStatus('Acesso negado. Usuário sem permissão.', 'error');
+            return;
+        }
+
+        const twoFactorResult = await twoFactorService.sendCode(user.email, user.nome);
+        if (!twoFactorResult.success) {
+            showLoginStatus(twoFactorResult.error || 'Erro ao enviar código', 'error');
+            return;
+        }
+
+        req.session.userId = user.email;
+        req.session.tempToken = twoFactorResult.tempToken;
+        req.session.ip = req.ip;
+        req.session.userAgent = req.headers['user-agent'];
+
+        req.session.save((err) => {
+            if (err) {
+                showLoginStatus('Erro interno', 'error');
+                return;
+            }
+
+            currentUser = {
+                id: user.email,
+                nome: user.nome,
+                email: user.email,
+                equipe: user.nome_equipe,
+                cargo: user.cargo,
+                status: user.status,
+                periodo: user.periodo
+            };
+            showPanel(elements.loginPanel, false);
+            showPanel(elements.twoFactorVerifyPanel, true);
+            startTwoFactorTimer();
+            document.getElementById('twoFactorCode').value = '';
+        });
+
     } catch (error) {
         console.error('Erro no login:', error);
         showLoginStatus('Erro ao realizar login', 'error');
@@ -307,24 +306,24 @@ function showLoginStatus(message, type) {
 
 function startTwoFactorTimer() {
     if (twoFactorTimer) clearInterval(twoFactorTimer);
-    
+
     let timeLeft = 300;
     const timerElement = document.createElement('div');
     timerElement.id = 'twoFactorTimer';
     timerElement.className = 'timer-countdown';
-    
+
     const verifyPanel = document.querySelector('.twofactor-content');
     if (verifyPanel) {
         const existingTimer = document.getElementById('twoFactorTimer');
         if (existingTimer) existingTimer.remove();
         verifyPanel.appendChild(timerElement);
     }
-    
+
     twoFactorTimer = setInterval(() => {
         const minutes = Math.floor(timeLeft / 60);
         const seconds = timeLeft % 60;
         timerElement.textContent = `Código expira em: ${minutes}:${seconds.toString().padStart(2, '0')}`;
-        
+
         if (timeLeft <= 0) {
             clearInterval(twoFactorTimer);
             timerElement.textContent = 'Código expirado. Solicite um novo.';
@@ -336,42 +335,27 @@ function startTwoFactorTimer() {
 
 async function verifyTwoFactor() {
     const enteredCode = document.getElementById('twoFactorCode').value;
-    const userId = currentUser?.nome || currentUser?.username;
-    
+    const userId = currentUser?.id;
+
     if (!userId) {
         alert('Erro: usuário não identificado');
         return;
     }
-    
-    // Verificar código usando o serviço 2FA
+
     const verification = twoFactorService.verifyCode(userId, enteredCode);
-    
     if (verification.success) {
         clearInterval(twoFactorTimer);
         twoFactorService.stopTimer();
         showPanel(elements.twoFactorVerifyPanel, false);
-        
-        // Marcar como autenticado
+
         isAuthenticated = true;
-        
-        // Mostrar conteúdo principal
         toggleMainContent(true);
-        
-        // Carregar dashboard do usuário
+
+        await loadUserConfigurations(userId);
         await loadUserDashboard();
-        
-        // Aplicar restrições de acesso
         applyAccessRestrictions();
-        
-        // Inicializar servidor após login bem-sucedido
-        startServer.initialize();
-        
-        // Verificar página atual e aplicar restrições
-        checkPageAccess();
     } else {
         alert(verification.error);
-        
-        // Se muitas tentativas, fechar painel e voltar ao login
         if (verification.error.includes('Muitas tentativas')) {
             cancelTwoFactor();
         }
@@ -379,16 +363,13 @@ async function verifyTwoFactor() {
 }
 
 async function resendTwoFactorCode() {
-    const userId = currentUser?.nome || currentUser?.username;
-    const userEmail = await postgresService.getUserEmail(currentUser?.id);
-    
+    const userId = currentUser?.id;
+    const userEmail = currentUser?.email;
+
     if (userId && userEmail) {
         const result = await twoFactorService.resendCode(userId, userEmail);
-        
         if (result.success) {
             alert('Novo código enviado para seu email');
-            
-            // Reiniciar timer
             clearInterval(twoFactorTimer);
             startTwoFactorTimer();
         } else {
@@ -402,13 +383,11 @@ async function resendTwoFactorCode() {
 function cancelTwoFactor() {
     clearInterval(twoFactorTimer);
     twoFactorService.stopTimer();
-    
-    // Limpar código do usuário atual
+
     if (currentUser) {
-        const userId = currentUser.nome || currentUser.username;
-        twoFactorService.clearCode(userId);
+        twoFactorService.clearCode(currentUser.id);
     }
-    
+
     showPanel(elements.twoFactorVerifyPanel, false);
     showPanel(elements.loginPanel, true);
     currentUser = null;
@@ -420,46 +399,34 @@ function cancelTwoFactor() {
 
 function checkPageAccess() {
     if (!isAuthenticated || !currentUser) {
-        // Se não estiver autenticado, redirecionar para login
         if (window.location.pathname.includes('equipes.html')) {
             window.location.href = '../index.html';
         }
         return;
     }
-    
+
     const currentPath = window.location.pathname;
-    const userLevel = accessControl.getAccessLevel(currentUser.grupo);
-    
-    // Verificar acesso à página de equipes
+    const userLevel = accessControl.getAccessLevel(currentUser.cargo);
+
     if (currentPath.includes('equipes.html')) {
-        // Assessor não pode acessar página de equipes
-        if (userLevel === 1) { // LEVELS.ASSESSOR = 1
+        if (userLevel === 1) {
             showAccessDeniedMessage('Acesso Negado', 'Usuários do tipo ASSESSOR não têm permissão para acessar a página de equipes.');
-            
-            // Redirecionar após 3 segundos
-            setTimeout(() => {
-                window.location.href = '../index.html';
-            }, 3000);
+            setTimeout(() => { window.location.href = '../index.html'; }, 3000);
             return;
         }
-        
-        // Verificar se tem permissão para ver equipe
+
         const permissions = accessControl.getUserPermissions(currentUser);
         if (!permissions.canViewTeam) {
             showAccessDeniedMessage('Acesso Negado', 'Você não tem permissão para visualizar dados da equipe.');
-            setTimeout(() => {
-                window.location.href = '../index.html';
-            }, 3000);
+            setTimeout(() => { window.location.href = '../index.html'; }, 3000);
             return;
         }
-        
-        // Carregar dados da equipe se tiver permissão
+
         loadTeamMembers();
     }
 }
 
 function showAccessDeniedMessage(title, message) {
-    // Criar modal de acesso negado
     const modal = document.createElement('div');
     modal.className = 'access-denied-modal';
     modal.innerHTML = `
@@ -477,163 +444,147 @@ function showAccessDeniedMessage(title, message) {
             </div>
         </div>
     `;
-    
-    // Adicionar estilos
-    const style = document.createElement('style');
-    style.textContent = `
-        .access-denied-modal {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.8);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 10000;
-        }
-        .access-denied-content {
-            background: white;
-            border-radius: 12px;
-            max-width: 500px;
-            width: 90%;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-            animation: slideIn 0.3s ease;
-        }
-        .access-denied-header {
-            background: #dc3545;
-            color: white;
-            padding: 20px;
-            border-radius: 12px 12px 0 0;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .access-denied-icon {
-            font-size: 32px;
-        }
-        .access-denied-body {
-            padding: 20px;
-            color: #333;
-        }
-        .access-denied-footer {
-            padding: 20px;
-            border-top: 1px solid #eee;
-            text-align: center;
-        }
-        @keyframes slideIn {
-            from {
-                transform: translateY(-50px);
-                opacity: 0;
-            }
-            to {
-                transform: translateY(0);
-                opacity: 1;
-            }
-        }
-    `;
-    
-    document.head.appendChild(style);
     document.body.appendChild(modal);
-    
-    // Remover modal após 5 segundos ou quando clicar no botão
-    setTimeout(() => {
-        if (modal && modal.parentNode) {
-            modal.remove();
-        }
-    }, 5000);
 }
 
 // ==================== FUNÇÕES DO DASHBOARD ====================
 
 async function loadUserDashboard() {
     if (!currentUser || !isAuthenticated) return;
-    
+
     try {
-        // Carregar dados do usuário
-        const userData = await postgresService.getUserData(currentUser.id, selectedDate);
-        
-        // Atualizar informações do usuário
-        if (elements.userInfoNome) elements.userInfoNome.textContent = currentUser.nome;
-        if (elements.userInfoEquipe) elements.userInfoEquipe.textContent = currentUser.equipe;
-        
-        // Atualizar métricas principais
-        if (elements.emitidosValue) elements.emitidosValue.textContent = userData.emitidos || 0;
-        if (elements.assinadosValue) elements.assinadosValue.textContent = userData.assinados || 0;
-        if (elements.ganhosValue) elements.ganhosValue.textContent = userData.ganhos || 0;
-        if (elements.perdidosValue) elements.perdidosValue.textContent = userData.perdidos || 0;
-        
-        // Carregar meta do usuário
-        const metaConfig = await postgresService.getUserMeta(currentUser.id);
-        const metaQuantidade = metaConfig?.meta_quantidade || 10;
-        const metaPercentual = metaConfig?.meta_percentual || 70;
-        
-        const ganhos = userData.ganhos || 0;
-        const assinados = userData.assinados || 0;
-        
-        // Usar Calculator para verificar meta (com sistema de pesos)
+        // Emitidos – view_app_emitidos_e_assinados
+        const emitidosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_emitidos_e_assinados
+             WHERE consultor_responsavel_emissao = $1
+               AND data_envio::date = $2`,
+            [currentUser.nome, selectedDate]
+        );
+        const emitidos = emitidosRes.rows[0].total;
+
+        // Assinados – view_app_emitidos_e_assinados com status 'signed'
+        const assinadosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_emitidos_e_assinados
+             WHERE consultor_responsavel_assinatura = $1
+               AND data_assinatura::date = $2
+               AND status = 'signed'`,
+            [currentUser.nome, selectedDate]
+        );
+        const assinados = assinadosRes.rows[0].total;
+
+        // Ganhos – view_app_kommo_leads com filtros de funil e etapas
+        const ganhosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_kommo_leads
+             WHERE lead_usuario_responsavel = $1
+               AND data_ganho::date = $2
+               AND funil_vendas = ANY($3)
+               AND etapa_lead = ANY($4)`,
+            [currentUser.nome, selectedDate,
+             ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO'],
+             ['Venda ganha', 'PROTOCOLADO', 'AG PROTOCOLO', 'ANALISE DE PRONTUÁRIO', 'ENTRADA', 'E-MAIL NÃO RESPONDIDO', 'E-MAIL RESPONDIDO', 'AÇÃO DO CLIENTE', 'ASSINATURA DO ADV', 'AG PRONTUÁRIO', 'PENDÊNCIA PRO', 'VALIDAÇÃO SUPERVISOR', 'protocolado']
+            ]
+        );
+        const ganhos = ganhosRes.rows[0].total;
+
+        // Perdidos
+        const perdidosRes = await pool.query(
+            `SELECT COUNT(*)::int AS total
+             FROM madm.view_app_kommo_leads
+             WHERE lead_usuario_responsavel = $1
+               AND data_ganho::date = $2
+               AND funil_vendas = ANY($3)
+               AND etapa_lead = 'Venda perdida'`,
+            [currentUser.nome, selectedDate,
+             ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO']
+            ]
+        );
+        const perdidos = perdidosRes.rows[0].total;
+
+        if (elements.emitidosValue) elements.emitidosValue.textContent = emitidos;
+        if (elements.assinadosValue) elements.assinadosValue.textContent = assinados;
+        if (elements.ganhosValue) elements.ganhosValue.textContent = ganhos;
+        if (elements.perdidosValue) elements.perdidosValue.textContent = perdidos;
+
+        // Meta – sem view fornecida, mantém tabela original
+        const metaRes = await pool.query(
+            'SELECT * FROM app_comissionamento.metas WHERE usuario_id = $1',
+            [currentUser.id]
+        );
+        const metaConfig = metaRes.rows[0] || {};
+        const metaQuantidade = metaConfig.meta_quantidade || 10;
+        const metaPercentual = metaConfig.meta_percentual || 70;
+
         const bateuMeta = calculator.checkGoal(ganhos, assinados, metaQuantidade, metaPercentual);
         const metasBatidas = bateuMeta ? 1 : 0;
-        
-        // Atualizar display de meta
+
         if (elements.metaValue) elements.metaValue.textContent = metasBatidas;
-        
-        // Calcular e atualizar progresso usando Calculator
+
         const progressPercent = calculator.calculateProgress(ganhos, metaQuantidade);
         if (elements.metaProgress) elements.metaProgress.style.width = `${Math.min(100, progressPercent)}%`;
         if (elements.metaPercent) elements.metaPercent.textContent = `${Math.round(progressPercent)}%`;
-        
-        // Calcular quantidade faltante usando Calculator
+
         const qtdParaMeta = calculator.calculateRemainingToGoal(ganhos, metaQuantidade);
         if (elements.QTDAtMeta) elements.QTDAtMeta.textContent = Math.max(0, qtdParaMeta);
-        
-        // Calcular comissão usando Calculator
-        const comissaoPercentual = userData.comissao_percentual || currentConfig?.comissaoPercentualPadrao || 5;
+
+        // Comissão – usando configuração padrão (view de métricas assessores não tem campo comissao_colaborador)
+        const comissaoPercentual = currentConfig?.comissaoPercentualPadrao || 5;
         const comissao = calculator.calculateCommission(assinados, comissaoPercentual);
-        
-        // Calcular bônus usando Calculator (agora com sistema de pesos)
         const bonus = calculator.calculateBonus(metasBatidas, ganhos, metaQuantidade);
-        
-        // Atualizar valores na tela
+
         if (elements.comissaoValue) elements.comissaoValue.textContent = formatCurrency(comissao);
         if (elements.bonusValue) elements.bonusValue.textContent = formatCurrency(bonus);
-        
-        // Calcular e exibir pontuação total (opcional)
+
         const totalScore = calculator.calculateTotalScore(ganhos, assinados);
         const successRate = calculator.calculateSuccessRate(ganhos, assinados);
-        
-        // Adicionar informações extras ao dashboard (opcional)
         updateExtraMetrics(totalScore, successRate, bateuMeta);
-        
-        // Extrair dados para relatório
+
+        // Extração (agora usando as views)
         await extractBD.extractUserData(currentUser.id, selectedDate);
-        
-        // Log para debug
-        console.log(`Dashboard atualizado - Meta: ${metaQuantidade}, Ganhos: ${ganhos}, Assinados: ${assinados}, Bateu Meta: ${bateuMeta}, Bônus: ${bonus}`);
-        
+
+        // Buscar metas de gols (novos campos)
+        try {
+            const mesAtual = selectedDate.substring(0, 7);
+            const golsRes = await pool.query(
+                `SELECT meta_gols_assinados, meta_gols_ganhos
+                 FROM app_comissionamento.view_app_metricas_assessores
+                 WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
+                   AND TO_CHAR(data_metrica::date, 'YYYY-MM') = $2`,
+                [currentUser.email, mesAtual]
+            );
+            if (golsRes.rows.length > 0) {
+                const golsData = golsRes.rows[0];
+                // Exibir nos elementos correspondentes (se existirem)
+                const golsAssElem = document.getElementById('metaGolsAssinados');
+                const golsGanElem = document.getElementById('metaGolsGanhos');
+                if (golsAssElem) golsAssElem.textContent = golsData.meta_gols_assinados || 0;
+                if (golsGanElem) golsGanElem.textContent = golsData.meta_gols_ganhos || 0;
+            }
+        } catch (golsErr) {
+            console.warn('Metas de gols não disponíveis:', golsErr.message);
+        }
+
     } catch (error) {
         console.error('Erro ao carregar dashboard:', error);
         alert('Erro ao carregar dados do dashboard. Tente novamente.');
     }
 }
 
-// Função auxiliar para atualizar métricas extras no dashboard
 function updateExtraMetrics(totalScore, successRate, bateuMeta) {
-    // Verificar se os elementos existem, se não, criar dinamicamente
     let scoreElement = document.getElementById('totalScore');
     let rateElement = document.getElementById('successRate');
     let metaStatusElement = document.getElementById('metaStatus');
-    
+
     if (!scoreElement) {
-        // Criar elementos se não existirem
         const metricsSection = document.querySelector('.metrics-cards');
         if (metricsSection) {
             const scoreCard = document.createElement('div');
             scoreCard.className = 'card';
             scoreCard.innerHTML = `<h3>Pontuação Total</h3><div class="card-value" id="totalScore">${totalScore}</div>`;
             metricsSection.appendChild(scoreCard);
-            
+
             const rateCard = document.createElement('div');
             rateCard.className = 'card';
             rateCard.innerHTML = `<h3>Aproveitamento</h3><div class="card-value" id="successRate">${Math.round(successRate)}%</div>`;
@@ -643,8 +594,7 @@ function updateExtraMetrics(totalScore, successRate, bateuMeta) {
         if (scoreElement) scoreElement.textContent = totalScore;
         if (rateElement) rateElement.textContent = `${Math.round(successRate)}%`;
     }
-    
-    // Atualizar status da meta nos indicadores
+
     const metaCard = document.querySelector('.indicator-card:first-child');
     if (metaCard && !metaStatusElement) {
         const statusDiv = document.createElement('div');
@@ -655,7 +605,7 @@ function updateExtraMetrics(totalScore, successRate, bateuMeta) {
         metaCard.appendChild(statusDiv);
         metaStatusElement = statusDiv;
     }
-    
+
     if (metaStatusElement) {
         metaStatusElement.textContent = bateuMeta ? '✅ Meta BATIDA!' : '⏳ Em progresso...';
         metaStatusElement.style.color = bateuMeta ? 'green' : 'orange';
@@ -666,29 +616,32 @@ function updateExtraMetrics(totalScore, successRate, bateuMeta) {
 
 async function loadTeamMembers() {
     if (!currentUser || !isAuthenticated) return;
-    
-    // Verificar permissão antes de carregar
+
     const permissions = accessControl.getUserPermissions(currentUser);
-    if (!permissions.canViewTeam) {
-        console.warn('Usuário sem permissão para ver equipe');
-        return;
-    }
-    
+    if (!permissions.canViewTeam) return;
+
     try {
-        const teamMembers = await postgresService.getTeamMembers(currentUser.equipe);
-        
-        // Filtrar dados baseado no nível de acesso
+        const teamRes = await pool.query(
+            `SELECT email, nome, nome_equipe, cargo, status, periodo
+             FROM core.view_app_colaboradores
+             WHERE nome_equipe = $1 AND LOWER(status) = 'ativo'`,
+            [currentUser.equipe]
+        );
+        const teamMembers = teamRes.rows.map(m => ({
+            id: m.email,
+            nome: m.nome,
+            equipe: m.nome_equipe,
+            cargo: m.cargo,
+            status: m.status,
+            periodo: m.periodo
+        }));
+
         const filteredMembers = accessControl.filterTeamData(teamMembers, currentUser);
-        
-        if (elements.tabelaColaboradoresBody) {
-            // Usar Calculator para calcular ranking da equipe
-            const rankedMembers = calculator.calculateRanking(filteredMembers);
-            renderTeamTable(rankedMembers);
-            
-            // Calcular bônus da equipe
-            const teamBonus = calculator.calculateTeamBonus(filteredMembers);
-            displayTeamBonus(teamBonus);
-        }
+        const rankedMembers = calculator.calculateRanking(filteredMembers);
+        renderTeamTable(rankedMembers);
+
+        const teamBonus = calculator.calculateTeamBonus(filteredMembers);
+        displayTeamBonus(teamBonus);
     } catch (error) {
         console.error('Erro ao carregar equipe:', error);
     }
@@ -696,81 +649,43 @@ async function loadTeamMembers() {
 
 function renderTeamTable(members) {
     if (!elements.tabelaColaboradoresBody) return;
-    
+
     const tbody = elements.tabelaColaboradoresBody;
     tbody.innerHTML = '';
-    
+
     let totalComissao = 0;
     let totalBonus = 0;
-    
+
     members.forEach(member => {
         const row = tbody.insertRow();
-        
-        // Adicionar ranking
-        const rankCell = row.insertCell(0);
-        rankCell.textContent = `#${member.ranking}`;
-        rankCell.className = 'ranking-cell';
-        
+        row.insertCell(0).textContent = `#${member.ranking}`;
         row.insertCell(1).textContent = member.id;
         row.insertCell(2).textContent = member.nome;
         row.insertCell(3).textContent = member.equipe;
         row.insertCell(4).textContent = member.cargo;
         row.insertCell(5).textContent = member.status;
         row.insertCell(6).textContent = member.meta_individual || 0;
-        
-        // Usar valores já calculados pelo ranking
+
         const comissao = member.comissao;
         const bonus = member.bonus;
-        
         row.insertCell(7).textContent = formatCurrency(comissao);
         row.insertCell(8).textContent = formatCurrency(bonus);
         totalComissao += comissao;
         totalBonus += bonus;
-        
-        // Status da meta
+
         const statusCell = row.insertCell(9);
         statusCell.textContent = member.bateuMeta ? '✅' : '⏳';
         statusCell.className = member.bateuMeta ? 'meta-achieved' : 'meta-progress';
-        
-        row.insertCell(10).textContent = member.ultima_atualizacao ? 
-            formatDate(new Date(member.ultima_atualizacao)) : '-';
-        
-        // Pontuação
+
+        row.insertCell(10).textContent = member.ultima_atualizacao ? formatDate(new Date(member.ultima_atualizacao)) : '-';
         row.insertCell(11).textContent = member.score;
-        
-        // Verificar permissão para ver detalhes do usuário
-        const permissions = accessControl.getUserPermissions(currentUser);
-        if (permissions.canViewTeam) {
-            const actionsCell = row.insertCell(12);
-            const viewBtn = document.createElement('button');
-            viewBtn.textContent = 'Visualizar';
-            viewBtn.className = 'btn-view';
-            viewBtn.onclick = () => viewUserDetails(member.id);
-            actionsCell.appendChild(viewBtn);
-        }
     });
-    
+
     if (elements.totalColaboradores) {
         elements.totalColaboradores.textContent = members.length;
     }
-    
     if (elements.totalComissoes) {
         elements.totalComissoes.textContent = formatCurrency(totalComissao);
-    }
-    
-    // Adicionar total de bônus se existir elemento
-    let totalBonusElement = document.getElementById('totalBonus');
-    if (!totalBonusElement) {
-        const statsContainer = document.querySelector('.team-stats');
-        if (statsContainer) {
-            const bonusDiv = document.createElement('div');
-            bonusDiv.className = 'stat-item';
-            bonusDiv.innerHTML = `<strong>Total Bônus:</strong> <span id="totalBonus">${formatCurrency(totalBonus)}</span>`;
-            statsContainer.appendChild(bonusDiv);
-            totalBonusElement = document.getElementById('totalBonus');
-        }
-    } else {
-        totalBonusElement.textContent = formatCurrency(totalBonus);
     }
 }
 
@@ -798,30 +713,58 @@ function displayTeamBonus(teamBonus) {
 }
 
 async function viewUserDetails(userId) {
-    // Verificar permissão
     if (!accessControl.canViewUser(currentUser, { id: userId })) {
         alert('Você não tem permissão para visualizar dados deste usuário.');
         return;
     }
-    
-    const userData = await postgresService.getUserData(userId, selectedDate);
-    const metaConfig = await postgresService.getUserMeta(userId);
-    
-    const ganhos = userData.ganhos || 0;
-    const assinados = userData.assinados || 0;
-    const metaQuantidade = metaConfig?.meta_quantidade || 10;
-    
-    // Calcular projeção usando Calculator
+
+    const colabRes = await pool.query(
+        `SELECT nome FROM core.view_app_colaboradores WHERE email = $1`,
+        [userId]
+    );
+    if (colabRes.rows.length === 0) return alert('Colaborador não encontrado.');
+    const nomeColab = colabRes.rows[0].nome;
+
+    const emitidosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_emitidos_e_assinados WHERE consultor_responsavel_emissao = $1 AND data_envio::date = $2`,
+        [nomeColab, selectedDate]
+    );
+    const assinadosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_emitidos_e_assinados WHERE consultor_responsavel_assinatura = $1 AND data_assinatura::date = $2 AND status = 'signed'`,
+        [nomeColab, selectedDate]
+    );
+    const ganhosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_kommo_leads WHERE lead_usuario_responsavel = $1 AND data_ganho::date = $2 AND funil_vendas = ANY($3) AND etapa_lead = ANY($4)`,
+        [nomeColab, selectedDate,
+         ['AUDITORIA DE GANHO','JURIDICO AUDITORIA DE GANHO','NOVO - AUDITORIA DE GANHO','PRO'],
+         ['Venda ganha','PROTOCOLADO','AG PROTOCOLO','ANALISE DE PRONTUÁRIO','ENTRADA','E-MAIL NÃO RESPONDIDO','E-MAIL RESPONDIDO','AÇÃO DO CLIENTE','ASSINATURA DO ADV','AG PRONTUÁRIO','PENDÊNCIA PRO','VALIDAÇÃO SUPERVISOR','protocolado']
+        ]
+    );
+    const perdidosRes = await pool.query(
+        `SELECT COUNT(*)::int AS total FROM madm.view_app_kommo_leads WHERE lead_usuario_responsavel = $1 AND data_ganho::date = $2 AND funil_vendas = ANY($3) AND etapa_lead = 'Venda perdida'`,
+        [nomeColab, selectedDate,
+         ['AUDITORIA DE GANHO','JURIDICO AUDITORIA DE GANHO','NOVO - AUDITORIA DE GANHO','PRO']
+        ]
+    );
+
+    const emitidos = emitidosRes.rows[0].total;
+    const assinados = assinadosRes.rows[0].total;
+    const ganhos = ganhosRes.rows[0].total;
+    const perdidos = perdidosRes.rows[0].total;
+
+    const metaRes = await pool.query('SELECT * FROM app_comissionamento.metas WHERE usuario_id = $1', [userId]);
+    const metaConfig = metaRes.rows[0] || {};
+    const metaQuantidade = metaConfig.meta_quantidade || 10;
     const diasRestantes = 30 - new Date(selectedDate).getDate();
     const projection = calculator.calculateProjection(ganhos, assinados, diasRestantes, metaQuantidade);
-    
+
     alert(`Detalhes do colaborador:
     
 📊 Métricas:
-• Emitidos: ${userData.emitidos || 0}
-• Assinados: ${userData.assinados || 0}
-• Ganhos: ${userData.ganhos || 0}
-• Perdidos: ${userData.perdidos || 0}
+• Emitidos: ${emitidos}
+• Assinados: ${assinados}
+• Ganhos: ${ganhos}
+• Perdidos: ${perdidos}
 
 🎯 Meta:
 • Quantidade: ${metaQuantidade}
@@ -834,20 +777,26 @@ async function viewUserDetails(userId) {
 • Meta Projetada: ${projection.projecaoMeta ? '✅ SIM' : '❌ NÃO'}
 
 💰 Financeiro:
-• Comissão: ${formatCurrency(calculator.calculateCommission(assinados, userData.comissao_percentual || 5))}
-• Bônus: ${formatCurrency(calculator.calculateBonus(calculator.checkGoal(ganhos, assinados, metaQuantidade) ? 1 : 0, ganhos, metaQuantidade))}`);
+• Comissão: ${formatCurrency(calculator.calculateCommission(assinados, 5))}
+• Bônus: ${formatCurrency(calculator.calculateBonus(calculator.checkGoal(ganhos, assinados, metaQuantidade, metaConfig?.meta_percentual || 70) ? 1 : 0, ganhos, metaQuantidade))}`);
 }
 
 async function exportTeamData() {
-    // Verificar permissão
     const permissions = accessControl.getUserPermissions(currentUser);
     if (!permissions.canExportData) {
         alert('Você não tem permissão para exportar dados.');
         return;
     }
-    
-    const members = await postgresService.getTeamMembers(currentUser.equipe);
-    const filteredMembers = accessControl.filterTeamData(members, currentUser);
+
+    const members = await pool.query(
+        `SELECT email, nome, nome_equipe, cargo, status, periodo
+         FROM core.view_app_colaboradores
+         WHERE nome_equipe = $1 AND LOWER(status) = 'ativo'`,
+        [currentUser.equipe]
+    );
+    const filteredMembers = accessControl.filterTeamData(members.rows.map(m => ({
+        id: m.email, nome: m.nome, equipe: m.nome_equipe, cargo: m.cargo, status: m.status
+    })), currentUser);
     const rankedMembers = calculator.calculateRanking(filteredMembers);
     const csv = convertToCSV(rankedMembers);
     downloadCSV(csv, `equipe_${currentUser.equipe}_${selectedDate}.csv`);
@@ -856,20 +805,13 @@ async function exportTeamData() {
 function convertToCSV(data) {
     const headers = ['Ranking', 'ID', 'Nome', 'Equipe', 'Cargo', 'Status', 'Meta Individual', 'Comissão', 'Bônus', 'Bateu Meta', 'Pontuação', 'Última Atualização'];
     const rows = data.map(item => [
-        item.ranking,
-        item.id,
-        item.nome,
-        item.equipe,
-        item.cargo,
-        item.status,
-        item.meta_individual,
+        item.ranking, item.id, item.nome, item.equipe, item.cargo, item.status, item.meta_individual,
         calculator.calculateCommission(item.assinados || 0, item.comissao_percentual || 5),
         calculator.calculateBonus(item.bateuMeta ? 1 : 0, item.ganhos || 0, item.meta_individual || 10),
         item.bateuMeta ? 'Sim' : 'Não',
         calculator.calculateTotalScore(item.ganhos || 0, item.assinados || 0),
         item.ultima_atualizacao
     ]);
-    
     return [headers, ...rows].map(row => row.join(',')).join('\n');
 }
 
@@ -889,19 +831,16 @@ function downloadCSV(csv, filename) {
 
 function applyDateFilter() {
     if (!currentUser || !isAuthenticated) return;
-    
+
     const dateInput = elements.consultaDataMeta?.value;
     if (dateInput) {
         const parsedDate = parseDate(dateInput);
         if (parsedDate && !isNaN(parsedDate.getTime())) {
             selectedDate = parsedDate.toISOString().split('T')[0];
             loadUserDashboard();
-            
             if (window.location.pathname.includes('equipes.html')) {
                 const permissions = accessControl.getUserPermissions(currentUser);
-                if (permissions.canViewTeam) {
-                    loadTeamMembers();
-                }
+                if (permissions.canViewTeam) loadTeamMembers();
             }
         } else {
             alert('Data inválida. Use o formato DD/MM/AAAA');
@@ -913,27 +852,22 @@ function applyDateFilter() {
 
 async function updateCalculatorConfig(newConfig) {
     if (!currentUser || !isAuthenticated) return false;
-    
-    // Verificar permissão
+
     const permissions = accessControl.getUserPermissions(currentUser);
     if (!permissions.canAdjustGoal) {
         alert('Você não tem permissão para ajustar configurações.');
         return false;
     }
-    
+
     try {
-        // Atualizar no calculator
         calculator.updateConfig(newConfig);
-        
-        // Salvar no banco de dados
-        if (currentUser) {
-            await postgresService.saveUserConfigurations(currentUser.id, newConfig);
-        }
-        
-        // Recarregar dashboard com novas configurações
+        await pool.query(
+            `INSERT INTO app_comissionamento.configuracoes_usuario (usuario_id, peso_ganhos, peso_assinados, bonus_base, comissao_percentual_padrao, bonus_extra_por_meta)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             ON CONFLICT (usuario_id) DO UPDATE SET peso_ganhos=$2, peso_assinados=$3, bonus_base=$4, comissao_percentual_padrao=$5, bonus_extra_por_meta=$6`,
+            [currentUser.id, newConfig.pesoGanhos, newConfig.pesoAssinados, newConfig.bonusBase, newConfig.comissaoPercentualPadrao, newConfig.bonusExtraPorMeta]
+        );
         await loadUserDashboard();
-        
-        console.log('Configurações do calculator atualizadas:', calculator.getConfig());
         return true;
     } catch (error) {
         console.error('Erro ao atualizar configurações:', error);
@@ -944,115 +878,100 @@ async function updateCalculatorConfig(newConfig) {
 // ==================== FUNÇÕES DE LOGOUT ====================
 
 function logout() {
-    // Limpar dados de autenticação
-    if (currentUser) {
-        const userId = currentUser.nome || currentUser.username;
-        twoFactorService.clearCode(userId);
-        twoFactorService.stopTimer();
-    }
-    
-    currentUser = null;
-    selectedDate = new Date().toISOString().split('T')[0];
-    currentConfig = null;
-    isAuthenticated = false;
-    
-    if (twoFactorTimer) clearInterval(twoFactorTimer);
-    
-    // Resetar calculator para configurações padrão
-    calculator.updateConfig({
-        pesoGanhos: 3,
-        pesoAssinados: 3,
-        bonusBase: 10.00,
-        comissaoPercentualPadrao: 5,
-        bonusExtraPorMeta: 50.00
-    });
-    
-    // Ocultar conteúdo principal
-    toggleMainContent(false);
-    
-    // Mostrar painel de login
-    showPanel(elements.loginPanel, true);
-    showPanel(elements.twoFactorVerifyPanel, false);
-    
-    // Limpar formulário de login
-    const usernameInput = document.getElementById('username');
-    const passwordInput = document.getElementById('password');
-    const codeInput = document.getElementById('twoFactorCode');
-    
-    if (usernameInput) usernameInput.value = '';
-    if (passwordInput) passwordInput.value = '';
-    if (codeInput) codeInput.value = '';
-    
-    // Redirecionar para página inicial se estiver em equipes
-    if (window.location.pathname.includes('equipes.html')) {
-        window.location.href = '../index.html';
-    }
+    fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
+        .catch(() => {})
+        .finally(() => {
+            if (currentUser) {
+                twoFactorService.clearCode(currentUser.id);
+                twoFactorService.stopTimer();
+            }
+
+            currentUser = null;
+            selectedDate = new Date().toISOString().split('T')[0];
+            currentConfig = null;
+            isAuthenticated = false;
+
+            if (twoFactorTimer) clearInterval(twoFactorTimer);
+
+            calculator.updateConfig({
+                pesoGanhos: 3, pesoAssinados: 3, bonusBase: 10.00,
+                comissaoPercentualPadrao: 5, bonusExtraPorMeta: 50.00
+            });
+
+            toggleMainContent(false);
+            showPanel(elements.loginPanel, true);
+            showPanel(elements.twoFactorVerifyPanel, false);
+
+            const usernameInput = document.getElementById('username');
+            const passwordInput = document.getElementById('password');
+            const codeInput = document.getElementById('twoFactorCode');
+            if (usernameInput) usernameInput.value = '';
+            if (passwordInput) passwordInput.value = '';
+            if (codeInput) codeInput.value = '';
+
+            if (window.location.pathname.includes('equipes.html')) {
+                window.location.href = '../index.html';
+            }
+        });
 }
 
 // ==================== NAVEGAÇÃO ====================
 
 function navigateToTeamPage(e) {
     if (e) e.preventDefault();
-    
+
     if (!currentUser || !isAuthenticated) {
         alert('Faça login primeiro');
         return;
     }
-    
-    // Verificar permissão para acessar página de equipes
-    const userLevel = accessControl.getAccessLevel(currentUser.grupo);
-    
-    if (userLevel === 1) { // ASSESSOR
+
+    const userLevel = accessControl.getAccessLevel(currentUser.cargo);
+    if (userLevel === 1) {
         alert('Acesso Negado: Usuários do tipo ASSESSOR não têm permissão para acessar a página de equipes.');
         return;
     }
-    
+
     const permissions = accessControl.getUserPermissions(currentUser);
     if (!permissions.canViewTeam) {
         alert('Você não tem permissão para visualizar dados da equipe.');
         return;
     }
-    
+
     window.location.href = 'pages/equipes.html';
 }
 
 function navigateToIndex(e) {
     if (e) e.preventDefault();
-    
+
     if (!currentUser || !isAuthenticated) {
         alert('Faça login primeiro');
         return;
     }
-    
+
     window.location.href = '../index.html';
 }
 
-// ==================== INICIALIZAÇÃO ====================
+// ==================== INICIALIZAÇÃO DOS EVENTOS ====================
 
 function initializeEventListeners() {
-    // Login events
     const loginForm = document.getElementById('loginForm');
     if (loginForm) loginForm.addEventListener('submit', handleLogin);
-    
+
     if (elements.closeLoginBtn) elements.closeLoginBtn.addEventListener('click', () => showPanel(elements.loginPanel, false));
     if (elements.closeVerifyBtn) elements.closeVerifyBtn.addEventListener('click', () => cancelTwoFactor());
     if (elements.verifyTwoFactorBtn) elements.verifyTwoFactorBtn.addEventListener('click', verifyTwoFactor);
     if (elements.cancelTwoFactorBtn) elements.cancelTwoFactorBtn.addEventListener('click', cancelTwoFactor);
     if (elements.resendCodeBtn) elements.resendCodeBtn.addEventListener('click', resendTwoFactorCode);
-    
-    // Dashboard events
+
     if (elements.aplicarDataMetaBtn) elements.aplicarDataMetaBtn.addEventListener('click', applyDateFilter);
     if (elements.logoutBtn) elements.logoutBtn.addEventListener('click', logout);
-    
-    // Team page events
+
     if (elements.exportarBtn) elements.exportarBtn.addEventListener('click', exportTeamData);
     if (elements.atualizarBtn) elements.atualizarBtn.addEventListener('click', loadTeamMembers);
-    
-    // Navigation
+
     if (elements.linkEquipes) elements.linkEquipes.addEventListener('click', navigateToTeamPage);
     if (elements.linkIndex) elements.linkIndex.addEventListener('click', navigateToIndex);
-    
-    // Input mask for date
+
     if (elements.consultaDataMeta) {
         elements.consultaDataMeta.addEventListener('input', (e) => {
             let value = e.target.value.replace(/\D/g, '');
@@ -1064,41 +983,32 @@ function initializeEventListeners() {
 }
 
 function initializePage() {
-    // Ocultar conteúdo principal inicialmente
     toggleMainContent(false);
-    
     initializeEventListeners();
-    
-    // Configurar URL base da API para o serviço 2FA
+
     if (twoFactorService.setApiBaseUrl) {
         twoFactorService.setApiBaseUrl(window.location.origin);
     }
-    
-    // Mostrar apenas o painel de login
+
     showPanel(elements.loginPanel, true);
     showPanel(elements.twoFactorVerifyPanel, false);
-    
-    // Log das configurações iniciais do calculator
+
     console.log('Calculator inicializado com configurações:', calculator.getConfig());
     console.log('Sistema de controle de acesso inicializado');
 }
 
-// Verificar autenticação ao carregar a página (para páginas que não sejam a inicial)
 function checkInitialAuth() {
-    // Se não for a página de login e não estiver autenticado, redirecionar
     if (!isAuthenticated && !window.location.pathname.includes('index.html')) {
         window.location.href = '../index.html';
     }
 }
 
-// Inicializar aplicação quando o DOM estiver pronto
 document.addEventListener('DOMContentLoaded', () => {
     initializePage();
     checkInitialAuth();
     checkPageAccess();
 });
 
-// Exportar funções para uso em outros módulos
 export {
     handleLogin,
     logout,

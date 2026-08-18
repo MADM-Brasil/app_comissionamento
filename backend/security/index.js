@@ -2,11 +2,6 @@
 import { inputSanitizer } from './input-validator.js';
 import { fullScan } from './scanners/total-security.js';
 
-/**
- * Middleware de segurança global.
- * 1. Sanitiza os inputs (remove HTML, preserva texto/quebras de linha).
- * 2. Varre padrões suspeitos (apenas loga alertas; pode ser configurado para bloquear).
- */
 export function securityMiddleware(req, res, next) {
   // Sanitiza req.body, req.query e req.params
   inputSanitizer(req, res, () => {

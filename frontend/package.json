@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check": "tsc --noEmit",
     "format": "prettier --write ."
+  
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -38,7 +39,8 @@
     "@radix-ui/react-toggle": "^1.1.10",
     "@radix-ui/react-toggle-group": "^1.1.11",
     "@radix-ui/react-tooltip": "^1.2.8",
-    "axios": "^1.12.0",
+    "axios": "^1.12.0", 
+    "multer": "^1.4.5-lts.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -86,4 +88,5 @@
     "vite-plugin-manus-runtime": "^0.0.57",
     "vitest": "^2.1.4"
   }
+  
 }

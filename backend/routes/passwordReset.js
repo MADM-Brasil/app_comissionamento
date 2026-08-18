@@ -62,10 +62,6 @@ router.post('/request-reset', async (req, res) => {
   }
 
   try {
-    // Opcional: verificar se e-mail existe no banco
-    // const db = new PostgresService();
-    // const user = await db.getUserByEmail(email);
-    // if (!user) return res.status(404).json({ message: 'E-mail não cadastrado' });
 
     const code = generateResetCode();
     const expiresAt = Date.now() + CODE_EXPIRATION_MS;

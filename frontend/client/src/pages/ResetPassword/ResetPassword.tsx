@@ -6,6 +6,17 @@ import { resetPassword } from "@/lib/passwordRecovery";
 import { cn } from "@/lib/utils";
 import logoImg from "@/components/img/logo.png";
 
+// ========== VALIDAÇÃO DE SENHA ==========
+function validarSenha(senha: string): { valida: boolean; erros: string[] } {
+  const erros: string[] = [];
+  if (senha.length < 8) erros.push("Pelo menos 8 caracteres.");
+  if (!/[A-Z]/.test(senha)) erros.push("Pelo menos 1 letra maiúscula.");
+  if (!/[0-9]/.test(senha)) erros.push("Pelo menos 1 número.");
+  if (!/[!@#$%^&*()_+\-=\[\]{}|;:'",.<>?/]/.test(senha))
+    erros.push("Pelo menos 1 caractere especial.");
+  return { valida: erros.length === 0, erros };
+}
+
 export default function ResetPassword() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -18,13 +29,16 @@ export default function ResetPassword() {
     e.preventDefault();
     setError("");
 
+    // Validação das senhas idênticas
     if (password !== confirmPassword) {
       setError("As senhas não coincidem.");
       return;
     }
 
-    if (password.length < 6) {
-      setError("A senha deve ter pelo menos 6 caracteres.");
+    // Nova validação de força da senha
+    const validacao = validarSenha(password);
+    if (!validacao.valida) {
+      setError("Senha fraca: " + validacao.erros.join(" "));
       return;
     }
 
@@ -53,7 +67,11 @@ export default function ResetPassword() {
         {/* Logo */}
         <div className="text-center mb-8">
           <div className="w-24 h-24 mx-auto mb-4">
-            <img src={logoImg} alt="MADM Brasil" className="w-full h-full object-cover rounded-2xl shadow-md" />
+            <img
+              src={logoImg}
+              alt="MADM Brasil"
+              className="w-full h-full object-cover rounded-2xl shadow-md"
+            />
           </div>
           <h1 className="text-2xl font-black text-[#09175b]">MADM Brasil</h1>
         </div>
@@ -68,7 +86,10 @@ export default function ResetPassword() {
           <div className="p-6">
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
-                <label htmlFor="password" className="block text-xs font-semibold text-gray-600 mb-1">
+                <label
+                  htmlFor="password"
+                  className="block text-xs font-semibold text-gray-600 mb-1"
+                >
                   Nova senha
                 </label>
                 <div className="relative">
@@ -81,7 +102,7 @@ export default function ResetPassword() {
                     className="w-full pl-9 pr-10 py-2 text-sm rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-[#09175b]/20"
                     placeholder="••••••••"
                     required
-                    title="Digite sua nova senha (mínimo 6 caracteres)"
+                    title="Mínimo 8 caracteres, 1 maiúscula, 1 número e 1 caractere especial"
                     aria-label="Nova senha"
                   />
                   <button
@@ -91,13 +112,41 @@ export default function ResetPassword() {
                     title={showPassword ? "Ocultar senha" : "Mostrar senha"}
                     aria-label={showPassword ? "Ocultar senha" : "Mostrar senha"}
                   >
-                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    {showPassword ? (
+                      <EyeOff className="w-4 h-4" />
+                    ) : (
+                      <Eye className="w-4 h-4" />
+                    )}
                   </button>
                 </div>
+                {/* Lista de requisitos (dica visual) */}
+                <ul className="mt-2 text-[11px] text-gray-400 space-y-0.5">
+                  <li className={password.length >= 8 ? "text-green-600" : ""}>
+                    ✓ Mínimo 8 caracteres
+                  </li>
+                  <li className={/[A-Z]/.test(password) ? "text-green-600" : ""}>
+                    ✓ Pelo menos 1 letra maiúscula
+                  </li>
+                  <li className={/[0-9]/.test(password) ? "text-green-600" : ""}>
+                    ✓ Pelo menos 1 número
+                  </li>
+                  <li
+                    className={
+                      /[!@#$%^&*()_+\-=\[\]{}|;:'",.<>?/]/.test(password)
+                        ? "text-green-600"
+                        : ""
+                    }
+                  >
+                    ✓ Pelo menos 1 caractere especial
+                  </li>
+                </ul>
               </div>
 
               <div>
-                <label htmlFor="confirmPassword" className="block text-xs font-semibold text-gray-600 mb-1">
+                <label
+                  htmlFor="confirmPassword"
+                  className="block text-xs font-semibold text-gray-600 mb-1"
+                >
                   Confirmar nova senha
                 </label>
                 <div className="relative">
@@ -114,6 +163,11 @@ export default function ResetPassword() {
                     aria-label="Confirmar nova senha"
                   />
                 </div>
+                {confirmPassword && password !== confirmPassword && (
+                  <p className="text-red-500 text-[11px] mt-1">
+                    As senhas não conferem.
+                  </p>
+                )}
               </div>
 
               {error && <p className="text-red-500 text-xs">{error}</p>}

@@ -1,9 +1,5 @@
 /*
- * MADM Brasil — Design System
- * Philosophy: Precision SaaS (HubSpot clarity × Stripe sophistication)
- * Font: Plus Jakarta Sans
- * Background: White (#ffffff) absolute
- * Primary: #09175b | Success: #34a853 | Ice: #c8eaed | Emerald: #045b5b | Gold: #ffcc00
+ * MADM Comissionamento — Design System
  */
 
 @import "tailwindcss";
@@ -49,81 +45,95 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
 
-  /* MADM Brand Colors */
-  --color-madm-blue: #09175b;
-  --color-madm-green: #34a853;
-  --color-madm-ice: #c8eaed;
-  --color-madm-emerald: #045b5b;
-  --color-madm-gold: #ffcc00;
+  /* Paleta semântica */
+  --color-brand-blue: #2F6FED;
+  --color-brand-green: #16A34A;
+  --color-brand-red: #DC2626;
+  --color-brand-orange: #EA8C1D;
 }
 
 :root {
   --radius: 0.5rem;
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 
-  /* MADM Brand */
-  --madm-blue: #09175b;
-  --madm-green: #34a853;
-  --madm-ice: #c8eaed;
-  --madm-emerald: #045b5b;
-  --madm-gold: #ffcc00;
+  /* Cores semânticas */
+  --brand-blue: #2F6FED;
+  --brand-green: #16A34A;
+  --brand-red: #DC2626;
+  --brand-orange: #EA8C1D;
 
-  /* Theme */
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.15 0.02 260);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0.02 260);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.15 0.02 260);
+  /* Tema claro */
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #2F6FED;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --muted: #f8fafc;
+  --muted-foreground: #64748b;
+  --accent: #eff6ff;
+  --accent-foreground: #2F6FED;
+  --destructive: #DC2626;
+  --destructive-foreground: #ffffff;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #2F6FED;
 
-  /* Primary = MADM Blue #09175b */
-  --primary: oklch(0.25 0.12 265);
-  --primary-foreground: oklch(1 0 0);
+  --chart-1: #2F6FED;
+  --chart-2: #16A34A;
+  --chart-3: #EA8C1D;
+  --chart-4: #8B5CF6;
+  --chart-5: #EC4899;
 
-  /* Secondary = light ice */
-  --secondary: oklch(0.96 0.015 200);
-  --secondary-foreground: oklch(0.25 0.12 265);
-
-  --muted: oklch(0.97 0.005 260);
-  --muted-foreground: oklch(0.55 0.02 260);
-
-  --accent: oklch(0.94 0.02 200);
-  --accent-foreground: oklch(0.25 0.12 265);
-
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-
-  --border: oklch(0.92 0.005 260);
-  --input: oklch(0.92 0.005 260);
-  --ring: oklch(0.25 0.12 265);
-
-  /* Charts */
-  --chart-1: oklch(0.55 0.18 145);
-  --chart-2: oklch(0.25 0.12 265);
-  --chart-3: oklch(0.82 0.18 85);
-  --chart-4: oklch(0.45 0.15 200);
-  --chart-5: oklch(0.65 0.22 27);
-
-  /* Sidebar = MADM Blue */
-  --sidebar: oklch(0.25 0.12 265);
-  --sidebar-foreground: oklch(0.95 0.01 260);
-  --sidebar-primary: oklch(0.55 0.18 145);
-  --sidebar-primary-foreground: oklch(0.15 0.05 260);
-  --sidebar-accent: oklch(0.32 0.12 265);
-  --sidebar-accent-foreground: oklch(0.95 0.01 260);
-  --sidebar-border: oklch(0.32 0.1 265);
-  --sidebar-ring: oklch(0.55 0.18 145);
+  --sidebar: #ffffff;
+  --sidebar-foreground: #0f172a;
+  --sidebar-primary: #2F6FED;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #f1f5f9;
+  --sidebar-accent-foreground: #0f172a;
+  --sidebar-border: #e2e8f0;
+  --sidebar-ring: #2F6FED;
 }
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
+    box-sizing: border-box;
   }
+
+  html {
+    font-size: 16px;
+    scroll-behavior: smooth;
+  }
+
   body {
     @apply bg-background text-foreground;
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    min-height: 100vh;
+    margin: 0;
+    background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+    font-family: 'Inter', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
   }
+
+  #root {
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background: rgba(47, 111, 237, 0.24);
+    color: #0f172a;
+  }
+  /* cursor pointer para elementos interativos */
   button:not(:disabled),
   [role="button"]:not([aria-disabled="true"]),
   [type="button"]:not(:disabled),
@@ -133,11 +143,12 @@
   select:not(:disabled),
   input[type="checkbox"]:not(:disabled),
   input[type="radio"]:not(:disabled) {
-    @apply cursor-pointer;
+    cursor: pointer;
   }
 }
 
 @layer components {
+  /* Container responsivo */
   .container {
     width: 100%;
     margin-left: auto;
@@ -145,19 +156,12 @@
     padding-left: 1rem;
     padding-right: 1rem;
   }
-
-  .flex {
-    min-height: 0;
-    min-width: 0;
-  }
-
   @media (min-width: 640px) {
     .container {
       padding-left: 1.5rem;
       padding-right: 1.5rem;
     }
   }
-
   @media (min-width: 1024px) {
     .container {
       padding-left: 2rem;
@@ -166,176 +170,424 @@
     }
   }
 
-  /* MADM Custom Components */
-  .madm-card {
-    @apply bg-white rounded-xl border border-border shadow-sm;
-    box-shadow: 0 1px 3px rgba(9, 23, 91, 0.06), 0 1px 2px rgba(9, 23, 91, 0.04);
-    transition: box-shadow 0.2s ease, transform 0.2s ease;
+  /* Layout do dashboard */
+  .dashboard-shell {
+    min-height: 100vh;
+    display: flex;
+    background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
   }
 
-  .madm-card:hover {
-    box-shadow: 0 4px 12px rgba(9, 23, 91, 0.1), 0 2px 4px rgba(9, 23, 91, 0.06);
-    transform: translateY(-1px);
+  .dashboard-sidebar {
+    position: fixed;
+    inset-y: 0;
+    left: 0;
+    z-index: 40;
+    width: 17rem;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #e2e8f0;
+    background: rgba(255, 255, 255, 0.94);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 20px 45px rgba(15, 23, 42, 0.06);
+    transition: transform 0.25s ease;
   }
 
-  .madm-kpi-value {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    font-weight: 800;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -0.02em;
+  .dashboard-content-shell {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    margin-left: 0;
   }
 
-  .madm-gold-badge {
-    background: linear-gradient(135deg, #ffcc00, #f5a623);
-    color: #09175b;
+  .dashboard-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem 1rem 1rem 1rem;
+    border-bottom: 1px solid #e2e8f0;
+    background: rgba(255, 255, 255, 0.9);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.04);
+  }
+
+  .dashboard-page-title {
+    font-size: clamp(1rem, 1.1rem + 0.2vw, 1.2rem);
+    line-height: 1.2;
     font-weight: 700;
+    color: #0f172a;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
-  .madm-progress-bar {
-    height: 8px;
-    border-radius: 999px;
-    background: oklch(0.94 0.02 200);
+  .dashboard-page-subtitle {
+    margin-top: 0.2rem;
+    font-size: 0.875rem;
+    color: #64748b;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dashboard-main {
+    flex: 1;
+    padding: 1rem 1rem 5.5rem;
+  }
+
+  .dashboard-content {
+    width: 100%;
+    max-width: 1440px;
+    margin: 0 auto;
+  }
+
+  .dashboard-input {
+    width: 100%;
+    min-width: 7.5rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.75rem;
+    background: white;
+    color: #0f172a;
+    font-size: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    outline: none;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+
+  .dashboard-input:focus {
+    border-color: #2F6FED;
+    box-shadow: 0 0 0 3px rgba(47, 111, 237, 0.16);
+  }
+
+  .sidebar-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(15, 23, 42, 0.45);
+  }
+
+  .mobile-nav {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 35;
+    border-top: 1px solid #e2e8f0;
+    background: rgba(255, 255, 255, 0.95);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 -8px 24px rgba(15, 23, 42, 0.08);
+  }
+
+  .dashboard-card {
+    overflow: hidden;
+    border: 1px solid #e2e8f0;
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.04);
+  }
+
+  /* Cartão padrão */
+  .card {
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 1.25rem;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+    transition: box-shadow 0.15s ease;
+  }
+  .card:hover {
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  }
+
+  /* KPI – número grande */
+  .kpi-value {
+    font-weight: 700;
+    font-size: 1.75rem;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Rótulo em caixa alta (eyebrow) */
+  .eyebrow {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748b;
+  }
+
+  /* Barra de progresso fina */
+  .progress-bar {
+    height: 6px;
+    border-radius: 9999px;
+    background: #f1f5f9;
     overflow: hidden;
   }
-
-  .madm-progress-fill {
+  .progress-fill {
     height: 100%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, #09175b, #34a853);
-    transition: width 1s cubic-bezier(0.4, 0, 0.2, 1);
+    border-radius: 9999px;
+    background: linear-gradient(90deg, #2F6FED, #16A34A);
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
   }
 
-  .madm-sidebar-item {
-    @apply flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150;
-    color: rgba(255, 255, 255, 0.7);
-  }
-
-  .madm-sidebar-item:hover {
-    background: rgba(255, 255, 255, 0.1);
-    color: white;
-  }
-
-  .madm-sidebar-item.active {
-    background: rgba(52, 168, 83, 0.15) !important;
-    color: #34a853 !important;
-    border-left: 3px solid #34a853 !important;
-    padding-left: calc(0.75rem - 3px);
-  }
-
-  .madm-insight-card {
-    @apply rounded-xl p-4 border-l-4;
-  }
-
-  .madm-insight-card.warning {
-    background: #fffbeb;
-    border-left-color: #ffcc00;
-  }
-
-  .madm-insight-card.danger {
+  /* Banner de alerta */
+  .alert-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    border-radius: 12px;
+    border-left: 4px solid;
     background: #fef2f2;
-    border-left-color: #ef4444;
+    border-left-color: #DC2626;
   }
-
-  .madm-insight-card.success {
+  .alert-banner.warning {
+    background: #fff7ed;
+    border-left-color: #EA8C1D;
+  }
+  .alert-banner.success {
     background: #f0fdf4;
-    border-left-color: #34a853;
+    border-left-color: #16A34A;
   }
-
-  .madm-insight-card.info {
+  .alert-banner.info {
     background: #eff6ff;
-    border-left-color: #09175b;
+    border-left-color: #2F6FED;
   }
 
-  /* Funnel Stage */
-  .funnel-stage {
-    @apply relative flex flex-col items-center;
+  /* Pílulas de filtro */
+  .filter-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.375rem 0.875rem;
+    border-radius: 9999px;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    border: 1px solid #e2e8f0;
+    background: white;
+    color: #334155;
+    transition: all 0.15s;
+  }
+  .filter-pill:hover {
+    background: #f8fafc;
+  }
+  .filter-pill.active {
+    background: #2F6FED;
+    color: white;
+    border-color: #2F6FED;
   }
 
-  /* Rank badge */
-  .rank-1 { background: linear-gradient(135deg, #ffcc00, #f5a623); color: #09175b; }
-  .rank-2 { background: linear-gradient(135deg, #e2e8f0, #cbd5e1); color: #334155; }
-  .rank-3 { background: linear-gradient(135deg, #d97706, #b45309); color: white; }
-
-  /* CountUp animation */
-  @keyframes countUp {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+  /* Sidebar item */
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 0.875rem;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #334155;
+    transition: all 0.15s;
+  }
+  .sidebar-item:hover {
+    background: #f1f5f9;
+    color: #0f172a;
+  }
+  .sidebar-item.active {
+    background: #eff6ff;
+    color: #2F6FED;
+    font-weight: 600;
   }
 
-  .animate-count-up {
-    animation: countUp 0.6s ease-out forwards;
+  /* Avatar colorido circular */
+  .avatar-circle {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 9999px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: white;
+    background: #8B5CF6; /* fallback */
   }
 
-  /* Stagger animations */
+  /* Grade de cartões com gap 16px */
+  .card-grid {
+    display: grid;
+    gap: 1rem;
+  }
+  .card-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .card-grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .card-grid.cols-5 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+  @media (max-width: 640px) {
+    .card-grid.cols-2,
+    .card-grid.cols-3,
+    .card-grid.cols-4,
+    .card-grid.cols-5 {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .card-grid.cols-4,
+    .card-grid.cols-5 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  /* Tabelas simples */
+  .simple-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .simple-table th {
+    text-align: left;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #64748b;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #e2e8f0;
+  }
+  .simple-table td {
+    padding: 0.625rem 0.75rem;
+    font-size: 0.875rem;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .simple-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  /* Badges de status */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .badge.critical { background: #fef2f2; color: #DC2626; }
+  .badge.warning { background: #fff7ed; color: #EA8C1D; }
+  .badge.success { background: #f0fdf4; color: #16A34A; }
+  .badge.info { background: #eff6ff; color: #2F6FED; }
+
+  /* Animações */
   @keyframes fadeInUp {
-    from { opacity: 0; transform: translateY(16px); }
+    from { opacity: 0; transform: translateY(12px); }
     to { opacity: 1; transform: translateY(0); }
   }
-
   .animate-fade-in-up {
-    animation: fadeInUp 0.5s ease-out forwards;
-  }
-
-  .stagger-1 { animation-delay: 50ms; }
-  .stagger-2 { animation-delay: 100ms; }
-  .stagger-3 { animation-delay: 150ms; }
-  .stagger-4 { animation-delay: 200ms; }
-  .stagger-5 { animation-delay: 250ms; }
-  .stagger-6 { animation-delay: 300ms; }
-
-  /* Goal arc */
-  .goal-arc-track {
-    stroke: #e8eaed;
-    stroke-width: 10;
-    fill: none;
-  }
-
-  .goal-arc-fill {
-    stroke-width: 10;
-    fill: none;
-    stroke-linecap: round;
-    transition: stroke-dashoffset 1.2s cubic-bezier(0.4, 0, 0.2, 1);
-  }
-
-  /* Mobile bottom nav */
-  .mobile-nav {
-    @apply fixed bottom-0 left-0 right-0 bg-white border-t border-border;
-    padding-bottom: env(safe-area-inset-bottom);
-    z-index: 50;
+    animation: fadeInUp 0.45s ease-out forwards;
   }
 }
 
-/* Scrollbar styling */
+/* Scrollbar fina */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
-
 ::-webkit-scrollbar-track {
   background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: oklch(0.85 0.005 260);
-  border-radius: 999px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.7 0.01 260);
-}
-
-/* Custom scrollbar for commission list */
-.custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: #f1f5f9;
-  border-radius: 10px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
   background: #cbd5e1;
   border-radius: 10px;
 }
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
+}
+
+/* ================================================================
+   CORREÇÕES DE OVERFLOW – TABELA DO FUNIL (DEFINITIVO)
+   ================================================================ */
+
+/* 1. Trava scroll horizontal global */
+html, body {
+  overflow-x: hidden !important;
+  max-width: 100vw !important;
+}
+
+@media (min-width: 1024px) {
+  .dashboard-content-shell {
+    margin-left: 17rem;
+  }
+}
+
+@media (max-width: 1023px) {
+  .dashboard-topbar {
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+  }
+
+  .dashboard-main {
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+  }
+}
+
+/* 2. Garante que containers principais não vazem */
+main,
+[class*="main-content"],
+[class*="dashboard-content"],
+.funil-page-container {
+  overflow-x: hidden !important;
+  max-width: 100% !important;
+}
+
+/* 3. Wrapper da tabela: aqui nasce o scroll horizontal */
+.funil-table-wrapper {
+  overflow-x: auto !important;
+  overflow-y: visible !important;
+  max-width: 100% !important;
+  -webkit-overflow-scrolling: touch;
+  /* Essencial para evitar que flex containers estiquem o wrapper */
+  min-width: 0 !important;
+}
+
+/* 4. Tabela: largura baseada no conteúdo (para ativar o scroll) */
+.funil-table-wrapper table {
+  width: max-content !important;
+  min-width: 100% !important;
+  table-layout: auto !important;
+  white-space: nowrap !important;
+  border-collapse: collapse;
+}
+
+/* 5. Células sem quebra de linha */
+.funil-table-wrapper th,
+.funil-table-wrapper td {
+  white-space: nowrap !important;
+  padding: 0.75rem 0.5rem;
+  text-align: center;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+/* 6. Coluna fixa à esquerda (opcional, via classe .sticky-col) */
+.funil-table-wrapper .sticky-col {
+  position: sticky;
+  left: 0;
+  background: white;
+  z-index: 5;
+  box-shadow: 2px 0 4px rgba(0,0,0,0.03);
+}
+
+/* 7. Prevenção extra: flex containers não devem expandir além da tela */
+.flex-1,
+.flex-auto {
+  min-width: 0 !important;
 }

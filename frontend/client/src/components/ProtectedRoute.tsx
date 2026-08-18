@@ -1,14 +1,18 @@
 // src/components/ProtectedRoute.tsx
-import { useEffect } from "react";
-import { useLocation } from "wouter";
+import { Redirect } from "wouter";
+import { useAppStore } from "@/lib/dataStore";
 
-export default function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const [, setLocation] = useLocation();
-  const token = localStorage.getItem("accessToken");
+interface ProtectedRouteProps {
+  children: React.ReactNode;
+}
 
-  useEffect(() => {
-    if (!token) setLocation("/login");
-  }, [token, setLocation]);
+export default function ProtectedRoute({ children }: ProtectedRouteProps) {
+  const currentUser = useAppStore((state) => state.currentUser);
 
-  return token ? <>{children}</> : null;
+  if (!currentUser?.email) {
+    return <Redirect to="/login" />;
+  }
+
+  // The data loading is handled by App.tsx; here we just check authentication.
+  return <>{children}</>;
 }

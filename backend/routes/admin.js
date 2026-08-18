@@ -1,23 +1,32 @@
 // backend/routes/admin.js
 import express from 'express';
 import db from '../services/db.js';
-import { requireAuth } from '../middleware/auth.js';
 import { body, validationResult } from 'express-validator';
 
 const router = express.Router();
+
+// Middleware de autenticação (inline, atualizado para a sessão atual)
+function requireAuth(req, res, next) {
+  if (!req.session.isAuthenticated || !req.session.userId) {
+    return res.status(401).json({ success: false, error: 'Não autenticado' });
+  }
+  next();
+}
+
 router.use(requireAuth);
 
 console.log('✅ Rotas de admin carregadas (incluindo /months)');
 
 // ============================================================
 // POST /api/admin/update-assessor-metrics (Individual)
-// ATUALIZAÇÃO POR EMAIL + DATA_METRICA
 // ============================================================
 router.post('/update-assessor-metrics', [
   body('email').notEmpty().withMessage('email é obrigatório'),
   body('data_metrica').notEmpty().withMessage('data_metrica é obrigatória'),
   body('meta_diario_assinados').optional().isNumeric(),
   body('meta_diario_ganhos').optional().isNumeric(),
+  body('meta_gols_assinados').optional().isNumeric(),
+  body('meta_gols_ganhos').optional().isNumeric(), 
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -34,16 +43,17 @@ router.post('/update-assessor-metrics', [
       meta_semanal_ganhos,
       meta_mensal_assinados,
       meta_mensal_ganhos,
-      comissao_colaborador,
       comissao_bonus,
+      meta_gols_assinados,
+      meta_gols_ganhos,      
     } = req.body;
 
     if (!email || !data_metrica) {
       return res.status(400).json({ success: false, error: 'email e data_metrica são obrigatórios' });
     }
 
-    // Atualiza diretamente pelos campos email e data_metrica
-    const updateQuery = `
+    // UPDATE com suporte a meta_gols_assinados e meta_gols_ganhos
+    const updateQuery = ` 
       UPDATE app_comissionamento.metricas_assessores
       SET
         peso_meta_assinados_diario = COALESCE($1, peso_meta_assinados_diario),
@@ -52,11 +62,12 @@ router.post('/update-assessor-metrics', [
         peso_meta_ganho_semanal = COALESCE($4, peso_meta_ganho_semanal),
         peso_meta_assinados_mensal = COALESCE($5, peso_meta_assinados_mensal),
         peso_meta_ganho_mensal = COALESCE($6, peso_meta_ganho_mensal),
-        comissao_colaborador = COALESCE($7, comissao_colaborador),
-        comissao_bonus = COALESCE($8, comissao_bonus),
+        comissao_bonus = COALESCE($7, comissao_bonus),
+        meta_gols_assinados = COALESCE($8, meta_gols_assinados),
+        meta_gols_ganhos = COALESCE($9, meta_gols_ganhos),
         updated_at = NOW()
-      WHERE email = $9
-        AND data_metrica::date = $10::date
+      WHERE email = $10
+        AND data_metrica::date = $11::date
       RETURNING id_assessor
     `;
 
@@ -67,8 +78,9 @@ router.post('/update-assessor-metrics', [
       meta_semanal_ganhos ?? null,
       meta_mensal_assinados ?? null,
       meta_mensal_ganhos ?? null,
-      comissao_colaborador ?? null,
       comissao_bonus ?? null,
+      meta_gols_assinados ?? null,   // ✅ adicionado
+      meta_gols_ganhos ?? null,      // ✅ adicionado
       email,
       data_metrica,
     ];
@@ -94,7 +106,15 @@ router.post('/update-assessor-metrics', [
 // ============================================================
 router.post('/update-all-assessors-metrics', async (req, res) => {
   try {
-    const { periodo, peso_assinados, peso_ganhos, bonus, data_metrica } = req.body;
+    const {
+      periodo,
+      peso_assinados,
+      peso_ganhos,
+      bonus,
+      data_metrica,
+      meta_gols_assinados,   // ✅ adicionado
+      meta_gols_ganhos,      // ✅ adicionado
+    } = req.body;
 
     if (!periodo || !['diario','semanal','mensal'].includes(periodo)) {
       return res.status(400).json({ success: false, error: 'Período inválido' });
@@ -112,17 +132,30 @@ router.post('/update-all-assessors-metrics', async (req, res) => {
     ];
     const params = [peso_assinados, peso_ganhos];
 
+    // Bônus (opcional)
     if (bonus !== undefined && bonus !== null) {
-      setClauses.push('comissao_bonus = $3');
+      setClauses.push(`comissao_bonus = $${params.length + 1}`);
       params.push(Number(bonus));
+    }
+
+    // ✅ Adiciona meta_gols_assinados se fornecido
+    if (meta_gols_assinados !== undefined && meta_gols_assinados !== null) {
+      setClauses.push(`meta_gols_assinados = $${params.length + 1}`);
+      params.push(Number(meta_gols_assinados));
+    }
+
+    // ✅ Adiciona meta_gols_ganhos se fornecido
+    if (meta_gols_ganhos !== undefined && meta_gols_ganhos !== null) {
+      setClauses.push(`meta_gols_ganhos = $${params.length + 1}`);
+      params.push(Number(meta_gols_ganhos));
     }
 
     setClauses.push('updated_at = NOW()');
 
-    // data_metrica como último parâmetro
     const dataMetricaIndex = params.length + 1;
     params.push(data_metrica);
 
+    // UPDATE global inclui as novas colunas (se fornecidas)
     await db.query(
       `UPDATE app_comissionamento.metricas_assessores
        SET ${setClauses.join(', ')}
@@ -138,13 +171,22 @@ router.post('/update-all-assessors-metrics', async (req, res) => {
 });
 
 // ============================================================
-// POST /api/admin/update-team-metrics (Equipe) – COM LOGS
+// POST /api/admin/update-team-metrics (Equipe)
 // ============================================================
 router.post('/update-team-metrics', async (req, res) => {
   try {
-    const { equipe, periodo, peso_assinados, peso_ganhos, bonus, data_metrica } = req.body;
+    const {
+      equipe,
+      periodo,
+      peso_assinados,
+      peso_ganhos,
+      bonus,
+      data_metrica,
+      meta_gols_assinados,   // ✅ adicionado
+      meta_gols_ganhos,      // ✅ adicionado
+    } = req.body;
 
-    console.log('🔍 [update-team-metrics] Dados recebidos:', { equipe, periodo, peso_assinados, peso_ganhos, bonus, data_metrica });
+    console.log('🔍 [update-team-metrics] Dados recebidos:', { equipe, periodo, peso_assinados, peso_ganhos, bonus, data_metrica, meta_gols_assinados, meta_gols_ganhos });
 
     if (!equipe || !periodo || !['diario','semanal','mensal'].includes(periodo) || !data_metrica) {
       return res.status(400).json({ success: false, error: 'Equipe, período e data_metrica são obrigatórios' });
@@ -160,8 +202,20 @@ router.post('/update-team-metrics', async (req, res) => {
     const params = [peso_assinados, peso_ganhos];
 
     if (bonus !== undefined && bonus !== null) {
-      setClauses.push('comissao_bonus = $3');
+      setClauses.push(`comissao_bonus = $${params.length + 1}`);
       params.push(Number(bonus));
+    }
+
+    // ✅ Adiciona meta_gols_assinados se fornecido
+    if (meta_gols_assinados !== undefined && meta_gols_assinados !== null) {
+      setClauses.push(`meta_gols_assinados = $${params.length + 1}`);
+      params.push(Number(meta_gols_assinados));
+    }
+
+    // ✅ Adiciona meta_gols_ganhos se fornecido
+    if (meta_gols_ganhos !== undefined && meta_gols_ganhos !== null) {
+      setClauses.push(`meta_gols_ganhos = $${params.length + 1}`);
+      params.push(Number(meta_gols_ganhos));
     }
 
     setClauses.push('updated_at = NOW()');
@@ -169,13 +223,14 @@ router.post('/update-team-metrics', async (req, res) => {
     const dataMetricaIndex = params.length + 1;
     const equipeIndex = dataMetricaIndex + 1;
 
+    // UPDATE por equipe: alvo é a tabela original, mas o JOIN usa a view de colaboradores para obter equipe
     const query = `
       UPDATE app_comissionamento.metricas_assessores a
       SET ${setClauses.join(', ')}
-      FROM madm.colaboradores c
-      WHERE a.id_assessor::integer = c.internal_id
+      FROM core.view_app_colaboradores c
+      WHERE a.email = c.email
         AND a.data_metrica::date = $${dataMetricaIndex}::date
-        AND c.equipe = $${equipeIndex}
+        AND c.nome_equipe = $${equipeIndex}
     `;
 
     console.log('🔍 [update-team-metrics] Query:', query);
@@ -197,7 +252,7 @@ router.post('/update-team-metrics', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/admin/global-metrics
+// GET /api/admin/global-metrics (LEITURA – usa VIEW)
 // ============================================================
 router.get('/global-metrics', async (req, res) => {
   try {
@@ -210,7 +265,7 @@ router.get('/global-metrics', async (req, res) => {
          COALESCE(peso_meta_assinados_mensal, 10) AS peso_mensal_assinados,
          COALESCE(peso_meta_ganho_mensal, 10) AS peso_mensal_ganhos,
          COALESCE(comissao_bonus, 150) AS bonus
-       FROM app_comissionamento.metricas_assessores
+       FROM app_comissionamento.view_app_metricas_assessores
        LIMIT 1`
     );
 
@@ -237,7 +292,7 @@ router.get('/global-metrics', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/admin/equipe-metrics?nome=EquipeX
+// GET /api/admin/equipe-metrics?nome=EquipeX (LEITURA – usa VIEW)
 // ============================================================
 router.get('/equipe-metrics', async (req, res) => {
   const { nome } = req.query;
@@ -253,9 +308,9 @@ router.get('/equipe-metrics', async (req, res) => {
          COALESCE(a.peso_meta_assinados_mensal, 10) AS peso_mensal_assinados,
          COALESCE(a.peso_meta_ganho_mensal, 10) AS peso_mensal_ganhos,
          COALESCE(a.comissao_bonus, 150) AS bonus
-       FROM app_comissionamento.metricas_assessores a
-       INNER JOIN madm.colaboradores c ON a.id_assessor::integer = c.internal_id
-       WHERE c.equipe = $1
+       FROM app_comissionamento.view_app_metricas_assessores a
+       INNER JOIN core.view_app_colaboradores c ON a.email = c.email
+       WHERE c.nome_equipe = $1
        LIMIT 1`,
       [nome]
     );
@@ -283,14 +338,14 @@ router.get('/equipe-metrics', async (req, res) => {
 });
 
 // ============================================================
-// GET /api/admin/months
+// GET /api/admin/months (LEITURA – usa VIEW)
 // ============================================================
 router.get('/months', async (req, res) => {
-  console.log('📅 Rota /api/admin/months foi chamada');
+  console.log('📅 Rota /api/admin/months foi chamada. Sessão:', req.session.isAuthenticated);
   try {
     const result = await db.query(
       `SELECT DISTINCT data_metrica 
-       FROM app_comissionamento.metricas_assessores 
+       FROM app_comissionamento.view_app_metricas_assessores 
        ORDER BY data_metrica DESC`
     );
     const months = result.rows.map(r => {
@@ -309,7 +364,7 @@ router.get('/months', async (req, res) => {
 });
 
 // ============================================================
-// POST /api/admin/generate-next-month
+// POST /api/admin/generate-next-month (ESCRITA na tabela original)
 // ============================================================
 router.post('/generate-next-month', async (req, res) => {
   try {
@@ -319,6 +374,7 @@ router.post('/generate-next-month', async (req, res) => {
     const primeiroProximoMes = new Date(ano, mes + 1, 1);
     const dataMetrica = primeiroProximoMes.toISOString().slice(0, 10);
 
+    // Verifica se já existem registros para o próximo mês
     const check = await db.query(
       `SELECT COUNT(*) as total FROM app_comissionamento.metricas_assessores WHERE data_metrica::date = $1::date`,
       [dataMetrica]
@@ -327,12 +383,13 @@ router.post('/generate-next-month', async (req, res) => {
       return res.status(409).json({ success: false, error: 'Registros para o próximo mês já existem.' });
     }
 
+    // Inserção na tabela original, copiando do último mês e excluindo Desativado
     await db.query(`
       INSERT INTO app_comissionamento.metricas_assessores (
         id_assessor,
         email,
         senha_colaborador_hash,
-        comissao_colaborador,
+        colaborador,
         comissao_bonus,
         peso_meta_assinados_diario,
         peso_meta_ganho_diario,
@@ -340,6 +397,10 @@ router.post('/generate-next-month', async (req, res) => {
         peso_meta_ganho_semanal,
         peso_meta_assinados_mensal,
         peso_meta_ganho_mensal,
+        peso_meta_protocolados_mensal,
+        classificacao_operacional,
+        meta_gols_assinados,      -- ✅ adicionado
+        meta_gols_ganhos,         -- ✅ adicionado
         data_metrica,
         updated_at
       )
@@ -347,7 +408,7 @@ router.post('/generate-next-month', async (req, res) => {
         id_assessor,
         email,
         senha_colaborador_hash,
-        comissao_colaborador,
+        colaborador,
         comissao_bonus,
         peso_meta_assinados_diario,
         peso_meta_ganho_diario,
@@ -355,10 +416,17 @@ router.post('/generate-next-month', async (req, res) => {
         peso_meta_ganho_semanal,
         peso_meta_assinados_mensal,
         peso_meta_ganho_mensal,
+        peso_meta_protocolados_mensal,
+        classificacao_operacional,
+        meta_gols_assinados,      
+        meta_gols_ganhos,         
         $1::date,
         NOW()
       FROM app_comissionamento.metricas_assessores
-      WHERE data_metrica::date = (SELECT MAX(data_metrica::date) FROM app_comissionamento.metricas_assessores)
+      WHERE data_metrica::date = (
+        SELECT MAX(data_metrica::date) FROM app_comissionamento.metricas_assessores
+      )
+        AND (classificacao_operacional IS NULL OR classificacao_operacional != 'Desativado')
     `, [dataMetrica]);
 
     res.json({ success: true, message: `Registros para ${dataMetrica} criados com sucesso.` });

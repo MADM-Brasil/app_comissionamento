@@ -1,17 +1,14 @@
 // src/lib/auth.ts
 import { useAppStore } from "@/lib/dataStore";
 
-// ============================================================
-// BASE URL: deve terminar com /api
-// ============================================================
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
 
 export interface UserData {
-  id: number;
-  name: string;
+  id: string;               // e‑mail (identificador único)
+  nome: string;
   email: string;
-  equipe: string;
-  grupo: string;
+  equipe: string;           // nome_equipe
+  cargo: string;            // cargo/grupo
   status: string;
   periodo: string;
 }
@@ -76,7 +73,6 @@ async function handleApiResponse(response: Response, defaultMessage: string) {
 // LOGIN – envia credenciais e recebe tempToken para 2FA
 // ============================================================
 export async function login(email: string, password: string, rememberMe: boolean = false) {
-  // Garante que o token CSRF exista antes de enviar
   await ensureCsrfToken();
 
   const response = await fetch(`${API_BASE}/auth/login`, {
@@ -93,7 +89,7 @@ export async function login(email: string, password: string, rememberMe: boolean
 }
 
 // ============================================================
-// VERIFICAÇÃO 2FA – valida o código e obtém token de acesso
+// VERIFICAÇÃO 2FA – valida o código e autentica a sessão
 // ============================================================
 export async function verify2FA(tempToken: string, code: string) {
   await ensureCsrfToken();
@@ -110,12 +106,21 @@ export async function verify2FA(tempToken: string, code: string) {
 
   const data = await handleApiResponse(response, 'Código inválido');
 
-  // Precarrega colaboradores após autenticação
-  try {
-    const { loadCollaborators } = useAppStore.getState();
-    await loadCollaborators();
-  } catch (error) {
-    console.warn('⚠️ Não foi possível carregar colaboradores:', error);
+  if (data.user) {
+    // Garante que o objeto tenha o campo 'cargo' (mesmo que a API envie 'grupo' por compatibilidade)
+    const normalizedUser = {
+      ...data.user,
+      cargo: data.user.cargo || data.user.grupo,   // fallback seguro
+      id: data.user.id || data.user.email || '',
+    };
+    useAppStore.getState().setCurrentUser(normalizedUser);
+
+    // Dispara o carregamento de dados em segundo plano (não bloqueia o redirecionamento)
+    const { loadCollaboratorsAndMetrics, loadRawMetrics } = useAppStore.getState();
+    Promise.all([
+      loadCollaboratorsAndMetrics(),
+      loadRawMetrics()
+    ]).catch(err => console.error('Erro ao carregar dados:', err));
   }
 
   return data;
@@ -141,6 +146,35 @@ export async function resendCode() {
 }
 
 // ============================================================
+// VERIFICA SE A SESSÃO JÁ ESTÁ ATIVA (rota /auth/me)
+// ============================================================
+export async function fetchCurrentUser(): Promise<UserData | null> {
+  await ensureCsrfToken();
+  try {
+    const response = await fetch(`${API_BASE}/auth/me`, {
+      method: 'GET',
+      headers: { 'x-csrf-token': getCsrfToken() },
+      credentials: 'include',
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data.success && data.user) {
+      const normalizedUser = {
+        ...data.user,
+        cargo: data.user.cargo || data.user.grupo,
+        id: data.user.id || data.user.email || '',
+      };
+      useAppStore.getState().setCurrentUser(normalizedUser);
+      return normalizedUser;
+    }
+    return null;
+  } catch (e) {
+    console.error('Erro ao verificar sessão:', e);
+    return null;
+  }
+}
+
+// ============================================================
 // LOGOUT – destrói a sessão e limpa dados locais
 // ============================================================
 export async function logout() {
@@ -156,7 +190,9 @@ export async function logout() {
     // ignora
   }
 
-  localStorage.removeItem('accessToken');
+  // Limpa apenas o CSRF token e a persistência do Zustand – a sessão é destruída no backend
   localStorage.removeItem('csrfToken');
+  localStorage.removeItem('madm-storage');
   sessionStorage.clear();
+  useAppStore.getState().resetStore();
 }

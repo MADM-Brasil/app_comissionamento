@@ -11,7 +11,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@hubspot/api-client": "^14.0.1",
     "bcrypt": "^6.0.0",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "csrf": "^3.1.0",
     "dotenv": "^17.4.2",

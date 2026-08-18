@@ -1,30 +1,29 @@
 // src/lib/api.ts
+export const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// ============================================================
-// BASE URL – EXPORTADA PARA USO EM OUTROS ARQUIVOS
-// ============================================================
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
-
-// ============================================================
-// FUNÇÃO AUXILIAR PARA TRATAR RESPOSTAS
-// ============================================================
 async function handleResponse(response: Response, defaultErrorMessage: string) {
-  // Verifica se a resposta está vazia (ex: 204 ou 403 sem corpo)
   const contentLength = response.headers.get('content-length');
   if (contentLength === '0' || response.status === 204) {
     if (response.status === 403) {
       throw new Error('Token CSRF inválido. Recarregue a página e tente novamente.');
     }
-    throw new Error(defaultErrorMessage || 'Resposta vazia do servidor.');
+    return {};  
+  } 
+
+  let text;
+  try {
+    text = await response.text();
+  } catch (err) {
+    console.error('❌ Erro ao ler corpo da resposta:', err);
+    throw new Error(defaultErrorMessage || 'Erro desconhecido ao processar a resposta');
   }
 
   let data;
   try {
-    data = await response.json();
+    data = JSON.parse(text);
   } catch (_) {
-    const text = await response.text();
     console.error('❌ Resposta não é JSON:', text?.substring(0, 200));
-    throw new Error(`Resposta inválida: ${text?.substring(0, 100) || 'Erro desconhecido'}`);
+    throw new Error(text?.substring(0, 100) || 'Resposta inválida do servidor');
   }
 
   if (!response.ok) {
@@ -38,9 +37,6 @@ async function handleResponse(response: Response, defaultErrorMessage: string) {
   return data;
 }
 
-// ============================================================
-// FUNÇÃO AUXILIAR CSRF
-// ============================================================
 function csrfHeaders(extraHeaders: Record<string, string> = {}) {
   const token = localStorage.getItem('csrfToken');
   return {
@@ -50,13 +46,15 @@ function csrfHeaders(extraHeaders: Record<string, string> = {}) {
   };
 }
 
-// ============================================================
-// COLABORADORES E EQUIPES
-// ============================================================
+// ============ COLABORADORES E EQUIPES ============
+
 export async function fetchCollaborators(queryString = "") {
   const url = `${API_BASE}/collaborators${queryString}`;
+  console.log('🌐 [fetchCollaborators] URL:', url);
   const response = await fetch(url, { credentials: 'include' });
+  console.log('📡 [fetchCollaborators] Status:', response.status);
   const data = await handleResponse(response, 'Erro ao carregar colaboradores');
+  console.log('📦 [fetchCollaborators] Itens recebidos:', data.data?.length);
   return data.data || [];
 }
 
@@ -65,7 +63,6 @@ export async function fetchEquipes() {
   const data = await handleResponse(response, 'Erro ao carregar equipes');
   return data.data || [];
 }
-
 // ============================================================
 // MÉTRICAS GLOBAIS
 // ============================================================
@@ -131,7 +128,7 @@ export interface MetricParams {
   start: string;
   end: string;
   colaborador?: string;
-  colaboradorId?: number;
+  colaboradorId?: string | number;
   equipe?: string;
   produto?: string;
   granularity?: 'daily' | 'weekly' | 'monthly';
@@ -139,7 +136,7 @@ export interface MetricParams {
 }
 
 function buildMetricUrl(base: string, params: MetricParams): string {
-  const url = new URL(base);
+  const url = new URL(base, window.location.origin);
   url.searchParams.append('start', params.start);
   url.searchParams.append('end', params.end);
   if (params.colaborador) url.searchParams.append('colaborador', params.colaborador);
@@ -199,7 +196,7 @@ export async function fetchLeadsRecebidos(params: MetricParams): Promise<{ data:
 // PERFORMANCE SEMANAL
 // ============================================================
 export async function fetchWeeklyPerformance(params: { start: string; end: string }): Promise<{ semana: string; vendas: number; meta: number }[]> {
-  const url = new URL(`${API_BASE}/metrics/weekly`);
+  const url = new URL(`${API_BASE}/metrics/weekly`, window.location.origin);
   url.searchParams.append('start', params.start);
   url.searchParams.append('end', params.end);
   const res = await fetch(url.toString(), { credentials: 'include' });
@@ -220,7 +217,7 @@ export function getDateRangeFromPeriod(periodo: string): { start: string; end: s
     const first = now.getDate() - now.getDay() + (now.getDay() === 0 ? -6 : 1);
     start = new Date(now.getFullYear(), now.getMonth(), first);
     end = new Date(now.getFullYear(), now.getMonth(), first + 7);
-  } else { // Mês
+  } else {
     start = new Date(now.getFullYear(), now.getMonth(), 1);
     end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   }

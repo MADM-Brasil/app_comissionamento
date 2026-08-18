@@ -1,9 +1,5 @@
-/*
- * Login — MADM Brasil
- * Autenticação com verificação de dois fatores (2FA) via e-mail
- */
-
-import { useState, useEffect } from "react";
+// src/pages/Login.tsx
+import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
 import { Eye, EyeOff, Shield, Mail, Lock, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -21,30 +17,38 @@ export default function Login() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [tempToken, setTempToken] = useState<string | null>(null);
-  const [rememberMe, setRememberMe] = useState(false); 
+  const [rememberMe, setRememberMe] = useState(false);
   const [, setLocation] = useLocation();
 
-  const setCurrentUser = useAppStore((state) => state.setCurrentUser);
+  const isSubmittingRef = useRef(false);
+  const redirectDoneRef = useRef(false);
 
-  // ===== Buscar token CSRF ao montar a página =====
+  // CSRF token on mount
   useEffect(() => {
-    const fetchCsrfToken = async () => {
+    (async () => {
       try {
         const res = await fetch(`${API_BASE}/csrf-token`, { credentials: "include" });
         const data = await res.json();
         if (data.csrfToken && data.csrfToken !== "disabled") {
           localStorage.setItem("csrfToken", data.csrfToken);
         }
-      } catch (err) {
-        console.warn("Não foi possível obter token CSRF:", err);
-      }
-    };
-    fetchCsrfToken();
+      } catch (_) {}
+    })();
   }, []);
 
-  // ===== Envia credenciais =====
+  // Redirect if already authenticated (e.g., session restored)
+  useEffect(() => {
+    const currentUser = useAppStore.getState().currentUser;
+    if (currentUser?.email && !redirectDoneRef.current) {
+      redirectDoneRef.current = true;
+      setLocation("/");
+    }
+  }, [setLocation]);
+
   const handleCredentialsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
     setError("");
     setIsLoading(true);
 
@@ -54,55 +58,57 @@ export default function Login() {
         setTempToken(data.tempToken);
         setStep("2fa");
       } else {
-        localStorage.setItem("accessToken", data.accessToken);
-        if (data.user) setCurrentUser(data.user);
-        setLocation("/");
+        if (data.user) {
+          useAppStore.getState().setCurrentUser(data.user);
+          if (!redirectDoneRef.current) {
+            redirectDoneRef.current = true;
+            setLocation("/");
+          }
+        }
       }
     } catch (err: any) {
-      if (err.message?.toLowerCase().includes("csrf")) {
-        setError("Erro de segurança. Recarregue a página e tente novamente.");
-      } else {
-        setError(err.message || "Erro ao fazer login. Verifique suas credenciais.");
-      }
+      setError(err.message || "Erro ao fazer login");
     } finally {
       setIsLoading(false);
+      isSubmittingRef.current = false;
     }
   };
 
-  // ===== Verifica código 2FA =====
   const handleTwoFactorSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError("");
-    setIsLoading(true);
-
+    if (isSubmittingRef.current) return;
     if (!tempToken) {
       setError("Sessão expirada. Faça login novamente.");
       setStep("credentials");
-      setIsLoading(false);
       return;
     }
+    isSubmittingRef.current = true;
+    setError("");
+    setIsLoading(true);
 
     try {
-      const data = await verify2FA(tempToken, twoFactorCode);
-      localStorage.setItem("accessToken", data.accessToken);
-      if (data.user) setCurrentUser(data.user);
-      setLocation("/");
+      await verify2FA(tempToken, twoFactorCode);
+      // verify2FA already updates the store; now we redirect manually
+      if (!redirectDoneRef.current) {
+        redirectDoneRef.current = true;
+        setLocation("/");
+      }
     } catch (err: any) {
-      setError(err.message || "Código inválido. Tente novamente.");
+      setError(err.message || "Código inválido");
+      isSubmittingRef.current = false; // allow retry
     } finally {
       setIsLoading(false);
     }
   };
 
-  // ===== Reenvia código 2FA =====
   const handleResendCode = async () => {
     if (!tempToken) {
       setError("Sessão inválida. Tente novamente.");
       setStep("credentials");
       return;
     }
-    setIsLoading(true);
     setError("");
+    setIsLoading(true);
     try {
       await resendCode();
       alert("✅ Novo código enviado para seu e-mail.");
@@ -116,7 +122,7 @@ export default function Login() {
   return (
     <div className="min-h-screen bg-[#f8f9fc] flex items-center justify-center p-6">
       <div className="w-full max-w-md">
-        {/* Logo / Brand */}
+        {/* Logo */}
         <div className="text-center mb-8">
           <div className="w-24 h-24 mx-auto mb-4">
             <img src={logoImg} alt="MADM Brasil" className="w-full h-full object-cover rounded-2xl shadow-md" />
@@ -139,10 +145,9 @@ export default function Login() {
           <div className="p-6">
             {step === "credentials" ? (
               <form onSubmit={handleCredentialsSubmit} className="space-y-4">
+                {/* Email field */}
                 <div>
-                  <label htmlFor="email" className="block text-xs font-semibold text-gray-600 mb-1">
-                    E-mail
-                  </label>
+                  <label htmlFor="email" className="block text-xs font-semibold text-gray-600 mb-1">E-mail</label>
                   <div className="relative">
                     <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
@@ -158,10 +163,9 @@ export default function Login() {
                   </div>
                 </div>
 
+                {/* Password field */}
                 <div>
-                  <label htmlFor="password" className="block text-xs font-semibold text-gray-600 mb-1">
-                    Senha
-                  </label>
+                  <label htmlFor="password" className="block text-xs font-semibold text-gray-600 mb-1">Senha</label>
                   <div className="relative">
                     <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
@@ -183,7 +187,7 @@ export default function Login() {
                   </div>
                 </div>
 
-                {/* ===== CHECKBOX LEMBRAR-ME ===== */}
+                {/* Remember me */}
                 <div className="flex items-center gap-2">
                   <input
                     type="checkbox"
@@ -193,7 +197,7 @@ export default function Login() {
                     className="w-4 h-4 text-[#09175b] border-gray-300 rounded focus:ring-[#09175b]"
                   />
                   <label htmlFor="rememberMe" className="text-xs text-gray-600 cursor-pointer">
-                    Lembre de mim.
+                    Lembrar‑me
                   </label>
                 </div>
 
@@ -226,9 +230,7 @@ export default function Login() {
             ) : (
               <form onSubmit={handleTwoFactorSubmit} className="space-y-4">
                 <div>
-                  <label htmlFor="2fa-code" className="block text-xs font-semibold text-gray-600 mb-1">
-                    Código de verificação
-                  </label>
+                  <label htmlFor="2fa-code" className="block text-xs font-semibold text-gray-600 mb-1">Código de verificação</label>
                   <div className="relative">
                     <Shield className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
@@ -289,7 +291,7 @@ export default function Login() {
             <p className="text-[10px] text-gray-400">
               {step === "credentials"
                 ? "Sistema seguro com autenticação de dois fatores por e-mail."
-                : "O código expira em 5 minutos. Verifique sua caixa de entrada ou spam."}
+                : "O código expira em 5 minutos. Verifique sua caixa de entrada, spam ou lixo eletrônico."}
             </p>
           </div>
         </div>
