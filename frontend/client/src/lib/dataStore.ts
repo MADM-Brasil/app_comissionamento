@@ -195,7 +195,7 @@ function getDateRangeFromPeriod(period: Period, customStart?: string, customEnd?
 // ESTADOS INICIAIS
 // ============================================================
 const initialKpiData: KpiData = {
-  comissaoMes: { value: 0, target: 0, unit: 'R$', label: 'Comissão do Mês' },
+  comissaoMes: { value: 0, target: 0, unit: 'R$', label: 'Estimativa do Mês' },
   vendasFechadas: { value: 0, target: 0, unit: '', label: 'Vendas Fechadas' },
   protocolados: { value: 0, target: 0, unit: '', label: 'Protocolados' },
   taxaConversao: { value: 0, target: 0, unit: '%', label: 'Taxa de Conversão' },
