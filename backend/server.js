@@ -6,8 +6,8 @@ import helmet from 'helmet';
 import session from 'express-session';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
-import path from 'path';                                
-import { fileURLToPath } from 'url';                   
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 import { pool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
@@ -24,50 +24,72 @@ import campanhasRoutes from './routes/campanhas.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 import { startNotificationEngine } from './services/notificationEngine.js';
 
-const __filename = fileURLToPath(import.meta.url);      
-const __dirname = path.dirname(__filename);          
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3007;
 
-// ---------- Trust proxy ----------
-app.set('trust proxy', 1);
+// ================================================================
+// 1. VALIDAÇÃO DAS VARIÁVEIS DE AMBIENTE (essenciais)
+// ================================================================
+const requiredEnv = ['SESSION_SECRET', 'DATABASE_URL'];
+const missing = requiredEnv.filter((v) => !process.env[v]);
+if (missing.length) {
+  console.error(`❌ Variáveis de ambiente obrigatórias ausentes: ${missing.join(', ')}`);
+  process.exit(1);
+}
 
-// ---------- CORS ----------
+// ================================================================
+// 2. CONFIGURAÇÕES GERAIS
+// ================================================================
 const isProduction = process.env.NODE_ENV === 'production';
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3008'];
+const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3008';
 
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-}));
+// Trust proxy (para funcionar com HTTPS e proxy reverso)
+app.set('trust proxy', 1);
 
-// ---------- Body parsers ----------
+// ================================================================
+// 3. MIDDLEWARES
+// ================================================================
+
+// CORS
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
+
+// Body parsers
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// ---------- SERVE ARQUIVOS ESTÁTICOS (uploads) SEM AUTENTICAÇÃO ----------
+// Arquivos estáticos (uploads) – SEM autenticação
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
-// ---------- Helmet ----------
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "blob:"],
-      connectSrc: ["'self'", process.env.FRONTEND_URL || 'http://localhost:3007'],
-      fontSrc: ["'self'"],
+// Helmet (CSP)
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        connectSrc: ["'self'", frontendUrl],
+        fontSrc: ["'self'"],
+      },
     },
-  },
-}));
+  })
+);
 
-// ---------- Cookie Parser manual ----------
+// Cookie parser manual (para CSRF)
 app.use((req, res, next) => {
   const raw = req.headers.cookie || '';
   const cookies = {};
-  raw.split(';').forEach(cookie => {
+  raw.split(';').forEach((cookie) => {
     const [name, ...rest] = cookie.trim().split('=');
     if (name) cookies[name] = decodeURIComponent(rest.join('='));
   });
@@ -75,7 +97,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- CSRF Double Submit Cookie ----------
+// ================================================================
+// 4. CSRF (Double Submit Cookie)
+// ================================================================
 app.use((req, res, next) => {
   if (!req.cookies?.['csrf-token']) {
     const token = crypto.randomBytes(32).toString('hex');
@@ -106,23 +130,29 @@ app.get('/api/csrf-token', (req, res) => {
   res.json({ csrfToken: req.csrfToken });
 });
 
-// ---------- Sessão ----------
+// ================================================================
+// 5. SESSÃO (com tabela criada automaticamente)
+// ================================================================
 const sessionStore = new PostgreSqlSessionStore(pool);
 
-app.use(session({
-  store: sessionStore,
-  secret: process.env.SESSION_SECRET || 'chave-secreta-sessao',
-  resave: false,
-  saveUninitialized: false,
-  rolling: true,
-  cookie: {
-    secure: isProduction,
-    httpOnly: true,
-    sameSite: isProduction ? 'none' : 'lax',
-  },
-}));
+app.use(
+  session({
+    store: sessionStore,
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    rolling: true,
+    cookie: {
+      secure: isProduction,
+      httpOnly: true,
+      sameSite: isProduction ? 'none' : 'lax',
+    },
+  })
+);
 
-// ========== FUNÇÃO AUXILIAR – período atual ==========
+// ================================================================
+// 6. FUNÇÃO AUXILIAR – período atual
+// ================================================================
 function getCurrentPeriod() {
   const now = new Date();
   const year = now.getFullYear();
@@ -130,7 +160,9 @@ function getCurrentPeriod() {
   return `${year}-${month}`;
 }
 
-// ========== ROTAS PÚBLICAS (sem CSRF) ==========
+// ================================================================
+// 7. ROTAS PÚBLICAS (sem CSRF)
+// ================================================================
 app.get('/api/auth/ping', (req, res) => {
   if (!req.session.isAuthenticated) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
@@ -251,16 +283,18 @@ app.get('/api/auth/me', (req, res) => {
      FROM core.view_app_colaboradores
      WHERE email = $1`,
     [req.session.userId]
-  ).then(result => {
-    if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
-    res.json({ success: true, user: result.rows[0] });
-  }).catch(error => {
-    console.error('Erro ao obter usuário:', error);
-    res.status(500).json({ success: false, error: 'Erro interno' });
-  });
+  )
+    .then((result) => {
+      if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
+      res.json({ success: true, user: result.rows[0] });
+    })
+    .catch((error) => {
+      console.error('Erro ao obter usuário:', error);
+      res.status(500).json({ success: false, error: 'Erro interno' });
+    });
 });
 
-// ========== NOVAS ROTAS PÚBLICAS DE RECUPERAÇÃO DE SENHA ==========
+// Rotas de recuperação de senha
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
@@ -362,16 +396,18 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
-// ========== MIDDLEWARES DE PROTEÇÃO (CSRF + Autenticação) ==========
+// ================================================================
+// 8. MIDDLEWARES DE PROTEÇÃO (CSRF + Autenticação)
+// ================================================================
 app.use(csrfProtection);
 app.use((req, res, next) => {
   if (req.session.isAuthenticated) return next();
   return res.status(401).json({ success: false, error: 'Não autenticado' });
 });
 
-// ========== ROTAS PROTEGIDAS ==========
-
-// GET /api/metricas-assessores
+// ================================================================
+// 9. ROTAS PROTEGIDAS
+// ================================================================
 app.get('/api/metricas-assessores', async (req, res) => {
   try {
     const { mes, email, colaborador_id } = req.query;
@@ -401,7 +437,6 @@ app.get('/api/metricas-assessores', async (req, res) => {
   }
 });
 
-// Registro das rotas protegidas
 app.use('/api', colaboradoresRoutes);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/tabela-comissoes', tabelaComissoesRoutes);
@@ -411,7 +446,6 @@ app.use('/api/user', userRouter);
 app.use('/api/suporte', suporteRouter);
 app.use('/api/notificacoes', notificacoesRoutes);
 
-// GET /api/admin/months
 app.get('/api/admin/months', async (req, res) => {
   try {
     const result = await pool.query(
@@ -419,7 +453,7 @@ app.get('/api/admin/months', async (req, res) => {
        FROM app_comissionamento.view_app_metricas_assessores 
        ORDER BY data_metrica DESC`
     );
-    const months = result.rows.map(r => {
+    const months = result.rows.map((r) => {
       const d = new Date(r.data_metrica);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
     });
@@ -430,28 +464,43 @@ app.get('/api/admin/months', async (req, res) => {
   }
 });
 
-// Health checks
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
-// Tratamento de erro
+// Tratamento de erro (último middleware)
 app.use((err, req, res, next) => {
   console.error('❌ Erro:', err);
   if (res.headersSent) return next(err);
   res.status(500).json({ error: 'Erro interno' });
 });
 
-// ---------- Inicialização ----------
+// ================================================================
+// 10. INICIALIZAÇÃO ASSÍNCRONA (criação da tabela de sessões + start)
+// ================================================================
 (async () => {
   try {
+    // Testa conexão com o banco
     await pool.query('SELECT 1');
     console.log('✅ Conectado ao PostgreSQL');
+
+    // Cria tabela de sessões se não existir
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS session (
+        sid varchar NOT NULL COLLATE "default",
+        sess json NOT NULL,
+        expire timestamp(6) NOT NULL
+      ) WITH (OIDS=FALSE);
+      ALTER TABLE session ADD CONSTRAINT session_pkey PRIMARY KEY (sid) NOT DEFERRABLE INITIALLY IMMEDIATE;
+    `);
+    console.log('✅ Tabela "session" verificada/criada com sucesso');
+
+    // Inicia o servidor
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
-      startNotificationEngine(); 
+      startNotificationEngine();
     });
   } catch (error) {
-    console.error('❌ Erro ao conectar ao banco:', error);
+    console.error('❌ Erro ao conectar ao banco ou criar tabela:', error);
     process.exit(1);
   }
 })();

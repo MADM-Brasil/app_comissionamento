@@ -139,3 +139,28 @@ Exemplo: se você escolheu o mês de agosto de 2026, a linha azul mostra quantos
 
 Anterior (linha laranja): os dados do período imediatamente anterior, com a mesma duração do período atual.
 Exemplo: para o mês de agosto (31 dias), o período anterior será julho de 2026 (também 31 dias). Se você escolheu um intervalo customizado de 10 dias, o anterior será os 10 dias imediatamente anteriores a esse intervalo.
+
+
+.env
+# ========== OBRIGATÓRIAS ==========
+PORT=3007
+NODE_ENV=production
+DATABASE_URL=postgres://usuario:senha@host:5432/db?schema=madm
+SESSION_SECRET=substitua-por-uma-string-aleatoria-forte
+ALLOWED_ORIGINS=https://app.seudominio.com,https://seudominio.com
+FRONTEND_URL=https://app.seudominio.com
+
+# ========== E-MAIL (2FA / recuperação) ==========
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_USER=seu-email@gmail.com
+EMAIL_PASS=senha-de-app
+
+# ========== INTEGRAÇÕES ==========
+KOMMO_API_TOKEN=seu-token
+CHV_Hubspot=seu-token-hubspot
+WEBHOOK_CASOS_DISCADORA=sua-url-webhook
+# ... (todas as outras)
+
+# ========== OPCIONAL ==========
+CORS_ENABLED=true
