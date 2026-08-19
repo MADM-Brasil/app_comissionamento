@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: madm
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: madm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  backend:
+    build: ./backend
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgres://madm:secret@postgres:5432/madm
+      SESSION_SECRET: super-secret
+      ALLOWED_ORIGINS: http://localhost:3008,http://frontend
+      NODE_ENV: production
+      FRONTEND_URL: http://frontend
+      PORT: 3007
+    ports:
+      - "3007:3007"
+    volumes:
+      - uploads:/app/uploads
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3008:80"
+
+volumes:
+  pgdata:
+  uploads:
