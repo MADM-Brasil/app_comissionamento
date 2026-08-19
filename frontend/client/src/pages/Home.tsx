@@ -767,7 +767,7 @@ export default function Home() {
   }, [currentUserData, tabelaComissoes]);
 
   const kpiCards = [
-    { label: "Comissão do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
+    { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
     { label: "Vendas Fechadas", value: totals.assinados, target: totalTargetAssinados, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
     { label: "Protocolados", value: totals.protocolados, target: 1200, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
