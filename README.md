@@ -164,3 +164,82 @@ WEBHOOK_CASOS_DISCADORA=sua-url-webhook
 
 # ========== OPCIONAL ==========
 CORS_ENABLED=true
+
+1. Aviso (status: 'aviso')
+Quando ocorre:
+Contato não encontrado e o usuário preencheu apenas telefone, sem e‑mail ou CPF.
+
+Mensagem:
+"Campos pendentes: preencha e‑mail ou CPF para tentar novamente."
+
+Sucesso: false
+
+Observação:
+O registro é gravado no banco com status de aviso para acompanhamento.
+
+2. Suporte (status: 'suporte')
+Quando ocorre:
+Contato encontrado, porém os dados informados divergem do cadastro existente (e‑mail, telefone ou CPF).
+
+Mensagem:
+"Dados divergentes do cadastro: <campos divergentes>."
+
+Sucesso: false
+
+Observação:
+O ticket fica com status de suporte para análise manual.
+
+3. Bloqueado (status: 'bloqueado')
+Quando ocorre:
+
+Card (negócio) em pipeline diferente de Base de Leads e não está com o colaborador informado.
+
+Card já está com o colaborador informado, mas em outro pipeline (opcional).
+
+Mensagens:
+
+"Movimentação bloqueada: Card em pipeline 'X'."
+
+"Card já está com o colaborador 'X'."
+
+Sucesso: false
+
+Observação:
+A movimentação não é realizada.
+
+4. Erro (status: 'erro')
+Quando ocorre:
+Falha na integração com o HubSpot (exceção não tratada, autenticação, erro de API).
+
+Mensagem:
+"Erro na integração HubSpot: <detalhes>."
+
+Sucesso: false
+
+5. Concluído (status: 'concluido')
+Quando ocorre:
+Card movido com sucesso para o pipeline Closer, fase Em Contato (ou quando a movimentação é bem-sucedida).
+
+Mensagem:
+"Card movido"
+
+Sucesso: true
+
+6. Fora do Pipeline (status: 'fora_pipeline')
+Quando ocorre:
+Situação atípica em que a movimentação não foi bloqueada, mas o card não está no pipeline/estágio esperado após a operação.
+
+Mensagem:
+Normalmente não é exibida diretamente, pois o sistema tende a classificar como concluído ou bloqueado.
+
+Sucesso: true (genérico)
+
+Resumo dos status utilizados na prática
+Status	Cor/Badge	Sucesso	Mensagem principal
+aviso	Amarelo/Laranja	false	Campos pendentes
+suporte	Laranja	false	Dados divergentes
+bloqueado	Vermelho	false	Card em pipeline não permitido
+erro	Vermelho	false	Erro na integração
+concluido	Verde	true	Card movido
+Esses são os retornos definidos ao longo das alterações. O frontend (Suporte.tsx) já possui os mapeamentos de ícones e cores correspondentes para exibição no histórico.
+

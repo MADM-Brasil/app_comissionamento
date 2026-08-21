@@ -7,6 +7,7 @@ class TeamsNotificadorSuporte {
             casos_bd_dash: process.env.WEBHOOK_CASOS_BD_DASH || null,
             casos_acessos: process.env.WEBHOOK_CASOS_ACESSOS || null,
             outros_casos: process.env.WEBHOOK_OUTROS_CASOS || null,
+            casos_suporte: process.env.WEBHOOK_CASOS_SUPORTE || null,
         };
 
         this.webhookRoteador = process.env.WEBHOOK_ROTEADOR || null;
@@ -29,6 +30,8 @@ class TeamsNotificadorSuporte {
             'Acesso': 'casos_acessos',
             'Acessos': 'casos_acessos',
             'Outro': 'outros_casos',
+            'Movimentacao': 'casos_suporte',
+            'Movimentação': 'casos_suporte',
         };
         return mapa[normalizado] || 'outros_casos';
     }
@@ -72,15 +75,27 @@ class TeamsNotificadorSuporte {
                 );
             }
 
+            // Monta o JSON raiz exatamente como o Power Automate espera
             const payload = {
-                titulo: dados.titulo || dados.assunto,
-                assunto: dados.assunto,
-                descricao: dados.descricao,
-                solicitante: dados.solicitante || 'Não informado',
-                equipe: dados.equipe || 'Não informada',
-                dataHora: this.formatarDataHora(),
-                anexosMarkdown: dados.anexosMarkdown || 'Nenhum anexo'
-            };
+    titulo: dados.titulo || dados.assunto,
+    assunto: dados.assunto,
+    descricao: dados.descricao,
+    solicitante: dados.solicitante || 'Não informado',
+    equipe: dados.equipe || 'Não informada',
+    dataHora: this.formatarDataHora(),
+    anexosMarkdown: dados.anexosMarkdown || 'Nenhum anexo',
+    // Campos extras para movimentação
+    cliente: dados.cliente || null,
+    telefone: dados.telefone || null,
+    equipeDestino: dados.equipeDestino || null,
+    assessorDestino: dados.assessorDestino || null,
+    status: dados.status || null,
+    mensagem: dados.mensagem || null,
+    pipeline: dados.pipeline || null, 
+    stage: dados.stage || null,
+    pipelineNome: dados.pipelineNome || null,
+    stageNome: dados.stageNome || null,
+};
 
             const response = await fetch(webhookUrl, {
                 method: 'POST',
@@ -91,29 +106,16 @@ class TeamsNotificadorSuporte {
             });
 
             if (response.ok) {
-                console.log(`✅ Notificação enviada para o Power Automate (${dados.assunto})`);
-                return {
-                    success: true,
-                    status: response.status,
-                    channel: chave,
-                    assunto: dados.assunto,
-                };
+                console.log(`✅ Notificação enviada (${dados.assunto})`);
+                return { success: true, status: response.status, channel: chave, assunto: dados.assunto };
             } else {
                 const errorText = await response.text();
-                console.error(`❌ Erro ao enviar para o Power Automate (${response.status}):`, errorText);
-                return {
-                    success: false,
-                    status: response.status,
-                    error: errorText,
-                    channel: chave,
-                };
+                console.error(`❌ Erro ao enviar (${response.status}):`, errorText);
+                return { success: false, status: response.status, error: errorText, channel: chave };
             }
         } catch (error) {
             console.error('❌ Erro no envio da notificação:', error.message);
-            return {
-                success: false,
-                error: error.message,
-            };
+            return { success: false, error: error.message };
         }
     }
 }

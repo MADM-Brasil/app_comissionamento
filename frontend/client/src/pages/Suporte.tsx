@@ -1,6 +1,5 @@
 // src/pages/Suporte.tsx
-import React from "react";
-import { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
   Send,
@@ -39,6 +38,16 @@ interface MovementItem {
   resultado: string;
   usuario: string;
   atualizadoEm: string;
+  observacao_sales_ops?: string;
+  hubspot?: {
+    contactId?: string;
+    existe?: boolean;
+    pipeline?: string;
+    stage?: string;
+    status?: string;
+    erro?: boolean;
+    mensagem?: string;
+  };
 }
 
 interface ReportItem {
@@ -71,6 +80,7 @@ interface TicketMovimentacao {
   equipe_destino_nome: string;
   status_mapeamento: string;
   observacao_sales_ops?: string;
+  motivo_solicitacao?: string;
   criado_em: string;
 }
 
@@ -115,6 +125,9 @@ const getStatusInfo = (status: string) => {
     suporte: { label: "Suporte", icon: <AlertCircle className="w-3 h-3" />, className: "bg-orange-50 text-orange-700" },
     aviso: { label: "Aviso", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
     erro: { label: "Erro", icon: <AlertCircle className="w-3 h-3" />, className: "bg-red-50 text-red-700" },
+    no_pipeline: { label: "No Pipeline", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
+    fora_pipeline: { label: "Fora do Pipeline", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
+    bloqueado: { label: "Bloqueado", icon: <Ban className="w-3 h-3" />, className: "bg-red-100 text-red-800" },
     ENVIADO: { label: "Enviado", icon: <Send className="w-3 h-3" />, className: "bg-blue-50 text-blue-700" },
     SUSPEITO: { label: "Suspeito", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
     CONCLUÍDO: { label: "Concluído", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
@@ -212,6 +225,7 @@ function MovimentacaoTab() {
   const [movements, setMovements] = useState<MovementItem[]>([]);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const isSubmitting = useRef(false);
 
   const equipesDisponiveis = useMemo(() => {
     if (!equipeConfigs || equipeConfigs.length === 0) return [];
@@ -235,7 +249,11 @@ function MovimentacaoTab() {
     if (!collaborators.length) return [];
     let filtered = collaborators.filter(c => !isExcludedTeam(c.equipeNome));
     if (equipe) filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(equipe));
-    return filtered.map(c => ({ id: c.id.toString(), nome: c.name }));
+    return filtered.map(c => ({
+      id: c.id.toString(),
+      nome: c.name,
+      email: c.email
+    }));
   }, [collaborators, equipe]);
 
   useEffect(() => {
@@ -250,21 +268,40 @@ function MovimentacaoTab() {
       if (!res.ok) throw new Error('Erro ao carregar histórico');
       const data = await res.json();
       if (data.success) {
-        const historico: MovementItem[] = (data.data || []).map((ticket: any) => ({
-          id: `db_${ticket.id_ticket_movimentacao}`,
-          timestamp: ticket.criado_em,
-          cliente: `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`,
-          email: ticket.email_cliente_informado,
-          telefone: ticket.telefone_cliente_informado || "Não informado",
-          cpf: ticket.cpf_cliente_informado || "Não informado",
-          origem: ticket.origem_cliente_informada || "Não informada",
-          equipe: ticket.equipe_destino_nome,
-          assessor: ticket.colaborador_destino_nome,
-          status: ticket.status_mapeamento || "pendente",
-          resultado: ticket.observacao_sales_ops || "Movimentação registrada",
-          usuario: ticket.colaborador_origem_nome,
-          atualizadoEm: ticket.criado_em,
-        }));
+        const historico: MovementItem[] = (data.data || []).map((ticket: any) => {
+          let hubspotData;
+          let motivoOriginal = "Movimentação registrada";
+          let observacao = '';
+
+          if (ticket.observacao_sales_ops) {
+            try {
+              const parsed = JSON.parse(ticket.observacao_sales_ops);
+              if (parsed.hubspot) hubspotData = parsed.hubspot;
+              if (parsed.motivoOriginal) motivoOriginal = parsed.motivoOriginal;
+              if (parsed.observacao) observacao = parsed.observacao;
+            } catch (e) {
+              observacao = ticket.observacao_sales_ops;
+            }
+          }
+
+          return {
+            id: `db_${ticket.id_ticket_movimentacao}`,
+            timestamp: ticket.criado_em,
+            cliente: `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`,
+            email: ticket.email_cliente_informado,
+            telefone: ticket.telefone_cliente_informado || "Não informado",
+            cpf: ticket.cpf_cliente_informado || "Não informado",
+            origem: ticket.origem_cliente_informada || "Não informada",
+            equipe: ticket.equipe_destino_nome,
+            assessor: ticket.colaborador_destino_nome,
+            status: ticket.status_mapeamento || "pendente",
+            resultado: motivoOriginal,
+            usuario: ticket.colaborador_origem_nome,
+            atualizadoEm: ticket.criado_em,
+            observacao_sales_ops: observacao,
+            hubspot: hubspotData,
+          };
+        });
         setMovements(historico);
       }
     } catch (err: any) {
@@ -278,16 +315,25 @@ function MovimentacaoTab() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting.current) return;
     if (!firstName.trim()) { setMessage({ text: "Nome é obrigatório", type: "error" }); return; }
     if (!lastName.trim()) { setMessage({ text: "Sobrenome é obrigatório", type: "error" }); return; }
-    if (!email.trim()) { setMessage({ text: "E-mail é obrigatório", type: "error" }); return; }
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) { setMessage({ text: "E-mail inválido", type: "error" }); return; }
+    if (!telefone.trim()) { setMessage({ text: "Telefone é obrigatório", type: "error" }); return; }
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
 
+    isSubmitting.current = true;
     setLoading(true);
     setMessage(null);
-    const assessorNome = assessoresDisponiveis.find(a => a.id === assessorId)?.nome || assessorId;
+
+    const assessorSelecionado = assessoresDisponiveis.find(a => a.id === assessorId);
+    const assessorNome = assessorSelecionado?.nome || assessorId;
+    const assessorEmail = assessorSelecionado?.email || '';
+
+    const idempotencyKey = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
 
     const payload = {
       crm_origem: "CRM",
@@ -302,10 +348,12 @@ function MovimentacaoTab() {
       colaborador_origem_nome: currentUser?.nome || currentUser?.email || 'frontend',
       equipe_origem_nome: currentUser?.equipe || '',
       colaborador_destino_nome: assessorNome,
+      colaborador_destino_email: assessorEmail,
       equipe_destino_nome: equipe,
       motivo_solicitacao: null,
       observacao_sales_ops: null,
-      status_mapeamento: "pendente"
+      status_mapeamento: "pendente",
+      idempotency_key: idempotencyKey,
     };
 
     try {
@@ -315,18 +363,23 @@ function MovimentacaoTab() {
         credentials: 'include',
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(`Erro HTTP ${response.status}`);
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `Erro HTTP ${response.status}`);
+      }
       const result = await response.json();
       setMessage({ text: result.message || "Movimentação registrada", type: result.success ? "success" : "error" });
+      await loadUserHistory();
       if (result.success) {
         setFirstName(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
         setEquipe(""); setAssessorId("");
-        await loadUserHistory();
       }
     } catch (err: any) {
       setMessage({ text: err.message || "Erro na movimentação", type: "error" });
+      await loadUserHistory();
     } finally {
       setLoading(false);
+      setTimeout(() => { isSubmitting.current = false; }, 500);
     }
   };
 
@@ -335,10 +388,28 @@ function MovimentacaoTab() {
 
   const exportHistory = () => {
     if (movements.length === 0) return;
-    const headers = ["Data/Hora", "Cliente", "E-mail", "Telefone", "CPF", "Equipe", "Assessor", "Status", "Resultado"];
-    const rows = movements.map(m =>
-      [new Date(m.timestamp).toLocaleString("pt-BR"), `"${m.cliente}"`, `"${m.email}"`, `"${m.telefone}"`, `"${m.cpf}"`, `"${m.equipe}"`, `"${m.assessor}"`, `"${getStatusInfo(m.status).label}"`, `"${m.resultado}"`].join(";")
-    );
+    const headers = ["Data/Hora", "Cliente", "E-mail", "Telefone", "CPF", "Equipe", "Assessor", "Status", "HubSpot", "Resultado"];
+    const rows = movements.map(m => {
+      const hubspotInfo = m.hubspot
+        ? m.hubspot.erro
+          ? "Erro"
+          : m.hubspot.status === 'bloqueado'
+            ? m.hubspot.mensagem || "Bloqueado"
+            : `${m.hubspot.existe ? "Existe" : "Não existe"}${m.hubspot.pipeline ? ` - ${m.hubspot.pipeline}/${m.hubspot.stage}` : ""}${m.hubspot.status === 'no_pipeline' ? " (no pipeline)" : ""}`
+        : "Não verificado";
+      return [
+        new Date(m.timestamp).toLocaleString("pt-BR"),
+        `"${m.cliente}"`,
+        `"${m.email}"`,
+        `"${m.telefone}"`,
+        `"${m.cpf}"`,
+        `"${m.equipe}"`,
+        `"${m.assessor}"`,
+        `"${getStatusInfo(m.status).label}"`,
+        `"${hubspotInfo}"`,
+        `"${m.resultado}"`,
+      ].join(";");
+    });
     const csv = [headers.join(";"), ...rows].join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -359,20 +430,48 @@ function MovimentacaoTab() {
         <h2 className="text-lg font-bold text-[#0f172a] mb-4">Movimentação de Leads</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Nome *</label><input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome *</label><input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail *</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Nome</label><input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome</label><input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"  /></div>
             <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label><select value={origem} onChange={e => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"><option value="">Selecionar origem</option><option value="cat">CAT</option><option value="indicacao">Indicação</option><option value="trafego_pago">Marketing</option></select></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone</label><input type="tel" value={telefone} onChange={e => setTelefone(e.target.value)} onBlur={() => telefone && setTelefone(formatPhoneDisplay(telefone))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" /></div>
+            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone</label><input type="tel" value={telefone} onChange={e => setTelefone(e.target.value)} onBlur={() => telefone && setTelefone(formatPhoneDisplay(telefone))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
             <div><label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label><input type="text" value={cpf} onChange={e => setCpf(e.target.value)} onBlur={() => cpf && setCpf(formatCPF(cpf))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" /></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Equipe Destino *</label><select value={equipe} onChange={e => setEquipe(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>{equipesDisponiveis.map(nome => <option key={nome} value={nome}>{nome}</option>)}</select></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Assessor Destino *</label><select value={assessorId} onChange={e => setAssessorId(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>{loadingColaboradores ? <option disabled>Carregando...</option> : assessoresDisponiveis.length === 0 ? <option disabled>Nenhum disponível</option> : assessoresDisponiveis.map(a => <option key={a.id} value={a.id}>{a.nome}</option>)}</select></div>
+            <div>
+              <label className="block text-sm font-medium text-[#0f172a] mb-1">Equipe Destino *</label>
+              <select 
+                value={equipe} 
+                onChange={e => setEquipe(e.target.value)} 
+                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" 
+                required
+              >
+                <option value="" disabled>Selecione equipe</option>
+                {equipesDisponiveis.map(nome => <option key={nome} value={nome}>{nome}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#0f172a] mb-1">Assessor Destino *</label>
+              <select 
+                value={assessorId} 
+                onChange={e => setAssessorId(e.target.value)} 
+                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" 
+                required
+              >
+                <option value="" disabled>Selecione colaborador</option>
+                {loadingColaboradores ? 
+                  <option disabled>Carregando...</option> : 
+                  assessoresDisponiveis.length === 0 ? 
+                    <option disabled>Nenhum disponível</option> : 
+                    assessoresDisponiveis.map(a => <option key={a.id} value={a.id}>{a.nome}</option>)
+                }
+              </select>
+            </div>
           </div>
           {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">{message.text}</div>}
           <div className="flex justify-end"><button type="submit" disabled={loading || loadingColaboradores} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}{loading ? "Enviando..." : "Registrar Movimentação"}</button></div>
         </form>
       </div>
 
+      {/* Histórico */}
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
@@ -386,8 +485,29 @@ function MovimentacaoTab() {
           filteredMovements.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada</div> :
           <div className="overflow-x-auto">
             <table className="simple-table">
-              <thead><tr><th>Data/Hora</th><th>Cliente</th><th>E-mail</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Resultado</th></tr></thead>
-              <tbody>{filteredMovements.map(m => { const info = getStatusInfo(m.status); return (<tr key={m.id}><td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td><td>{m.cliente}</td><td>{m.email}</td><td><div>{m.telefone}</div><small className="text-[#94a3b8]">{m.cpf}</small></td><td><div>{m.equipe}</div><small>{m.assessor}</small></td><td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td><td className="max-w-xs truncate">{m.resultado}</td></tr>); })}</tbody>
+              <thead><tr><th>Data/Hora</th><th>Cliente</th><th>E-mail</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Obs. SalesOps</th><th>Resultado</th></tr></thead>
+              <tbody>{filteredMovements.map(m => {
+                const statusParaExibir = m.status; // Usa status_mapeamento
+                const info = getStatusInfo(statusParaExibir);
+                return (
+                  <tr key={m.id}>
+                    <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
+                    <td>{m.cliente}</td>
+                    <td>{m.email}</td>
+                    <td><div>{m.telefone}</div><small className="text-[#94a3b8]">{m.cpf}</small></td>
+                    <td><div>{m.equipe}</div><small>{m.assessor}</small></td>
+                    <td>
+                      <span className={cn("badge", info.className)} title={m.hubspot?.mensagem || info.label}>
+                        {info.icon} {info.label}
+                      </span>
+                    </td>
+                    <td className="max-w-[200px] whitespace-pre-wrap break-words" title={m.observacao_sales_ops || ''}>
+                      {m.observacao_sales_ops || '—'}
+                    </td>
+                    <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
+                  </tr>
+                );
+              })}</tbody>
             </table>
           </div>}
       </div>
@@ -395,7 +515,7 @@ function MovimentacaoTab() {
   );
 }
 
-// ---------------------- Aba Reportar (CORRIGIDA – upload de arquivos via FormData + UI melhorada + coluna Observação + cancelamento + filtro por email) ----------------------
+// ---------------------- Aba Reportar ----------------------
 function ReportarTab() {
   const { currentUser } = useAppStore();
 
@@ -411,7 +531,6 @@ function ReportarTab() {
   const [loadingReports, setLoadingReports] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // Carrega os reportes do usuário logado pelo e-mail
   const loadUserReports = async () => {
     if (!currentUser?.email) {
       setLoadingReports(false);
@@ -466,22 +585,10 @@ function ReportarTab() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!titulo.trim()) {
-      setMessage({ text: "Preencha o título", type: "error" });
-      return;
-    }
-    if (!assunto || !descricao.trim()) {
-      setMessage({ text: "Preencha assunto e descrição", type: "error" });
-      return;
-    }
-    if (descricao.replace(/\n/g, "").length < 10) {
-      setMessage({ text: "Descrição muito curta", type: "error" });
-      return;
-    }
-    if (files.length === 0) {
-      setMessage({ text: "Necessário 1 print para o envio", type: "error" });
-      return;
-    }
+    if (!titulo.trim()) { setMessage({ text: "Preencha o título", type: "error" }); return; }
+    if (!assunto || !descricao.trim()) { setMessage({ text: "Preencha assunto e descrição", type: "error" }); return; }
+    if (descricao.replace(/\n/g, "").length < 10) { setMessage({ text: "Descrição muito curta", type: "error" }); return; }
+    if (files.length === 0) { setMessage({ text: "Necessário 1 print para o envio", type: "error" }); return; }
 
     setLoading(true);
     setMessage(null);
@@ -558,7 +665,7 @@ function ReportarTab() {
   const cancelRequest = async (id: string) => {
     if (!confirm("Tem certeza que deseja cancelar esta solicitação?")) return;
     try {
-      const numericId = id.replace("REP_", ""); // extrai o número do id
+      const numericId = id.replace("REP_", "");
       const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${numericId}`, {
         method: 'PATCH',
         headers: getCsrfHeaders(),
@@ -568,7 +675,7 @@ function ReportarTab() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erro ao cancelar solicitação');
       setMessage({ text: "Solicitação cancelada com sucesso.", type: "success" });
-      await loadUserReports(); // recarrega a lista
+      await loadUserReports();
     } catch (err: any) {
       setMessage({ text: err.message, type: "error" });
     }
@@ -591,7 +698,6 @@ function ReportarTab() {
   const filteredReports = reports.filter(r => filterStatus === "todos" || r.status === filterStatus);
   const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "ANALISE", "REVISÃO", "CANCELADO"];
 
-  // Detalhes mais completos no "olhinho"
   const viewDetails = (report: ReportItem) => {
     const statusLabel = getStatusInfo(report.status).label;
     const dataFormatada = new Date(report.data).toLocaleString("pt-BR");
@@ -646,7 +752,6 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
             <div className="text-right text-xs text-[#94a3b8] mt-1">{descricao.length}/1000</div>
           </div>
 
-          {/* Área de anexos melhorada */}
           <div>
             <span className="block text-sm font-medium text-[#0f172a] mb-1">
               Anexos <span className="text-red-500">*</span> <span className="text-xs text-[#64748b]">(obrigatório pelo menos 1 print)</span>
@@ -721,7 +826,6 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
         </form>
       </div>
 
-      {/* Meus Reportes (com coluna Observação SalesOps e ação cancelar) */}
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
@@ -766,7 +870,7 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
                         <div>{r.titulo}</div>
                         {r.assunto && r.assunto !== r.titulo && <small className="text-[#94a3b8]">{r.assunto}</small>}
                       </td>
-                      <td className="max-w-[200px] truncate" title={r.observacao_sales_ops}>
+                      <td className="max-w-[200px] whitespace-pre-wrap break-words" title={r.observacao_sales_ops}>
                         {r.observacao_sales_ops || "—"}
                       </td>
                       <td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td>
@@ -799,7 +903,7 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
   );
 }
 
-// ---------------------- Visão SalesOps com sub-tabs ----------------------
+// ---------------------- Visão SalesOps ----------------------
 function SalesOpsTab() {
   const [subTab, setSubTab] = useState<"movimentacoes" | "reportes">("reportes");
 
@@ -830,60 +934,136 @@ function SalesOpsTab() {
   );
 }
 
-// ---------------------- Tabela de movimentações com edição inline ----------------------
+// ---------------------- Modal de Edição (Reutilizável) ----------------------
+interface EditModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  title: string;
+  children: React.ReactNode;
+  onSave: () => void;
+  saving: boolean;
+}
+
+function EditModal({ isOpen, onClose, title, children, onSave, saving }: EditModalProps) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-bold text-[#0f172a]">{title}</h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="space-y-4">
+          {children}
+        </div>
+        <div className="flex justify-end gap-3 mt-6">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm font-medium text-[#475569] hover:bg-[#f1f5f9]"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={saving}
+            className="px-4 py-2 bg-[#2F6FED] text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-[#2F6FED]/90 disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            {saving ? "Salvando..." : "Salvar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------- Tabela de movimentações com edição via modal ----------------------
 function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
   const [editForm, setEditForm] = useState<{ status_mapeamento: string; observacao_sales_ops: string }>({ status_mapeamento: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
 
+  const carregarTickets = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao?todos=1`, { credentials: 'include' });
+      const data = await res.json();
+      if (data.success) setTickets(data.data);
+      else setMessage({ text: "Erro ao carregar tickets", type: "error" });
+    } catch (err) {
+      setMessage({ text: "Erro ao carregar tickets", type: "error" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const carregarTickets = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao?todos=1`, { credentials: 'include' });
-        const data = await res.json();
-        if (data.success) setTickets(data.data);
-        else setMessage({ text: "Erro ao carregar tickets", type: "error" });
-      } catch (err) {
-        setMessage({ text: "Erro ao carregar tickets", type: "error" });
-      } finally {
-        setLoading(false);
-      }
-    };
     carregarTickets();
   }, []);
 
-  const startEdit = (ticket: TicketMovimentacao) => {
-    setEditingId(ticket.id_ticket_movimentacao);
+  const openEditModal = (ticket: TicketMovimentacao) => {
+    setEditingTicket(ticket);
+    let observacao = ticket.observacao_sales_ops || '';
+    try {
+      const parsed = JSON.parse(observacao);
+      observacao = parsed.observacao || observacao;
+    } catch (e) {
+      // Mantém texto puro
+    }
     setEditForm({
       status_mapeamento: ticket.status_mapeamento || 'pendente',
-      observacao_sales_ops: ticket.observacao_sales_ops || '',
+      observacao_sales_ops: observacao,
     });
   };
 
-  const cancelEdit = () => {
-    setEditingId(null);
+  const closeEditModal = () => {
+    setEditingTicket(null);
     setEditForm({ status_mapeamento: '', observacao_sales_ops: '' });
   };
 
-  const saveEdit = async (id: number) => {
+  const saveEdit = async () => {
+    if (!editingTicket) return;
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${id}`, {
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`, {
         method: 'PATCH',
         headers: getCsrfHeaders(),
         credentials: 'include',
-        body: JSON.stringify(editForm),
+        body: JSON.stringify({
+          status_mapeamento: editForm.status_mapeamento,
+          observacao_sales_ops: editForm.observacao_sales_ops,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erro ao atualizar');
 
-      setTickets(prev => prev.map(t => t.id_ticket_movimentacao === id ? { ...t, status_mapeamento: editForm.status_mapeamento, observacao_sales_ops: editForm.observacao_sales_ops } : t));
+      setTickets(prev => prev.map(t => {
+        if (t.id_ticket_movimentacao !== editingTicket.id_ticket_movimentacao) return t;
+        let novoObservacao;
+        try {
+          const current = JSON.parse(t.observacao_sales_ops || '{}');
+          current.observacao = editForm.observacao_sales_ops;
+          novoObservacao = JSON.stringify(current);
+        } catch {
+          novoObservacao = JSON.stringify({ observacao: editForm.observacao_sales_ops });
+        }
+        return {
+          ...t,
+          status_mapeamento: editForm.status_mapeamento,
+          observacao_sales_ops: novoObservacao,
+        };
+      }));
+
       setMessage({ text: "Ticket atualizado com sucesso.", type: "success" });
-      cancelEdit();
+      closeEditModal();
     } catch (err: any) {
       setMessage({ text: err.message, type: "error" });
     } finally {
@@ -929,12 +1109,11 @@ function MovimentacoesSuporteTab() {
                   <th>Destino</th>
                   <th>Status</th>
                   <th>Obs.</th>
-                  <th>Ações</th>
+                  <th className="w-20">Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredTickets.map(ticket => {
-                  const isEditing = editingId === ticket.id_ticket_movimentacao;
                   const statusInfo = getStatusInfo(ticket.status_mapeamento || 'pendente');
                   return (
                     <tr key={ticket.id_ticket_movimentacao}>
@@ -949,47 +1128,30 @@ function MovimentacoesSuporteTab() {
                       <td>{ticket.equipe_origem_nome}</td>
                       <td>{ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</td>
                       <td>
-                        {isEditing ? (
-                          <select
-                            value={editForm.status_mapeamento}
-                            onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
-                            className="px-2 py-1 border border-[#e2e8f0] rounded text-xs"
-                          >
-                            <option value="pendente">Pendente</option>
-                            <option value="processando">Processando</option>
-                            <option value="concluido">Concluído</option>
-                            <option value="suporte">Suporte</option>
-                            <option value="aviso">Aviso</option>
-                            <option value="erro">Erro</option>
-                          </select>
-                        ) : (
-                          <span className={cn("badge", statusInfo.className)}>
-                            {statusInfo.icon} {statusInfo.label}
-                          </span>
-                        )}
+                        <span className={cn("badge", statusInfo.className)}>
+                          {statusInfo.icon} {statusInfo.label}
+                        </span>
                       </td>
-                      <td className="max-w-[150px]">
-                        {isEditing ? (
-                          <textarea
-                            value={editForm.observacao_sales_ops}
-                            onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
-                            rows={2}
-                            className="w-full px-2 py-1 border border-[#e2e8f0] rounded text-xs resize-none"
-                            placeholder="Nova observação"
-                          />
-                        ) : (
-                          <span className="truncate block" title={ticket.observacao_sales_ops}>{ticket.observacao_sales_ops || "—"}</span>
-                        )}
+                      <td className="max-w-[200px]">
+                        <span className="block whitespace-pre-wrap break-words" title={ticket.observacao_sales_ops}>
+                          {(() => {
+                            try {
+                              const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
+                              return parsed.observacao || ticket.observacao_sales_ops || '—';
+                            } catch {
+                              return ticket.observacao_sales_ops || '—';
+                            }
+                          })()}
+                        </span>
                       </td>
                       <td>
-                        {isEditing ? (
-                          <div className="flex items-center gap-1">
-                            <button onClick={() => saveEdit(ticket.id_ticket_movimentacao)} disabled={saving} className="p-1 rounded hover:bg-green-50" title="Salvar"><Save className="w-3.5 h-3.5 text-green-600" /></button>
-                            <button onClick={cancelEdit} className="p-1 rounded hover:bg-red-50" title="Cancelar"><X className="w-3.5 h-3.5 text-red-500" /></button>
-                          </div>
-                        ) : (
-                          <button onClick={() => startEdit(ticket)} className="p-1 rounded hover:bg-[#f1f5f9]" title="Editar"><Edit2 className="w-3.5 h-3.5 text-[#64748b]" /></button>
-                        )}
+                        <button
+                          onClick={() => openEditModal(ticket)}
+                          className="p-2 rounded-lg hover:bg-[#f1f5f9] text-[#64748b] hover:text-[#2F6FED] transition-colors"
+                          title="Editar"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
                       </td>
                     </tr>
                   );
@@ -999,53 +1161,90 @@ function MovimentacoesSuporteTab() {
           </div>
         )}
       </div>
+
+      {/* Modal de Edição */}
+      <EditModal
+        isOpen={editingTicket !== null}
+        onClose={closeEditModal}
+        title={`Editar Movimentação #${editingTicket?.id_ticket_movimentacao || ''}`}
+        onSave={saveEdit}
+        saving={saving}
+      >
+        <div>
+          <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
+          <select
+            value={editForm.status_mapeamento}
+            onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
+            className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
+          >
+            <option value="pendente">Pendente</option>
+            <option value="processando">Processando</option>
+            <option value="concluido">Concluído</option>
+            <option value="suporte">Suporte</option>
+            <option value="aviso">Aviso</option>
+            <option value="erro">Erro</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[#0f172a] mb-2">Observação SalesOps</label>
+          <textarea
+            value={editForm.observacao_sales_ops}
+            onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
+            rows={5}
+            className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
+            placeholder="Digite a observação..."
+          />
+        </div>
+      </EditModal>
     </div>
   );
 }
 
-// ---------------------- Tabela de reportes com edição inline (SalesOps) ----------------------
+// ---------------------- Tabela de reportes com edição via modal (SalesOps) ----------------------
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
-  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingTicket, setEditingTicket] = useState<TicketSuporte | null>(null);
   const [editForm, setEditForm] = useState<{ status: string; observacao_sales_ops: string }>({ status: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
 
+  const carregarReportes = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/suporte/ticket-suporte?todos=1`, { credentials: 'include' });
+      const data = await res.json();
+      if (data.success) setTickets(data.data);
+      else setMessage({ text: "Erro ao carregar reportes", type: "error" });
+    } catch (err) {
+      setMessage({ text: "Erro ao carregar reportes", type: "error" });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const carregarReportes = async () => {
-      try {
-        const res = await fetch(`${API_BASE}/suporte/ticket-suporte?todos=1`, { credentials: 'include' });
-        const data = await res.json();
-        if (data.success) setTickets(data.data);
-        else setMessage({ text: "Erro ao carregar reportes", type: "error" });
-      } catch (err) {
-        setMessage({ text: "Erro ao carregar reportes", type: "error" });
-      } finally {
-        setLoading(false);
-      }
-    };
     carregarReportes();
   }, []);
 
-  const startEdit = (ticket: TicketSuporte) => {
-    setEditingId(ticket.id_ticket_suporte);
+  const openEditModal = (ticket: TicketSuporte) => {
+    setEditingTicket(ticket);
     setEditForm({
       status: ticket.status || 'ENVIADO',
       observacao_sales_ops: ticket.observacao_sales_ops || '',
     });
   };
 
-  const cancelEdit = () => {
-    setEditingId(null);
+  const closeEditModal = () => {
+    setEditingTicket(null);
     setEditForm({ status: '', observacao_sales_ops: '' });
   };
 
-  const saveEdit = async (id: number) => {
+  const saveEdit = async () => {
+    if (!editingTicket) return;
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${id}`, {
+      const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${editingTicket.id_ticket_suporte}`, {
         method: 'PATCH',
         headers: getCsrfHeaders(),
         credentials: 'include',
@@ -1054,9 +1253,9 @@ function ReportesSuporteTab() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erro ao atualizar');
 
-      setTickets(prev => prev.map(t => t.id_ticket_suporte === id ? { ...t, status: editForm.status, observacao_sales_ops: editForm.observacao_sales_ops } : t));
+      setTickets(prev => prev.map(t => t.id_ticket_suporte === editingTicket.id_ticket_suporte ? { ...t, status: editForm.status, observacao_sales_ops: editForm.observacao_sales_ops } : t));
       setMessage({ text: "Reporte atualizado com sucesso.", type: "success" });
-      cancelEdit();
+      closeEditModal();
     } catch (err: any) {
       setMessage({ text: err.message, type: "error" });
     } finally {
@@ -1108,12 +1307,11 @@ function ReportesSuporteTab() {
                   <th>Título</th>
                   <th>Status</th>
                   <th>Obs. SalesOps</th>
-                  <th>Ações</th>
+                  <th className="w-20">Ações</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredTickets.map(ticket => {
-                  const isEditing = editingId === ticket.id_ticket_suporte;
                   const statusInfo = getStatusInfo(ticket.status || 'ENVIADO');
                   return (
                     <tr key={ticket.id_ticket_suporte}>
@@ -1123,49 +1321,23 @@ function ReportesSuporteTab() {
                       <td>{ticket.equipe_nome}</td>
                       <td>{ticket.titulo || ticket.assunto}</td>
                       <td>
-                        {isEditing ? (
-                          <select
-                            value={editForm.status}
-                            onChange={e => setEditForm(prev => ({ ...prev, status: e.target.value }))}
-                            className="px-2 py-1 border border-[#e2e8f0] rounded text-xs"
-                          >
-                            <option value="ENVIADO">Enviado</option>
-                            <option value="SUSPEITO">Suspeito</option>
-                            <option value="CONCLUÍDO">Concluído</option>
-                            <option value="ERRO">Erro</option>
-                            <option value="BLOQUEADO">Bloqueado</option>
-                            <option value="ANALISE">Análise</option>
-                            <option value="REVISÃO">Revisão</option>
-                            <option value="CANCELADO">Cancelado</option>
-                          </select>
-                        ) : (
-                          <span className={cn("badge", statusInfo.className)}>
-                            {statusInfo.icon} {statusInfo.label}
-                          </span>
-                        )}
+                        <span className={cn("badge", statusInfo.className)}>
+                          {statusInfo.icon} {statusInfo.label}
+                        </span>
                       </td>
-                      <td className="max-w-[150px]">
-                        {isEditing ? (
-                          <textarea
-                            value={editForm.observacao_sales_ops}
-                            onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
-                            rows={2}
-                            className="w-full px-2 py-1 border border-[#e2e8f0] rounded text-xs resize-none"
-                            placeholder="Nova observação"
-                          />
-                        ) : (
-                          <span className="truncate block" title={ticket.observacao_sales_ops}>{ticket.observacao_sales_ops || "—"}</span>
-                        )}
+                      <td className="max-w-[200px]">
+                        <span className="block whitespace-pre-wrap break-words" title={ticket.observacao_sales_ops}>
+                          {ticket.observacao_sales_ops || "—"}
+                        </span>
                       </td>
                       <td>
-                        {isEditing ? (
-                          <div className="flex items-center gap-1">
-                            <button onClick={() => saveEdit(ticket.id_ticket_suporte)} disabled={saving} className="p-1 rounded hover:bg-green-50" title="Salvar"><Save className="w-3.5 h-3.5 text-green-600" /></button>
-                            <button onClick={cancelEdit} className="p-1 rounded hover:bg-red-50" title="Cancelar"><X className="w-3.5 h-3.5 text-red-500" /></button>
-                          </div>
-                        ) : (
-                          <button onClick={() => startEdit(ticket)} className="p-1 rounded hover:bg-[#f1f5f9]" title="Editar"><Edit2 className="w-3.5 h-3.5 text-[#64748b]" /></button>
-                        )}
+                        <button
+                          onClick={() => openEditModal(ticket)}
+                          className="p-2 rounded-lg hover:bg-[#f1f5f9] text-[#64748b] hover:text-[#2F6FED] transition-colors"
+                          title="Editar"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
                       </td>
                     </tr>
                   );
@@ -1175,6 +1347,43 @@ function ReportesSuporteTab() {
           </div>
         )}
       </div>
+
+      {/* Modal de Edição */}
+      <EditModal
+        isOpen={editingTicket !== null}
+        onClose={closeEditModal}
+        title={`Editar Reporte #${editingTicket?.id_ticket_suporte || ''}`}
+        onSave={saveEdit}
+        saving={saving}
+      >
+        <div>
+          <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
+          <select
+            value={editForm.status}
+            onChange={e => setEditForm(prev => ({ ...prev, status: e.target.value }))}
+            className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
+          >
+            <option value="ENVIADO">Enviado</option>
+            <option value="SUSPEITO">Suspeito</option>
+            <option value="CONCLUÍDO">Concluído</option>
+            <option value="ERRO">Erro</option>
+            <option value="BLOQUEADO">Bloqueado</option>
+            <option value="ANALISE">Análise</option>
+            <option value="REVISÃO">Revisão</option>
+            <option value="CANCELADO">Cancelado</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[#0f172a] mb-2">Observação SalesOps</label>
+          <textarea
+            value={editForm.observacao_sales_ops}
+            onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
+            rows={5}
+            className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
+            placeholder="Digite a observação..."
+          />
+        </div>
+      </EditModal>
     </div>
   );
 }

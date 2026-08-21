@@ -151,7 +151,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
     }
     if (permissions.canAccessConfiguration)
-      //items.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
+      items.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     return items;
   }, [permissions]);
@@ -168,7 +168,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
     if (permissions.canAccessRanking) flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
     if (permissions.canAccessConfiguration)
-      //flat.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
+      flat.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
     return flat.slice(0, 5);
   }, [permissions]);
