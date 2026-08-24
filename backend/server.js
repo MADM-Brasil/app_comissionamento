@@ -59,7 +59,7 @@ app.use(helmet({
       imgSrc: [ "'self'",
   "data:",
   "blob:",
-  "https://d2xsxph8kpxj0f.cloudfront.net",     // imagem do ranking
+  "https://d2xsxph8kpxj0f.cloudfront.net",     
   "https://*.cloudfront.net"],
       connectSrc: ["'self'", process.env.FRONTEND_URL || 'http://localhost:3007'],
       fontSrc: ["'self'"],
