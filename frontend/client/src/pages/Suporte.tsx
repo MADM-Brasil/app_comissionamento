@@ -117,6 +117,24 @@ const formatCPF = (cpf: string): string => {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
+// Função para verificar se uma data está dentro de um intervalo (formato YYYY-MM-DD)
+const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string): boolean => {
+  if (!startDate && !endDate) return true;
+  const dateStr = new Date(dateISO).toISOString().slice(0, 10);
+  if (startDate && dateStr < startDate) return false;
+  if (endDate && dateStr > endDate) return false;
+  return true;
+};
+
+// Função para obter a data de hoje em formato YYYY-MM-DD
+const getTodayString = (): string => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 const getStatusInfo = (status: string) => {
   const map: Record<string, { label: string; icon: React.ReactElement; className: string }> = {
     pendente: { label: "Pendente", icon: <Clock className="w-3 h-3" />, className: "bg-gray-100 text-gray-600" },
@@ -276,9 +294,15 @@ function MovimentacaoTab() {
           if (ticket.observacao_sales_ops) {
             try {
               const parsed = JSON.parse(ticket.observacao_sales_ops);
-              if (parsed.hubspot) hubspotData = parsed.hubspot;
-              if (parsed.motivoOriginal) motivoOriginal = parsed.motivoOriginal;
-              if (parsed.observacao) observacao = parsed.observacao;
+              if (parsed.hubspot) {
+                hubspotData = parsed.hubspot;
+              }
+              if (parsed.motivoOriginal) {
+                motivoOriginal = parsed.motivoOriginal;
+              }
+              if (parsed.observacao) {
+                observacao = parsed.observacao;
+              }
             } catch (e) {
               observacao = ticket.observacao_sales_ops;
             }
@@ -487,7 +511,7 @@ function MovimentacaoTab() {
             <table className="simple-table">
               <thead><tr><th>Data/Hora</th><th>Cliente</th><th>E-mail</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Obs. SalesOps</th><th>Resultado</th></tr></thead>
               <tbody>{filteredMovements.map(m => {
-                const statusParaExibir = m.status; // Usa status_mapeamento
+                const statusParaExibir = m.status;
                 const info = getStatusInfo(statusParaExibir);
                 return (
                   <tr key={m.id}>
@@ -988,6 +1012,8 @@ function MovimentacoesSuporteTab() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
+  const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
+  const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
   const [editForm, setEditForm] = useState<{ status_mapeamento: string; observacao_sales_ops: string }>({ status_mapeamento: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
@@ -1071,7 +1097,11 @@ function MovimentacoesSuporteTab() {
     }
   };
 
-  const filteredTickets = tickets.filter(t => filterStatus === "todos" || t.status_mapeamento === filterStatus);
+  const filteredTickets = tickets.filter(t => {
+    const statusMatch = filterStatus === "todos" || t.status_mapeamento === filterStatus;
+    if (!statusMatch) return false;
+    return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
+  });
 
   if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>;
 
@@ -1081,7 +1111,7 @@ function MovimentacoesSuporteTab() {
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Movimentações (Suporte)</h2>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Filtrar por status" aria-label="Filtrar tickets por status">
               <option value="todos">Todos</option>
               <option value="pendente">Pendente</option>
@@ -1091,6 +1121,21 @@ function MovimentacoesSuporteTab() {
               <option value="aviso">Aviso</option>
               <option value="erro">Erro</option>
             </select>
+            <input
+              type="date"
+              value={filterDataInicio}
+              onChange={e => setFilterDataInicio(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data inicial"
+            />
+            <span className="text-sm text-[#64748b]">até</span>
+            <input
+              type="date"
+              value={filterDataFim}
+              onChange={e => setFilterDataFim(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data final"
+            />
           </div>
         </div>
         {filteredTickets.length === 0 ? (
@@ -1206,6 +1251,8 @@ function ReportesSuporteTab() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
+  const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
+  const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketSuporte | null>(null);
   const [editForm, setEditForm] = useState<{ status: string; observacao_sales_ops: string }>({ status: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
@@ -1263,7 +1310,11 @@ function ReportesSuporteTab() {
     }
   };
 
-  const filteredTickets = tickets.filter(t => filterStatus === "todos" || t.status === filterStatus);
+  const filteredTickets = tickets.filter(t => {
+    const statusMatch = filterStatus === "todos" || t.status === filterStatus;
+    if (!statusMatch) return false;
+    return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
+  });
 
   if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>;
 
@@ -1273,7 +1324,7 @@ function ReportesSuporteTab() {
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <select
               value={filterStatus}
               onChange={e => setFilterStatus(e.target.value)}
@@ -1291,6 +1342,21 @@ function ReportesSuporteTab() {
               <option value="REVISÃO">Revisão</option>
               <option value="CANCELADO">Cancelado</option>
             </select>
+            <input
+              type="date"
+              value={filterDataInicio}
+              onChange={e => setFilterDataInicio(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data inicial"
+            />
+            <span className="text-sm text-[#64748b]">até</span>
+            <input
+              type="date"
+              value={filterDataFim}
+              onChange={e => setFilterDataFim(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data final"
+            />
           </div>
         </div>
         {filteredTickets.length === 0 ? (
