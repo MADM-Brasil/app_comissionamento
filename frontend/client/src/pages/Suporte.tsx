@@ -1,4 +1,4 @@
-// src/pages/Suporte.tsx
+// client/src/pages/Suporte.tsx
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
@@ -117,7 +117,6 @@ const formatCPF = (cpf: string): string => {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
-// Função para verificar se uma data está dentro de um intervalo (formato YYYY-MM-DD)
 const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string): boolean => {
   if (!startDate && !endDate) return true;
   const dateStr = new Date(dateISO).toISOString().slice(0, 10);
@@ -126,7 +125,6 @@ const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string
   return true;
 };
 
-// Função para obter a data de hoje em formato YYYY-MM-DD
 const getTodayString = (): string => {
   const now = new Date();
   const year = now.getFullYear();
@@ -158,7 +156,6 @@ const getStatusInfo = (status: string) => {
   return map[status] || { label: status, icon: <FileText className="w-3 h-3" />, className: "bg-gray-100 text-gray-600" };
 };
 
-// ---------------------- Constantes de equipes excluídas ----------------------
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael',
@@ -171,7 +168,6 @@ const isExcludedTeam = (teamName: string): boolean => {
   return EXCLUDED_TEAMS.some(t => t.trim().toLowerCase() === n);
 };
 
-// ---------------------- Função auxiliar para CSRF ----------------------
 function getCsrfHeaders() {
   const token = localStorage.getItem('csrfToken') || '';
   return {
@@ -180,7 +176,6 @@ function getCsrfHeaders() {
   };
 }
 
-// ---------------------- Componente principal ----------------------
 export default function Suporte() {
   const [activeTab, setActiveTab] = useState<"movimentacao" | "reportar" | "salesops">("reportar");
   const { getAccessLevel, LEVELS } = useAccessControl();
@@ -220,7 +215,6 @@ export default function Suporte() {
   );
 }
 
-// ---------------------- Aba Movimentação ----------------------
 function MovimentacaoTab() {
   const {
     currentUser,
@@ -242,6 +236,8 @@ function MovimentacaoTab() {
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [movements, setMovements] = useState<MovementItem[]>([]);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
+  const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
+  const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [loadingHistory, setLoadingHistory] = useState(true);
   const isSubmitting = useRef(false);
 
@@ -294,15 +290,9 @@ function MovimentacaoTab() {
           if (ticket.observacao_sales_ops) {
             try {
               const parsed = JSON.parse(ticket.observacao_sales_ops);
-              if (parsed.hubspot) {
-                hubspotData = parsed.hubspot;
-              }
-              if (parsed.motivoOriginal) {
-                motivoOriginal = parsed.motivoOriginal;
-              }
-              if (parsed.observacao) {
-                observacao = parsed.observacao;
-              }
+              if (parsed.hubspot) hubspotData = parsed.hubspot;
+              if (parsed.motivoOriginal) motivoOriginal = parsed.motivoOriginal;
+              if (parsed.observacao) observacao = parsed.observacao;
             } catch (e) {
               observacao = ticket.observacao_sales_ops;
             }
@@ -407,7 +397,11 @@ function MovimentacaoTab() {
     }
   };
 
-  const filteredMovements = movements.filter(m => filterStatus === "todos" || m.status === filterStatus);
+  const filteredMovements = movements.filter(m => {
+    const statusMatch = filterStatus === "todos" || m.status === filterStatus;
+    if (!statusMatch) return false;
+    return isWithinDateRange(m.timestamp, filterDataInicio, filterDataFim);
+  });
   const statusOptions = ["todos", "pendente", "processando", "concluido", "suporte", "aviso", "erro"];
 
   const exportHistory = () => {
@@ -499,14 +493,31 @@ function MovimentacaoTab() {
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
-          <div className="flex gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">{statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}</option>)}</select>
+          <div className="flex flex-wrap items-center gap-2">
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
+              {statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+            </select>
+            <input
+              type="date"
+              value={filterDataInicio}
+              onChange={e => setFilterDataInicio(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data inicial"
+            />
+            <span className="text-sm text-[#64748b]">até</span>
+            <input
+              type="date"
+              value={filterDataFim}
+              onChange={e => setFilterDataFim(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data final"
+            />
             <button onClick={exportHistory} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"><Download className="w-3 h-3" /> Exportar</button>
             <button onClick={clearHistory} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"><X className="w-3 h-3" /> Limpar</button>
           </div>
         </div>
         {loadingHistory ? <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div> :
-          filteredMovements.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada</div> :
+          filteredMovements.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada no período</div> :
           <div className="overflow-x-auto">
             <table className="simple-table">
               <thead><tr><th>Data/Hora</th><th>Cliente</th><th>E-mail</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Obs. SalesOps</th><th>Resultado</th></tr></thead>
@@ -552,6 +563,8 @@ function ReportarTab() {
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [reports, setReports] = useState<ReportItem[]>([]);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
+  const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
+  const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [loadingReports, setLoadingReports] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -719,7 +732,11 @@ function ReportarTab() {
     a.click(); URL.revokeObjectURL(url);
   };
 
-  const filteredReports = reports.filter(r => filterStatus === "todos" || r.status === filterStatus);
+  const filteredReports = reports.filter(r => {
+    const statusMatch = filterStatus === "todos" || r.status === filterStatus;
+    if (!statusMatch) return false;
+    return isWithinDateRange(r.data, filterDataInicio, filterDataFim);
+  });
   const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "ANALISE", "REVISÃO", "CANCELADO"];
 
   const viewDetails = (report: ReportItem) => {
@@ -853,10 +870,25 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
               {statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}
             </select>
+            <input
+              type="date"
+              value={filterDataInicio}
+              onChange={e => setFilterDataInicio(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data inicial"
+            />
+            <span className="text-sm text-[#64748b]">até</span>
+            <input
+              type="date"
+              value={filterDataFim}
+              onChange={e => setFilterDataFim(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data final"
+            />
             <button type="button" onClick={exportReports} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]">
               <Download className="w-3 h-3" /> Exportar
             </button>
@@ -870,7 +902,7 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
         {loadingReports ? (
           <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>
         ) : filteredReports.length === 0 ? (
-          <div className="text-center py-8 text-[#64748b]">Nenhum reporte encontrado</div>
+          <div className="text-center py-8 text-[#64748b]">Nenhum reporte encontrado no período</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="simple-table">
