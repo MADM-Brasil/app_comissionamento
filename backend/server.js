@@ -56,7 +56,11 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "blob:"],
+      imgSrc: [ "'self'",
+  "data:",
+  "blob:",
+  "https://d2xsxph8kpxj0f.cloudfront.net",     // imagem do ranking
+  "https://*.cloudfront.net"],
       connectSrc: ["'self'", process.env.FRONTEND_URL || 'http://localhost:3007'],
       fontSrc: ["'self'"],
     },
