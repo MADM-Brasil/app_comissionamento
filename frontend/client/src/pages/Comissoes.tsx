@@ -190,12 +190,17 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                             <span className="font-bold text-[#EA8C1D]">×{camp.multiplicador}</span>
                           </div>
                         ))}
-                        {campanhasAssinados.map((camp: any, cIdx: number) => (
-                          <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Assinados valem Gols</span>
-                            <span className="font-bold text-[#16A34A]">+1 gol/assinado</span>
-                          </div>
-                        ))}
+                        {campanhasAssinados.map((camp: any, cIdx: number) => {
+                          const proporcao = Number(camp.multiplicador) || 1;
+                          return (
+                            <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
+                              <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Assinados valem Gols</span>
+                              <span className="font-bold text-[#16A34A]">
+                                {proporcao === 1 ? '+1 gol/assinado' : `+1 gol a cada ${proporcao} assinados`}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -575,7 +580,7 @@ export default function Comissoes() {
 
   const calcPercent = (value: number, target: number) => target > 0 ? Math.min((value / target) * 100, 100) : 0;
 
-  // ========== EVOLUÇÃO DIÁRIA (CORRIGIDO) ==========
+  // ========== EVOLUÇÃO DIÁRIA ==========
   const evolucaoDiariaData = useMemo(() => {
     const now = new Date();
     const dayOfWeek = now.getDay();

@@ -151,11 +151,13 @@ export default function Configuration() {
   const [loadingCampanhas, setLoadingCampanhas] = useState(false);
 
   const isAssinados = campanhaCategoria === "Assinados";
+  // Quando a categoria muda para Assinados, ajusta o multiplicador para 1 (proporção padrão)
   useEffect(() => {
     if (isAssinados) {
-      setCampanhaMultiplicador(1.0);
+      setCampanhaMultiplicador(1);
     } else {
-      if (campanhaMultiplicador === 1.0) {
+      // Se for Gols ou outros, mantém 2.0 como padrão (caso esteja em 1)
+      if (campanhaMultiplicador === 1) {
         setCampanhaMultiplicador(2.0);
       }
     }
@@ -862,32 +864,36 @@ export default function Configuration() {
                   </select>
                 </div>
                 <div>
-                  <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
-                    {isAssinados ? "Assinados = Gol" : "Multiplicador (1.5 – 2.0)"}
-                  </label>
-                  {isAssinados ? (
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        value={campanhaMultiplicador}
-                        disabled
-                        className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-gray-100 text-center disabled:opacity-50 cursor-not-allowed"
-                      />
-                      <span className="text-xs text-[#64748b] whitespace-nowrap">(fixo)</span>
-                    </div>
-                  ) : (
-                    <input
-                      id="campanhaMultiplicador"
-                      type="number"
-                      min={1.5}
-                      max={2.0}
-                      step={0.1}
-                      value={campanhaMultiplicador}
-                      onChange={(e) => setCampanhaMultiplicador(parseFloat(e.target.value) || 1.5)}
-                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-                    />
-                  )}
-                </div>
+  <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
+    {isAssinados ? "Proporção (assinados por gol)" : "Multiplicador (1.5 – 2.0)"}
+  </label>
+  {isAssinados ? (
+    <input
+      id="campanhaMultiplicador"
+      type="number"
+      min={1}
+      max={5}
+      step={1}
+      value={campanhaMultiplicador}
+      onChange={(e) => {
+        const val = parseInt(e.target.value) || 1;
+        setCampanhaMultiplicador(Math.min(5, Math.max(1, val)));
+      }}
+      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+    />
+  ) : (
+    <input
+      id="campanhaMultiplicador"
+      type="number"
+      min={1.5}
+      max={2.0}
+      step={0.1}
+      value={campanhaMultiplicador}
+      onChange={(e) => setCampanhaMultiplicador(parseFloat(e.target.value) || 1.5)}
+      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+    />
+  )}
+</div>
                 <div>
                   <label htmlFor="campanhaProduto" className="block text-xs font-medium text-[#64748b] mb-1">
                     Produto
@@ -968,8 +974,11 @@ export default function Configuration() {
                               </td>
                               <td className="text-xs font-medium">{camp.tipo}</td>
                               <td className="text-center text-xs font-bold">
-                                {camp.multiplicador.toFixed(1)}x
-                                {camp.tipo === "Assinados" && " (1:1)"}
+                                {camp.tipo === "Assinados" ? (
+                                  `${camp.multiplicador}x (1 gol a cada ${camp.multiplicador} assinados)`
+                                ) : (
+                                  `${camp.multiplicador.toFixed(1)}x`
+                                )}
                               </td>
                               <td className="text-xs">{camp.produto}</td>
                               <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>

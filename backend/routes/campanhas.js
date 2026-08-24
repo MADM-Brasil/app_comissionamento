@@ -9,7 +9,7 @@ function requireAuth(req, res, next) {
   if (!req.session.isAuthenticated || !req.session.userId) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
   }
-  next();
+  next(); 
 }
 
 // Função para normalizar cargos (minúsculas, sem acentos, espaços → underscore)
@@ -228,7 +228,9 @@ router.post('/aplicar', requireAuth, async (req, res) => {
     const campanhasAssinados = result.rows.filter(c => (c.tipo || '').toUpperCase() === 'ASSINADOS');
 
     function aplicarCampanhas(dailyData, campanhasGols, campanhasAssinados, metaGolsAssinados, metaGolsGanhos) {
+      // Mapa: data -> maior multiplicador GOLS
       const golsMap = new Map();
+      // Mapa: data -> menor proporção (multiplicador) para ASSINADOS
       const assinadosMap = new Map();
 
       const normalizarData = (data) => (data || '').split('T')[0];
@@ -236,17 +238,18 @@ router.post('/aplicar', requireAuth, async (req, res) => {
       for (const camp of campanhasGols) {
         const dateKey = normalizarData(camp.data_publicacao);
         const atual = golsMap.get(dateKey);
-        if (!atual || camp.multiplicador > atual.multiplicador) {
-          golsMap.set(dateKey, camp);
+        if (!atual || camp.multiplicador > atual) {
+          golsMap.set(dateKey, camp.multiplicador);
         }
       }
 
       for (const camp of campanhasAssinados) {
         const dateKey = normalizarData(camp.data_publicacao);
-        if (!assinadosMap.has(dateKey)) {
-          assinadosMap.set(dateKey, []);
+        const prop = Number(camp.multiplicador) || 1;
+        const current = assinadosMap.get(dateKey);
+        if (!current || prop < current) {
+          assinadosMap.set(dateKey, prop);
         }
-        assinadosMap.get(dateKey).push(camp);
       }
 
       let totalGols = 0;
@@ -255,19 +258,22 @@ router.post('/aplicar', requireAuth, async (req, res) => {
         const ganhos = day.ganhos || 0;
         const dateKey = (day.date || '').slice(0, 10);
 
+        // Gols base (sem campanhas)
         let golsDoDia = Math.min(
           Math.floor(assinados / metaGolsAssinados),
           Math.floor(ganhos / metaGolsGanhos)
         );
 
-        const campGols = golsMap.get(dateKey);
-        if (campGols) {
-          golsDoDia = golsDoDia * (campGols.multiplicador || 1);
+        // Aplica campanha GOLS (multiplica)
+        const mult = golsMap.get(dateKey);
+        if (mult) {
+          golsDoDia = golsDoDia * mult;
         }
 
-        const campsAssinados = assinadosMap.get(dateKey);
-        if (campsAssinados) {
-          golsDoDia += assinados;
+        // Aplica campanha ASSINADOS (proporção)
+        const proporcao = assinadosMap.get(dateKey);
+        if (proporcao) {
+          golsDoDia += Math.floor(assinados / proporcao);
         }
 
         totalGols += golsDoDia;

@@ -151,7 +151,7 @@ export class Calculator {
    * 
    * Regras:
    * - Campanha GOLS: multiplica os gols do dia pelo multiplicador.
-   * - Campanha ASSINADOS: adiciona 1 gol por assinado no dia.
+   * - Campanha ASSINADOS: adiciona 1 gol a cada N assinados (proporção = multiplicador).
    * 
    * @param dailyData - Array de { date, assinados, ganhos }
    * @param metaGolsAssinados
@@ -176,7 +176,7 @@ export class Calculator {
 
     // Mapas por data (normalizada)
     const golsMap = new Map<string, number>();       // multiplicador máximo de campanha GOLS
-    const assinadosMap = new Map<string, boolean>(); // data com campanha ASSINADOS
+    const assinadosMap = new Map<string, number>();  // proporção (menor) para campanha ASSINADOS
 
     for (const camp of campanhasAtivas) {
       const dateKey = (camp.data_publicacao || '').split('T')[0];
@@ -188,7 +188,11 @@ export class Calculator {
         const mult = Number(camp.multiplicador) || 1;
         if (mult > atual) golsMap.set(dateKey, mult);
       } else if (tipo === 'ASSINADOS') {
-        assinadosMap.set(dateKey, true);
+        const prop = Number(camp.multiplicador) || 1;
+        const current = assinadosMap.get(dateKey);
+        if (!current || prop < current) {
+          assinadosMap.set(dateKey, prop);
+        }
       }
     }
 
@@ -201,11 +205,12 @@ export class Calculator {
       const mult = golsMap.get(dateKey);
       if (mult) gols = gols * mult;
 
-      // Aplica campanha ASSINADOS (cada assinado = +1 gol)
+      // Aplica campanha ASSINADOS (cada N assinados = +1 gol)
       if (assinadosMap.has(dateKey)) {
         const dayData = normalizedDailyData.find(d => d.date === dateKey);
         if (dayData) {
-          gols += dayData.assinados || 0;
+          const proporcao = assinadosMap.get(dateKey) || 1;
+          gols += Math.floor(dayData.assinados / proporcao);
         }
       }
 
