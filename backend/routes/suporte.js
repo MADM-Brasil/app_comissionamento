@@ -124,6 +124,8 @@ router.post('/ticket-movimentacao', async (req, res) => {
       origem_equipe: equipe_origem_nome || '',
       destino_colaborador: colaborador_destino_nome || '',
       destino_equipe: equipe_destino_nome || '',
+      solicitante_email: req.user?.email || '',
+      solicitante_nome: colaborador_origem_nome || req.user?.nome || '',
     };
 
     const baseResult = await pool.query(
@@ -442,7 +444,7 @@ router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => 
 // ==================== LISTAGEM DE TICKETS DE MOVIMENTAÇÃO ====================
 router.get('/tickets-movimentacao', async (req, res) => {
   try {
-    const { status_mapeamento, colaborador_origem_nome, todos } = req.query;
+    const { status_mapeamento, colaborador_origem_nome, todos, solicitante_email } = req.query;
     let query = `
       SELECT 
         tml.id_ticket_movimentacao,
@@ -477,7 +479,10 @@ router.get('/tickets-movimentacao', async (req, res) => {
     }
 
     if (todos !== '1') {
-      if (colaborador_origem_nome) {
+      if (solicitante_email) {
+        query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_email', ''))) = LOWER(TRIM($${paramIndex++}))`;
+        params.push(solicitante_email);
+      } else if (colaborador_origem_nome) {
         query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'origem_colaborador', ''))) = LOWER(TRIM($${paramIndex++}))`;
         params.push(colaborador_origem_nome);
       } else {
@@ -545,51 +550,104 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Nenhum campo para atualizar.' });
     }
 
-    const setClauses = [];
-    const values = [];
-    let paramIndex = 1;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
 
-    if (status_mapeamento !== undefined) {
-      setClauses.push(`status_mapeamento = $${paramIndex++}`);
-      values.push(status_mapeamento);
-    }
+      const setClauses = [];
+      const values = [];
+      let paramIndex = 1;
 
-    if (observacao_sales_ops !== undefined) {
-      const current = await pool.query(
-        `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
-        [id]
-      );
-
-      let jsonAtual = {};
-      if (current.rowCount > 0 && current.rows[0].observacao_sales_ops) {
-        try {
-          jsonAtual = JSON.parse(current.rows[0].observacao_sales_ops);
-        } catch (e) {
-          jsonAtual = {};
-        }
+      if (status_mapeamento !== undefined) {
+        setClauses.push(`status_mapeamento = $${paramIndex++}`);
+        values.push(status_mapeamento);
       }
 
-      jsonAtual.observacao = observacao_sales_ops;
-      setClauses.push(`observacao_sales_ops = $${paramIndex++}`);
-      values.push(JSON.stringify(jsonAtual));
+      if (observacao_sales_ops !== undefined) {
+        const current = await client.query(
+          `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
+          [id]
+        );
+
+        let jsonAtual = {};
+        if (current.rowCount > 0 && current.rows[0].observacao_sales_ops) {
+          try {
+            jsonAtual = JSON.parse(current.rows[0].observacao_sales_ops);
+          } catch (e) {
+            jsonAtual = {};
+          }
+        }
+
+        jsonAtual.observacao = observacao_sales_ops;
+        setClauses.push(`observacao_sales_ops = $${paramIndex++}`);
+        values.push(JSON.stringify(jsonAtual));
+      }
+
+      setClauses.push(`atualizado_em = NOW()`);
+
+      const updateMovimentacaoQuery = `
+        UPDATE app_comissionamento.tickets_movimentacao_lead
+        SET ${setClauses.join(', ')}
+        WHERE id_ticket_movimentacao = $${paramIndex}
+        RETURNING id_ticket_movimentacao, ticket_id
+      `;
+      values.push(id);
+
+      const movResult = await client.query(updateMovimentacaoQuery, values);
+      if (movResult.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ success: false, error: 'Ticket de movimentação não encontrado.' });
+      }
+
+      // Sincroniza status com tickets_suporte
+      if (status_mapeamento !== undefined) {
+        const ticketId = movResult.rows[0].ticket_id;
+        const mappedStatus = STATUS_MAP[status_mapeamento] || status_mapeamento;
+
+        await client.query(
+          `UPDATE app_comissionamento.tickets_suporte
+           SET status = $1, atualizado_em = NOW()
+           WHERE id_ticket = $2`,
+          [mappedStatus, ticketId]
+        );
+      }
+
+      // Notificação SSE
+      try {
+        const ticketInfo = await client.query(
+          `SELECT ts.titulo, ts.metadados->>'solicitante_email' AS solicitante_email
+           FROM app_comissionamento.tickets_suporte ts
+           JOIN app_comissionamento.tickets_movimentacao_lead tml ON tml.ticket_id = ts.id_ticket
+           WHERE tml.id_ticket_movimentacao = $1`,
+          [id]
+        );
+
+        if (ticketInfo.rowCount > 0) {
+          const { titulo, solicitante_email } = ticketInfo.rows[0];
+          if (solicitante_email) {
+            const statusLabel = status_mapeamento || 'inalterado';
+            const obsLabel = observacao_sales_ops !== undefined ? observacao_sales_ops : 'inalterada';
+            broadcastNotification({
+              tipo: 'info',
+              titulo: '📢 Atualização da movimentação',
+              mensagem: `Sua solicitação de movimentação "${titulo}" foi atualizada.\nNovo status: ${statusLabel}.\nObservação: ${obsLabel}`,
+              destinatario: solicitante_email,
+              data: new Date().toISOString(),
+            });
+          }
+        }
+      } catch (notifErr) {
+        console.error('Erro ao enviar notificação SSE (movimentação):', notifErr);
+      }
+
+      await client.query('COMMIT');
+      return res.json({ success: true, message: 'Ticket atualizado com sucesso.' });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-
-    setClauses.push(`atualizado_em = NOW()`);
-
-    const updateMovimentacaoQuery = `
-      UPDATE app_comissionamento.tickets_movimentacao_lead
-      SET ${setClauses.join(', ')}
-      WHERE id_ticket_movimentacao = $${paramIndex}
-      RETURNING id_ticket_movimentacao
-    `;
-    values.push(id);
-
-    const movResult = await pool.query(updateMovimentacaoQuery, values);
-    if (movResult.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Ticket de movimentação não encontrado.' });
-    }
-
-    return res.json({ success: true, message: 'Ticket atualizado com sucesso.' });
   } catch (err) {
     console.error('Erro ao atualizar ticket:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
@@ -635,33 +693,31 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Ticket de suporte não encontrado.' });
     }
 
-    if (status && ['CONCLUÍDO', 'BLOQUEADO', 'ANALISE'].includes(status)) {
-      try {
-        const ticketResult = await pool.query(
-          `SELECT titulo, metadados->>'solicitante_email' AS solicitante_email
-           FROM app_comissionamento.tickets_suporte
-           WHERE id_ticket = $1`,
-          [id]
-        );
+    // Notificação SSE
+    try {
+      const ticketResult = await pool.query(
+        `SELECT titulo, metadados->>'solicitante_email' AS solicitante_email
+         FROM app_comissionamento.tickets_suporte
+         WHERE id_ticket = $1`,
+        [id]
+      );
 
-        if (ticketResult.rows.length > 0) {
-          const { titulo, solicitante_email } = ticketResult.rows[0];
-          if (solicitante_email) {
-            broadcastNotification({
-              tipo: 'info',
-              titulo: '📢 Atualização da solicitação',
-              mensagem: `Sua solicitação "${titulo}" foi marcada como ${status}.`,
-              destinatario: solicitante_email,
-              data: new Date().toISOString(),
-            });
-            console.log(`🔔 Notificação enviada para ${solicitante_email} sobre o ticket ${id}`);
-          } else {
-            console.warn(`⚠️ E-mail do solicitante não encontrado para o ticket ${id}`);
-          }
+      if (ticketResult.rows.length > 0) {
+        const { titulo, solicitante_email } = ticketResult.rows[0];
+        if (solicitante_email) {
+          const statusLabel = status || 'inalterado';
+          const obsLabel = observacao_sales_ops !== undefined ? observacao_sales_ops : 'inalterada';
+          broadcastNotification({
+            tipo: 'info',
+            titulo: '📢 Atualização da solicitação',
+            mensagem: `Sua solicitação "${titulo}" foi atualizada.\nNovo status: ${statusLabel}.\nObservação: ${obsLabel}`,
+            destinatario: solicitante_email,
+            data: new Date().toISOString(),
+          });
         }
-      } catch (notifErr) {
-        console.error('Erro ao enviar notificação SSE:', notifErr);
       }
+    } catch (notifErr) {
+      console.error('Erro ao enviar notificação SSE (suporte):', notifErr);
     }
 
     return res.json({ success: true, message: 'Ticket de suporte atualizado com sucesso.' });

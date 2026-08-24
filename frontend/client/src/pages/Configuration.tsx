@@ -42,6 +42,15 @@ const normalize = (str: string): string =>
 const normalizeRole = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+// ✅ Função para obter a data de hoje no formato YYYY-MM-DD
+const getTodayString = (): string => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 function formatMonthYear(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '--';
   const [year, month] = dateStr.split('-');
@@ -149,6 +158,10 @@ export default function Configuration() {
     validacao_financeiro: boolean;
   }>>([]);
   const [loadingCampanhas, setLoadingCampanhas] = useState(false);
+
+  // ✅ Estados do filtro de data com padrão na data atual
+  const [filterCampanhaDataInicio, setFilterCampanhaDataInicio] = useState(getTodayString());
+  const [filterCampanhaDataFim, setFilterCampanhaDataFim] = useState(getTodayString());
 
   const isAssinados = campanhaCategoria === "Assinados";
   // Quando a categoria muda para Assinados, ajusta o multiplicador para 1 (proporção padrão)
@@ -769,6 +782,15 @@ export default function Configuration() {
     }
   };
 
+  // ✅ Filtro de campanhas por data
+  const filteredCampanhas = useMemo(() => {
+    return campanhasRegistradas.filter(camp => {
+      if (filterCampanhaDataInicio && camp.data_publicacao < filterCampanhaDataInicio) return false;
+      if (filterCampanhaDataFim && camp.data_publicacao > filterCampanhaDataFim) return false;
+      return true;
+    });
+  }, [campanhasRegistradas, filterCampanhaDataInicio, filterCampanhaDataFim]);
+
   // ========== RENDER ==========
   return (
     <DashboardLayout title="Configurações" subtitle="Gerencie metas e pesos do sistema">
@@ -939,16 +961,43 @@ export default function Configuration() {
             {/* Lista de campanhas */}
             {mostrarCampanhas && (
               <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex flex-wrap items-center justify-between mb-3 gap-2">
                   <span className="text-xs font-medium text-[#64748b]">
-                    {campanhasRegistradas.length} campanha(s) registrada(s)
+                    {filteredCampanhas.length} campanha(s) registrada(s)
                   </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="date"
+                      value={filterCampanhaDataInicio}
+                      onChange={(e) => setFilterCampanhaDataInicio(e.target.value)}
+                      className="px-2 py-1 text-xs rounded-lg border border-[#e2e8f0] bg-white"
+                      title="Data inicial"
+                    />
+                    <span className="text-xs text-[#64748b]">até</span>
+                    <input
+                      type="date"
+                      value={filterCampanhaDataFim}
+                      onChange={(e) => setFilterCampanhaDataFim(e.target.value)}
+                      className="px-2 py-1 text-xs rounded-lg border border-[#e2e8f0] bg-white"
+                      title="Data final"
+                    />
+                    <button
+                      onClick={() => {
+                        setFilterCampanhaDataInicio(getTodayString());
+                        setFilterCampanhaDataFim(getTodayString());
+                      }}
+                      className="text-xs text-[#2F6FED] hover:underline"
+                      title="Voltar para data atual"
+                    >
+                      Hoje
+                    </button>
+                  </div>
                   {loadingCampanhas && <span className="text-xs text-[#94a3b8]">Carregando...</span>}
                 </div>
 
-                {campanhasRegistradas.length === 0 ? (
+                {filteredCampanhas.length === 0 ? (
                   <div className="text-center py-6 text-sm text-[#94a3b8]">
-                    Nenhuma campanha registrada neste mês.
+                    Nenhuma campanha encontrada no período selecionado.
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -965,7 +1014,7 @@ export default function Configuration() {
                         </tr>
                       </thead>
                       <tbody>
-                        {campanhasRegistradas.map((camp) => {
+                        {filteredCampanhas.map((camp) => {
                           const chave = `${camp.tipo}-${camp.data_publicacao}-${camp.produto}`;
                           return (
                             <tr key={chave}>
