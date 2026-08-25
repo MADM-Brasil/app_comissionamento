@@ -92,7 +92,7 @@ app.use((req, res, next) => {
     res.cookie('csrf-token', token, {
       httpOnly: false,
       secure: isProduction,
-      sameSite: 'lax',   // same-origin: lax é suficiente
+      sameSite: 'lax',
       path: '/',
     });
     req.csrfToken = token;
@@ -128,7 +128,7 @@ app.use(session({
   cookie: {
     secure: isProduction,
     httpOnly: true,
-    sameSite: 'lax',   // same-origin, não é necessário 'none'
+    sameSite: 'lax',
   },
 }));
 
@@ -188,12 +188,31 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/auth/verify-2fa', async (req, res) => {
   try {
+    // Log temporário para diagnóstico
+    console.log('🔎 [2FA DEBUG] Sessão:', {
+      userId: req.session?.userId,
+      tempTokenSession: req.session?.tempToken,
+      body: req.body,
+      cookies: req.cookies,
+    });
+
     const { tempToken, code } = req.body;
     const userId = req.session.userId;
-    if (!userId || !tempToken) return res.status(400).json({ success: false, error: 'Sessão inválida.' });
+    const sessionTempToken = req.session.tempToken;
+
+    if (!userId || !tempToken) {
+      return res.status(400).json({ success: false, error: 'Sessão inválida.' });
+    }
+
+    // Verifica se o tempToken enviado coincide com o da sessão
+    if (tempToken !== sessionTempToken) {
+      return res.status(400).json({ success: false, error: 'Token temporário inválido.' });
+    }
 
     const verification = twoFactorService.verifyCode(userId, code);
-    if (!verification.success) return res.status(401).json({ success: false, error: verification.error });
+    if (!verification.success) {
+      return res.status(401).json({ success: false, error: verification.error });
+    }
 
     delete req.session.tempToken;
     req.session.isAuthenticated = true;
