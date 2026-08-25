@@ -27,6 +27,9 @@ const STATUS_MAP = {
   suporte: 'Aguardando Suporte',
   aviso: 'Aviso',
   erro: 'Erro',
+  bloqueado: 'Bloqueado',
+  fora_pipeline: 'Fora do Pipeline',
+  no_pipeline: 'No Pipeline',
 };
 
 // ==================== CONFIGURAÇÃO DE UPLOAD ====================
@@ -279,6 +282,38 @@ router.post('/ticket-movimentacao', async (req, res) => {
       hubspotData.mensagem = `Erro na integração HubSpot: ${error.message}`;
     }
 
+    // ==================== ATUALIZA STATUS_MAPEAMENTO ====================
+    let statusFinal = 'pendente';
+    switch (hubspotData.status) {
+      case 'concluido':
+        statusFinal = 'concluido';
+        break;
+      case 'bloqueado':
+        statusFinal = 'bloqueado';
+        break;
+      case 'suporte':
+        statusFinal = 'suporte';
+        break;
+      case 'aviso':
+        statusFinal = 'aviso';
+        break;
+      case 'erro':
+        statusFinal = 'erro';
+        break;
+      case 'fora_pipeline':
+        statusFinal = 'fora_pipeline';
+        break;
+      default:
+        statusFinal = 'pendente';
+    }
+
+    await pool.query(
+      `UPDATE app_comissionamento.tickets_movimentacao_lead
+       SET status_mapeamento = $1
+       WHERE id_ticket_movimentacao = $2`,
+      [statusFinal, movimentacaoId]
+    );
+
     const observacaoJson = JSON.stringify({
       hubspot: hubspotData,
       motivoOriginal: motivoSolicitacao || '',
@@ -292,6 +327,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       [observacaoJson, movimentacaoId]
     );
 
+    // ==================== NOTIFICAÇÃO TEAMS ====================
     try {
       await teamsNotificador.enviar({
         titulo: 'Movimentação de Lead',
