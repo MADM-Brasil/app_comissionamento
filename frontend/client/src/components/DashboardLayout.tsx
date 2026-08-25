@@ -71,6 +71,30 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     collaborators,
   } = useAppStore();
 
+  // ------------------------------------------------------------------
+  // NOVO: Obtém o e‑mail do colaborador filtrado (ajuste o nome do estado
+  // conforme sua store, ex.: selectedCollaboratorEmail ou filteredUserEmail)
+  // ------------------------------------------------------------------
+  const selectedCollaboratorEmail = useAppStore(
+    (state) => (state as any).selectedCollaboratorEmail ?? (state as any).selectedCollaborator?.email ?? null
+  );
+
+  // Determina se o colaborador filtrado é diferente do usuário logado
+  const isViewingOtherCollaborator = !!selectedCollaboratorEmail &&
+    !!currentUser?.email &&
+    selectedCollaboratorEmail !== currentUser.email;
+
+  // Força hideValues = true enquanto estiver visualizando outro colaborador
+  useEffect(() => {
+    if (isViewingOtherCollaborator && !hideValues) {
+      toggleHideValues();
+    }
+  }, [isViewingOtherCollaborator, hideValues, toggleHideValues]);
+
+  // Calcula o valor efetivo a ser usado (já é forçado pela store via useEffect)
+  // Este valor pode ser usado em qualquer parte do layout se necessário.
+  const effectiveHideValues = hideValues || isViewingOtherCollaborator;
+
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
   const permissions = useMemo(() => getUserPermissions(currentUser ?? undefined), [currentUser]);
@@ -466,11 +490,19 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               </div>
             )}
 
-            {/* Botão ocultar valores */}
+            {/* Botão ocultar valores – desabilitado se visualizar outro colaborador */}
             <button
               onClick={toggleHideValues}
-              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e2e8f0] bg-white text-[#475569] hover:bg-[#f1f5f9] transition-colors"
-              title={hideValues ? "Mostrar valores" : "Ocultar valores"}
+              disabled={isViewingOtherCollaborator}
+              className={cn(
+                "hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e2e8f0] bg-white text-[#475569] transition-colors",
+                isViewingOtherCollaborator
+                  ? "opacity-50 cursor-not-allowed"
+                  : "hover:bg-[#f1f5f9]",
+              )}
+              title={isViewingOtherCollaborator
+                ? "Você não pode alterar a visibilidade ao visualizar outro colaborador"
+                : (hideValues ? "Mostrar valores" : "Ocultar valores")}
             >
               {hideValues ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
