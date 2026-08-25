@@ -51,7 +51,6 @@ pool.on('connect', async (client) => {
     `);
     console.log('🔎 [DB DEBUG] database:', dbRes.rows[0].db);
     console.log('🔎 [DB DEBUG] search_path:', schemaRes.rows[0].search_path);
-    console.log('🔎 [DB DEBUG] tabelas disponíveis:', tablesRes.rows);
   } catch (err) {
     console.error('❌ [DB DEBUG] Erro ao obter diagnóstico:', err);
   }
