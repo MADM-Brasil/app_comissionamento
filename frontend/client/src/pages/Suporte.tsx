@@ -1284,6 +1284,7 @@ function ReportesSuporteTab() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
+  const [filterAssunto, setFilterAssunto] = useState<string>("todos"); // Novo estado para filtro de assunto
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketSuporte | null>(null);
@@ -1306,6 +1307,12 @@ function ReportesSuporteTab() {
   useEffect(() => {
     carregarReportes();
   }, []);
+
+  // Extrai lista de assuntos únicos
+  const assuntosDisponiveis = useMemo(() => {
+    const assuntos = tickets.map(t => t.assunto).filter(Boolean);
+    return Array.from(new Set(assuntos)).sort();
+  }, [tickets]);
 
   const openEditModal = (ticket: TicketSuporte) => {
     setEditingTicket(ticket);
@@ -1345,7 +1352,8 @@ function ReportesSuporteTab() {
 
   const filteredTickets = tickets.filter(t => {
     const statusMatch = filterStatus === "todos" || t.status === filterStatus;
-    if (!statusMatch) return false;
+    const assuntoMatch = filterAssunto === "todos" || t.assunto === filterAssunto;
+    if (!statusMatch || !assuntoMatch) return false;
     return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
   });
 
@@ -1358,6 +1366,21 @@ function ReportesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
+            {/* Filtro por assunto */}
+            <select
+              value={filterAssunto}
+              onChange={e => setFilterAssunto(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Filtrar por assunto"
+              aria-label="Filtrar reportes por assunto"
+            >
+              <option value="todos">Todos os assuntos</option>
+              {assuntosDisponiveis.map(assunto => (
+                <option key={assunto} value={assunto}>{assunto}</option>
+              ))}
+            </select>
+
+            {/* Filtro por status */}
             <select
               value={filterStatus}
               onChange={e => setFilterStatus(e.target.value)}
@@ -1375,6 +1398,7 @@ function ReportesSuporteTab() {
               <option value="REVISÃO">Revisão</option>
               <option value="CANCELADO">Cancelado</option>
             </select>
+
             <input
               type="date"
               value={filterDataInicio}
