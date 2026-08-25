@@ -10,7 +10,7 @@ import {
   UserCheck,
   Users,
   RefreshCw,
-  Loader2,
+  Loader2, 
   TrendingUp,
   Target,
   ShieldCheck,
@@ -115,30 +115,22 @@ function KpiCard({ titulo, valor, icon: Icon, accent = "brand", subtitulo, varia
 }
 
 // ============================================================
-//  CONSTANTES DE EXCLUSÃO
+//  CONSTANTES DE EXCLUSÃO (ALINHADAS COM Configuration)
 // ============================================================
 const EXCLUDED_TEAMS = [
-  "Equipe SAC", "Sales Ops", "Equipe", "Equipe Lucilene", "Equipe SDR", "Equipe Camila",
-  "Equipe Erica", "Equipe Erika", "Equipe Lucas", "Equipe Irene", "Equipe Maria Eduarda", "SalesOps",
-  "Equipe Murilo Balsalobre", "Comercial", "Backoffice", "CEO", "Prontuário",
-  "Equipe Leonardo Cardoso", "Equipe Julia", "Equipe Leticia", "Dr. Felipe Marx", "Administrativo",
-  "Equipe Thales", "Financeiro", "Equipe Reciclagem",""
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops'
 ];
-const EXCLUDED_CARGOS = [
-  "desativado", "assistente", "analista juridico", "gestor de projetos", "analista",
-  "analista de discadora", "supervisor", "coordenador", "salesops", "ceo",
-  "analista de crm", "desenvolvedor", "diretora", "analista de dados", "desenvolvedor make",
-];
+
 const normalize = (str: string): string =>
   (str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-// ========== FUNÇÕES DE EXCLUSÃO NORMALIZADAS ==========
 const isExcludedTeam = (teamName: string) =>
   EXCLUDED_TEAMS.some((t) => normalize(t) === normalize(teamName));
-const isExcludedCargo = (cargo: string) =>
-  EXCLUDED_CARGOS.some((g) => normalize(g) === normalize(cargo));
-const isDesativado = (c: Collaborator) =>
-  normalize(c.cargo) === "desativado" || normalize(c.equipeNome).includes("desativado");
+
+// Removemos completamente os filtros de status e cargo
 const normalizarNome = (nome: string) => normalize(nome);
 
 // ============================================================
@@ -327,10 +319,8 @@ export default function Equipe() {
   // 🔧 Correção: obtém a equipe do supervisor com fallback
   const userTeam = useMemo(() => {
     if (!currentUser) return '';
-    // Tenta campos diretos
     const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
     if (direct) return direct;
-    // Fallback: busca nos colaboradores carregados
     if (rawCollaborators.length > 0) {
       const colab = rawCollaborators.find(c => c.email === currentUser.email || c.id === currentUser.id);
       if (colab && colab.equipeNome) return colab.equipeNome.trim();
@@ -370,14 +360,10 @@ export default function Equipe() {
     }
   }, [currentUser, isSupervisor, isAssessor, supervisor, rawCollaborators, userTeam]);
 
-  // 🔧 Correção: normaliza o status e a equipe nos filtros
+  // ✅ FILTRO PRINCIPAL – sem status e sem desativado, apenas exclusão de equipes
   const colaboradores = useMemo(() => {
     let filtered = rawCollaborators.filter(
-      (c) =>
-        normalize(c.status) === "ativo" &&
-        !isDesativado(c) &&
-        !isExcludedTeam(c.equipeNome) &&
-        !isExcludedCargo(c.cargo)
+      (c) => !isExcludedTeam(c.equipeNome)
     );
     if (isAssessor) {
       filtered = filtered.filter(c => c.email === currentUser?.email);
@@ -593,14 +579,13 @@ function ListaEquipes({
     ? colaboradores.filter((c) => normalizarNome(c.name).includes(buscaNormalizada))
     : null;
 
-  // 🔧 Mensagem quando não há equipes/colaboradores
   if (colaboradores.length === 0 && !loadingDiario && times.length === 0) {
     return (
       <div className="text-center py-12">
         <Users className="w-12 h-12 text-slate-300 mx-auto mb-3" />
         <h3 className="text-lg font-semibold text-slate-700 mb-1">Nenhuma equipe encontrada</h3>
         <p className="text-sm text-slate-500 mb-4">
-          Não há colaboradores ativos para exibir no momento.
+          Não há colaboradores para exibir no momento.
         </p>
         <button
           onClick={handleRefresh}
@@ -636,7 +621,7 @@ function ListaEquipes({
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-6">
-        <KpiCard titulo="Colaboradores ativos" valor={`${colaboradores.length}`} icon={UserCheck} accent="brand" />
+        <KpiCard titulo="Colaboradores" valor={`${colaboradores.length}`} icon={UserCheck} accent="brand" />
       </div>
 
       {resultadosBusca ? (
@@ -872,7 +857,7 @@ function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; cola
         <div className="text-center py-12">
           <Users className="w-12 h-12 text-slate-300 mx-auto mb-3" />
           <h3 className="text-lg font-semibold text-slate-700">Nenhum colaborador encontrado</h3>
-          <p className="text-sm text-slate-500">Não há membros ativos na equipe {equipe}.</p>
+          <p className="text-sm text-slate-500">Não há membros na equipe {equipe}.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

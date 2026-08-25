@@ -1431,7 +1431,7 @@ export default function Configuration() {
                               </div>
                             </div>
                           </td>
-                        </tr>
+                        </tr> 
                       )}
                     </React.Fragment>
                   );
