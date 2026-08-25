@@ -25,7 +25,7 @@ const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem',''
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops'
 ];
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);

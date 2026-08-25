@@ -48,7 +48,7 @@ function startBackend() {
       console.error(`${colors.red}❌ Backend encerrou com código ${code}${colors.reset}`);
     }
   });
-}
+} 
 
 // Função para iniciar frontend
 function startFrontend() {
