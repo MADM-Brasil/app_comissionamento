@@ -22,6 +22,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://madm:${POSTGRES_PASSWORD:-secret}@postgres:5432/madm
+      DB_SSL: 'false'
       SESSION_SECRET: ${SESSION_SECRET:-super-secret}
       ALLOWED_ORIGINS: https://comissionamento.madmbrasil.com.br
       NODE_ENV: production

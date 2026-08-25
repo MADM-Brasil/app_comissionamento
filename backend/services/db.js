@@ -10,10 +10,12 @@ const connectionString = process.env.DATABASE_URL;
 
 let dbConfig;
 if (connectionString) {
-  // Produção (Render) – SSL obrigatório
+  // Se DATABASE_URL existe, usa ela
+  // SSL é controlado pela variável DB_SSL (default: false)
+  const useSSL = process.env.DB_SSL === 'true';
   dbConfig = {
     connectionString,
-    ssl: { rejectUnauthorized: false },
+    ssl: useSSL ? { rejectUnauthorized: false } : false,
   };
 } else {
   // Desenvolvimento local – monta a partir de variáveis individuais
@@ -24,12 +26,12 @@ if (connectionString) {
   }
 
   dbConfig = {
-    host: process.env.DB_HOST || 'localhost', 
+    host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT || '5432', 10),
     user: process.env.DB_USER || 'postgres',
     password: dbPassword,
     database: process.env.DB_NAME || 'madm',
-    ssl: false,                                        
+    ssl: false,
   };
 }
 
