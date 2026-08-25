@@ -38,6 +38,25 @@ if (connectionString) {
 // ─── Criação do pool ───────────────────────────────────────────
 const pool = new Pool(dbConfig);
 
+// Diagnóstico temporário – ver o que o backend enxerga
+pool.on('connect', async (client) => {
+  try {
+    const dbRes = await client.query('SELECT current_database() AS db');
+    const schemaRes = await client.query('SHOW search_path');
+    const tablesRes = await client.query(`
+      SELECT schemaname, tablename 
+      FROM pg_tables 
+      WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY schemaname, tablename
+    `);
+    console.log('🔎 [DB DEBUG] database:', dbRes.rows[0].db);
+    console.log('🔎 [DB DEBUG] search_path:', schemaRes.rows[0].search_path);
+    console.log('🔎 [DB DEBUG] tabelas disponíveis:', tablesRes.rows);
+  } catch (err) {
+    console.error('❌ [DB DEBUG] Erro ao obter diagnóstico:', err);
+  }
+});
+
 pool.on('connect', () => {
   console.log('✅ Conectado ao PostgreSQL com sucesso');
 });
