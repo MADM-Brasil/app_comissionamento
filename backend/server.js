@@ -126,7 +126,10 @@ app.use(session({
   saveUninitialized: false,
   rolling: true,
   cookie: {
-    secure: isProduction,
+    // ⚠️ IMPORTANTE: Defina `secure: false` para resolver o problema de sessão.
+    // Se o proxy (Nginx/Traefik) enviar X-Forwarded-Proto corretamente,
+    // você pode voltar para `secure: isProduction`.
+    secure: false,
     httpOnly: true,
     sameSite: 'lax',
   },
@@ -178,6 +181,7 @@ app.post('/api/auth/login', async (req, res) => {
         console.error('Erro ao salvar sessão:', err);
         return res.status(500).json({ success: false, error: 'Erro interno' });
       }
+      console.log('🍪 [LOGIN] Set-Cookie header:', res.getHeader('set-cookie'));
       return res.json({ success: true, requiresTwoFactor: true, tempToken: twoFactorResult.tempToken });
     });
   } catch (error) {
@@ -188,7 +192,6 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/auth/verify-2fa', async (req, res) => {
   try {
-    // Log temporário para diagnóstico
     console.log('🔎 [2FA DEBUG] Sessão:', {
       userId: req.session?.userId,
       tempTokenSession: req.session?.tempToken,
@@ -204,7 +207,6 @@ app.post('/api/auth/verify-2fa', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Sessão inválida.' });
     }
 
-    // Verifica se o tempToken enviado coincide com o da sessão
     if (tempToken !== sessionTempToken) {
       return res.status(400).json({ success: false, error: 'Token temporário inválido.' });
     }
