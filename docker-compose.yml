@@ -5,33 +5,49 @@ services:
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: madm
-      POSTGRES_PASSWORD: secret
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}   # defina via env no Dokploy
       POSTGRES_DB: madm
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    networks:
+      - internal
 
   backend:
     build: ./backend
     depends_on:
       - postgres
     environment:
-      DATABASE_URL: postgres://madm:secret@postgres:5432/madm
-      SESSION_SECRET: super-secret
-      ALLOWED_ORIGINS: http://localhost:3008,http://frontend
+      DATABASE_URL: postgres://madm:${POSTGRES_PASSWORD:-secret}@postgres:5432/madm
+      SESSION_SECRET: ${SESSION_SECRET:-super-secret}   # defina via env
+      ALLOWED_ORIGINS: https://comissionamento.madmbrasil.com.br   # apenas se necessário, mas pode ser omitido
       NODE_ENV: production
-      FRONTEND_URL: http://frontend
+      FRONTEND_URL: https://comissionamento.madmbrasil.com.br
       PORT: 3007
-    ports:
-      - "3007:3007"
     volumes:
       - uploads:/app/uploads
+    networks:
+      - internal
+    # Não expor porta externa
 
   frontend:
-    build: ./frontend
-    ports:
-      - "3008:80"
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api   # importante: a API agora é acessada via proxy no mesmo domínio
+    depends_on:
+      - backend
+    networks:
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`comissionamento.madmbrasil.com.br`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+
+networks:
+  internal:
+    driver: bridge
 
 volumes:
   pgdata:

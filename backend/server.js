@@ -6,8 +6,8 @@ import helmet from 'helmet';
 import session from 'express-session';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
-import path from 'path';                                
-import { fileURLToPath } from 'url';                   
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 import { pool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
@@ -24,8 +24,8 @@ import campanhasRoutes from './routes/campanhas.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 import { startNotificationEngine } from './services/notificationEngine.js';
 
-const __filename = fileURLToPath(import.meta.url);      
-const __dirname = path.dirname(__filename);          
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3007;
@@ -35,7 +35,11 @@ app.set('trust proxy', 1);
 
 // ---------- CORS ----------
 const isProduction = process.env.NODE_ENV === 'production';
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3008'];
+// Em produção, o domínio principal. Pode incluir localhost para desenvolvimento local.
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
+  'https://comissionamento.madmbrasil.com.br',
+  'http://localhost:3008'  // para desenvolvimento
+];
 
 app.use(cors({
   origin: allowedOrigins,
@@ -56,12 +60,14 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: [ "'self'",
-  "data:",
-  "blob:",
-  "https://d2xsxph8kpxj0f.cloudfront.net",     
-  "https://*.cloudfront.net"],
-      connectSrc: ["'self'", process.env.FRONTEND_URL || 'http://localhost:3007'],
+      imgSrc: [
+        "'self'",
+        "data:",
+        "blob:",
+        "https://d2xsxph8kpxj0f.cloudfront.net",
+        "https://*.cloudfront.net"
+      ],
+      connectSrc: ["'self'"],
       fontSrc: ["'self'"],
     },
   },
@@ -86,7 +92,7 @@ app.use((req, res, next) => {
     res.cookie('csrf-token', token, {
       httpOnly: false,
       secure: isProduction,
-      sameSite: 'lax',
+      sameSite: 'lax',   // same-origin: lax é suficiente
       path: '/',
     });
     req.csrfToken = token;
@@ -122,7 +128,7 @@ app.use(session({
   cookie: {
     secure: isProduction,
     httpOnly: true,
-    sameSite: isProduction ? 'none' : 'lax',
+    sameSite: 'lax',   // same-origin, não é necessário 'none'
   },
 }));
 
@@ -460,4 +466,4 @@ app.use((err, req, res, next) => {
   }
 })();
 
-export { app, pool }
+export { app, pool };
