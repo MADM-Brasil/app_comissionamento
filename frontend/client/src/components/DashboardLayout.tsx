@@ -31,6 +31,7 @@ import { cn } from "@/lib/utils";
 import { API_BASE } from "@/lib/api";
 import logoBranca from "./img/LogoBranca.png";
 import { getUserPermissions } from "@/lib/accessControl";
+import { useAccessControl } from "@/hooks/useAccessControl";
 
 type NavChild = { path: string; label: string; icon: React.ComponentType<any> };
 type NavItem =
@@ -71,16 +72,20 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     collaborators,
   } = useAppStore();
 
-  // ------------------------------------------------------------------
-  // NOVO: Obtém o e‑mail do colaborador filtrado (ajuste o nome do estado
-  // conforme sua store, ex.: selectedCollaboratorEmail ou filteredUserEmail)
-  // ------------------------------------------------------------------
+  // Obtém nível de acesso
+  const { getAccessLevel, LEVELS } = useAccessControl();
+  const userLevel = getAccessLevel();
+  const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
+
+  // Obtém o e-mail do colaborador selecionado (armazenado no dataStore)
   const selectedCollaboratorEmail = useAppStore(
-    (state) => (state as any).selectedCollaboratorEmail ?? (state as any).selectedCollaborator?.email ?? null
+    (state) => (state as any).selectedCollaboratorEmail ?? null
   );
 
-  // Determina se o colaborador filtrado é diferente do usuário logado
-  const isViewingOtherCollaborator = !!selectedCollaboratorEmail &&
+  // Determina se o colaborador filtrado é diferente do usuário logado,
+  // EXCETO se o usuário for SUPER_ADMIN (mantém visualização livre).
+  const isViewingOtherCollaborator = !isSuperAdmin &&
+    !!selectedCollaboratorEmail &&
     !!currentUser?.email &&
     selectedCollaboratorEmail !== currentUser.email;
 
@@ -90,10 +95,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       toggleHideValues();
     }
   }, [isViewingOtherCollaborator, hideValues, toggleHideValues]);
-
-  // Calcula o valor efetivo a ser usado (já é forçado pela store via useEffect)
-  // Este valor pode ser usado em qualquer parte do layout se necessário.
-  const effectiveHideValues = hideValues || isViewingOtherCollaborator;
 
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
@@ -490,7 +491,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               </div>
             )}
 
-            {/* Botão ocultar valores – desabilitado se visualizar outro colaborador */}
+            {/* Botão ocultar valores – desabilitado se visualizar outro colaborador (exceto SUPER_ADMIN) */}
             <button
               onClick={toggleHideValues}
               disabled={isViewingOtherCollaborator}
