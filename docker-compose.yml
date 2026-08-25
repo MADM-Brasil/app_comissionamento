@@ -1,30 +1,10 @@
 services:
-  postgres:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_USER: madm
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
-      POSTGRES_DB: madm
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U madm -d madm"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - internal
-
   backend:
     build: ./backend
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      DATABASE_URL: postgres://madm:${POSTGRES_PASSWORD:-secret}@postgres:5432/madm?sslmode=disable&options=-c%20search_path%3Dapp_comissionamento%2Cmadm%2Cpublic
-      DB_SSL: 'false'
+      DATABASE_URL: ${DATABASE_URL}   # será fornecida no Dokploy
+      DB_SSL: ${DB_SSL:-false}        # ajuste conforme o banco externo exigir SSL
       SESSION_SECRET: ${SESSION_SECRET:-super-secret}
-      ALLOWED_ORIGINS: https://comissionamento.madmbrasil.com.br
       NODE_ENV: production
       FRONTEND_URL: https://comissionamento.madmbrasil.com.br
       PORT: 3007
@@ -54,5 +34,4 @@ networks:
     driver: bridge
 
 volumes:
-  pgdata:
   uploads:
