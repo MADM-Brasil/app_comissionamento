@@ -21,7 +21,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://madm:${POSTGRES_PASSWORD:-secret}@postgres:5432/madm
+      DATABASE_URL: postgres://madm:${POSTGRES_PASSWORD:-secret}@postgres:5432/madm?sslmode=disable&options=-c%20search_path%3Dapp_comissionamento%2Cmadm%2Cpublic
       DB_SSL: 'false'
       SESSION_SECRET: ${SESSION_SECRET:-super-secret}
       ALLOWED_ORIGINS: https://comissionamento.madmbrasil.com.br
