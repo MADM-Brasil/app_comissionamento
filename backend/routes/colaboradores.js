@@ -79,7 +79,8 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
       WHERE m.data_metrica::date = $1::date
         AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
-        AND (c.status IS NULL OR LOWER(c.status) != 'desativado')
+        -- Exclui apenas colaboradores desativados
+        AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
         AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')
         AND (m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != '')
     `;
@@ -180,7 +181,8 @@ router.get('/equipes', requireAuth, async (req, res) => {
          ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
        WHERE m.data_metrica::date = $1::date
          AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
-         AND (c.status IS NULL OR LOWER(c.status) != 'desativado')
+         -- Exclui apenas equipes de colaboradores desativados
+         AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
          AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')`,
       [dataMetrica]
     );
