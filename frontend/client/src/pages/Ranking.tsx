@@ -17,9 +17,9 @@ import {
 } from "@/lib/api";
 import { fetchDailyMetrics } from "@/lib/metrics";
 import { calculator } from "@/lib/calculator";
+import madm_dashboard_growth from "@/components/img/madm-dashboard-growth.png";
 
-const RANKING_BG =
-  "https://d2xsxph8kpxj0f.cloudfront.net/310519663539696960/XjeLEb8phavPWoPR3fCUmm/madm-ranking-bg-ducCAYN4wgdYBLEESvf2bZ.webp";
+const RANKING_BG = madm_dashboard_growth;
 
 // ============================================================
 // CONFIGURAÇÃO DE PESOS
@@ -62,7 +62,7 @@ interface RankingItem {
   isCurrentUser?: boolean;
   equipe?: string;
   id?: string;
-  gols?: number; // ✅ novo campo
+  gols?: number;
 }
 
 interface TeamRankingItem {
@@ -162,7 +162,7 @@ export default function Ranking() {
     currentEndDate,
     equipeConfigs,
     currentUser,
-    campaigns, // ✅ pega as campanhas da store
+    campaigns, 
   } = useAppStore();
 
   const [allCollaborators, setAllCollaborators] = useState<any[]>([]);
@@ -175,7 +175,7 @@ export default function Ranking() {
   ]);
   const [selectedProduct, setSelectedProduct] = useState<string>("Todos");
   const [selectedTeam, setSelectedTeam] = useState<string>("todas");
-  const [golsDict, setGolsDict] = useState<Record<string, number>>({}); // ✅ novo estado
+  const [golsDict, setGolsDict] = useState<Record<string, number>>({}); 
 
   const initialLoadDone = useRef(false);
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
