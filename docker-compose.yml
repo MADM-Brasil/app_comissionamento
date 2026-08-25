@@ -2,12 +2,39 @@ services:
   backend:
     build: ./backend
     environment:
-      DATABASE_URL: ${DATABASE_URL}   # será fornecida no Dokploy
-      DB_SSL: ${DB_SSL:-false}        # ajuste conforme o banco externo exigir SSL
-      SESSION_SECRET: ${SESSION_SECRET:-super-secret}
+      # Conexão com o banco de dados externo
+      DATABASE_URL: ${DATABASE_URL}
+      DB_SSL: ${DB_SSL:-false}
+
+      # Sessão e segurança
+      SESSION_SECRET: ${SESSION_SECRET}
+
+      # Ambiente
       NODE_ENV: production
-      FRONTEND_URL: https://comissionamento.madmbrasil.com.br
       PORT: 3007
+      FRONTEND_URL: ${FRONTEND_URL:-https://comissionamento.madmbrasil.com.br}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://comissionamento.madmbrasil.com.br}
+
+      # Email (usado no 2FA e recuperação de senha)
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT}
+      EMAIL_USER: ${EMAIL_USER}
+      EMAIL_PASS: ${EMAIL_PASS}
+
+      # Webhooks do Teams/Suporte
+      WEBHOOK_CASOS_DISCADORA: ${WEBHOOK_CASOS_DISCADORA}
+      WEBHOOK_CASOS_CRM: ${WEBHOOK_CASOS_CRM}
+      WEBHOOK_CASOS_BD_DASH: ${WEBHOOK_CASOS_BD_DASH}
+      WEBHOOK_CASOS_ACESSOS: ${WEBHOOK_CASOS_ACESSOS}
+      WEBHOOK_OUTROS_CASOS: ${WEBHOOK_OUTROS_CASOS}
+      WEBHOOK_CASOS_SUPORTE: ${WEBHOOK_CASOS_SUPORTE}
+      WEBHOOK_ROTEADOR: ${WEBHOOK_ROTEADOR:-}
+
+      # Integrações
+      KOMMO_API_TOKEN: ${KOMMO_API_TOKEN}
+      POWERAUTOMATE_WEBHOOK_URL: ${POWERAUTOMATE_WEBHOOK_URL}
+      CHV_Hubspot: ${CHV_Hubspot}
+
     volumes:
       - uploads:/app/uploads
     networks:
@@ -17,7 +44,7 @@ services:
     build:
       context: ./frontend
       args:
-        VITE_API_URL: /api
+        VITE_API_URL: /api   # importante: usa o proxy do Nginx, não a URL externa
     depends_on:
       - backend
     networks:
