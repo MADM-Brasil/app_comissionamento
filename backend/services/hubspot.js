@@ -9,10 +9,13 @@ const hubspotClient = new Client({
 const PIPELINE_BASE_LEADS_ID = process.env.HUBSPOT_PIPELINE_BASE_LEADS_ID || '905901447';
 const PIPELINE_CLOSER_ID = process.env.HUBSPOT_PIPELINE_CLOSER_ID || '904458124';
 const STAGE_EM_CONTATO_ID = process.env.HUBSPOT_STAGE_EM_CONTATO_ID || '1368997801';
+// Nova constante para fase Desqualificado
+const STAGE_DESQUALIFICADO_ID = process.env.HUBSPOT_STAGE_DESQUALIFICADO_ID || '1368997806';
 
 export const HUBSPOT_PIPELINE_BASE_LEADS_ID = PIPELINE_BASE_LEADS_ID;
 export const HUBSPOT_PIPELINE_CLOSER_ID = PIPELINE_CLOSER_ID;
 export const HUBSPOT_STAGE_EM_CONTATO_ID = STAGE_EM_CONTATO_ID;
+export const HUBSPOT_STAGE_DESQUALIFICADO_ID = STAGE_DESQUALIFICADO_ID;
 
 // Mapeamento de nomes para mensagens de bloqueio
 const PIPELINE_NAMES = {
@@ -27,6 +30,7 @@ const PIPELINE_NAMES = {
 // Mapeamento de nomes de estágios
 const STAGE_NAMES = {
   [STAGE_EM_CONTATO_ID]: 'Em Contato',
+  [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
 };
 
 /**
@@ -455,6 +459,7 @@ export async function moveDealToCloserEmContato(dealId, ownerId = null) {
  * Regras:
  * - Sem negócio: cria no Base de Leads e move para Closer/Em Contato.
  * - Negócio no Base de Leads: move para Closer/Em Contato.
+ * - Negócio no Closer, fase Desqualificado: permite movimentação (altera responsável e move para Em Contato).
  * - Negócio fora do Base de Leads (incluindo Closer):
  *   - Se já estiver com o colaborador informado (ownerId igual), bloqueia com "Card já está com o colaborador".
  *   - Senão, bloqueia com "Movimentação bloqueada: Card em pipeline".
@@ -490,6 +495,19 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
   const pipelineName = PIPELINE_NAMES[firstDeal.pipeline] || firstDeal.pipeline;
   const stageName = STAGE_NAMES[firstDeal.stage] || firstDeal.stage;
 
+  // Nova exceção: se estiver no Closer e na fase Desqualificado, permitir movimentação
+  if (firstDeal.pipeline === PIPELINE_CLOSER_ID && firstDeal.stage === STAGE_DESQUALIFICADO_ID) {
+    await moveDealToCloserEmContato(firstDeal.id, ownerId);
+    return {
+      blocked: false,
+      pipeline: PIPELINE_CLOSER_ID,
+      stage: STAGE_EM_CONTATO_ID,
+      pipelineNome: 'Closer',
+      stageNome: 'Em Contato',
+    };
+  }
+
+  // Regras de bloqueio existentes
   if (ownerId && firstDeal.ownerId === ownerId) {
     return {
       blocked: true,
