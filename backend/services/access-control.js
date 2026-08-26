@@ -37,6 +37,7 @@ class AccessControl {
             'analista de crm': this.LEVELS.ADMINISTRATIVO,
             'analista de dados': this.LEVELS.ADMINISTRATIVO,
             'desenvolvedor make': this.LEVELS.ADMINISTRATIVO,
+            'Supervisor Sales Ops': this.LEVELS.ADMINISTRATIVO,
 
             // Super Admin
             'ceo': this.LEVELS.SUPER_ADMIN,
