@@ -314,6 +314,16 @@ router.post('/ticket-movimentacao', async (req, res) => {
       [statusFinal, movimentacaoId]
     );
 
+    if (statusFinal === 'concluido') {
+      await pool.query(
+        `UPDATE app_comissionamento.tickets_suporte
+         SET status = 'CONCLUÍDO',
+             concluido_em = NOW()
+         WHERE id_ticket = $1`,
+        [ticketId]
+      );
+    }
+
     const observacaoJson = JSON.stringify({
       hubspot: hubspotData,
       motivoOriginal: motivoSolicitacao || '',
@@ -710,6 +720,9 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
     if (status) {
       setClauses.push(`status = $${paramIndex++}`);
       values.push(status);
+      if (status === 'CONCLUÍDO') {
+        setClauses.push(`concluido_em = NOW()`);
+      }
     }
 
     if (observacao_sales_ops !== undefined) {
