@@ -203,6 +203,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
             phone: telefone_cliente_informado,
             cpf: cpf_cliente_informado,
             origem: origem_cliente_informada,
+            hubspot_owner_id: colaborador_destino_nome || null,
           });
 
           hubspotData.contactId = novoContato.id;
