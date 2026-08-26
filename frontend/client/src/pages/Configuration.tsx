@@ -1019,7 +1019,7 @@ export default function Configuration() {
                           return (
                             <tr key={chave}>
                               <td className="text-xs text-[#64748b]">
-                                {camp.data_publicacao || '—'}  {/* ✅ Exibe diretamente a string da data */}
+                                 {camp.data_publicacao ? camp.data_publicacao.split('T')[0] : '—'}
                               </td>
                               <td className="text-xs font-medium">{camp.tipo}</td>
                               <td className="text-center text-xs font-bold">
