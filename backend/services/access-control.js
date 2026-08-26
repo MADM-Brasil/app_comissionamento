@@ -37,12 +37,13 @@ class AccessControl {
             'analista de crm': this.LEVELS.ADMINISTRATIVO,
             'analista de dados': this.LEVELS.ADMINISTRATIVO,
             'desenvolvedor make': this.LEVELS.ADMINISTRATIVO,
-            'Supervisor Sales Ops': this.LEVELS.ADMINISTRATIVO,
+            'Supervisor salesops': this.LEVELS.ADMINISTRATIVO,
 
             // Super Admin
             'ceo': this.LEVELS.SUPER_ADMIN,
             'desenvolvedor': this.LEVELS.SUPER_ADMIN,
             'diretora': this.LEVELS.SUPER_ADMIN,
+            'coordenador SalesOps': this.LEVELS.SUPER_ADMIN,
         };
 
         // Permissões por nível

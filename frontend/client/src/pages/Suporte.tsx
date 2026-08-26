@@ -285,7 +285,7 @@ function MovimentacaoTab() {
       if (data.success) {
         const historico: MovementItem[] = (data.data || []).map((ticket: any) => {
           let hubspotData;
-          let motivoOriginal = "Movimentação registrada";
+          let motivoOriginal = "Movimentação Concluida";
           let observacao = '';
 
           if (ticket.observacao_sales_ops) {
@@ -383,7 +383,7 @@ function MovimentacaoTab() {
         throw new Error(errorData.error || `Erro HTTP ${response.status}`);
       }
       const result = await response.json();
-      setMessage({ text: result.message || "Movimentação registrada", type: result.success ? "success" : "error" });
+      setMessage({ text: result.message || "Movimentação Concluida", type: result.success ? "success" : "error" });
       await loadUserHistory();
       if (result.success) {
         setFirstName(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
