@@ -699,7 +699,7 @@ export default function Configuration() {
         tipo: campanhaCategoria,
         multiplicador: campanhaMultiplicador,
         produto: campanhaProduto,
-        data_publicacao: new Date().toISOString().slice(0, 10),
+        data_publicacao: getTodayString(),
         descricao: campanhaDescricao || 'Sem descrição',
       };
 
@@ -1019,7 +1019,7 @@ export default function Configuration() {
                           return (
                             <tr key={chave}>
                               <td className="text-xs text-[#64748b]">
-                                {new Date(camp.data_publicacao).toLocaleDateString('pt-BR')}
+                                {new Date(camp.data_publicacao + 'T12:00:00').toLocaleDateString('pt-BR')}
                               </td>
                               <td className="text-xs font-medium">{camp.tipo}</td>
                               <td className="text-center text-xs font-bold">
