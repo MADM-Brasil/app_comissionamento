@@ -135,11 +135,11 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Visualiza seus próprios dados, Home, Comissões e Ranking',
   },
   [LEVELS.SUPERVISAO]: {
-    canAccessDashboard: true,
-    canAccessComissoes: true,
-    canAccessRanking: true,
-    canAccessReports: true,
-    canAccessConfiguration: true,
+    canAccessDashboard: false, //true
+    canAccessComissoes: false, //true
+    canAccessRanking: false,   //true
+    canAccessReports: false,   //true
+    canAccessConfiguration: false, //true
     canViewTeam: true,
     canEditConfiguration: false,
     canEditBonus: false,
