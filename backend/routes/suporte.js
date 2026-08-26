@@ -314,6 +314,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       [statusFinal, movimentacaoId]
     );
 
+    // Se concluído automaticamente, atualiza o ticket base para CONCLUÍDO e preenche concluido_em
     if (statusFinal === 'concluido') {
       await pool.query(
         `UPDATE app_comissionamento.tickets_suporte
@@ -338,28 +339,28 @@ router.post('/ticket-movimentacao', async (req, res) => {
     );
 
     // ==================== NOTIFICAÇÃO TEAMS ====================
-if (hubspotData.status !== 'concluido') {
-  try {
-    await teamsNotificador.enviar({
-      titulo: 'Movimentação de Lead',
-      assunto: 'Movimentacao',
-      descricao: `Movimentação solicitada: ${nome_cliente_informado} ${sobrenome_cliente_informado} | Tel: ${telefone_cliente_informado || 'N/A'} | Equipe destino: ${equipe_destino_nome || 'N/A'}`,
-      solicitante: colaborador_origem_nome || 'N/A',
-      equipe: equipe_origem_nome || 'N/A',
-      anexosMarkdown: 'Nenhum anexo',
-      cliente: `${nome_cliente_informado} ${sobrenome_cliente_informado}`,
-      telefone: telefone_cliente_informado || 'N/A',
-      equipeDestino: equipe_destino_nome || 'N/A',
-      assessorDestino: colaborador_destino_nome || 'N/A',
-      status: hubspotData.status || 'N/A',
-      mensagem: hubspotData.mensagem || 'N/A',
-      pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
-      stage: hubspotData.stageNome || hubspotData.stage || null,
-    });
-  } catch (notifErr) {
-    console.error('❌ Erro ao enviar notificação Teams para movimentação:', notifErr.message);
-  }
-}
+    if (hubspotData.status !== 'concluido') {
+      try {
+        await teamsNotificador.enviar({
+          titulo: 'Movimentação de Lead',
+          assunto: 'Movimentacao',
+          descricao: `Movimentação solicitada: ${nome_cliente_informado} ${sobrenome_cliente_informado} | Tel: ${telefone_cliente_informado || 'N/A'} | Equipe destino: ${equipe_destino_nome || 'N/A'}`,
+          solicitante: colaborador_origem_nome || 'N/A',
+          equipe: equipe_origem_nome || 'N/A',
+          anexosMarkdown: 'Nenhum anexo',
+          cliente: `${nome_cliente_informado} ${sobrenome_cliente_informado}`,
+          telefone: telefone_cliente_informado || 'N/A',
+          equipeDestino: equipe_destino_nome || 'N/A',
+          assessorDestino: colaborador_destino_nome || 'N/A',
+          status: hubspotData.status || 'N/A',
+          mensagem: hubspotData.mensagem || 'N/A',
+          pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
+          stage: hubspotData.stageNome || hubspotData.stage || null,
+        });
+      } catch (notifErr) {
+        console.error('❌ Erro ao enviar notificação Teams para movimentação:', notifErr.message);
+      }
+    }
 
     let mensagem;
     let success = true;
@@ -513,7 +514,8 @@ router.get('/tickets-movimentacao', async (req, res) => {
         tml.status_mapeamento,
         tml.observacao_sales_ops,
         tml.motivo_solicitacao,
-        tml.atualizado_em AS criado_em
+        tml.atualizado_em AS criado_em,
+        tml.analisado_em
       FROM app_comissionamento.tickets_movimentacao_lead tml
       LEFT JOIN app_comissionamento.tickets_suporte ts ON tml.ticket_id = ts.id_ticket
       WHERE 1=1
@@ -521,12 +523,17 @@ router.get('/tickets-movimentacao', async (req, res) => {
     const params = [];
     let paramIndex = 1;
 
+    // Filtro por status específico (usado pelo usuário comum)
     if (status_mapeamento) {
-      query += ` AND (tml.status_mapeamento != 'concluido' OR tml.analisado_em IS NOT NULL)`;
+      query += ` AND tml.status_mapeamento = $${paramIndex++}`;
       params.push(status_mapeamento);
     }
 
-    if (todos !== '1') {
+    // Se for a visão SalesOps (todos=1), esconde concluídos sem análise
+    if (todos === '1') {
+      query += ` AND (tml.status_mapeamento != 'concluido' OR tml.analisado_em IS NOT NULL)`;
+    } else {
+      // Caso contrário, aplica filtros por email ou nome
       if (solicitante_email) {
         query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_email', ''))) = LOWER(TRIM($${paramIndex++}))`;
         params.push(solicitante_email);
@@ -562,7 +569,8 @@ router.get('/ticket-suporte', async (req, res) => {
         COALESCE(metadados->>'solicitante_nome', '') AS solicitante_nome,
         COALESCE(metadados->>'equipe_nome', '') AS equipe_nome,
         COALESCE(metadados->>'observacao_sales_ops', '') AS observacao_sales_ops,
-        encaminhado_em AS criado_em
+        encaminhado_em AS criado_em,
+        concluido_em
       FROM app_comissionamento.tickets_suporte
       WHERE tipo_ticket = 'Reporte'
     `;
@@ -609,7 +617,7 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
       if (status_mapeamento !== undefined) {
         setClauses.push(`status_mapeamento = $${paramIndex++}`);
         values.push(status_mapeamento);
-        setClauses.push(`analisado_em = NOW()`); 
+        setClauses.push(`analisado_em = NOW()`);
       }
 
       if (observacao_sales_ops !== undefined) {
@@ -653,12 +661,22 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
         const ticketId = movResult.rows[0].ticket_id;
         const mappedStatus = STATUS_MAP[status_mapeamento] || status_mapeamento;
 
-        await client.query(
-          `UPDATE app_comissionamento.tickets_suporte
-           SET status = $1, atualizado_em = NOW()
-           WHERE id_ticket = $2`,
-          [mappedStatus, ticketId]
-        );
+        // Se o status for concluído, também preenche concluido_em
+        if (status_mapeamento === 'concluido') {
+          await client.query(
+            `UPDATE app_comissionamento.tickets_suporte
+             SET status = $1, atualizado_em = NOW(), concluido_em = NOW()
+             WHERE id_ticket = $2`,
+            [mappedStatus, ticketId]
+          );
+        } else {
+          await client.query(
+            `UPDATE app_comissionamento.tickets_suporte
+             SET status = $1, atualizado_em = NOW()
+             WHERE id_ticket = $2`,
+            [mappedStatus, ticketId]
+          );
+        }
       }
 
       // Notificação SSE
