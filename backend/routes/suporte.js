@@ -191,9 +191,9 @@ router.post('/ticket-movimentacao', async (req, res) => {
       });
 
       if (!busca.found) {
-        if (!email_cliente_informado && !cpf_cliente_informado) {
+        if (!email_cliente_informado) {
           hubspotData.status = 'aviso';
-          hubspotData.mensagem = 'Campos pendentes: preencha e‑mail ou CPF para tentar novamente.';
+          hubspotData.mensagem = 'Campos pendentes: preencha e‑mail para tentar novamente.';
           resultado = { blocked: false, message: hubspotData.mensagem };
         } else {
           const novoContato = await createContact({
