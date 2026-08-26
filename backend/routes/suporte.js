@@ -328,26 +328,28 @@ router.post('/ticket-movimentacao', async (req, res) => {
     );
 
     // ==================== NOTIFICAÇÃO TEAMS ====================
-    try {
-      await teamsNotificador.enviar({
-        titulo: 'Movimentação de Lead',
-        assunto: 'Movimentacao',
-        descricao: `Movimentação solicitada: ${nome_cliente_informado} ${sobrenome_cliente_informado} | Tel: ${telefone_cliente_informado || 'N/A'} | Equipe destino: ${equipe_destino_nome || 'N/A'}`,
-        solicitante: colaborador_origem_nome || 'N/A',
-        equipe: equipe_origem_nome || 'N/A',
-        anexosMarkdown: 'Nenhum anexo',
-        cliente: `${nome_cliente_informado} ${sobrenome_cliente_informado}`,
-        telefone: telefone_cliente_informado || 'N/A',
-        equipeDestino: equipe_destino_nome || 'N/A',
-        assessorDestino: colaborador_destino_nome || 'N/A',
-        status: hubspotData.status || 'N/A',
-        mensagem: hubspotData.mensagem || 'N/A',
-        pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
-        stage: hubspotData.stageNome || hubspotData.stage || null,
-      });
-    } catch (notifErr) {
-      console.error('❌ Erro ao enviar notificação Teams para movimentação:', notifErr.message);
-    }
+if (hubspotData.status !== 'concluido') {
+  try {
+    await teamsNotificador.enviar({
+      titulo: 'Movimentação de Lead',
+      assunto: 'Movimentacao',
+      descricao: `Movimentação solicitada: ${nome_cliente_informado} ${sobrenome_cliente_informado} | Tel: ${telefone_cliente_informado || 'N/A'} | Equipe destino: ${equipe_destino_nome || 'N/A'}`,
+      solicitante: colaborador_origem_nome || 'N/A',
+      equipe: equipe_origem_nome || 'N/A',
+      anexosMarkdown: 'Nenhum anexo',
+      cliente: `${nome_cliente_informado} ${sobrenome_cliente_informado}`,
+      telefone: telefone_cliente_informado || 'N/A',
+      equipeDestino: equipe_destino_nome || 'N/A',
+      assessorDestino: colaborador_destino_nome || 'N/A',
+      status: hubspotData.status || 'N/A',
+      mensagem: hubspotData.mensagem || 'N/A',
+      pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
+      stage: hubspotData.stageNome || hubspotData.stage || null,
+    });
+  } catch (notifErr) {
+    console.error('❌ Erro ao enviar notificação Teams para movimentação:', notifErr.message);
+  }
+}
 
     let mensagem;
     let success = true;
@@ -510,7 +512,7 @@ router.get('/tickets-movimentacao', async (req, res) => {
     let paramIndex = 1;
 
     if (status_mapeamento) {
-      query += ` AND tml.status_mapeamento = $${paramIndex++}`;
+      query += ` AND (tml.status_mapeamento != 'concluido' OR tml.analisado_em IS NOT NULL)`;
       params.push(status_mapeamento);
     }
 
@@ -597,6 +599,7 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
       if (status_mapeamento !== undefined) {
         setClauses.push(`status_mapeamento = $${paramIndex++}`);
         values.push(status_mapeamento);
+        setClauses.push(`analisado_em = NOW()`); 
       }
 
       if (observacao_sales_ops !== undefined) {
