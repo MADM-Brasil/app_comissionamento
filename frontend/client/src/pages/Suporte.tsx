@@ -369,7 +369,7 @@ function MovimentacaoTab() {
 
     // ✅ Validação de telefone (DDD+número)
     if (!isValidBrazilianPhone(telefone)) {
-      setMessage({ text: "Telefone inválido. Informe DDD + número (ex.: 11 98765-4321).", type: "error" });
+      setMessage({ text: "Telefone inválido. Informe DDD + número (ex.: 11 00000-1234).", type: "error" });
       return;
     }
 
@@ -512,7 +512,7 @@ function MovimentacaoTab() {
                     }
                   }}
                   className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
-                  placeholder="(11) 98765-4321"
+                  placeholder="(00) 00000-0000"
                   required
                 />
               </div>
