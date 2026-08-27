@@ -102,9 +102,9 @@ const formatPhoneDisplay = (phone: string): string => {
   if (!numbers) return "";
   
   // Se não começa com +55 e tem até 11 dígitos, adiciona +55
-  const hasCountryCode = numbers.startsWith("55") && numbers.length >= 12;
+  const hasCountryCode = numbers.startsWith("+55") && numbers.length >= 13;
   if (!hasCountryCode && numbers.length <= 11) {
-    numbers = "55" + numbers;
+    numbers = "+55" + numbers;
   }
   
   // Agora formata de acordo com o comprimento
