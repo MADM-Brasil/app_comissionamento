@@ -10,6 +10,7 @@ import {
   garantirLeadNoCloser,
   findOwnerIdByEmail,
   getContactDeals,
+  updateContactOwner,   // <== adicionado
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_STAGE_EM_CONTATO_ID
 } from '../services/hubspot.js';
@@ -190,7 +191,19 @@ router.post('/ticket-movimentacao', async (req, res) => {
         cpf: cpf_cliente_informado,
       });
 
+      // Buscar ownerId (comum a todos os cenários)
+      const assessorEmail = colaborador_destino_email || '';
+      let ownerId = null;
+      if (assessorEmail) {
+        ownerId = await findOwnerIdByEmail(assessorEmail);
+        if (!ownerId) console.warn('⚠️ Owner não encontrado para e-mail:', assessorEmail);
+        else console.log('👤 Owner encontrado:', ownerId);
+      } else {
+        console.warn('⚠️ E-mail do colaborador destino não fornecido. Owner não será preenchido.');
+      }
+
       if (!busca.found) {
+        // E-mail é obrigatório para criar novo contato
         if (!email_cliente_informado) {
           hubspotData.status = 'aviso';
           hubspotData.mensagem = 'Campos pendentes: preencha e‑mail para tentar novamente.';
@@ -203,6 +216,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
             phone: telefone_cliente_informado,
             cpf: cpf_cliente_informado,
             origem: origem_cliente_informada,
+            ownerId, // agora contato é criado com proprietário
           });
 
           hubspotData.contactId = novoContato.id;
@@ -211,16 +225,6 @@ router.post('/ticket-movimentacao', async (req, res) => {
           console.log('✅ HubSpot: novo contato criado com ID', novoContato.id);
 
           await waitForDealCreation(novoContato.id, 2000, 3);
-
-          const assessorEmail = colaborador_destino_email || '';
-          let ownerId = null;
-          if (assessorEmail) {
-            ownerId = await findOwnerIdByEmail(assessorEmail);
-            if (!ownerId) console.warn('⚠️ Owner não encontrado para e-mail:', assessorEmail);
-            else console.log('👤 Owner encontrado:', ownerId);
-          } else {
-            console.warn('⚠️ E-mail do colaborador destino não fornecido. Owner não será preenchido.');
-          }
 
           resultado = await garantirLeadNoCloser(
             novoContato.id,
@@ -234,19 +238,20 @@ router.post('/ticket-movimentacao', async (req, res) => {
         hubspotData.mensagem = busca.motivo || 'Dados divergentes do cadastro. Aguardando suporte.';
         hubspotData.contactId = busca.contact.id;
         hubspotData.existe = true;
+
+        // Atualiza proprietário do contato existente
+        if (ownerId) {
+          await updateContactOwner(busca.contact.id, ownerId);
+        }
+
         resultado = { blocked: false, message: hubspotData.mensagem };
       } else {
         hubspotData.contactId = busca.contact.id;
         hubspotData.existe = true;
 
-        const assessorEmail = colaborador_destino_email || '';
-        let ownerId = null;
-        if (assessorEmail) {
-          ownerId = await findOwnerIdByEmail(assessorEmail);
-          if (!ownerId) console.warn('⚠️ Owner não encontrado para e-mail:', assessorEmail);
-          else console.log('👤 Owner encontrado:', ownerId);
-        } else {
-          console.warn('⚠️ E-mail do colaborador destino não fornecido. Owner não será preenchido.');
+        // Atualiza proprietário do contato existente
+        if (ownerId) {
+          await updateContactOwner(busca.contact.id, ownerId);
         }
 
         resultado = await garantirLeadNoCloser(

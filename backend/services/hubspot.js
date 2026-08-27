@@ -240,7 +240,7 @@ export async function searchContact({ email, phone, cpf }) {
 /**
  * Cria um novo contato no HubSpot.
  * Padroniza o telefone para apenas dígitos.
- * Agora aceita ownerId para definir o proprietário do contato.
+ * Aceita ownerId para definir o proprietário do contato.
  */
 export async function createContact({ firstName, lastName, email, phone, cpf, origem, ownerId }) {
   const properties = {
@@ -266,7 +266,6 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
     properties.contact_fonte = origem;
   }
 
-  // ✅ Definir proprietário do contato, se fornecido
   if (ownerId) {
     properties.hubspot_owner_id = ownerId;
   }
@@ -294,6 +293,24 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
         }
       }
     }
+    throw error;
+  }
+}
+
+/**
+ * Atualiza o proprietário (hubspot_owner_id) de um contato existente.
+ */
+export async function updateContactOwner(contactId, ownerId) {
+  if (!contactId || !ownerId) return null;
+
+  try {
+    return await hubspotClient.crm.contacts.basicApi.update(contactId, {
+      properties: {
+        hubspot_owner_id: ownerId,
+      },
+    });
+  } catch (error) {
+    console.error('❌ [updateContactOwner] Erro:', error.message);
     throw error;
   }
 }
