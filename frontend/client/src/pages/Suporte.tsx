@@ -97,22 +97,46 @@ interface TicketSuporte {
 }
 
 // ---------------------- Helpers ----------------------
-const formatPhoneDisplay = (phone: string): string => {
+// Formata DDD+número (sem código do país)
+const formatPhoneInput = (phone: string): string => {
   let numbers = phone.replace(/\D/g, "");
-  if (!numbers) return "";
-  
-  // Se não começa com +55 e tem até 11 dígitos, adiciona +55
-  const hasCountryCode = numbers.startsWith("+55") && numbers.length >= 13;
-  if (!hasCountryCode && numbers.length <= 11) {
-    numbers = "+55" + numbers;
+
+  // Se colar com código do país (55) remove para manter apenas DDD+número
+  if (numbers.startsWith("55") && numbers.length >= 12) {
+    numbers = numbers.slice(2);
   }
-  
-  // Agora formata de acordo com o comprimento
-  if (numbers.length === 13) return `+${numbers.slice(0, 2)}-${numbers.slice(2, 4)}-${numbers.slice(4, 9)}-${numbers.slice(9)}`;
-  if (numbers.length === 12) return `+${numbers.slice(0, 2)}-${numbers.slice(2, 4)}-${numbers.slice(4, 8)}-${numbers.slice(8)}`;
-  if (numbers.length === 11) return `-${numbers.slice(0, 2)}-${numbers.slice(2, 7)}-${numbers.slice(7)}`;
-  if (numbers.length === 10) return `-${numbers.slice(0, 2)}-${numbers.slice(2, 6)}-${numbers.slice(6)}`;
-  return numbers;
+
+  // Limita a 11 dígitos (DDD + 9 dígitos)
+  numbers = numbers.slice(0, 11);
+
+  // Aplica máscara: (DD) NNNNN-NNNN ou (DD) NNNN-NNNN
+  if (numbers.length <= 2) {
+    return numbers;
+  } else if (numbers.length <= 6) {
+    return `(${numbers.slice(0, 2)}) ${numbers.slice(2)}`;
+  } else if (numbers.length <= 10) {
+    return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 6)}-${numbers.slice(6)}`;
+  } else {
+    return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7)}`;
+  }
+};
+
+// Valida se o telefone (DDD+número) é válido
+const isValidBrazilianPhone = (phone: string): boolean => {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.length !== 10 && digits.length !== 11) return false;
+
+  const ddd = digits.slice(0, 2);
+  const number = digits.slice(2);
+  const dddNum = parseInt(ddd, 10);
+
+  // DDD não pode ser 55 nem estar fora da faixa 11-99
+  if (isNaN(dddNum) || dddNum < 11 || dddNum > 99 || ddd === '55') return false;
+
+  // Número deve ter 8 ou 9 dígitos
+  if (number.length !== 8 && number.length !== 9) return false;
+
+  return true;
 };
 
 const formatCPF = (cpf: string): string => {
@@ -342,6 +366,13 @@ function MovimentacaoTab() {
     if (!firstName.trim()) { setMessage({ text: "Nome é obrigatório", type: "error" }); return; }
     if (!lastName.trim()) { setMessage({ text: "Sobrenome é obrigatório", type: "error" }); return; }
     if (!telefone.trim()) { setMessage({ text: "Telefone é obrigatório", type: "error" }); return; }
+
+    // ✅ Validação de telefone (DDD+número)
+    if (!isValidBrazilianPhone(telefone)) {
+      setMessage({ text: "Telefone inválido. Informe DDD + número (ex.: 11 98765-4321).", type: "error" });
+      return;
+    }
+
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
 
     isSubmitting.current = true;
@@ -358,13 +389,17 @@ function MovimentacaoTab() {
       return v.toString(16);
     });
 
+    // Monta o telefone completo com +55 e hífens
+    const telefoneSemMascara = telefone.replace(/\D/g, '');
+    const telefoneCompleto = `+55-${telefoneSemMascara.slice(0, 2)}-${telefoneSemMascara.slice(2, 7)}-${telefoneSemMascara.slice(7)}`;
+
     const payload = {
       crm_origem: "CRM",
       crm_lead_id: null,
       nome_cliente_informado: firstName.trim(),
       sobrenome_cliente_informado: lastName.trim(),
       email_cliente_informado: email.trim(),
-      telefone_cliente_informado: telefone || null,
+      telefone_cliente_informado: telefoneCompleto,
       cpf_cliente_informado: cpf || null,
       origem_cliente_informada: origem || null,
       tipo_solicitacao: "Movimentação",
@@ -461,7 +496,27 @@ function MovimentacaoTab() {
             <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome</label><input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
             <div><label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"  /></div>
             <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label><select value={origem} onChange={e => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"><option value="">Selecionar origem</option><option value="discadora">Discadora</option><option value="cat">CAT</option><option value="indicacao">Indicação</option><option value="trafego_pago">Marketing</option></select></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone</label><input type="tel" value={telefone} onChange={e => setTelefone(e.target.value)} onBlur={() => telefone && setTelefone(formatPhoneDisplay(telefone))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
+            <div>
+              <label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone</label>
+              <div className="flex items-center">
+                <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">
+                  +55
+                </span>
+                <input
+                  type="tel"
+                  value={telefone}
+                  onChange={e => setTelefone(formatPhoneInput(e.target.value))}
+                  onBlur={() => {
+                    if (telefone) {
+                      setTelefone(formatPhoneInput(telefone));
+                    }
+                  }}
+                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
+                  placeholder="(11) 98765-4321"
+                  required
+                />
+              </div>
+            </div>
             <div><label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label><input type="text" value={cpf} onChange={e => setCpf(e.target.value)} onBlur={() => cpf && setCpf(formatCPF(cpf))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" /></div>
             <div>
               <label className="block text-sm font-medium text-[#0f172a] mb-1">Equipe Destino *</label>
