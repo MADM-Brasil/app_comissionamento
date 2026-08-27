@@ -98,12 +98,20 @@ interface TicketSuporte {
 
 // ---------------------- Helpers ----------------------
 const formatPhoneDisplay = (phone: string): string => {
-  const numbers = phone.replace(/\D/g, "");
+  let numbers = phone.replace(/\D/g, "");
   if (!numbers) return "";
-  if (numbers.length === 13) return `+${numbers.slice(0, 2)} (${numbers.slice(2, 4)}) ${numbers.slice(4, 9)}-${numbers.slice(9)}`;
-  if (numbers.length === 12) return `+${numbers.slice(0, 2)} (${numbers.slice(2, 4)}) ${numbers.slice(4, 8)}-${numbers.slice(8)}`;
-  if (numbers.length === 11) return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7)}`;
-  if (numbers.length === 10) return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 6)}-${numbers.slice(6)}`;
+  
+  // Se não começa com +55 e tem até 11 dígitos, adiciona +55
+  const hasCountryCode = numbers.startsWith("55") && numbers.length >= 12;
+  if (!hasCountryCode && numbers.length <= 11) {
+    numbers = "55" + numbers;
+  }
+  
+  // Agora formata de acordo com o comprimento
+  if (numbers.length === 13) return `+${numbers.slice(0, 2)}-${numbers.slice(2, 4)}-${numbers.slice(4, 9)}-${numbers.slice(9)}`;
+  if (numbers.length === 12) return `+${numbers.slice(0, 2)}-${numbers.slice(2, 4)}-${numbers.slice(4, 8)}-${numbers.slice(8)}`;
+  if (numbers.length === 11) return `-${numbers.slice(0, 2)}-${numbers.slice(2, 7)}-${numbers.slice(7)}`;
+  if (numbers.length === 10) return `-${numbers.slice(0, 2)}-${numbers.slice(2, 6)}-${numbers.slice(6)}`;
   return numbers;
 };
 

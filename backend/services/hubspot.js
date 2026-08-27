@@ -252,10 +252,9 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
     properties.email = email.trim().toLowerCase();
   }
 
-  if (phone) {
-    const phoneNormalized = normalizePhone(phone);
-    properties.phone = phoneNormalized;
-    properties.hs_whatsapp_phone_number = phoneNormalized;
+  if (phone && phone.trim()) {
+   properties.phone = phone.trim();
+   properties.hs_whatsapp_phone_number = phone.trim(); 
   }
 
   if (cpf) {
