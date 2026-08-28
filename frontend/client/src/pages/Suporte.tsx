@@ -360,6 +360,21 @@ function MovimentacaoTab() {
 
   useEffect(() => { loadUserHistory(); }, [currentUser?.nome]);
 
+  // ✅ Polling automático a cada 10 segundos enquanto houver tickets pendentes/processando
+  useEffect(() => {
+    const hasPending = movements.some(
+      (m) => m.status === "pendente" || m.status === "processando"
+    );
+
+    if (!hasPending) return;
+
+    const intervalId = setInterval(() => {
+      loadUserHistory();
+    }, 10000); // 10 segundos
+
+    return () => clearInterval(intervalId);
+  }, [movements]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting.current) return;
@@ -426,7 +441,7 @@ function MovimentacaoTab() {
         throw new Error(errorData.error || `Erro HTTP ${response.status}`);
       }
       const result = await response.json();
-      setMessage({ text: result.message || "Movimentação Concluida", type: result.success ? "success" : "error" });
+      setMessage({ text: result.message || "Solicitação registrada e enfileirada.", type: result.success ? "success" : "error" });
       await loadUserHistory();
       if (result.success) {
         setFirstName(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
@@ -1124,7 +1139,7 @@ function MovimentacoesSuporteTab() {
       setMessage({ text: "Erro ao carregar tickets", type: "error" });
     } finally {
       setLoading(false);
-    }
+    } 
   };
 
   useEffect(() => {
