@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
+import { startTicketQueue } from './services/ticketQueue.js';
 import { pool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 import twoFactorService from './security/verif-2factory.js';
@@ -447,7 +447,7 @@ app.get('/api/admin/months', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT DISTINCT data_metrica::date 
-       FROM app_comissionamento.view_app_metricas_assessores 
+       FROM app_comissionamento.view_app_metricas_assessores  
        ORDER BY data_metrica DESC`
     );
     const months = result.rows.map(r => {
@@ -479,7 +479,8 @@ app.use((err, req, res, next) => {
     console.log('✅ Conectado ao PostgreSQL');
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
-      startNotificationEngine(); 
+      startNotificationEngine();
+      startTicketQueue(); 
     });
   } catch (error) {
     console.error('❌ Erro ao conectar ao banco:', error);

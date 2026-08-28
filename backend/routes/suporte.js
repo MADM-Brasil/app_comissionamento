@@ -4,16 +4,6 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { pool } from '../services/db.js';
-import {
-  findContactAndValidate,
-  createContact,
-  garantirLeadNoCloser,
-  findOwnerIdByEmail,
-  getContactDeals,
-  updateContactOwner,   // <== adicionado
-  HUBSPOT_PIPELINE_CLOSER_ID,
-  HUBSPOT_STAGE_EM_CONTATO_ID
-} from '../services/hubspot.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
 
@@ -180,238 +170,18 @@ router.post('/ticket-movimentacao', async (req, res) => {
     const movResult = await pool.query(insertMovimentacaoQuery, movValues);
     const movimentacaoId = movResult.rows[0].id_ticket_movimentacao;
 
-    // ==================== INTEGRAÇÃO HUBSPOT ====================
-    let hubspotData = {};
-    let resultado = null;
-
-    try {
-      const busca = await findContactAndValidate({
-        email: email_cliente_informado,
-        phone: telefone_cliente_informado,
-        cpf: cpf_cliente_informado,
-      });
-
-      // Buscar ownerId (comum a todos os cenários)
-      const assessorEmail = colaborador_destino_email || '';
-      let ownerId = null;
-      if (assessorEmail) {
-        ownerId = await findOwnerIdByEmail(assessorEmail);
-        if (!ownerId) console.warn('⚠️ Owner não encontrado para e-mail:', assessorEmail);
-        else console.log('👤 Owner encontrado:', ownerId);
-      } else {
-        console.warn('⚠️ E-mail do colaborador destino não fornecido. Owner não será preenchido.');
-      }
-
-      if (!busca.found) {
-        // E-mail é obrigatório para criar novo contato
-        if (!email_cliente_informado) {
-          hubspotData.status = 'aviso';
-          hubspotData.mensagem = 'Campos pendentes: preencha e‑mail para tentar novamente.';
-          resultado = { blocked: false, message: hubspotData.mensagem };
-        } else {
-          const novoContato = await createContact({
-            firstName: nome_cliente_informado,
-            lastName: sobrenome_cliente_informado,
-            email: email_cliente_informado,
-            phone: telefone_cliente_informado,
-            cpf: cpf_cliente_informado,
-            origem: origem_cliente_informada,
-            ownerId, // agora contato é criado com proprietário
-          });
-
-          hubspotData.contactId = novoContato.id;
-          hubspotData.existe = true;
-          hubspotData.criadoAgora = true;
-          console.log('✅ HubSpot: novo contato criado com ID', novoContato.id);
-
-          await waitForDealCreation(novoContato.id, 2000, 3);
-
-          resultado = await garantirLeadNoCloser(
-            novoContato.id,
-            `${nome_cliente_informado} ${sobrenome_cliente_informado}`,
-            ownerId,
-            colaborador_destino_nome
-          );
-        }
-      } else if (busca.divergente) {
-        hubspotData.status = 'suporte';
-        hubspotData.mensagem = busca.motivo || 'Dados divergentes do cadastro. Aguardando suporte.';
-        hubspotData.contactId = busca.contact.id;
-        hubspotData.existe = true;
-
-        // Atualiza proprietário do contato existente
-        if (ownerId) {
-          await updateContactOwner(busca.contact.id, ownerId);
-        }
-
-        resultado = { blocked: false, message: hubspotData.mensagem };
-      } else {
-        hubspotData.contactId = busca.contact.id;
-        hubspotData.existe = true;
-
-        // Atualiza proprietário do contato existente
-        if (ownerId) {
-          await updateContactOwner(busca.contact.id, ownerId);
-        }
-
-        resultado = await garantirLeadNoCloser(
-          busca.contact.id,
-          `${nome_cliente_informado} ${sobrenome_cliente_informado}`,
-          ownerId,
-          colaborador_destino_nome
-        );
-      }
-
-      if (resultado?.blocked) {
-        hubspotData.status = 'bloqueado';
-        hubspotData.mensagem = resultado.message;
-        hubspotData.pipeline = resultado.pipeline;
-        hubspotData.stage = resultado.stage;
-        hubspotData.pipelineNome = resultado.pipelineNome || resultado.pipeline;
-        hubspotData.stageNome = resultado.stageNome || resultado.stage;
-      } else if (hubspotData.status === 'suporte' || hubspotData.status === 'aviso') {
-        // Mantém status
-      } else {
-        hubspotData.pipeline = resultado.pipeline;
-        hubspotData.stage = resultado.stage;
-        hubspotData.pipelineNome = resultado.pipelineNome || resultado.pipeline;
-        hubspotData.stageNome = resultado.stageNome || resultado.stage;
-        const isCardMovido = (resultado.pipeline === HUBSPOT_PIPELINE_CLOSER_ID && resultado.stage === HUBSPOT_STAGE_EM_CONTATO_ID);
-        hubspotData.status = isCardMovido ? 'concluido' : 'fora_pipeline';
-        hubspotData.mensagem = isCardMovido ? 'Card movido' : undefined;
-      }
-    } catch (error) {
-      console.error('❌ HubSpot: erro na integração:', error.message);
-      hubspotData.erro = true;
-      hubspotData.status = 'erro';
-      hubspotData.mensagem = `Erro na integração HubSpot: ${error.message}`;
-    }
-
-    // ==================== ATUALIZA STATUS_MAPEAMENTO ====================
-    let statusFinal = 'pendente';
-    switch (hubspotData.status) {
-      case 'concluido':
-        statusFinal = 'concluido';
-        break;
-      case 'bloqueado':
-        statusFinal = 'bloqueado';
-        break;
-      case 'suporte':
-        statusFinal = 'suporte';
-        break;
-      case 'aviso':
-        statusFinal = 'aviso';
-        break;
-      case 'erro':
-        statusFinal = 'erro';
-        break;
-      case 'fora_pipeline':
-        statusFinal = 'fora_pipeline';
-        break;
-      default:
-        statusFinal = 'pendente';
-    }
-
-    await pool.query(
-      `UPDATE app_comissionamento.tickets_movimentacao_lead
-       SET status_mapeamento = $1
-       WHERE id_ticket_movimentacao = $2`,
-      [statusFinal, movimentacaoId]
-    );
-
-    // Se concluído automaticamente, atualiza o ticket base para CONCLUÍDO e preenche concluido_em
-    if (statusFinal === 'concluido') {
-      await pool.query(
-        `UPDATE app_comissionamento.tickets_suporte
-         SET status = 'CONCLUÍDO',
-             concluido_em = NOW()
-         WHERE id_ticket = $1`,
-        [ticketId]
-      );
-    }
-
-    const observacaoJson = JSON.stringify({
-      hubspot: hubspotData,
-      motivoOriginal: motivoSolicitacao || '',
-      idempotency_key: idempotency_key || null,
-    });
-
-    await pool.query(
-      `UPDATE app_comissionamento.tickets_movimentacao_lead
-       SET observacao_sales_ops = $1
-       WHERE id_ticket_movimentacao = $2`,
-      [observacaoJson, movimentacaoId]
-    );
-
-    // ==================== NOTIFICAÇÃO TEAMS ====================
-    if (hubspotData.status !== 'concluido') {
-      try {
-        await teamsNotificador.enviar({
-          titulo: 'Movimentação de Lead',
-          assunto: 'Movimentacao',
-          descricao: `Movimentação solicitada: ${nome_cliente_informado} ${sobrenome_cliente_informado} | Tel: ${telefone_cliente_informado || 'N/A'} | Equipe destino: ${equipe_destino_nome || 'N/A'}`,
-          solicitante: colaborador_origem_nome || 'N/A',
-          equipe: equipe_origem_nome || 'N/A',
-          anexosMarkdown: 'Nenhum anexo',
-          cliente: `${nome_cliente_informado} ${sobrenome_cliente_informado}`,
-          telefone: telefone_cliente_informado || 'N/A',
-          equipeDestino: equipe_destino_nome || 'N/A',
-          assessorDestino: colaborador_destino_nome || 'N/A',
-          status: hubspotData.status || 'N/A',
-          mensagem: hubspotData.mensagem || 'N/A',
-          pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
-          stage: hubspotData.stageNome || hubspotData.stage || null,
-        });
-      } catch (notifErr) {
-        console.error('❌ Erro ao enviar notificação Teams para movimentação:', notifErr.message);
-      }
-    }
-
-    let mensagem;
-    let success = true;
-    if (hubspotData.status === 'aviso') {
-      mensagem = hubspotData.mensagem || 'Campos pendentes.';
-      success = false;
-    } else if (hubspotData.status === 'suporte') {
-      mensagem = hubspotData.mensagem || 'Dados divergentes do cadastro. Aguardando suporte.';
-      success = false;
-    } else if (hubspotData.status === 'bloqueado') {
-      mensagem = hubspotData.mensagem;
-      success = false;
-    } else if (hubspotData.status === 'erro' || hubspotData.erro) {
-      mensagem = hubspotData.mensagem || 'Erro na integração HubSpot.';
-      success = false;
-    } else if (hubspotData.status === 'concluido') {
-      mensagem = hubspotData.mensagem || 'Card movido';
-      success = true;
-    } else {
-      mensagem = 'Ticket de movimentação registrado com sucesso.';
-      success = true;
-    }
-
-    return res.status(201).json({
-      success,
-      message: mensagem,
+    // ==================== RESPOSTA IMEDIATA – FILA ASSUME ====================
+    return res.status(202).json({
+      success: true,
+      message: 'Solicitação de movimentação registrada e enfileirada para processamento.',
       id: movimentacaoId,
+      status_mapeamento: 'pendente',
     });
   } catch (err) {
     console.error('Erro ao registrar ticket:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
   }
 });
-
-// Função auxiliar para aguardar automação do HubSpot criar negócio
-async function waitForDealCreation(contactId, intervalMs, attempts) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise(resolve => setTimeout(resolve, intervalMs));
-    const deals = await getContactDeals(contactId);
-    if (deals.length > 0) {
-      console.log(`🔎 Automação HubSpot criou negócio(s). Encontrados: ${deals.length}`);
-      return;
-    }
-    console.log(`⏳ Aguardando automação... tentativa ${i + 1}/${attempts}`);
-  }
-}
 
 // ==================== REGISTRO DE TICKET DE SUPORTE (REPORTAR) COM UPLOAD ====================
 router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => {
@@ -528,17 +298,14 @@ router.get('/tickets-movimentacao', async (req, res) => {
     const params = [];
     let paramIndex = 1;
 
-    // Filtro por status específico (usado pelo usuário comum)
     if (status_mapeamento) {
       query += ` AND tml.status_mapeamento = $${paramIndex++}`;
       params.push(status_mapeamento);
     }
 
-    // Se for a visão SalesOps (todos=1), esconde concluídos sem análise
     if (todos === '1') {
       query += ` AND (tml.status_mapeamento != 'concluido' OR tml.analisado_em IS NOT NULL)`;
     } else {
-      // Caso contrário, aplica filtros por email ou nome
       if (solicitante_email) {
         query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_email', ''))) = LOWER(TRIM($${paramIndex++}))`;
         params.push(solicitante_email);
@@ -666,7 +433,6 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
         const ticketId = movResult.rows[0].ticket_id;
         const mappedStatus = STATUS_MAP[status_mapeamento] || status_mapeamento;
 
-        // Se o status for concluído, também preenche concluido_em
         if (status_mapeamento === 'concluido') {
           await client.query(
             `UPDATE app_comissionamento.tickets_suporte
@@ -799,6 +565,36 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
   } catch (err) {
     console.error('Erro ao atualizar ticket de suporte:', err);
     return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+  }
+});
+
+// ==================== REPROCESSAR TICKET DE MOVIMENTAÇÃO ====================
+router.post('/tickets-movimentacao/:id/reprocessar', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
+      [id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ success: false, error: 'Ticket não encontrado' });
+    }
+
+    let obs = {};
+    try { obs = JSON.parse(result.rows[0].observacao_sales_ops || '{}'); } catch { obs = {}; }
+    delete obs.processado;
+
+    await pool.query(
+      `UPDATE app_comissionamento.tickets_movimentacao_lead
+       SET status_mapeamento = 'pendente', observacao_sales_ops = $1, atualizado_em = NOW()
+       WHERE id_ticket_movimentacao = $2`,
+      [JSON.stringify(obs), id]
+    );
+
+    return res.json({ success: true, message: 'Ticket reenfileirado.' });
+  } catch (err) {
+    console.error('Erro ao reprocessar:', err);
+    return res.status(500).json({ success: false, error: 'Erro interno' });
   }
 });
 

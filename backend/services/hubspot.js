@@ -126,7 +126,7 @@ async function searchContactByPhone(phoneRaw, phoneDigits) {
 }
 
 /**
- * Busca contato por telefone (prioridade), e‑mail e CPF, validando divergências.
+ * Busca contato por telefone (prioridade), e‑mail e CPF, validando divergências. 
  * Retorna { found, divergente, contact, motivo? }.
  */
 export async function findContactAndValidate({ email, phone, cpf }) {
