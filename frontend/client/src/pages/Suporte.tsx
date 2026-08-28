@@ -360,7 +360,7 @@ function MovimentacaoTab() {
 
   useEffect(() => { loadUserHistory(); }, [currentUser?.nome]);
 
-  // ✅ Polling automático a cada 20 segundos enquanto houver tickets pendentes/processando
+  // ✅ Polling automático a cada 10 segundos enquanto houver tickets pendentes/processando
   useEffect(() => {
     const hasPending = movements.some(
       (m) => m.status === "pendente" || m.status === "processando"
@@ -370,7 +370,7 @@ function MovimentacaoTab() {
 
     const intervalId = setInterval(() => {
       loadUserHistory();
-    }, 20000); // 20 segundos
+    }, 10000); // 10 segundos
 
     return () => clearInterval(intervalId);
   }, [movements]);
