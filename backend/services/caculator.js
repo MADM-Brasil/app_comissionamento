@@ -1,57 +1,112 @@
-// calculator.js - Sistema de Cálculo de Comissões (Gols, Produtos, Quinquenio, Supervisores e Gaps)
+// calculator.js - Sistema de Cálculo de Comissões
 
 export class Calculator {
     constructor() {
-        // Configurações padrão 
         this.config = {
             bonusBase: 10.00,
             comissaoPercentualPadrao: 5,
             bonusExtraPorMeta: 50.00
         };
-
-        // lista de e‑mails dos Supervisores SR
         this.supervisorSREmails = new Set();
     }
 
-    // define os Supervisores SR
     setSupervisorSREmails(emails) {
         this.supervisorSREmails = new Set(emails.map(e => e.trim().toLowerCase()));
     }
 
-    // verifica se um e‑mail é Supervisor SR
     isSupervisorSR(email) {
         return this.supervisorSREmails.has((email || '').trim().toLowerCase());
     }
 
-    // ==================== NOVO: CÁLCULO DE GOLS DIÁRIOS ====================
+    // ==================== CÁLCULO DE GOLS DIÁRIOS (ATUALIZADO) ====================
     /**
      * Calcula gols diários de um assessor.
-     * Gol do dia = assinados >= metaGolsAssinados E ganhos >= metaGolsGanhos.
-     * @param {Object[]} dailyData - Array de { date, assinados, ganhos }
-     * @param {number} metaGolsAssinados
-     * @param {number} metaGolsGanhos
-     * @returns {{ totalGols: number, dailyGols: Array<{ date, gol: boolean }> }}
+     * Agora conta múltiplos gols por dia: mínimo entre assinados/meta e ganhos/meta.
+     * Normaliza a data para YYYY-MM-DD.
      */
     calculateDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos) {
         let totalGols = 0;
         const dailyGols = dailyData.map(day => {
             const assinados = day.assinados || 0;
             const ganhos = day.ganhos || 0;
-            const gol = assinados >= metaGolsAssinados && ganhos >= metaGolsGanhos;
-            if (gol) totalGols++;
-            return { date: day.date, gol };
+
+            const golsNoDia = Math.min(
+                Math.floor(assinados / metaGolsAssinados),
+                Math.floor(ganhos / metaGolsGanhos)
+            );
+            totalGols += golsNoDia;
+            return { date: (day.date || '').slice(0, 10), gols: golsNoDia };
         });
         return { totalGols, dailyGols };
     }
 
-    // ==================== TABELA DE FAIXAS ====================
+    // ==================== APLICAÇÃO DE CAMPANHAS ====================
     /**
-     * Retorna a faixa atual para um tipo e valor.
-     * @param {Object[]} tabelaComissoes - Faixas { tipo, valor_comissao, faixa_min, faixa_max }
-     * @param {string} tipo - 'GOL', 'AUXILIO ACIDENTE', etc.
-     * @param {number} valor - total de gols ou assinados
-     * @returns {Object|null}
+     * Aplica campanhas ativas (aprovadas) aos gols diários.
+     * Tipos suportados:
+     * - GOLS: multiplica os gols do dia pelo multiplicador.
+     * - ASSINADOS: adiciona 1 gol por assinado no dia.
+     * - PROGRESSIVA: se assinados >= meta mínima (multiplicador), gols = assinados.
      */
+    applyCampaignsToDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos, campanhasAtivas = []) {
+        // Normaliza datas dos dados diários
+        const normalizedDailyData = dailyData.map(d => ({
+            ...d,
+            date: (d.date || '').slice(0, 10)
+        }));
+
+        const base = this.calculateDailyGoals(normalizedDailyData, metaGolsAssinados, metaGolsGanhos);
+
+        const golsMap = new Map();           // data -> multiplicador máximo
+        const assinadosMap = new Map();      // data -> true
+        const progressivaMap = new Map();    // data -> meta mínima
+
+        for (const camp of campanhasAtivas) {
+            const dateKey = (camp.data_publicacao || '').split('T')[0];
+            const tipo = (camp.tipo || '').toUpperCase();
+
+            if (tipo === 'GOLS') {
+                const atual = golsMap.get(dateKey) || 0;
+                const mult = Number(camp.multiplicador) || 1;
+                if (mult > atual) golsMap.set(dateKey, mult);
+            } else if (tipo === 'ASSINADOS') {
+                assinadosMap.set(dateKey, true);
+            } else if (tipo === 'PROGRESSIVA') {
+                progressivaMap.set(dateKey, Number(camp.multiplicador) || 0);
+            }
+        }
+
+        let totalGols = 0;
+        const dailyGols = base.dailyGols.map(dayGol => {
+            const dateKey = dayGol.date;
+            let gols = dayGol.gols;
+
+            // GOLS: multiplicador
+            const mult = golsMap.get(dateKey);
+            if (mult) gols = gols * mult;
+
+            // ASSINADOS: +1 por assinado
+            if (assinadosMap.has(dateKey)) {
+                const dayData = normalizedDailyData.find(d => d.date === dateKey);
+                if (dayData) gols += (dayData.assinados || 0);
+            }
+
+            // PROGRESSIVA: substitui gols
+            const metaProgressiva = progressivaMap.get(dateKey);
+            if (metaProgressiva !== undefined) {
+                const dayData = normalizedDailyData.find(d => d.date === dateKey);
+                const assinados = dayData ? (dayData.assinados || 0) : 0;
+                gols = (assinados >= metaProgressiva) ? assinados : 0;
+            }
+
+            totalGols += gols;
+            return { date: dateKey, gols };
+        });
+
+        return { totalGols, dailyGols };
+    }
+
+    // ==================== TABELA DE FAIXAS ====================
     getFaixa(tabelaComissoes, tipo, valor) {
         const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
         for (const faixa of faixas) {
@@ -62,10 +117,6 @@ export class Calculator {
         return null;
     }
 
-    /**
-     * Retorna a próxima faixa superior e o gap.
-     * @returns {{ faixa: Object, gap: number }} ou null se for a última faixa.
-     */
     getNextFaixa(tabelaComissoes, tipo, valor) {
         const faixas = tabelaComissoes
             .filter(f => f.tipo === tipo)
@@ -75,7 +126,6 @@ export class Calculator {
         return { faixa: next, gap: next.faixa_min - valor };
     }
 
-    // ==================== CÁLCULO DE COMISSÕES ====================
     calculateGoalCommission(totalGols, tabelaComissoes) {
         const faixa = this.getFaixa(tabelaComissoes, 'GOL', totalGols);
         return faixa ? faixa.valor_comissao : 0;
@@ -98,11 +148,8 @@ export class Calculator {
         return faixa ? faixa.valor_comissao : 0;
     }
 
-    /**
-     * Comissão total de um assessor (gols + produto).
-     */
-    calculateTotalCommission(dailyData, metaGolsAssinados, metaGolsGanhos, totalAssinados, productType, tabelaComissoes) {
-        const { totalGols } = this.calculateDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos);
+    calculateTotalCommission(dailyData, metaGolsAssinados, metaGolsGanhos, totalAssinados, productType, tabelaComissoes, campanhasAtivas = []) {
+        const { totalGols } = this.applyCampaignsToDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos, campanhasAtivas);
         const goalCommission = this.calculateGoalCommission(totalGols, tabelaComissoes);
         const productCommission = this.calculateProductCommission(totalAssinados, productType, tabelaComissoes);
         return {
@@ -113,11 +160,6 @@ export class Calculator {
         };
     }
 
-    // ==================== GAPS PARA PRÓXIMA FAIXA ====================
-    /**
-     * Gap de gols para a próxima faixa.
-     * @returns {{ currentFaixa, nextFaixa, gap, nextValue }} ou null.
-     */
     calculateGoalGap(totalGols, tabelaComissoes) {
         const current = this.getFaixa(tabelaComissoes, 'GOL', totalGols);
         const next = this.getNextFaixa(tabelaComissoes, 'GOL', totalGols);
@@ -130,9 +172,6 @@ export class Calculator {
         };
     }
 
-    /**
-     * Gap de assinados para produto.
-     */
     calculateProductGap(totalAssinados, productType, tabelaComissoes) {
         const tipo = productType.toUpperCase();
         const current = this.getFaixa(tabelaComissoes, tipo, totalAssinados);
@@ -146,16 +185,10 @@ export class Calculator {
         };
     }
 
-    /**
-     * Gap para Quinquenio (apenas assinados).
-     */
     calculateQuinquenioGap(totalAssinados, tabelaComissoes) {
         return this.calculateProductGap(totalAssinados, 'QUINQUENIO', tabelaComissoes);
     }
 
-    /**
-     * Gap para Supervisores (assinados da equipe).
-     */
     calculateSupervisorGap(totalAssinadosEquipe, isSR, tabelaComissoes) {
         const tipo = isSR ? 'SUPERVISOR SR' : 'SUPERVISOR';
         const current = this.getFaixa(tabelaComissoes, tipo, totalAssinadosEquipe);
@@ -169,9 +202,9 @@ export class Calculator {
         };
     }
 
-    // ==================== MÉTODOS LEGADOS  ====================
+    // ==================== MÉTODOS LEGADOS ====================
     checkGoal(ganhos, assinados, metaQuantidade = 10, metaPercentual = 70) {
-        const score = ganhos * 1 + assinados * 1; // pesos neutros
+        const score = ganhos * 1 + assinados * 1;
         const required = metaQuantidade * 1;
         const atingiuQuantidade = score >= required;
         let atingiuPercentual = true;
@@ -191,11 +224,11 @@ export class Calculator {
     }
 
     calculateBonus(metasBatidas, ganhos, metaQuantidade = 10, metaExtra = false) {
-        return 0; // Placeholder
+        return 0;
     }
 
     calculateCommission(assinados, percentualComissao = null, valorPorAssinado = 100) {
-        return 0; // Placeholder
+        return 0;
     }
 
     calculateTotalScore(ganhos, assinados) {
@@ -222,7 +255,7 @@ export class Calculator {
             projecaoMeta: false,
             ganhosNecessariosPorDia: 0
         };
-    } 
+    }
 
     updateConfig(newConfig) {
         this.config = { ...this.config, ...newConfig };
