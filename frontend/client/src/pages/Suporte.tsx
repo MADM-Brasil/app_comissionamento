@@ -419,6 +419,7 @@ function MovimentacaoTab() {
       origem_cliente_informada: origem || null,
       tipo_solicitacao: "Movimentação",
       colaborador_origem_nome: currentUser?.nome || currentUser?.email || 'frontend',
+      colaborador_origem_email: currentUser?.email || '',
       equipe_origem_nome: currentUser?.equipe || '',
       colaborador_destino_nome: assessorNome,
       colaborador_destino_email: assessorEmail,
