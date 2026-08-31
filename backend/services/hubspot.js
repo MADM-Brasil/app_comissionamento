@@ -35,8 +35,6 @@ const STAGE_NAMES = {
 
 /**
  * Normaliza o número de telefone removendo caracteres não numéricos.
- * @param {string} phone
- * @returns {string}
  */
 function normalizePhone(phone) {
   return (phone || '').replace(/\D/g, '');
@@ -62,9 +60,6 @@ async function searchContactByField(propertyName, value, operator) {
 
 /**
  * Busca contato por telefone usando busca textual (query) e validação manual.
- * @param {string} phoneRaw - telefone original como veio do formulário
- * @param {string} phoneDigits - telefone apenas com dígitos
- * @returns {Promise<Object|null>}
  */
 async function searchContactByPhone(phoneRaw, phoneDigits) {
   const variants = [];
@@ -253,8 +248,8 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
   }
 
   if (phone && phone.trim()) {
-   properties.phone = phone.trim();
-   properties.hs_whatsapp_phone_number = phone.trim(); 
+    properties.phone = phone.trim();
+    properties.hs_whatsapp_phone_number = phone.trim();
   }
 
   if (cpf) {
@@ -340,6 +335,7 @@ export async function findOwnerIdByEmail(email) {
 
 /**
  * Obtém os negócios associados a um contato.
+ * Agora LANÇA erro se a API falhar, em vez de retornar lista vazia.
  */
 export async function getContactDeals(contactId) {
   try {
@@ -384,7 +380,7 @@ export async function getContactDeals(contactId) {
     }));
   } catch (error) {
     console.error('❌ [getContactDeals] Erro:', error.message);
-    return [];
+    throw error; // ✅ agora propaga o erro
   }
 }
 
@@ -478,13 +474,13 @@ export async function moveDealToCloserEmContato(dealId, ownerId = null) {
 
 /**
  * Função principal para garantir o lead no pipeline Closer.
- * Regras:
+ * Regras revisadas:
  * - Sem negócio: cria no Base de Leads e move para Closer/Em Contato.
  * - Negócio no Base de Leads: move para Closer/Em Contato.
  * - Negócio no Closer, fase Desqualificado: permite movimentação (altera responsável e move para Em Contato).
- * - Negócio fora do Base de Leads (incluindo Closer):
- *   - Se já estiver com o colaborador informado (ownerId igual), bloqueia com "Card já está com o colaborador".
- *   - Senão, bloqueia com "Movimentação bloqueada: Card em pipeline".
+ * - Negócio no Closer com o mesmo owner: bloqueia "Card já está com o colaborador".
+ * - Qualquer outro caso: bloqueia "Movimentação bloqueada".
+ * Agora avalia todos os deals, não apenas o primeiro.
  */
 export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
   const deals = await getContactDeals(contactId);
@@ -501,6 +497,7 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
+  // 1. Prioridade: deal no Base de Leads
   const dealBase = deals.find(d => d.pipeline === PIPELINE_BASE_LEADS_ID);
   if (dealBase) {
     await moveDealToCloserEmContato(dealBase.id, ownerId);
@@ -513,13 +510,12 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
-  const firstDeal = deals[0];
-  const pipelineName = PIPELINE_NAMES[firstDeal.pipeline] || firstDeal.pipeline;
-  const stageName = STAGE_NAMES[firstDeal.stage] || firstDeal.stage;
-
-  // Nova exceção: se estiver no Closer e na fase Desqualificado, permitir movimentação
-  if (firstDeal.pipeline === PIPELINE_CLOSER_ID && firstDeal.stage === STAGE_DESQUALIFICADO_ID) {
-    await moveDealToCloserEmContato(firstDeal.id, ownerId);
+  // 2. Deal no Closer na fase Desqualificado
+  const dealDesqualificado = deals.find(
+    d => d.pipeline === PIPELINE_CLOSER_ID && d.stage === STAGE_DESQUALIFICADO_ID
+  );
+  if (dealDesqualificado) {
+    await moveDealToCloserEmContato(dealDesqualificado.id, ownerId);
     return {
       blocked: false,
       pipeline: PIPELINE_CLOSER_ID,
@@ -529,23 +525,31 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
-  // Regras de bloqueio existentes
-  if (ownerId && firstDeal.ownerId === ownerId) {
+  // 3. Deal no Closer com o mesmo owner
+  const dealMesmoOwner = deals.find(
+    d => d.pipeline === PIPELINE_CLOSER_ID && d.ownerId === ownerId
+  );
+  if (dealMesmoOwner) {
     return {
       blocked: true,
       message: `Card já está com o colaborador '${collaboratorName}'`,
-      pipeline: firstDeal.pipeline,
-      stage: firstDeal.stage,
-      pipelineNome: pipelineName,
-      stageNome: stageName,
+      pipeline: dealMesmoOwner.pipeline,
+      stage: dealMesmoOwner.stage,
+      pipelineNome: PIPELINE_NAMES[dealMesmoOwner.pipeline] || dealMesmoOwner.pipeline,
+      stageNome: STAGE_NAMES[dealMesmoOwner.stage] || dealMesmoOwner.stage,
     };
   }
+
+  // 4. Qualquer outro deal (incluindo Closer com owner diferente)
+  const primeiro = deals[0];
+  const pipelineName = PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline;
+  const stageName = STAGE_NAMES[primeiro.stage] || primeiro.stage;
 
   return {
     blocked: true,
     message: `Movimentação bloqueada: Card em pipeline '${pipelineName}'`,
-    pipeline: firstDeal.pipeline,
-    stage: firstDeal.stage,
+    pipeline: primeiro.pipeline,
+    stage: primeiro.stage,
     pipelineNome: pipelineName,
     stageNome: stageName,
   };

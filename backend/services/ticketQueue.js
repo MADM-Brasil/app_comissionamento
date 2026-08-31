@@ -18,7 +18,7 @@ const LOCK_KEY = 854729; // Número arbitrário único para advisory lock da fil
 /**
  * Processa a fila de tickets de movimentação.
  * Cada registro pendente é tratado um por vez.
- * Usa advisory lock para evitar concorrência entre múltiplas instâncias.
+ * Usa advisory lock global para evitar concorrência entre múltiplas instâncias.
  */
 async function processTicketQueue() {
   if (isProcessing) return;
@@ -60,7 +60,7 @@ async function processTicketQueue() {
       try {
         await handleTicket(ticket, client);
 
-        // Marca como concluído
+        // Marca como concluído (caso handleTicket já não tenha atualizado)
         await client.query(
           `UPDATE app_comissionamento.tickets_movimentacao_lead
            SET status_mapeamento = 'concluido',
@@ -99,7 +99,7 @@ async function processTicketQueue() {
     client.release();
     isProcessing = false;
 
-    // Libera o advisory lock
+    // Libera o advisory lock global
     const unlockClient = await pool.connect();
     try {
       await unlockClient.query(`SELECT pg_advisory_unlock($1)`, [LOCK_KEY]);
@@ -114,7 +114,7 @@ async function processTicketQueue() {
 /**
  * Processa um ticket individualmente.
  * Implementa a lógica que antes estava no endpoint /ticket-movimentacao.
- * Inclui verificação de idempotência para evitar reprocessamento acidental.
+ * Inclui verificação de idempotência e controle de criação de deal.
  */
 async function handleTicket(ticket, client) {
   // Verifica idempotência
@@ -127,8 +127,24 @@ async function handleTicket(ticket, client) {
     }
   }
 
+  // Se já foi processado com sucesso e não está mais pendente, ignora
   if (observacaoAtual.processado === true && ticket.status_mapeamento !== 'pendente') {
     console.log(`⚠️ Ticket ${ticket.id_ticket_movimentacao} já processado. Pulando...`);
+    return;
+  }
+
+  // Se já existe dealId registrado e o status não é erro, também ignora (idempotência de criação)
+  if (observacaoAtual.dealId && ticket.status_mapeamento !== 'erro') {
+    console.log(`⚠️ Ticket ${ticket.id_ticket_movimentacao} já possui dealId ${observacaoAtual.dealId}. Pulando criação.`);
+    // Apenas atualiza status se necessário
+    if (ticket.status_mapeamento === 'pendente') {
+      await client.query(
+        `UPDATE app_comissionamento.tickets_movimentacao_lead
+         SET status_mapeamento = 'concluido'
+         WHERE id_ticket_movimentacao = $1`,
+        [ticket.id_ticket_movimentacao]
+      );
+    }
     return;
   }
 
@@ -143,6 +159,7 @@ async function handleTicket(ticket, client) {
 
   let hubspotData = {};
   let resultado = null;
+  let dealId = null;
 
   try {
     const busca = await findContactAndValidate({
@@ -179,6 +196,14 @@ async function handleTicket(ticket, client) {
           ownerId,
           ticket.colaborador_destino_nome
         );
+
+        // Captura dealId caso tenha sido criado/movido
+        if (resultado && !resultado.blocked) {
+          const deals = await getContactDeals(novoContato.id);
+          if (deals.length > 0) {
+            dealId = deals[0].id;
+          }
+        }
       }
     } else if (busca.divergente) {
       hubspotData.status = 'suporte';
@@ -205,6 +230,14 @@ async function handleTicket(ticket, client) {
         ownerId,
         ticket.colaborador_destino_nome
       );
+
+      // Captura dealId caso tenha sido movido
+      if (resultado && !resultado.blocked) {
+        const deals = await getContactDeals(busca.contact.id);
+        if (deals.length > 0) {
+          dealId = deals[0].id;
+        }
+      }
     }
 
     if (resultado?.blocked) {
@@ -226,10 +259,11 @@ async function handleTicket(ticket, client) {
       hubspotData.mensagem = isCardMovido ? 'Card movido' : undefined;
     }
 
-    // Adiciona flag de processado à observação
+    // Adiciona flag de processado e dealId à observação
     const novoObservacao = {
       ...observacaoAtual,
       processado: true,
+      dealId: dealId || observacaoAtual.dealId || null,
       hubspot: hubspotData,
       motivoOriginal: ticket.motivo_solicitacao || '',
       observacao: hubspotData.mensagem || '',

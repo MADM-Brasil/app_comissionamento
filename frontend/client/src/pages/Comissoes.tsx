@@ -20,10 +20,11 @@ import { toast } from "sonner";
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo'
+  'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
+  'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
+  'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
+  'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
+  'Equipe Thales','Financeiro', 'Equipe Reciclagem',''
 ];
 
 const EXCLUDED_CARGOS = [
@@ -34,10 +35,6 @@ const EXCLUDED_CARGOS = [
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 
-/**
- * Verifica se o colaborador pertence a grupo especial (Quinquênio ou Concomitante)
- * considerando produto, cargo e equipe.
- */
 function isSpecialGroupColaborador(colaborador: any): boolean {
   const produto = (colaborador.produto || '').toLowerCase();
   const cargo = (colaborador.cargo || '').toLowerCase();
@@ -51,10 +48,6 @@ function isSpecialGroupColaborador(colaborador: any): boolean {
          equipeQuinquenio || equipeConcomitante;
 }
 
-/**
- * Retorna o tipo de produto para a tabela de comissões,
- * mapeando JUDIT/DISCADORA para AUXILIO ACIDENTE e reconhecendo equipes Quinquênio/Concomitante.
- */
 function getFaixaProductType(colab: any): string {
   const rawProduct = (colab?.produto || '').toUpperCase().trim();
   if (rawProduct === 'JUDIT' || rawProduct === 'DISCADORA') {
@@ -156,14 +149,15 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                 const campanhasAssinados = campanhasAprovadas.filter((c: any) =>
                   c.tipo?.toUpperCase() === 'ASSINADOS' && c.data_publicacao.split('T')[0] === dateKey
                 );
-                const temCampanhas = campanhasGols.length > 0 || campanhasAssinados.length > 0;
+                const campanhasProgressivas = campanhasAprovadas.filter((c: any) =>
+                  c.tipo?.toUpperCase() === 'PROGRESSIVA' && c.data_publicacao.split('T')[0] === dateKey
+                );
+                const temCampanhas = campanhasGols.length > 0 || campanhasAssinados.length > 0 || campanhasProgressivas.length > 0;
 
                 return (
                   <div key={idx} className={`p-4 rounded-xl border ${temCampanhas ? 'border-[#2F6FED] bg-[#eff6ff]' : 'border-[#e2e8f0]'}`}>
                     <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-semibold text-[#0f172a]">{dateKey}</span>
-                      </div>
+                      <span className="text-sm font-semibold text-[#0f172a]">{dateKey}</span>
                       {temCampanhas && <span className="badge success text-xs">Campanha ativa</span>}
                     </div>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
@@ -189,17 +183,18 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                             <span className="font-bold text-[#EA8C1D]">×{camp.multiplicador}</span>
                           </div>
                         ))}
-                        {campanhasAssinados.map((camp: any, cIdx: number) => {
-                          const proporcao = Number(camp.multiplicador) || 1;
-                          return (
-                            <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
-                              <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Assinados valem Gols</span>
-                              <span className="font-bold text-[#16A34A]">
-                                {proporcao === 1 ? '+1 gol/assinado' : `+1 gol a cada ${proporcao} assinados`}
-                              </span>
-                            </div>
-                          );
-                        })}
+                        {campanhasAssinados.map((camp: any, cIdx: number) => (
+                          <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
+                            <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Assinados valem Gols</span>
+                            <span className="font-bold text-[#16A34A]">+1 gol/assinado</span>
+                          </div>
+                        ))}
+                        {campanhasProgressivas.map((camp: any, cIdx: number) => (
+                          <div key={`p-${cIdx}`} className="flex justify-between text-xs mb-1">
+                            <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-purple-500" />Progressiva (mín. {camp.multiplicador} assin.)</span>
+                            <span className="font-bold text-purple-500">1 gol por assinado</span>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -223,8 +218,8 @@ export default function Comissoes() {
     hideValues, tabelaComissoes, campaigns,
   } = useAppStore();
 
-  const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
-  const isAdmin = getAccessLevel() === LEVELS.SUPER_ADMIN;
+  const { currentUser, hasPermission } = useAccessControl();
+  const canUseFilterBar = hasPermission("canViewTeam") || hasPermission("canAccessReports");
 
   const [filters, setFilters] = useState<{
     equipe: string;
@@ -242,7 +237,6 @@ export default function Comissoes() {
   const [weeklyGols, setWeeklyGols] = useState<any[]>([]);
   const [loadingDaily, setLoadingDaily] = useState(false);
   const [showExtrato, setShowExtrato] = useState(false);
-
   const isLoadingRef = useRef(false);
 
   const reloadData = useCallback(async (showRefreshing = false) => {
@@ -260,23 +254,15 @@ export default function Comissoes() {
       let colaboradorIdApi: string | number | undefined;
       const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
 
-      if (isAdmin) {
+      if (canUseFilterBar) {
         equipeApi = filters.equipe !== "todas" ? filters.equipe : undefined;
         colaboradorApi = filters.colaborador !== "todos" ? filters.colaborador : undefined;
         colaboradorIdApi = filters.colaboradorId;
       } else {
         const userColab = storeColabs.find(c => c.id === currentUser.id);
         if (userColab) {
-          const isSupervisorUser = (userColab.cargo || '').toLowerCase() === 'supervisor';
-          if (isSupervisorUser) {
-            equipeApi = userColab.equipeNome;
-            colaboradorApi = undefined;
-            colaboradorIdApi = undefined;
-          } else {
-            equipeApi = undefined;
-            colaboradorApi = userColab.name;
-            colaboradorIdApi = currentUser.id;
-          }
+          colaboradorApi = userColab.name;
+          colaboradorIdApi = currentUser.id;
         } else {
           colaboradorIdApi = currentUser.id;
         }
@@ -291,7 +277,7 @@ export default function Comissoes() {
       const colaboradoresAtualizados = useAppStore.getState().collaborators;
       let targetColab: any;
 
-      if (isAdmin) {
+      if (canUseFilterBar) {
         targetColab = colaboradoresAtualizados.find(c => c.id === colaboradorIdApi || c.name === colaboradorApi);
       } else {
         targetColab = colaboradoresAtualizados.find(c => c.id === currentUser.id);
@@ -408,7 +394,7 @@ export default function Comissoes() {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, filters, currentUser, isAdmin, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, storeColabs, campaigns]);
+  }, [currentStartDate, currentEndDate, filters, currentUser, canUseFilterBar, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, storeColabs, campaigns]);
 
   const handleRefresh = useCallback(async () => { await reloadData(true); }, [reloadData]);
   const handleFilterChange = useCallback((newFilters: any) => { setFilters(newFilters); }, []);
@@ -424,7 +410,7 @@ export default function Comissoes() {
       if (EXCLUDED_CARGOS.some(cargo => normalizeText(c.cargo) === normalizeText(cargo))) return false;
       return true;
     });
-    if (!isAdmin) {
+    if (!canUseFilterBar) {
       if (currentUser && !filtered.some(c => c.id === currentUser.id)) {
         const userColab = storeColabs.find(c => c.id === currentUser.id);
         if (userColab) filtered = [userColab, ...filtered];
@@ -434,14 +420,14 @@ export default function Comissoes() {
       if (filters.colaborador !== "todos") filtered = filtered.filter(c => c.name === filters.colaborador);
     }
     return filtered;
-  }, [storeColabs, currentUser, filters, isAdmin]);
+  }, [storeColabs, currentUser, filters, canUseFilterBar]);
 
   const userColab = useMemo(() => {
-    if (isAdmin) {
+    if (canUseFilterBar) {
       return filteredColabs.find(c => c.id === (filters.colaboradorId || filters.colaborador));
     }
     return filteredColabs.find(c => c.id === currentUser?.id);
-  }, [filteredColabs, currentUser, filters, isAdmin]);
+  }, [filteredColabs, currentUser, filters, canUseFilterBar]);
 
   const isSupervisorUser = (userColab?.cargo || '').toLowerCase() === 'supervisor';
   const isSpecialUser = userColab ? isSpecialGroupColaborador(userColab) : false;
@@ -476,8 +462,6 @@ export default function Comissoes() {
       const totalAssEquipe = equipeColabs.reduce((s, c) => s + (c.assinados || 0), 0);
       totalCommission = calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
       comissaoAssinados = totalCommission;
-      totalGols = 0;
-      comissaoGols = 0;
     } else if (isQuinquenio || isConcomitante) {
       const tipoTabela = isQuinquenio ? 'QUINQUENIO' : 'CONCOMITANTE';
       totalCommission = calculator.calculateProductCommission(userColab.assinados || 0, tipoTabela, tabelaComissoes);
@@ -488,9 +472,7 @@ export default function Comissoes() {
         const metaGan = userColab.metaGolsGanhos ?? 3;
         const assinados = userColab.assinados || 0;
         const productType = getFaixaProductType(userColab);
-
         const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
-
         const golsResult = calculator.applyCampaignsToDailyGoals(dailyMetrics, metaAss, metaGan, activeCampaigns);
         totalGols = golsResult.totalGols;
         comissaoGols = calculator.calculateGoalCommission(totalGols, tabelaComissoes);
@@ -579,7 +561,6 @@ export default function Comissoes() {
 
   const calcPercent = (value: number, target: number) => target > 0 ? Math.min((value / target) * 100, 100) : 0;
 
-  // ========== EVOLUÇÃO DIÁRIA ==========
   const evolucaoDiariaData = useMemo(() => {
     const now = new Date();
     const dayOfWeek = now.getDay();
@@ -607,12 +588,8 @@ export default function Comissoes() {
       return `${dayName} ${dd}/${mm}`;
     };
 
-    const metricsMap = new Map(
-      weeklyMetrics.map(d => [d.date?.slice(0, 10), d])
-    );
-    const golsMap = new Map(
-      weeklyGols.map(g => [g.date?.slice(0, 10), g.gols])
-    );
+    const metricsMap = new Map(weeklyMetrics.map(d => [d.date?.slice(0, 10), d]));
+    const golsMap = new Map(weeklyGols.map(g => [g.date?.slice(0, 10), g.gols]));
 
     return days.map(date => {
       const key = formatKey(date);
@@ -628,7 +605,7 @@ export default function Comissoes() {
 
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Suas comissões, calculadas pela soma de Gols diários, semanais e mensais">
-      {isAdmin && (
+      {canUseFilterBar && (
         <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" onRefresh={handleRefresh} />
       )}
 
@@ -983,7 +960,7 @@ export default function Comissoes() {
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos de apuração:</span> Diário, semanal e mensal.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Gols por período:</span> mínimo entre assinados e ganhos.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma das faixas de assinados + gols.</div>
-                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Campanhas aprovadas:</span> multiplicam gols (tipo GOLS) ou adicionam 1 gol por assinado (tipo ASSINADOS).</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Campanhas aprovadas:</span> multiplicam gols (tipo GOLS), adicionam 1 gol por assinado (tipo ASSINADOS) ou progressivas (tipo PROGRESSIVA).</div>
                 </div>
               </div>
             </>

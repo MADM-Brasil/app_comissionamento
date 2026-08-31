@@ -1,6 +1,6 @@
 // src/lib/calculator.ts
 
-// ========== Tipos auxiliares (legados mantidos) ==========
+// ========== Tipos auxiliares ==========
 export interface CalculatorConfig {
   pesoGanhos: number;
   pesoAssinados: number;
@@ -54,7 +54,6 @@ export interface PeriodCommissionResult {
   bonus: number;
 }
 
-// ========== NOVOS TIPOS PARA O MODELO DE COMISSÕES ==========
 export interface TabelaComissaoItem {
   tipo: string;
   valor_comissao: number;
@@ -104,7 +103,6 @@ export class Calculator {
     this.supervisorSREmails = new Set();
   }
 
-  // ========== CONFIGURAÇÃO DE SUPERVISORES SR ==========
   setSupervisorSREmails(emails: string[]): void {
     this.supervisorSREmails = new Set(emails.map(e => e.trim().toLowerCase()));
   }
@@ -113,17 +111,7 @@ export class Calculator {
     return this.supervisorSREmails.has((email || '').trim().toLowerCase());
   }
 
-  // ========== CÁLCULO DE GOLS DIÁRIOS (AGORA COM MÚLTIPLOS GOLS POR DIA) ==========
-  /**
-   * Calcula gols diários de um assessor.
-   * Agora contabiliza quantos múltiplos das metas foram atingidos por dia.
-   * Normaliza a data para YYYY-MM-DD.
-   *
-   * @param dailyData - Array de { date, assinados, ganhos }
-   * @param metaGolsAssinados
-   * @param metaGolsGanhos
-   * @returns { totalGols: number, dailyGols: Array<{ date, gols: number }> }
-   */
+  // ========== CÁLCULO DE GOLS DIÁRIOS ==========
   calculateDailyGoals(
     dailyData: DailyData[],
     metaGolsAssinados: number,
@@ -134,7 +122,6 @@ export class Calculator {
       const assinados = day.assinados || 0;
       const ganhos = day.ganhos || 0;
 
-      // Quantos gols? Mínimo entre (assinados / metaAss) e (ganhos / metaGan)
       const golsNoDia = Math.min(
         Math.floor(assinados / metaGolsAssinados),
         Math.floor(ganhos / metaGolsGanhos)
@@ -148,16 +135,10 @@ export class Calculator {
   // ========== APLICAÇÃO DE CAMPANHAS ==========
   /**
    * Aplica campanhas ativas (aprovadas) aos gols diários.
-   * 
-   * Regras:
-   * - Campanha GOLS: multiplica os gols do dia pelo multiplicador.
-   * - Campanha ASSINADOS: adiciona 1 gol a cada N assinados (proporção = multiplicador).
-   * 
-   * @param dailyData - Array de { date, assinados, ganhos }
-   * @param metaGolsAssinados
-   * @param metaGolsGanhos
-   * @param campanhasAtivas - Array de campanhas com { tipo, data_publicacao, multiplicador }
-   * @returns { totalGols: number, dailyGols: DailyGols[] }
+   * Tipos suportados:
+   * - GOLS: multiplica os gols do dia pelo multiplicador.
+   * - ASSINADOS: adiciona 1 gol por assinado no dia.
+   * - PROGRESSIVA: se assinados >= meta mínima (multiplicador), gols = assinados.
    */
   applyCampaignsToDailyGoals(
     dailyData: DailyData[],
@@ -165,22 +146,19 @@ export class Calculator {
     metaGolsGanhos: number,
     campanhasAtivas: any[]
   ): { totalGols: number; dailyGols: DailyGols[] } {
-    // Normaliza as datas dos dados diários
     const normalizedDailyData = dailyData.map(d => ({
       ...d,
       date: d.date.slice(0, 10),
     }));
 
-    // Calcula gols base (sem campanhas) usando os dados normalizados
     const base = this.calculateDailyGoals(normalizedDailyData, metaGolsAssinados, metaGolsGanhos);
 
-    // Mapas por data (normalizada)
-    const golsMap = new Map<string, number>();       // multiplicador máximo de campanha GOLS
-    const assinadosMap = new Map<string, number>();  // proporção (menor) para campanha ASSINADOS
+    const golsMap = new Map<string, number>();
+    const assinadosMap = new Map<string, boolean>();
+    const progressivaMap = new Map<string, number>();
 
     for (const camp of campanhasAtivas) {
       const dateKey = (camp.data_publicacao || '').split('T')[0];
-      if (!dateKey) continue;
       const tipo = (camp.tipo || '').toUpperCase();
 
       if (tipo === 'GOLS') {
@@ -188,11 +166,9 @@ export class Calculator {
         const mult = Number(camp.multiplicador) || 1;
         if (mult > atual) golsMap.set(dateKey, mult);
       } else if (tipo === 'ASSINADOS') {
-        const prop = Number(camp.multiplicador) || 1;
-        const current = assinadosMap.get(dateKey);
-        if (!current || prop < current) {
-          assinadosMap.set(dateKey, prop);
-        }
+        assinadosMap.set(dateKey, true);
+      } else if (tipo === 'PROGRESSIVA') {
+        progressivaMap.set(dateKey, Number(camp.multiplicador) || 0);
       }
     }
 
@@ -201,16 +177,24 @@ export class Calculator {
       const dateKey = dayGol.date;
       let gols = dayGol.gols;
 
-      // Aplica multiplicador (campanha GOLS)
       const mult = golsMap.get(dateKey);
       if (mult) gols = gols * mult;
 
-      // Aplica campanha ASSINADOS (cada N assinados = +1 gol)
       if (assinadosMap.has(dateKey)) {
         const dayData = normalizedDailyData.find(d => d.date === dateKey);
         if (dayData) {
-          const proporcao = assinadosMap.get(dateKey) || 1;
-          gols += Math.floor(dayData.assinados / proporcao);
+          gols += dayData.assinados || 0;
+        }
+      }
+
+      const metaProgressiva = progressivaMap.get(dateKey);
+      if (metaProgressiva !== undefined) {
+        const dayData = normalizedDailyData.find(d => d.date === dateKey);
+        const assinados = dayData ? (dayData.assinados || 0) : 0;
+        if (assinados >= metaProgressiva) {
+          gols = assinados;
+        } else {
+          gols = 0;
         }
       }
 
@@ -308,7 +292,7 @@ export class Calculator {
     };
   }
 
-  // ========== GAPS (PRÓXIMA FAIXA) ==========
+  // ========== GAPS ==========
   calculateGoalGap(totalGols: number, tabelaComissoes: TabelaComissaoItem[]): GapResult | null {
     const current = this.getFaixa(tabelaComissoes, 'GOL', totalGols);
     const next = this.getNextFaixa(tabelaComissoes, 'GOL', totalGols);
@@ -362,7 +346,7 @@ export class Calculator {
     };
   }
 
-  // ========== MÉTODOS LEGADOS (mantidos para compatibilidade) ==========
+  // ========== LEGADOS ==========
   checkGoal(
     ganhos: number,
     assinados: number,
@@ -394,7 +378,7 @@ export class Calculator {
     metaQuantidade: number = 10,
     metaExtra: boolean = false
   ): number {
-    return 0; // Placeholder
+    return 0;
   }
 
   calculateCommission(
@@ -402,7 +386,7 @@ export class Calculator {
     percentualComissao: number | null = null,
     valorPorAssinado: number = 100
   ): number {
-    return 0; // Placeholder
+    return 0;
   }
 
   calculateTotalScore(ganhos: number, assinados: number): number {
@@ -455,7 +439,7 @@ export class Calculator {
     return { ...this.config };
   }
 
-  // ========== MÉTODOS DE CICLO (compatibilidade) ==========
+  // ========== CICLOS ==========
   calculateCycleCommission(
     assinados: number,
     ganhos: number,
@@ -525,5 +509,4 @@ export class Calculator {
   }
 }
 
-// Instância única para uso em toda aplicação
 export const calculator = new Calculator();

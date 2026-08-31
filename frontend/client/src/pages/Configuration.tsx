@@ -25,7 +25,7 @@ const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo'
+  'Equipe Reciclagem',''
 ];
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
@@ -41,15 +41,6 @@ const normalize = (str: string): string =>
 // ✅ Função para normalizar cargos (remove acentos, minúsculas)
 const normalizeRole = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-// ✅ Função para obter a data de hoje no formato YYYY-MM-DD
-const getTodayString = (): string => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
 
 function formatMonthYear(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '--';
@@ -72,14 +63,16 @@ export default function Configuration() {
   const { getAccessLevel, LEVELS } = useAccessControl();
   const userLevel = getAccessLevel();
 
-  //Determinação de permissões baseada no cargo/nível
+  // ✅ Determinação de permissões baseada no cargo/nível
   const normalizedCargo = normalizeRole(currentUser?.cargo || '');
 
+  // Aceita variações: "super admin", "superadmin", "ceo", "diretoria", "desenvolvedor"
   const isSuperAdmin =
-    normalizedCargo === 'desenvoldor' ||
-    normalizedCargo === 'superadmin' ||
-    normalizedCargo === 'ceo' ||
-    normalizedCargo === 'diretoria' ||
+    normalizedCargo.includes('super admin') ||
+    normalizedCargo.includes('superadmin') ||
+    normalizedCargo.includes('ceo') ||
+    normalizedCargo.includes('diretoria') ||
+    normalizedCargo.includes('desenvolvedor') ||
     userLevel === LEVELS.SUPER_ADMIN;
 
   const isCoordenador =
@@ -89,6 +82,7 @@ export default function Configuration() {
 
   const isAdministrativo =
     normalizedCargo.includes('administrativo') ||
+    normalizedCargo.includes('administrador') ||
     userLevel === LEVELS.ADMINISTRATIVO;
 
   const isSupervisor =
@@ -159,18 +153,17 @@ export default function Configuration() {
   }>>([]);
   const [loadingCampanhas, setLoadingCampanhas] = useState(false);
 
-  // ✅ Estados do filtro de data com padrão na data atual
-  const [filterCampanhaDataInicio, setFilterCampanhaDataInicio] = useState(getTodayString());
-  const [filterCampanhaDataFim, setFilterCampanhaDataFim] = useState(getTodayString());
-
   const isAssinados = campanhaCategoria === "Assinados";
-  // Quando a categoria muda para Assinados, ajusta o multiplicador para 1 (proporção padrão)
+  const isProgressiva = campanhaCategoria === "Progressiva";
+
   useEffect(() => {
     if (isAssinados) {
-      setCampanhaMultiplicador(1);
+      setCampanhaMultiplicador(1.0);
+    } else if (isProgressiva) {
+      // Para progressiva, o multiplicador representa a meta mínima de assinados
+      setCampanhaMultiplicador(3);
     } else {
-      // Se for Gols ou outros, mantém 2.0 como padrão (caso esteja em 1)
-      if (campanhaMultiplicador === 1) {
+      if (campanhaMultiplicador === 1.0) {
         setCampanhaMultiplicador(2.0);
       }
     }
@@ -699,7 +692,7 @@ export default function Configuration() {
         tipo: campanhaCategoria,
         multiplicador: campanhaMultiplicador,
         produto: campanhaProduto,
-        data_publicacao: getTodayString(), // ✅ Corrigido: usa data local
+        data_publicacao: new Date().toISOString().slice(0, 10),
         descricao: campanhaDescricao || 'Sem descrição',
       };
 
@@ -781,15 +774,6 @@ export default function Configuration() {
       toast.error(`Falha ao rejeitar: ${err.message}`);
     }
   };
-
-  // ✅ Filtro de campanhas por data
-  const filteredCampanhas = useMemo(() => {
-    return campanhasRegistradas.filter(camp => {
-      if (filterCampanhaDataInicio && camp.data_publicacao < filterCampanhaDataInicio) return false;
-      if (filterCampanhaDataFim && camp.data_publicacao > filterCampanhaDataFim) return false;
-      return true;
-    });
-  }, [campanhasRegistradas, filterCampanhaDataInicio, filterCampanhaDataFim]);
 
   // ========== RENDER ==========
   return (
@@ -883,39 +867,50 @@ export default function Configuration() {
                     <option value="outros">Outros</option>
                     <option value="Gols">Gols</option>
                     <option value="Assinados">Assinados</option>
+                    <option value="Progressiva">Progressiva</option>
                   </select>
                 </div>
                 <div>
-  <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
-    {isAssinados ? "Proporção (assinados por gol)" : "Multiplicador (1.5 – 2.0)"}
-  </label>
-  {isAssinados ? (
-    <input
-      id="campanhaMultiplicador"
-      type="number"
-      min={1}
-      max={5}
-      step={1}
-      value={campanhaMultiplicador}
-      onChange={(e) => {
-        const val = parseInt(e.target.value) || 1;
-        setCampanhaMultiplicador(Math.min(5, Math.max(1, val)));
-      }}
-      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-    />
-  ) : (
-    <input
-      id="campanhaMultiplicador"
-      type="number"
-      min={1.5}
-      max={2.0}
-      step={0.1}
-      value={campanhaMultiplicador}
-      onChange={(e) => setCampanhaMultiplicador(parseFloat(e.target.value) || 1.5)}
-      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-    />
-  )}
-</div>
+                  <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
+                    {isAssinados
+                      ? "Assinados = Gol"
+                      : isProgressiva
+                        ? "Meta mínima de assinados"
+                        : "Multiplicador (1.5 – 2.0)"}
+                  </label>
+                  {isAssinados ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        value={campanhaMultiplicador}
+                        disabled
+                        className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-gray-100 text-center disabled:opacity-50 cursor-not-allowed"
+                      />
+                      <span className="text-xs text-[#64748b] whitespace-nowrap">(fixo)</span>
+                    </div>
+                  ) : isProgressiva ? (
+                    <input
+                      id="campanhaMultiplicador"
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={campanhaMultiplicador}
+                      onChange={(e) => setCampanhaMultiplicador(parseInt(e.target.value) || 1)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                    />
+                  ) : (
+                    <input
+                      id="campanhaMultiplicador"
+                      type="number"
+                      min={1.5}
+                      max={2.0}
+                      step={0.1}
+                      value={campanhaMultiplicador}
+                      onChange={(e) => setCampanhaMultiplicador(parseFloat(e.target.value) || 1.5)}
+                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
+                    />
+                  )}
+                </div>
                 <div>
                   <label htmlFor="campanhaProduto" className="block text-xs font-medium text-[#64748b] mb-1">
                     Produto
@@ -961,43 +956,16 @@ export default function Configuration() {
             {/* Lista de campanhas */}
             {mostrarCampanhas && (
               <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
-                <div className="flex flex-wrap items-center justify-between mb-3 gap-2">
+                <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-medium text-[#64748b]">
-                    {filteredCampanhas.length} campanha(s) registrada(s)
+                    {campanhasRegistradas.length} campanha(s) registrada(s)
                   </span>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="date"
-                      value={filterCampanhaDataInicio}
-                      onChange={(e) => setFilterCampanhaDataInicio(e.target.value)}
-                      className="px-2 py-1 text-xs rounded-lg border border-[#e2e8f0] bg-white"
-                      title="Data inicial"
-                    />
-                    <span className="text-xs text-[#64748b]">até</span>
-                    <input
-                      type="date"
-                      value={filterCampanhaDataFim}
-                      onChange={(e) => setFilterCampanhaDataFim(e.target.value)}
-                      className="px-2 py-1 text-xs rounded-lg border border-[#e2e8f0] bg-white"
-                      title="Data final"
-                    />
-                    <button
-                      onClick={() => {
-                        setFilterCampanhaDataInicio(getTodayString());
-                        setFilterCampanhaDataFim(getTodayString());
-                      }}
-                      className="text-xs text-[#2F6FED] hover:underline"
-                      title="Voltar para data atual"
-                    >
-                      Hoje
-                    </button>
-                  </div>
                   {loadingCampanhas && <span className="text-xs text-[#94a3b8]">Carregando...</span>}
                 </div>
 
-                {filteredCampanhas.length === 0 ? (
+                {campanhasRegistradas.length === 0 ? (
                   <div className="text-center py-6 text-sm text-[#94a3b8]">
-                    Nenhuma campanha encontrada no período selecionado.
+                    Nenhuma campanha registrada neste mês.
                   </div>
                 ) : (
                   <div className="overflow-x-auto">
@@ -1014,20 +982,16 @@ export default function Configuration() {
                         </tr>
                       </thead>
                       <tbody>
-                        {filteredCampanhas.map((camp) => {
+                        {campanhasRegistradas.map((camp) => {
                           const chave = `${camp.tipo}-${camp.data_publicacao}-${camp.produto}`;
                           return (
                             <tr key={chave}>
                               <td className="text-xs text-[#64748b]">
-                                 {camp.data_publicacao ? camp.data_publicacao.split('T')[0] : '—'}
+                                {new Date(camp.data_publicacao).toLocaleDateString('pt-BR')}
                               </td>
                               <td className="text-xs font-medium">{camp.tipo}</td>
                               <td className="text-center text-xs font-bold">
-                                {camp.tipo === "Assinados" ? (
-                                  `${camp.multiplicador}x (1 gol a cada ${camp.multiplicador} assinados)`
-                                ) : (
-                                  `${camp.multiplicador.toFixed(1)}x`
-                                )}
+                                {camp.tipo === "Assinados" ? "1:1" : camp.tipo === "Progressiva" ? `mín. ${camp.multiplicador}` : `${camp.multiplicador.toFixed(1)}x`}
                               </td>
                               <td className="text-xs">{camp.produto}</td>
                               <td className="text-xs max-w-[150px] truncate" title={camp.descricao}>
@@ -1431,7 +1395,7 @@ export default function Configuration() {
                               </div>
                             </div>
                           </td>
-                        </tr> 
+                        </tr>
                       )}
                     </React.Fragment>
                   );
