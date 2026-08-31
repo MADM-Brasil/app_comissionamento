@@ -53,26 +53,27 @@ const upload = multer({
 router.post('/ticket-movimentacao', async (req, res) => {
   try {
     const {
-      crm_origem = 'CRM',
-      crm_lead_id: rawCrmLeadId = null,
-      lead_id: rawLeadId = null,
-      nome_cliente_informado,
-      sobrenome_cliente_informado,
-      email_cliente_informado,
-      telefone_cliente_informado,
-      cpf_cliente_informado,
-      origem_cliente_informada,
-      tipo_solicitacao = 'Movimentação',
-      colaborador_origem_nome,
-      equipe_origem_nome,
-      colaborador_destino_nome,
-      colaborador_destino_email,
-      equipe_destino_nome,
-      motivo_solicitacao: rawMotivo = null,
-      observacao_sales_ops: rawObs = null,
-      status_mapeamento = 'pendente',
-      idempotency_key,
-    } = req.body;
+  crm_origem = 'CRM',
+  crm_lead_id: rawCrmLeadId = null,
+  lead_id: rawLeadId = null,
+  nome_cliente_informado,
+  sobrenome_cliente_informado,
+  email_cliente_informado,
+  telefone_cliente_informado,
+  cpf_cliente_informado,
+  origem_cliente_informada,
+  tipo_solicitacao = 'Movimentação',
+  colaborador_origem_nome,
+  colaborador_origem_email,
+  equipe_origem_nome,
+  colaborador_destino_nome,
+  colaborador_destino_email,
+  equipe_destino_nome,
+  motivo_solicitacao: rawMotivo = null,
+  observacao_sales_ops: rawObs = null,
+  status_mapeamento = 'pendente',
+  idempotency_key,
+} = req.body;
 
     // ---------- Validação de campos ----------
     if (!nome_cliente_informado || !sobrenome_cliente_informado || !telefone_cliente_informado) {
@@ -118,7 +119,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       origem_equipe: equipe_origem_nome || '',
       destino_colaborador: colaborador_destino_nome || '',
       destino_equipe: equipe_destino_nome || '',
-      solicitante_email: req.user?.email || '',
+      solicitante_email: colaborador_origem_email || req.user?.email || '',
       solicitante_nome: colaborador_origem_nome || req.user?.nome || '',
     };
 
