@@ -81,7 +81,16 @@ router.post('/', requireAuth, async (req, res) => {
     const userEmail = req.session.userId;
     const role = await getUserRole(userEmail);
 
-    const allowedRoles = ['coordenador', 'administrativo', 'super_admin', 'superadmin'];
+    const allowedRoles = [
+  'coordenador',
+  'administrativo',
+  'super_admin',
+  'superadmin',
+  'desenvolvedor',
+  'ceo',
+  'diretoria',
+  'admin',
+];
     if (!allowedRoles.includes(role)) {
       return res.status(403).json({ success: false, error: 'Você não tem permissão para registrar campanhas.' });
     }
@@ -132,7 +141,14 @@ router.patch('/validacao', requireAuth, async (req, res) => {
   try {
     const userEmail = req.session.userId;
     const role = await getUserRole(userEmail);
-    const superAdminRoles = ['super_admin', 'superadmin', 'ceo', 'diretoria'];
+    const superAdminRoles = [
+  'super_admin',
+  'superadmin',
+  'ceo',
+  'diretoria',
+  'desenvolvedor',
+  'admin',
+];
 
     if (!superAdminRoles.includes(role)) {
       return res.status(403).json({ success: false, error: 'Apenas super administradores podem aprovar ou rejeitar campanhas.' });
