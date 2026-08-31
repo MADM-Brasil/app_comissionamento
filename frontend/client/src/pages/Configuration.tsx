@@ -42,6 +42,13 @@ const normalize = (str: string): string =>
 const normalizeRole = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+// ✅ Converte YYYY-MM-DD para DD/MM/YYYY sem converter fuso
+const formatDateOnly = (dateStr: string): string => {
+  if (!dateStr) return '—';
+  const [year, month, day] = dateStr.split('T')[0].split('-');
+  return `${day}/${month}/${year}`;
+};
+
 function formatMonthYear(dateStr: string): string {
   if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return '--';
   const [year, month] = dateStr.split('-');
@@ -66,9 +73,9 @@ export default function Configuration() {
   // ✅ Determinação de permissões baseada no cargo/nível
   const normalizedCargo = normalizeRole(currentUser?.cargo || '');
 
-  // Aceita variações: "super admin", "superadmin", "ceo", "diretoria", "desenvolvedor"
   const isSuperAdmin =
     normalizedCargo.includes('super admin') ||
+    normalizedCargo.includes('super_admin') ||
     normalizedCargo.includes('superadmin') ||
     normalizedCargo.includes('ceo') ||
     normalizedCargo.includes('diretoria') ||
@@ -77,7 +84,6 @@ export default function Configuration() {
 
   const isCoordenador =
     normalizedCargo.includes('coordenador') ||
-    normalizedCargo.includes('coordenadora') ||
     userLevel === LEVELS.COORDENADOR;
 
   const isAdministrativo =
@@ -91,16 +97,12 @@ export default function Configuration() {
 
   const isAssessor = !(isSuperAdmin || isCoordenador || isAdministrativo || isSupervisor);
 
-  // ✅ Acesso à página: todos exceto assessores
-  // Enquanto o currentUser não está carregado, permitimos (evita redirecionamento prematuro)
   const canAccessConfig = currentUser ? !isAssessor : true;
 
-  // ✅ Permissão de edição: coordenadores, administrativos e super admins
   const canEditConfig = isSuperAdmin || isCoordenador || isAdministrativo;
   const canEditBonus = canEditConfig;
   const canGenerateNextMonth = isSuperAdmin;
 
-  // ✅ Registro de campanhas: coordenadores, administrativos e super admins (não supervisores)
   const canRegisterCampanha = isSuperAdmin || isCoordenador || isAdministrativo;
 
   const isAdminOnly = canEditConfig;
@@ -160,7 +162,6 @@ export default function Configuration() {
     if (isAssinados) {
       setCampanhaMultiplicador(1.0);
     } else if (isProgressiva) {
-      // Para progressiva, o multiplicador representa a meta mínima de assinados
       setCampanhaMultiplicador(3);
     } else {
       if (campanhaMultiplicador === 1.0) {
@@ -251,20 +252,17 @@ export default function Configuration() {
       });
       const uniqueCollabs = Array.from(uniqueMap.values());
 
-      // Normaliza campos de meta de gols
       uniqueCollabs.forEach((c: any) => {
         c.metaGolsAssinados = c.meta_gols_assinados ?? c.metaGolsAssinados ?? 20;
         c.metaGolsGanhos = c.meta_gols_ganhos ?? c.metaGolsGanhos ?? 20;
       });
 
-      // Carrega métricas do mês selecionado
       const start = month;
       const year = parseInt(month.substring(0, 4), 10);
       const monthIdx = parseInt(month.substring(5, 7), 10) - 1;
       const lastDay = new Date(year, monthIdx + 1, 0).getDate();
       const end = `${month.substring(0, 7)}-${String(lastDay).padStart(2, '0')}`;
 
-      // Totais
       const [emitidos, assinados, ganhos, perdidos, protocolados] = await Promise.all([
         fetchEmitidos({ start, end }),
         fetchAssinados({ start, end }),
@@ -273,13 +271,11 @@ export default function Configuration() {
         fetchProtocolados({ start, end }),
       ]);
 
-      // Dados diários para calcular Gols
       const [dailyAssinados, dailyGanhos] = await Promise.all([
         fetchAssinados({ start, end, granularity: 'daily' }),
         fetchGanhos({ start, end, granularity: 'daily' }),
       ]);
 
-      // Mapa de totais por colaborador
       const metricsMap = new Map<string, { emitidos: number; assinados: number; ganhos: number; perdidos: number; protocolados: number }>();
       const aggregate = (data: any[], key: 'emitidos' | 'assinados' | 'ganhos' | 'perdidos' | 'protocolados') => {
         data.forEach((item: any) => {
@@ -298,7 +294,6 @@ export default function Configuration() {
       aggregate(perdidos, 'perdidos');
       aggregate(protocolados, 'protocolados');
 
-      // Mapa de dados diários por colaborador
       const dailyMap = new Map<string, Map<string, { assinados: number; ganhos: number }>>();
       const processDaily = (data: any[], key: 'assinados' | 'ganhos') => {
         data.forEach((item: any) => {
@@ -314,7 +309,6 @@ export default function Configuration() {
       processDaily(dailyAssinados, 'assinados');
       processDaily(dailyGanhos, 'ganhos');
 
-      // Atualiza colaboradores com métricas e total de gols
       uniqueCollabs.forEach((c: any) => {
         const name = normalize(c.name);
         const metrics = metricsMap.get(name) || { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0, protocolados: 0 };
@@ -324,7 +318,6 @@ export default function Configuration() {
         c.perdidos = metrics.perdidos;
         c.protocolados = metrics.protocolados;
 
-        // Calcula gols diários
         const dailyData = dailyMap.get(name);
         if (dailyData) {
           const dias = Array.from(dailyData.keys()).sort();
@@ -356,7 +349,7 @@ export default function Configuration() {
     if (selectedMonth) loadCollaboratorsForMonth(selectedMonth);
   }, [selectedMonth]);
 
-  // ========== CARREGAMENTO DE EQUIPES (uma vez) ==========
+  // ========== CARREGAMENTO DE EQUIPES ==========
   const equipesLoaded = useRef(false);
   useEffect(() => {
     if (equipesLoaded.current) return;
@@ -779,7 +772,6 @@ export default function Configuration() {
   return (
     <DashboardLayout title="Configurações" subtitle="Gerencie metas e pesos do sistema">
       <div className="space-y-6">
-        {/* AVISO DE BLOQUEIO + BOTÃO GERAR PRÓXIMO MÊS */}
         {isLocked && (
           <div className="alert-banner warning">
             <CalendarPlus className="w-5 h-5 text-[#EA8C1D] mt-0.5 flex-shrink-0" />
@@ -807,7 +799,6 @@ export default function Configuration() {
           </div>
         )}
 
-        {/* SELETOR DE MÊS */}
         <div className="card flex items-center gap-4 p-4">
           <Calendar className="w-5 h-5 text-[#2F6FED]" />
           <label htmlFor="monthSelect" className="text-sm font-semibold text-[#0f172a]">Mês de referência:</label>
@@ -832,7 +823,7 @@ export default function Configuration() {
           {isLocked && <span className="badge warning">Bloqueado</span>}
         </div>
 
-        {/* CARD: REGISTRAR CAMPANHA COMERCIAL (coordenador, administrativo e super admin) */}
+        {/* CARD: REGISTRAR CAMPANHA COMERCIAL */}
         {canRegisterCampanha && (
           <div className="card">
             <div className="px-5 py-3 border-b border-[#e2e8f0] flex items-center justify-between">
@@ -953,7 +944,6 @@ export default function Configuration() {
               </div>
             </div>
 
-            {/* Lista de campanhas */}
             {mostrarCampanhas && (
               <div className="px-4 pb-4 border-t border-[#e2e8f0] pt-4">
                 <div className="flex items-center justify-between mb-3">
@@ -987,7 +977,7 @@ export default function Configuration() {
                           return (
                             <tr key={chave}>
                               <td className="text-xs text-[#64748b]">
-                                {new Date(camp.data_publicacao).toLocaleDateString('pt-BR')}
+                                {formatDateOnly(camp.data_publicacao)}
                               </td>
                               <td className="text-xs font-medium">{camp.tipo}</td>
                               <td className="text-center text-xs font-bold">
