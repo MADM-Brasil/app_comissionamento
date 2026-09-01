@@ -9,7 +9,6 @@ const hubspotClient = new Client({
 const PIPELINE_BASE_LEADS_ID = process.env.HUBSPOT_PIPELINE_BASE_LEADS_ID || '905901447';
 const PIPELINE_CLOSER_ID = process.env.HUBSPOT_PIPELINE_CLOSER_ID || '904458124';
 const STAGE_EM_CONTATO_ID = process.env.HUBSPOT_STAGE_EM_CONTATO_ID || '1368997801';
-// Nova constante para fase Desqualificado
 const STAGE_DESQUALIFICADO_ID = process.env.HUBSPOT_STAGE_DESQUALIFICADO_ID || '1368997806';
 
 export const HUBSPOT_PIPELINE_BASE_LEADS_ID = PIPELINE_BASE_LEADS_ID;
@@ -17,7 +16,7 @@ export const HUBSPOT_PIPELINE_CLOSER_ID = PIPELINE_CLOSER_ID;
 export const HUBSPOT_STAGE_EM_CONTATO_ID = STAGE_EM_CONTATO_ID;
 export const HUBSPOT_STAGE_DESQUALIFICADO_ID = STAGE_DESQUALIFICADO_ID;
 
-// Mapeamento de nomes para mensagens de bloqueio
+// Mapeamento de nomes para mensagens
 const PIPELINE_NAMES = {
   [PIPELINE_BASE_LEADS_ID]: 'Base de Leads',
   [PIPELINE_CLOSER_ID]: 'Closer',
@@ -27,17 +26,41 @@ const PIPELINE_NAMES = {
   '925690734': 'Quinquenio/concomitante',
 };
 
-// Mapeamento de nomes de estágios
 const STAGE_NAMES = {
   [STAGE_EM_CONTATO_ID]: 'Em Contato',
   [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
 };
 
 /**
- * Normaliza o número de telefone removendo caracteres não numéricos.
+ * Normaliza telefone removendo todos os caracteres não numéricos.
  */
 function normalizePhone(phone) {
   return (phone || '').replace(/\D/g, '');
+}
+
+/**
+ * Compara dois telefones considerando variações comuns:
+ * - com ou sem código do país (55)
+ * - 10 ou 11 dígitos
+ * Retorna true se forem iguais ou se um contém o outro.
+ */
+function phonesMatch(contactPhone, inputPhone) {
+  const a = normalizePhone(contactPhone);
+  const b = normalizePhone(inputPhone);
+
+  if (!a || !b) return false;
+
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+
+  // Remove código do país para comparar
+  const aSem55 = a.startsWith('55') ? a.slice(2) : a;
+  const bSem55 = b.startsWith('55') ? b.slice(2) : b;
+
+  if (aSem55 === bSem55) return true;
+  if (aSem55.includes(bSem55) || bSem55.includes(aSem55)) return true;
+
+  return false;
 }
 
 /**
@@ -48,7 +71,15 @@ async function searchContactByField(propertyName, value, operator) {
   try {
     const response = await hubspotClient.crm.contacts.searchApi.doSearch({
       filterGroups: [{ filters: filter }],
-      properties: ['email', 'firstname', 'lastname', 'phone', 'hs_whatsapp_phone_number', 'contact_cpf', 'contact_fonte'],
+      properties: [
+        'email',
+        'firstname',
+        'lastname',
+        'phone',
+        'hs_whatsapp_phone_number',
+        'contact_cpf',
+        'contact_fonte'
+      ],
       limit: 1,
     });
     return response.results?.[0] || null;
@@ -95,14 +126,12 @@ async function searchContactByPhone(phoneRaw, phoneDigits) {
         const match = response.results.find(contact => {
           const props = contact.properties || {};
           const phoneValues = [
-            normalizePhone(props.phone || ''),
-            normalizePhone(props.hs_whatsapp_phone_number || '')
+            props.phone,
+            props.hs_whatsapp_phone_number
           ].filter(Boolean);
 
           return phoneValues.some(contactPhone =>
-            contactPhone === phoneDigits ||
-            contactPhone.includes(phoneDigits) ||
-            phoneDigits.includes(contactPhone)
+            phonesMatch(contactPhone, phoneDigits)
           );
         });
 
@@ -121,7 +150,7 @@ async function searchContactByPhone(phoneRaw, phoneDigits) {
 }
 
 /**
- * Busca contato por telefone (prioridade), e‑mail e CPF, validando divergências. 
+ * Busca contato por telefone (prioridade), e‑mail e CPF, validando divergências.
  * Retorna { found, divergente, contact, motivo? }.
  */
 export async function findContactAndValidate({ email, phone, cpf }) {
@@ -134,7 +163,12 @@ export async function findContactAndValidate({ email, phone, cpf }) {
   if (phoneClean.length >= 10) {
     const contact = await searchContactByPhone(phoneRaw, phoneClean);
     if (contact) {
-      return validateContact(contact, { emailClean, phoneClean, cpfClean });
+      return validateContact(contact, {
+        emailClean,
+        phoneClean,
+        cpfClean,
+        matchedBy: 'phone',
+      });
     }
   }
 
@@ -142,7 +176,12 @@ export async function findContactAndValidate({ email, phone, cpf }) {
   if (emailClean) {
     const contact = await searchContactByField('email', emailClean, 'EQ');
     if (contact) {
-      return validateContact(contact, { emailClean, phoneClean, cpfClean });
+      return validateContact(contact, {
+        emailClean,
+        phoneClean,
+        cpfClean,
+        matchedBy: 'email',
+      });
     }
   }
 
@@ -150,7 +189,12 @@ export async function findContactAndValidate({ email, phone, cpf }) {
   if (cpfClean.length === 11) {
     const contact = await searchContactByField('contact_cpf', cpfClean, 'EQ');
     if (contact) {
-      return validateContact(contact, { emailClean, phoneClean, cpfClean });
+      return validateContact(contact, {
+        emailClean,
+        phoneClean,
+        cpfClean,
+        matchedBy: 'cpf',
+      });
     }
   }
 
@@ -159,8 +203,9 @@ export async function findContactAndValidate({ email, phone, cpf }) {
 
 /**
  * Compara os dados fornecidos com os do contato existente.
+ * Se matchedBy = 'phone', não reprova telefone.
  */
-function validateContact(contact, { emailClean, phoneClean, cpfClean }) {
+function validateContact(contact, { emailClean, phoneClean, cpfClean, matchedBy }) {
   const props = contact.properties || {};
   const divergencias = [];
 
@@ -171,16 +216,14 @@ function validateContact(contact, { emailClean, phoneClean, cpfClean }) {
     }
   }
 
-  if (phoneClean) {
+  if (phoneClean && matchedBy !== 'phone') {
     const phoneValues = [
-      normalizePhone(props.phone || ''),
-      normalizePhone(props.hs_whatsapp_phone_number || '')
+      props.phone,
+      props.hs_whatsapp_phone_number
     ].filter(Boolean);
 
     const matchesPhone = phoneValues.some(contactPhone =>
-      contactPhone === phoneClean ||
-      contactPhone.includes(phoneClean) ||
-      phoneClean.includes(contactPhone)
+      phonesMatch(contactPhone, phoneClean)
     );
 
     if (phoneValues.length > 0 && !matchesPhone) {
@@ -209,7 +252,6 @@ function validateContact(contact, { emailClean, phoneClean, cpfClean }) {
 
 /**
  * Busca simples (usada internamente ou por outros módulos).
- * Não valida divergências, apenas retorna o primeiro contato encontrado.
  */
 export async function searchContact({ email, phone, cpf }) {
   const emailClean = (email || '').trim().toLowerCase();
@@ -234,8 +276,6 @@ export async function searchContact({ email, phone, cpf }) {
 
 /**
  * Cria um novo contato no HubSpot.
- * Padroniza o telefone para apenas dígitos.
- * Aceita ownerId para definir o proprietário do contato.
  */
 export async function createContact({ firstName, lastName, email, phone, cpf, origem, ownerId }) {
   const properties = {
@@ -335,7 +375,7 @@ export async function findOwnerIdByEmail(email) {
 
 /**
  * Obtém os negócios associados a um contato.
- * Agora LANÇA erro se a API falhar, em vez de retornar lista vazia.
+ * Lança erro em caso de falha (não retorna lista vazia).
  */
 export async function getContactDeals(contactId) {
   try {
@@ -380,7 +420,7 @@ export async function getContactDeals(contactId) {
     }));
   } catch (error) {
     console.error('❌ [getContactDeals] Erro:', error.message);
-    throw error; // ✅ agora propaga o erro
+    throw error;
   }
 }
 
@@ -478,9 +518,8 @@ export async function moveDealToCloserEmContato(dealId, ownerId = null) {
  * - Sem negócio: cria no Base de Leads e move para Closer/Em Contato.
  * - Negócio no Base de Leads: move para Closer/Em Contato.
  * - Negócio no Closer, fase Desqualificado: permite movimentação (altera responsável e move para Em Contato).
- * - Negócio no Closer com o mesmo owner: bloqueia "Card já está com o colaborador".
- * - Qualquer outro caso: bloqueia "Movimentação bloqueada".
- * Agora avalia todos os deals, não apenas o primeiro.
+ * - Negócio no Closer com o mesmo owner: SUCESSO idempotente (não bloqueia).
+ * - Qualquer outro caso: bloqueia.
  */
 export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
   const deals = await getContactDeals(contactId);
@@ -497,8 +536,7 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
-  // 1. Prioridade: deal no Base de Leads
-  const dealBase = deals.find(d => d.pipeline === PIPELINE_BASE_LEADS_ID);
+  const dealBase = deals.find(d => String(d.pipeline) === String(PIPELINE_BASE_LEADS_ID));
   if (dealBase) {
     await moveDealToCloserEmContato(dealBase.id, ownerId);
     return {
@@ -510,9 +548,8 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
-  // 2. Deal no Closer na fase Desqualificado
   const dealDesqualificado = deals.find(
-    d => d.pipeline === PIPELINE_CLOSER_ID && d.stage === STAGE_DESQUALIFICADO_ID
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.stage) === String(STAGE_DESQUALIFICADO_ID)
   );
   if (dealDesqualificado) {
     await moveDealToCloserEmContato(dealDesqualificado.id, ownerId);
@@ -525,13 +562,13 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
-  // 3. Deal no Closer com o mesmo owner
   const dealMesmoOwner = deals.find(
-    d => d.pipeline === PIPELINE_CLOSER_ID && d.ownerId === ownerId
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.ownerId || '') === String(ownerId || '')
   );
   if (dealMesmoOwner) {
     return {
-      blocked: true,
+      blocked: false,
+      alreadyAssigned: true,
       message: `Card já está com o colaborador '${collaboratorName}'`,
       pipeline: dealMesmoOwner.pipeline,
       stage: dealMesmoOwner.stage,
@@ -540,18 +577,28 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
-  // 4. Qualquer outro deal (incluindo Closer com owner diferente)
-  const primeiro = deals[0];
-  const pipelineName = PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline;
-  const stageName = STAGE_NAMES[primeiro.stage] || primeiro.stage;
+  const dealCloserOutroOwner = deals.find(
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && d.ownerId && String(d.ownerId) !== String(ownerId || '')
+  );
+  if (dealCloserOutroOwner) {
+    return {
+      blocked: true,
+      message: `Movimentação bloqueada: Card já está com outro colaborador`,
+      pipeline: dealCloserOutroOwner.pipeline,
+      stage: dealCloserOutroOwner.stage,
+      pipelineNome: PIPELINE_NAMES[dealCloserOutroOwner.pipeline] || dealCloserOutroOwner.pipeline,
+      stageNome: STAGE_NAMES[dealCloserOutroOwner.stage] || dealCloserOutroOwner.stage,
+    };
+  }
 
+  const primeiro = deals[0];
   return {
     blocked: true,
-    message: `Movimentação bloqueada: Card em pipeline '${pipelineName}'`,
+    message: `Movimentação bloqueada: Card em pipeline '${PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline}'`,
     pipeline: primeiro.pipeline,
     stage: primeiro.stage,
-    pipelineNome: pipelineName,
-    stageNome: stageName,
+    pipelineNome: PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline,
+    stageNome: STAGE_NAMES[primeiro.stage] || primeiro.stage,
   };
 }
 
