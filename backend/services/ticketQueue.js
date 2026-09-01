@@ -7,6 +7,7 @@ import {
   findOwnerIdByEmail,
   getContactDeals,
   updateContactOwner,
+  validateFinalAssignment,   // ✅ ADICIONADO
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_STAGE_EM_CONTATO_ID
 } from './hubspot.js';
@@ -144,6 +145,7 @@ async function handleTicket(ticket, client) {
   let hubspotData = {};
   let resultado = null;
   let dealId = null;
+  let contactId = null;
 
   try {
     const busca = await findContactAndValidate({
@@ -168,57 +170,68 @@ async function handleTicket(ticket, client) {
           ownerId,
         });
 
-        hubspotData.contactId = novoContato.id;
+        contactId = novoContato.id;
+        hubspotData.contactId = contactId;
         hubspotData.existe = true;
         hubspotData.criadoAgora = true;
 
-        await waitForDealCreation(novoContato.id, 2000, 3);
-
+        // ✅ REMOVIDO waitForDealCreation() – agora chama garantirLeadNoCloser direto
         resultado = await garantirLeadNoCloser(
-          novoContato.id,
+          contactId,
           nomeCompleto,
           ownerId,
           ticket.colaborador_destino_nome
         );
 
-        if (resultado && !resultado.blocked) {
-          const deals = await getContactDeals(novoContato.id);
-          if (deals.length > 0) {
-            dealId = deals[0].id;
-          }
+        // O dealId já vem de resultado.dealId – não precisa buscar novamente
+        if (resultado && !resultado.blocked && resultado.dealId) {
+          dealId = resultado.dealId;
         }
       }
     } else if (busca.divergente) {
+      contactId = busca.contact.id;
       hubspotData.status = 'suporte';
       hubspotData.mensagem = busca.motivo || 'Dados divergentes do cadastro. Aguardando suporte.';
-      hubspotData.contactId = busca.contact.id;
+      hubspotData.contactId = contactId;
       hubspotData.existe = true;
 
       if (ownerId) {
-        await updateContactOwner(busca.contact.id, ownerId);
+        await updateContactOwner(contactId, ownerId);
       }
       resultado = { blocked: false, message: hubspotData.mensagem };
     } else {
-      hubspotData.contactId = busca.contact.id;
+      contactId = busca.contact.id;
+      hubspotData.contactId = contactId;
       hubspotData.existe = true;
 
       if (ownerId) {
-        await updateContactOwner(busca.contact.id, ownerId);
+        await updateContactOwner(contactId, ownerId);
       }
 
       resultado = await garantirLeadNoCloser(
-        busca.contact.id,
+        contactId,
         nomeCompleto,
         ownerId,
         ticket.colaborador_destino_nome
       );
 
-      if (resultado && !resultado.blocked) {
-        const deals = await getContactDeals(busca.contact.id);
-        if (deals.length > 0) {
-          dealId = deals[0].id;
-        }
+      if (resultado && !resultado.blocked && resultado.dealId) {
+        dealId = resultado.dealId;
       }
+    }
+
+    // ✅ VALIDAÇÃO FINAL: confirma owner e pipeline
+    if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
+      const finalCheck = await validateFinalAssignment(
+        contactId,
+        ownerId,
+        dealId
+      );
+
+      if (!finalCheck.ok) {
+        throw new Error(`Validação final falhou: ${JSON.stringify(finalCheck.details || finalCheck)}`);
+      }
+      console.log(`✅ Validação final OK para contato ${contactId}, deal ${dealId}`);
     }
 
     // Determina status final
@@ -254,7 +267,8 @@ async function handleTicket(ticket, client) {
       motivoOriginal: ticket.motivo_solicitacao || '',
       observacao: hubspotData.mensagem || '',
       colaboradorDestinoNome: ticket.colaborador_destino_nome,
-      colaboradorDestinoEmail: colaboradorEmail, // guarda o e-mail usado
+      colaboradorDestinoEmail: colaboradorEmail,
+      validacaoFinal: true, // indica que passou pela validação
     };
 
     await client.query(
@@ -338,14 +352,6 @@ async function handleTicket(ticket, client) {
       [obsErro, ticket.id_ticket_movimentacao]
     );
     throw error;
-  }
-}
-
-async function waitForDealCreation(contactId, intervalMs, attempts) {
-  for (let i = 0; i < attempts; i++) {
-    await new Promise(resolve => setTimeout(resolve, intervalMs));
-    const deals = await getContactDeals(contactId);
-    if (deals.length > 0) return;
   }
 }
 
