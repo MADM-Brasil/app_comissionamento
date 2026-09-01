@@ -526,7 +526,7 @@ router.patch('/tickets-suporte/:id', async (req, res) => {
       UPDATE app_comissionamento.tickets_suporte
       SET ${setClauses.join(', ')}
       WHERE id_ticket = $${paramIndex}
-      RETURNING id_ticket
+      RETURNING id_ticket 
     `;
     values.push(id);
 
