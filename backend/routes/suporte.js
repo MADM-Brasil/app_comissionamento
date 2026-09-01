@@ -50,7 +50,6 @@ const upload = multer({
 });
 
 // ==================== REGISTRO DE TICKET DE MOVIMENTAÇÃO ====================
-// Agora apenas registra e enfileira. O processamento é feito pelo worker (ticketQueue.js)
 router.post('/ticket-movimentacao', async (req, res) => {
   try {
     const {
@@ -65,6 +64,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       origem_cliente_informada,
       tipo_solicitacao = 'Movimentação',
       colaborador_origem_nome,
+      colaborador_origem_email,
       equipe_origem_nome,
       colaborador_destino_nome,
       colaborador_destino_email,
@@ -78,6 +78,11 @@ router.post('/ticket-movimentacao', async (req, res) => {
     // ---------- Validação de campos ----------
     if (!nome_cliente_informado || !sobrenome_cliente_informado || !telefone_cliente_informado) {
       return res.status(400).json({ success: false, error: 'Nome, sobrenome e telefone são obrigatórios.' });
+    }
+
+    // ✅ Validação obrigatória do e-mail do colaborador destino
+    if (!colaborador_destino_email || !colaborador_destino_email.trim()) {
+      return res.status(400).json({ success: false, error: 'E-mail do colaborador de destino é obrigatório.' });
     }
 
     // ---------- Verificação de idempotência ----------
@@ -119,8 +124,8 @@ router.post('/ticket-movimentacao', async (req, res) => {
       origem_equipe: equipe_origem_nome || '',
       destino_colaborador: colaborador_destino_nome || '',
       destino_equipe: equipe_destino_nome || '',
-      solicitante_email: colaborador_origem_email || req.session.userId || '',
-      solicitante_nome: colaborador_origem_nome || req.user?.nome || '',
+      solicitante_email: req.session.userId || '',
+      solicitante_nome: colaborador_origem_nome || req.session.userId || 'Desconhecido',
     };
 
     const baseResult = await pool.query(
@@ -132,7 +137,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
     );
     const ticketId = baseResult.rows[0].id_ticket;
 
-    // 2. Inserir o registro específico da movimentação
+    // 2. Inserir o registro específico da movimentação (com colaborador_destino_email)
     const insertMovimentacaoQuery = `
       INSERT INTO app_comissionamento.tickets_movimentacao_lead (
         ticket_id,
@@ -143,13 +148,14 @@ router.post('/ticket-movimentacao', async (req, res) => {
         cpf_cliente_informado, origem_cliente_informada,
         tipo_solicitacao,
         colaborador_destino_nome,
+        colaborador_destino_email,
         motivo_solicitacao,
         status_mapeamento,
         observacao_sales_ops,
         atualizado_em
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, NOW()
+        $10, $11, $12, $13, $14, $15, $16, NOW()
       )
       RETURNING id_ticket_movimentacao
     `;
@@ -163,6 +169,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       cpfFinal || null, origem_cliente_informada,
       tipo_solicitacao,
       colaborador_destino_nome,
+      colaborador_destino_email,
       motivoSolicitacao,
       status_mapeamento,
       observacaoInicial,
@@ -204,6 +211,7 @@ router.get('/tickets-movimentacao', async (req, res) => {
         COALESCE(ts.metadados->>'origem_colaborador', '') AS colaborador_origem_nome,
         COALESCE(ts.metadados->>'origem_equipe', '') AS equipe_origem_nome,
         tml.colaborador_destino_nome,
+        tml.colaborador_destino_email,
         COALESCE(ts.metadados->>'destino_equipe', '') AS equipe_destino_nome,
         tml.status_mapeamento,
         tml.observacao_sales_ops,

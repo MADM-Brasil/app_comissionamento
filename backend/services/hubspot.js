@@ -26,7 +26,6 @@ const PIPELINE_NAMES = {
   '925690734': 'Quinquenio/concomitante',
 };
 
-// Mapeamento de nomes de estágios
 const STAGE_NAMES = {
   [STAGE_EM_CONTATO_ID]: 'Em Contato',
   [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
@@ -40,27 +39,18 @@ function normalizePhone(phone) {
 }
 
 /**
- * Compara dois telefones considerando variações comuns:
- * - com ou sem código do país (55)
- * - 10 ou 11 dígitos
- * Retorna true se forem iguais ou se um contém o outro.
+ * Compara dois telefones considerando variações comuns.
  */
 function phonesMatch(contactPhone, inputPhone) {
   const a = normalizePhone(contactPhone);
   const b = normalizePhone(inputPhone);
-
   if (!a || !b) return false;
-
   if (a === b) return true;
   if (a.includes(b) || b.includes(a)) return true;
-
-  // Remove código do país para comparar
   const aSem55 = a.startsWith('55') ? a.slice(2) : a;
   const bSem55 = b.startsWith('55') ? b.slice(2) : b;
-
   if (aSem55 === bSem55) return true;
   if (aSem55.includes(bSem55) || bSem55.includes(aSem55)) return true;
-
   return false;
 }
 
@@ -79,7 +69,8 @@ async function searchContactByField(propertyName, value, operator) {
         'phone',
         'hs_whatsapp_phone_number',
         'contact_cpf',
-        'contact_fonte'
+        'contact_fonte',
+        'hubspot_owner_id'
       ],
       limit: 1,
     });
@@ -95,7 +86,6 @@ async function searchContactByField(propertyName, value, operator) {
  */
 async function searchContactByPhone(phoneRaw, phoneDigits) {
   const variants = [];
-
   if (phoneRaw?.trim()) variants.push(phoneRaw.trim());
   if (phoneDigits) {
     variants.push(phoneDigits);
@@ -104,7 +94,6 @@ async function searchContactByPhone(phoneRaw, phoneDigits) {
     variants.push(`55${phoneDigits}`);
     variants.push(`+55${phoneDigits}`);
   }
-
   const uniqueVariants = [...new Set(variants)].filter(Boolean);
 
   for (const query of uniqueVariants) {
@@ -118,24 +107,17 @@ async function searchContactByPhone(phoneRaw, phoneDigits) {
           'phone',
           'hs_whatsapp_phone_number',
           'contact_cpf',
-          'contact_fonte'
+          'contact_fonte',
+          'hubspot_owner_id'
         ],
         limit: 10,
       });
-
       if (response.results?.length) {
         const match = response.results.find(contact => {
           const props = contact.properties || {};
-          const phoneValues = [
-            props.phone,
-            props.hs_whatsapp_phone_number
-          ].filter(Boolean);
-
-          return phoneValues.some(contactPhone =>
-            phonesMatch(contactPhone, phoneDigits)
-          );
+          const phoneValues = [props.phone, props.hs_whatsapp_phone_number].filter(Boolean);
+          return phoneValues.some(contactPhone => phonesMatch(contactPhone, phoneDigits));
         });
-
         if (match) {
           console.log(`✅ Contato encontrado via query "${query}"`);
           return match;
@@ -145,7 +127,6 @@ async function searchContactByPhone(phoneRaw, phoneDigits) {
       console.error(`❌ Erro na busca textual por telefone "${query}":`, error.message);
     }
   }
-
   console.warn('⚠️ Nenhum contato encontrado pelo telefone usando busca textual.');
   return null;
 }
@@ -204,7 +185,6 @@ export async function findContactAndValidate({ email, phone, cpf }) {
 
 /**
  * Compara os dados fornecidos com os do contato existente.
- * Se matchedBy = 'phone', não reprova telefone.
  */
 function validateContact(contact, { emailClean, phoneClean, cpfClean, matchedBy }) {
   const props = contact.properties || {};
@@ -218,15 +198,8 @@ function validateContact(contact, { emailClean, phoneClean, cpfClean, matchedBy 
   }
 
   if (phoneClean && matchedBy !== 'phone') {
-    const phoneValues = [
-      props.phone,
-      props.hs_whatsapp_phone_number
-    ].filter(Boolean);
-
-    const matchesPhone = phoneValues.some(contactPhone =>
-      phonesMatch(contactPhone, phoneClean)
-    );
-
+    const phoneValues = [props.phone, props.hs_whatsapp_phone_number].filter(Boolean);
+    const matchesPhone = phoneValues.some(contactPhone => phonesMatch(contactPhone, phoneClean));
     if (phoneValues.length > 0 && !matchesPhone) {
       divergencias.push('telefone');
     }
@@ -337,7 +310,6 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
  */
 export async function updateContactOwner(contactId, ownerId) {
   if (!contactId || !ownerId) return null;
-
   try {
     return await hubspotClient.crm.contacts.basicApi.update(contactId, {
       properties: {
@@ -515,63 +487,56 @@ export async function moveDealToCloserEmContato(dealId, ownerId = null) {
 
 /**
  * Função principal para garantir o lead no pipeline Closer.
- * Regras revisadas:
- * - Sem negócio: cria no Base de Leads e move para Closer/Em Contato.
- * - Negócio no Base de Leads: move para Closer/Em Contato.
- * - Negócio no Closer, fase Desqualificado: move para Em Contato e atribui owner.
- * - Negócio no Closer, Em Contato, sem owner: atribui owner (deal + contato) e retorna sucesso.
- * - Negócio no Closer com o mesmo owner: sucesso idempotente (não bloqueia).
- * - Negócio no Closer com outro owner: bloqueia.
- * - Qualquer outro caso: bloqueia.
+ * Agora retorna informações detalhadas incluindo dealId e ruleApplied.
  */
 export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
+  // Caso ownerId não seja fornecido, bloqueia imediatamente
+  if (!ownerId) {
+    return {
+      blocked: true,
+      message: 'Movimentação bloqueada: responsável de destino não informado',
+      pipeline: null,
+      stage: null,
+      pipelineNome: null,
+      stageNome: null,
+      dealId: null,
+      ruleApplied: 'owner_missing',
+    };
+  }
+
   const deals = await getContactDeals(contactId);
 
-  // 1. Sem negócio: cria e move
+  // 1. Sem negócio: cria no Base de Leads e move para Closer/Em Contato
   if (deals.length === 0) {
-    if (!ownerId) {
-      return {
-        blocked: true,
-        message: 'Movimentação bloqueada: responsável de destino não informado',
-        pipeline: PIPELINE_CLOSER_ID,
-        stage: STAGE_EM_CONTATO_ID,
-        pipelineNome: 'Closer',
-        stageNome: 'Em Contato',
-      };
-    }
     const newDeal = await createDealForContact(contactId, dealName, PIPELINE_BASE_LEADS_ID, null, ownerId);
     await moveDealToCloserEmContato(newDeal.id, ownerId);
     await updateContactOwner(contactId, ownerId);
+
     return {
       blocked: false,
+      dealId: newDeal.id,
       pipeline: PIPELINE_CLOSER_ID,
       stage: STAGE_EM_CONTATO_ID,
       pipelineNome: 'Closer',
       stageNome: 'Em Contato',
+      ruleApplied: 'created_and_moved',
     };
   }
 
   // 2. Negócio no Base de Leads
   const dealBase = deals.find(d => String(d.pipeline) === String(PIPELINE_BASE_LEADS_ID));
   if (dealBase) {
-    if (!ownerId) {
-      return {
-        blocked: true,
-        message: 'Movimentação bloqueada: responsável de destino não informado',
-        pipeline: dealBase.pipeline,
-        stage: dealBase.stage,
-        pipelineNome: PIPELINE_NAMES[dealBase.pipeline] || dealBase.pipeline,
-        stageNome: STAGE_NAMES[dealBase.stage] || dealBase.stage,
-      };
-    }
     await moveDealToCloserEmContato(dealBase.id, ownerId);
     await updateContactOwner(contactId, ownerId);
+
     return {
       blocked: false,
+      dealId: dealBase.id,
       pipeline: PIPELINE_CLOSER_ID,
       stage: STAGE_EM_CONTATO_ID,
       pipelineNome: 'Closer',
       stageNome: 'Em Contato',
+      ruleApplied: 'base_to_closer',
     };
   }
 
@@ -580,24 +545,17 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.stage) === String(STAGE_DESQUALIFICADO_ID)
   );
   if (dealDesqualificado) {
-    if (!ownerId) {
-      return {
-        blocked: true,
-        message: 'Movimentação bloqueada: responsável de destino não informado',
-        pipeline: dealDesqualificado.pipeline,
-        stage: dealDesqualificado.stage,
-        pipelineNome: PIPELINE_NAMES[dealDesqualificado.pipeline] || dealDesqualificado.pipeline,
-        stageNome: STAGE_NAMES[dealDesqualificado.stage] || dealDesqualificado.stage,
-      };
-    }
     await moveDealToCloserEmContato(dealDesqualificado.id, ownerId);
     await updateContactOwner(contactId, ownerId);
+
     return {
       blocked: false,
+      dealId: dealDesqualificado.id,
       pipeline: PIPELINE_CLOSER_ID,
       stage: STAGE_EM_CONTATO_ID,
       pipelineNome: 'Closer',
       stageNome: 'Em Contato',
+      ruleApplied: 'desqualificado_to_em_contato',
     };
   }
 
@@ -606,24 +564,17 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && !d.ownerId
   );
   if (dealCloserSemOwner) {
-    if (!ownerId) {
-      return {
-        blocked: true,
-        message: 'Movimentação bloqueada: responsável de destino não informado',
-        pipeline: dealCloserSemOwner.pipeline,
-        stage: dealCloserSemOwner.stage,
-        pipelineNome: PIPELINE_NAMES[dealCloserSemOwner.pipeline] || dealCloserSemOwner.pipeline,
-        stageNome: STAGE_NAMES[dealCloserSemOwner.stage] || dealCloserSemOwner.stage,
-      };
-    }
     await moveDealToCloserEmContato(dealCloserSemOwner.id, ownerId);
     await updateContactOwner(contactId, ownerId);
+
     return {
       blocked: false,
+      dealId: dealCloserSemOwner.id,
       pipeline: PIPELINE_CLOSER_ID,
       stage: STAGE_EM_CONTATO_ID,
       pipelineNome: 'Closer',
       stageNome: 'Em Contato',
+      ruleApplied: 'closer_without_owner',
     };
   }
 
@@ -632,14 +583,19 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.ownerId || '') === String(ownerId || '')
   );
   if (dealMesmoOwner) {
+    // Garante que o contato também tenha o owner correto
+    await updateContactOwner(contactId, ownerId);
+
     return {
       blocked: false,
       alreadyAssigned: true,
+      dealId: dealMesmoOwner.id,
       message: `Card já está com o colaborador '${collaboratorName}'`,
       pipeline: dealMesmoOwner.pipeline,
       stage: dealMesmoOwner.stage,
       pipelineNome: PIPELINE_NAMES[dealMesmoOwner.pipeline] || dealMesmoOwner.pipeline,
       stageNome: STAGE_NAMES[dealMesmoOwner.stage] || dealMesmoOwner.stage,
+      ruleApplied: 'already_assigned',
     };
   }
 
@@ -650,28 +606,32 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
   if (dealCloserOutroOwner) {
     return {
       blocked: true,
+      dealId: dealCloserOutroOwner.id,
       message: 'Movimentação bloqueada: Card já está com outro colaborador',
       pipeline: dealCloserOutroOwner.pipeline,
       stage: dealCloserOutroOwner.stage,
       pipelineNome: PIPELINE_NAMES[dealCloserOutroOwner.pipeline] || dealCloserOutroOwner.pipeline,
       stageNome: STAGE_NAMES[dealCloserOutroOwner.stage] || dealCloserOutroOwner.stage,
+      ruleApplied: 'owned_by_another',
     };
   }
 
-  // 7. Qualquer outro caso
+  // 7. Qualquer outro caso (fallback)
   const primeiro = deals[0];
   return {
     blocked: true,
+    dealId: primeiro?.id || null,
     message: `Movimentação bloqueada: Card em pipeline '${PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline}'`,
     pipeline: primeiro.pipeline,
     stage: primeiro.stage,
     pipelineNome: PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline,
     stageNome: STAGE_NAMES[primeiro.stage] || primeiro.stage,
+    ruleApplied: 'fallback_block',
   };
 }
 
 /**
- * Função de compatibilidade.
+ * Função de compatibilidade (mantida para não quebrar outros módulos).
  */
 export async function verificarPipelineBaseELevio(contactId) {
   const deal = await findDealInBaseLeads(contactId);
@@ -693,4 +653,47 @@ export async function isContactInPipeline(contactId, pipelineId) {
 export async function findDealInBaseLeads(contactId) {
   const deals = await getContactDeals(contactId);
   return deals.find(deal => deal.pipeline === PIPELINE_BASE_LEADS_ID) || null;
+}
+
+/**
+ * VALIDAÇÃO FINAL - confirma se o contato e o deal estão com o owner e pipeline esperados.
+ * Útil para revalidação após a movimentação.
+ */
+export async function validateFinalAssignment(contactId, expectedOwnerId, expectedDealId = null) {
+  const deals = await getContactDeals(contactId);
+  const targetDeal = expectedDealId
+    ? deals.find(d => String(d.id) === String(expectedDealId))
+    : deals.find(d => String(d.pipeline) === String(PIPELINE_CLOSER_ID));
+
+  try {
+    const contact = await hubspotClient.crm.contacts.basicApi.getById(contactId, [
+      'hubspot_owner_id',
+      'email',
+      'firstname',
+      'lastname',
+    ]);
+    const contactOwnerId = contact.properties?.hubspot_owner_id || null;
+
+    const okDeal = targetDeal &&
+      String(targetDeal.pipeline) === String(PIPELINE_CLOSER_ID) &&
+      String(targetDeal.stage) === String(STAGE_EM_CONTATO_ID) &&
+      String(targetDeal.ownerId || '') === String(expectedOwnerId || '');
+
+    const okContact = String(contactOwnerId || '') === String(expectedOwnerId || '');
+
+    return {
+      ok: Boolean(okDeal && okContact),
+      contactOwnerId,
+      deal: targetDeal || null,
+      details: {
+        dealPipeline: targetDeal?.pipeline || null,
+        dealStage: targetDeal?.stage || null,
+        dealOwnerId: targetDeal?.ownerId || null,
+        contactOwnerId: contactOwnerId,
+      }
+    };
+  } catch (error) {
+    console.error('❌ [validateFinalAssignment] Erro:', error.message);
+    return { ok: false, error: error.message };
+  }
 }
