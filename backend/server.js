@@ -88,8 +88,8 @@ app.use((req, res, next) => {
     const token = crypto.randomBytes(32).toString('hex');
     res.cookie('csrf-token', token, {
       httpOnly: false,
-      secure: isProduction,
-      sameSite: 'lax',
+      secure: isProduction ? true : false,
+      sameSite: isProduction ? 'none' : 'lax',
       path: '/',
     });
     req.csrfToken = token;
@@ -123,9 +123,10 @@ app.use(session({
   saveUninitialized: false,
   rolling: true,
   cookie: {
-    secure: isProduction,
+    secure: false,                // ✅ TLS termina no proxy, não aqui
     httpOnly: true,
-    sameSite: isProduction ? 'none' : 'lax',
+    sameSite: 'lax',             // ✅ mesmo domínio via proxy
+    maxAge: 24 * 60 * 60 * 1000, // 1 dia padrão (pode ser sobrescrito no login)
   },
 }));
 
@@ -286,13 +287,13 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     }
 
     const user = result.rows[0];
-    const sendResult = await twoFactorService.sendPasswordResetCode(user.email, user.nome);
+    const sendResult = await twoFactorService.sendPasswordResetCode(user.email, user.email);
     if (!sendResult.success) {
       return res.status(500).json({ success: false, error: sendResult.error });
     }
 
-    req.session.resetEmail = email;
-    req.session.resetName = user.nome;
+    req.session.resetEmail = user.email;
+    req.session.resetName = user.email;
 
     req.session.save((err) => {
       if (err) return res.status(500).json({ success: false, error: 'Erro ao salvar sessão' });
