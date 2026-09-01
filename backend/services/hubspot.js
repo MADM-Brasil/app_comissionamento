@@ -487,7 +487,7 @@ export async function moveDealToCloserEmContato(dealId, ownerId = null) {
 
 /**
  * Função principal para garantir o lead no pipeline Closer.
- * Agora retorna informações detalhadas incluindo dealId e ruleApplied.
+ * Retorna informações detalhadas incluindo dealId e ruleApplied.
  */
 export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
   // Caso ownerId não seja fornecido, bloqueia imediatamente
