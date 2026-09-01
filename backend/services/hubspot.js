@@ -26,6 +26,7 @@ const PIPELINE_NAMES = {
   '925690734': 'Quinquenio/concomitante',
 };
 
+// Mapeamento de nomes de estágios
 const STAGE_NAMES = {
   [STAGE_EM_CONTATO_ID]: 'Em Contato',
   [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
@@ -517,16 +518,30 @@ export async function moveDealToCloserEmContato(dealId, ownerId = null) {
  * Regras revisadas:
  * - Sem negócio: cria no Base de Leads e move para Closer/Em Contato.
  * - Negócio no Base de Leads: move para Closer/Em Contato.
- * - Negócio no Closer, fase Desqualificado: permite movimentação (altera responsável e move para Em Contato).
- * - Negócio no Closer com o mesmo owner: SUCESSO idempotente (não bloqueia).
+ * - Negócio no Closer, fase Desqualificado: move para Em Contato e atribui owner.
+ * - Negócio no Closer, Em Contato, sem owner: atribui owner (deal + contato) e retorna sucesso.
+ * - Negócio no Closer com o mesmo owner: sucesso idempotente (não bloqueia).
+ * - Negócio no Closer com outro owner: bloqueia.
  * - Qualquer outro caso: bloqueia.
  */
 export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
   const deals = await getContactDeals(contactId);
 
+  // 1. Sem negócio: cria e move
   if (deals.length === 0) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: PIPELINE_CLOSER_ID,
+        stage: STAGE_EM_CONTATO_ID,
+        pipelineNome: 'Closer',
+        stageNome: 'Em Contato',
+      };
+    }
     const newDeal = await createDealForContact(contactId, dealName, PIPELINE_BASE_LEADS_ID, null, ownerId);
     await moveDealToCloserEmContato(newDeal.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
     return {
       blocked: false,
       pipeline: PIPELINE_CLOSER_ID,
@@ -536,9 +551,21 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
+  // 2. Negócio no Base de Leads
   const dealBase = deals.find(d => String(d.pipeline) === String(PIPELINE_BASE_LEADS_ID));
   if (dealBase) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: dealBase.pipeline,
+        stage: dealBase.stage,
+        pipelineNome: PIPELINE_NAMES[dealBase.pipeline] || dealBase.pipeline,
+        stageNome: STAGE_NAMES[dealBase.stage] || dealBase.stage,
+      };
+    }
     await moveDealToCloserEmContato(dealBase.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
     return {
       blocked: false,
       pipeline: PIPELINE_CLOSER_ID,
@@ -548,11 +575,23 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
+  // 3. Negócio no Closer, fase Desqualificado
   const dealDesqualificado = deals.find(
     d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.stage) === String(STAGE_DESQUALIFICADO_ID)
   );
   if (dealDesqualificado) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: dealDesqualificado.pipeline,
+        stage: dealDesqualificado.stage,
+        pipelineNome: PIPELINE_NAMES[dealDesqualificado.pipeline] || dealDesqualificado.pipeline,
+        stageNome: STAGE_NAMES[dealDesqualificado.stage] || dealDesqualificado.stage,
+      };
+    }
     await moveDealToCloserEmContato(dealDesqualificado.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
     return {
       blocked: false,
       pipeline: PIPELINE_CLOSER_ID,
@@ -562,6 +601,33 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
+  // 4. Negócio no Closer, Em Contato, sem owner
+  const dealCloserSemOwner = deals.find(
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && !d.ownerId
+  );
+  if (dealCloserSemOwner) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: dealCloserSemOwner.pipeline,
+        stage: dealCloserSemOwner.stage,
+        pipelineNome: PIPELINE_NAMES[dealCloserSemOwner.pipeline] || dealCloserSemOwner.pipeline,
+        stageNome: STAGE_NAMES[dealCloserSemOwner.stage] || dealCloserSemOwner.stage,
+      };
+    }
+    await moveDealToCloserEmContato(dealCloserSemOwner.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
+    return {
+      blocked: false,
+      pipeline: PIPELINE_CLOSER_ID,
+      stage: STAGE_EM_CONTATO_ID,
+      pipelineNome: 'Closer',
+      stageNome: 'Em Contato',
+    };
+  }
+
+  // 5. Negócio no Closer com o mesmo owner (sucesso idempotente)
   const dealMesmoOwner = deals.find(
     d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.ownerId || '') === String(ownerId || '')
   );
@@ -577,13 +643,14 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
+  // 6. Negócio no Closer com outro owner
   const dealCloserOutroOwner = deals.find(
     d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && d.ownerId && String(d.ownerId) !== String(ownerId || '')
   );
   if (dealCloserOutroOwner) {
     return {
       blocked: true,
-      message: `Movimentação bloqueada: Card já está com outro colaborador`,
+      message: 'Movimentação bloqueada: Card já está com outro colaborador',
       pipeline: dealCloserOutroOwner.pipeline,
       stage: dealCloserOutroOwner.stage,
       pipelineNome: PIPELINE_NAMES[dealCloserOutroOwner.pipeline] || dealCloserOutroOwner.pipeline,
@@ -591,6 +658,7 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     };
   }
 
+  // 7. Qualquer outro caso
   const primeiro = deals[0];
   return {
     blocked: true,
