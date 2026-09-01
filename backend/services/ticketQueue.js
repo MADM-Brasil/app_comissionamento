@@ -7,7 +7,7 @@ import {
   findOwnerIdByEmail,
   getContactDeals,
   updateContactOwner,
-  validateFinalAssignment,   // ✅ ADICIONADO
+  validateFinalAssignment,
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_STAGE_EM_CONTATO_ID
 } from './hubspot.js';
@@ -175,7 +175,6 @@ async function handleTicket(ticket, client) {
         hubspotData.existe = true;
         hubspotData.criadoAgora = true;
 
-        // ✅ REMOVIDO waitForDealCreation() – agora chama garantirLeadNoCloser direto
         resultado = await garantirLeadNoCloser(
           contactId,
           nomeCompleto,
@@ -183,7 +182,6 @@ async function handleTicket(ticket, client) {
           ticket.colaborador_destino_nome
         );
 
-        // O dealId já vem de resultado.dealId – não precisa buscar novamente
         if (resultado && !resultado.blocked && resultado.dealId) {
           dealId = resultado.dealId;
         }
@@ -220,18 +218,29 @@ async function handleTicket(ticket, client) {
       }
     }
 
-    // ✅ VALIDAÇÃO FINAL: confirma owner e pipeline
+    // ✅ VALIDAÇÃO FINAL COM RETRY (aguarda associação no HubSpot)
     if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
-      const finalCheck = await validateFinalAssignment(
-        contactId,
-        ownerId,
-        dealId
-      );
+      let finalCheck = null;
+      let attempts = 0;
+      const maxAttempts = 5;
+      const delayMs = 2000;
 
-      if (!finalCheck.ok) {
-        throw new Error(`Validação final falhou: ${JSON.stringify(finalCheck.details || finalCheck)}`);
+      while (attempts < maxAttempts) {
+        attempts++;
+        finalCheck = await validateFinalAssignment(contactId, ownerId, dealId);
+        if (finalCheck.ok) {
+          console.log(`✅ Validação final OK (tentativa ${attempts})`);
+          break;
+        }
+        console.log(`⏳ Aguardando associação do deal (tentativa ${attempts}/${maxAttempts})...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
       }
-      console.log(`✅ Validação final OK para contato ${contactId}, deal ${dealId}`);
+
+      if (!finalCheck || !finalCheck.ok) {
+        throw new Error(
+          `Validação final falhou após ${maxAttempts} tentativas: ${JSON.stringify(finalCheck?.details || finalCheck)}`
+        );
+      }
     }
 
     // Determina status final
@@ -268,7 +277,7 @@ async function handleTicket(ticket, client) {
       observacao: hubspotData.mensagem || '',
       colaboradorDestinoNome: ticket.colaborador_destino_nome,
       colaboradorDestinoEmail: colaboradorEmail,
-      validacaoFinal: true, // indica que passou pela validação
+      validacaoFinal: true,
     };
 
     await client.query(
