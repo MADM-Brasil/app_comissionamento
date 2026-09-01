@@ -13,17 +13,15 @@ import {
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 
 let isProcessing = false;
-const LOCK_KEY = 854729; // Número arbitrário único para advisory lock da fila de tickets
+const LOCK_KEY = 854729;
 
 /**
  * Processa a fila de tickets de movimentação.
- * Cada registro pendente é tratado um por vez.
- * Usa advisory lock global para evitar concorrência entre múltiplas instâncias.
+ * Usa advisory lock global para evitar concorrência entre instâncias.
  */
 async function processTicketQueue() {
   if (isProcessing) return;
 
-  // Tenta adquirir lock global (advisory lock)
   const lockClient = await pool.connect();
   let hasLock = false;
   try {
@@ -42,7 +40,6 @@ async function processTicketQueue() {
   const client = await pool.connect();
   try {
     while (true) {
-      // Seleciona o próximo ticket pendente com bloqueio de linha
       const result = await client.query(
         `SELECT tml.*, ts.metadados
          FROM app_comissionamento.tickets_movimentacao_lead tml
@@ -58,34 +55,10 @@ async function processTicketQueue() {
       if (result.rows.length === 0) break;
       const ticket = result.rows[0];
 
-      // Extrai o e‑mail destino dos metadados (campo JSONB)
-      let colaboradorDestinoEmail = null;
       try {
-        const metadados = typeof ticket.metadados === 'string' ? JSON.parse(ticket.metadados) : ticket.metadados;
-        colaboradorDestinoEmail = metadados?.colaborador_destino_email || null;
-      } catch (e) {
-        console.warn(`⚠️ Erro ao parsear metadados do ticket ${ticket.id_ticket_movimentacao}:`, e);
-      }
-
-      // Se não houver e‑mail destino, marca como erro e pula
-      if (!colaboradorDestinoEmail) {
-        console.warn(`⚠️ Ticket ${ticket.id_ticket_movimentacao} sem e‑mail destino. Marcando como erro.`);
-        await client.query(
-          `UPDATE app_comissionamento.tickets_movimentacao_lead
-           SET status_mapeamento = 'erro',
-               observacao_sales_ops = jsonb_set(COALESCE(observacao_sales_ops, '{}'), '{erro}', '"E-mail do colaborador destino não informado"'),
-               atualizado_em = NOW()
-           WHERE id_ticket_movimentacao = $1`,
-          [ticket.id_ticket_movimentacao]
-        );
-        continue;
-      }
-
-      try {
-        await handleTicket(ticket, colaboradorDestinoEmail, client);
+        await handleTicket(ticket, client);
       } catch (err) {
         console.error(`Erro no ticket ${ticket.id_ticket_movimentacao}:`, err);
-        // Em caso de erro, marca como erro e registra observação
         const obs = JSON.stringify({
           erro: err.message,
           timestamp: new Date().toISOString(),
@@ -106,7 +79,6 @@ async function processTicketQueue() {
     client.release();
     isProcessing = false;
 
-    // Libera o advisory lock global
     const unlockClient = await pool.connect();
     try {
       await unlockClient.query(`SELECT pg_advisory_unlock($1)`, [LOCK_KEY]);
@@ -120,10 +92,10 @@ async function processTicketQueue() {
 
 /**
  * Processa um ticket individualmente.
- * Implementa a lógica de integração com HubSpot e atualiza o status final.
+ * Busca o ownerId pelo nome do colaborador destino (via e‑mail obtido do banco).
  */
-async function handleTicket(ticket, colaboradorDestinoEmail, client) {
-  // Verifica se já foi processado (idempotência baseada em 'processado')
+async function handleTicket(ticket, client) {
+  // Verifica idempotência
   let observacaoAtual = {};
   if (ticket.observacao_sales_ops) {
     try {
@@ -133,18 +105,38 @@ async function handleTicket(ticket, colaboradorDestinoEmail, client) {
     }
   }
 
-  // Se já foi processado e o status é final, ignora
   if (observacaoAtual.processado === true) {
     console.log(`⚠️ Ticket ${ticket.id_ticket_movimentacao} já processado. Pulando...`);
     return;
   }
 
-  // Resolve ownerId a partir do e‑mail destino
+  // 1. Obter e‑mail do colaborador destino a partir do nome
+  let colaboradorEmail = null;
+  if (ticket.colaborador_destino_nome) {
+    try {
+      const result = await client.query(
+        `SELECT email
+         FROM core.view_app_colaboradores
+         WHERE LOWER(TRIM(nome)) = LOWER(TRIM($1))
+         LIMIT 1`,
+        [ticket.colaborador_destino_nome]
+      );
+      if (result.rows.length > 0) {
+        colaboradorEmail = result.rows[0].email;
+      } else {
+        console.warn(`⚠️ Colaborador não encontrado no banco: ${ticket.colaborador_destino_nome}`);
+      }
+    } catch (err) {
+      console.error(`❌ Erro ao buscar e‑mail do colaborador ${ticket.colaborador_destino_nome}:`, err);
+    }
+  }
+
+  // 2. Resolver ownerId no HubSpot
   let ownerId = null;
-  if (colaboradorDestinoEmail) {
-    ownerId = await findOwnerIdByEmail(colaboradorDestinoEmail);
+  if (colaboradorEmail) {
+    ownerId = await findOwnerIdByEmail(colaboradorEmail);
     if (!ownerId) {
-      console.warn(`⚠️ Owner não encontrado para: ${colaboradorDestinoEmail}`);
+      console.warn(`⚠️ Owner não encontrado no HubSpot para: ${colaboradorEmail}`);
     }
   }
 
@@ -229,7 +221,7 @@ async function handleTicket(ticket, colaboradorDestinoEmail, client) {
       }
     }
 
-    // Determina status final baseado no resultado
+    // Determina status final
     let statusFinal = 'pendente';
     if (resultado?.blocked) {
       statusFinal = 'bloqueado';
@@ -253,7 +245,7 @@ async function handleTicket(ticket, colaboradorDestinoEmail, client) {
       hubspotData.status = 'fora_pipeline';
     }
 
-    // Atualiza observação com informações finais
+    // Atualiza observação e status
     const novoObservacao = {
       ...observacaoAtual,
       processado: true,
@@ -261,6 +253,8 @@ async function handleTicket(ticket, colaboradorDestinoEmail, client) {
       hubspot: hubspotData,
       motivoOriginal: ticket.motivo_solicitacao || '',
       observacao: hubspotData.mensagem || '',
+      colaboradorDestinoNome: ticket.colaborador_destino_nome,
+      colaboradorDestinoEmail: colaboradorEmail, // guarda o e-mail usado
     };
 
     await client.query(
@@ -273,7 +267,7 @@ async function handleTicket(ticket, colaboradorDestinoEmail, client) {
       [JSON.stringify(novoObservacao), statusFinal, ticket.id_ticket_movimentacao]
     );
 
-    // Atualiza tickets_suporte com status correspondente
+    // Atualiza tickets_suporte
     if (statusFinal === 'concluido') {
       await client.query(
         `UPDATE app_comissionamento.tickets_suporte
@@ -304,7 +298,7 @@ async function handleTicket(ticket, colaboradorDestinoEmail, client) {
       );
     }
 
-    // Notificação Teams apenas para casos não concluídos ou bloqueados
+    // Notificação Teams para casos não concluídos
     if (statusFinal !== 'concluido') {
       try {
         await teamsNotificador.enviar({
@@ -343,7 +337,7 @@ async function handleTicket(ticket, colaboradorDestinoEmail, client) {
        WHERE id_ticket_movimentacao = $2`,
       [obsErro, ticket.id_ticket_movimentacao]
     );
-    throw error; // repassa para o loop principal tratar
+    throw error;
   }
 }
 
@@ -355,10 +349,6 @@ async function waitForDealCreation(contactId, intervalMs, attempts) {
   }
 }
 
-/**
- * Inicia o loop da fila em intervalos regulares.
- * @param {number} intervalMs - Intervalo em milissegundos (padrão: 5 segundos)
- */
 export function startTicketQueue(intervalMs = 5000) {
   setInterval(() => processTicketQueue(), intervalMs);
   console.log('🔄 Fila de tickets de movimentação iniciada');
