@@ -1,38 +1,40 @@
 // src/lib/passwordRecovery.ts
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
+
+async function handleResponse(response: Response, defaultErrorMessage: string) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || defaultErrorMessage);
+  }
+  return data;
+}
 
 export async function requestPasswordReset(email: string) {
   const response = await fetch(`${API_BASE}/auth/forgot-password`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',   
     body: JSON.stringify({ email }),
+    credentials: 'include', // ✅ garante envio do cookie de sessão
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Erro ao solicitar recuperação');
-  return data; // { success: true, message: 'Código enviado' }
+  return handleResponse(response, 'Erro ao enviar código de recuperação.');
 }
 
 export async function verifyResetCode(email: string, code: string) {
   const response = await fetch(`${API_BASE}/auth/verify-reset-code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',   
     body: JSON.stringify({ email, code }),
+    credentials: 'include', // ✅ garante envio do cookie de sessão
   });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Código inválido');
-  return data; // { success: true, resetToken }
+  return handleResponse(response, 'Erro ao verificar código.');
 }
 
 export async function resetPassword(resetToken: string, newPassword: string) {
-    const response = await fetch(`${API_BASE}/auth/reset-password`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',   
-        body: JSON.stringify({ resetToken, newPassword }),
-    });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || 'Erro ao redefinir senha');
-  return data; // { success: true, message: 'Senha redefinida' }
+  const response = await fetch(`${API_BASE}/auth/reset-password`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resetToken, newPassword }),
+    credentials: 'include', // ✅ garante envio do cookie de sessão
+  });
+  return handleResponse(response, 'Erro ao redefinir senha.');
 }
