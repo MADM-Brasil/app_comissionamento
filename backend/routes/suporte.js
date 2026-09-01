@@ -50,7 +50,6 @@ const upload = multer({
 });
 
 // ==================== REGISTRO DE TICKET DE MOVIMENTAÇÃO ====================
-// Agora apenas registra e enfileira. O processamento é feito pelo worker (ticketQueue.js)
 router.post('/ticket-movimentacao', async (req, res) => {
   try {
     const {
@@ -119,8 +118,9 @@ router.post('/ticket-movimentacao', async (req, res) => {
       origem_equipe: equipe_origem_nome || '',
       destino_colaborador: colaborador_destino_nome || '',
       destino_equipe: equipe_destino_nome || '',
-      solicitante_email: colaborador_origem_email || req.session.userId || '',
-      solicitante_nome: colaborador_origem_nome || req.user?.nome || '',
+      // CORREÇÃO: usa o e-mail do usuário autenticado (sessão) em vez de variável indefinida
+      solicitante_email: req.session.userId || '',
+      solicitante_nome: colaborador_origem_nome || req.session.userId || 'Desconhecido',
     };
 
     const baseResult = await pool.query(
