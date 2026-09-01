@@ -64,10 +64,9 @@ router.post('/ticket-movimentacao', async (req, res) => {
       origem_cliente_informada,
       tipo_solicitacao = 'Movimentação',
       colaborador_origem_nome,
-      colaborador_origem_email,
       equipe_origem_nome,
       colaborador_destino_nome,
-      colaborador_destino_email,
+      colaborador_destino_email,  // mantido no destructuring mas NÃO usado no INSERT
       equipe_destino_nome,
       motivo_solicitacao: rawMotivo = null,
       observacao_sales_ops: rawObs = null,
@@ -80,10 +79,9 @@ router.post('/ticket-movimentacao', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Nome, sobrenome e telefone são obrigatórios.' });
     }
 
-    // ✅ Validação obrigatória do e-mail do colaborador destino
-    if (!colaborador_destino_email || !colaborador_destino_email.trim()) {
-      return res.status(400).json({ success: false, error: 'E-mail do colaborador de destino é obrigatório.' });
-    }
+    // ⚠️ A coluna colaborador_destino_email NÃO existe na tabela.
+    // O e-mail do destino será resolvido pelo worker a partir do nome, se necessário.
+    // Removemos a validação obrigatória para evitar erro.
 
     // ---------- Verificação de idempotência ----------
     if (idempotency_key) {
@@ -126,6 +124,8 @@ router.post('/ticket-movimentacao', async (req, res) => {
       destino_equipe: equipe_destino_nome || '',
       solicitante_email: req.session.userId || '',
       solicitante_nome: colaborador_origem_nome || req.session.userId || 'Desconhecido',
+      // Armazena o e-mail do destino nos metadados, caso precise (mas não na coluna)
+      colaborador_destino_email: colaborador_destino_email || null,
     };
 
     const baseResult = await pool.query(
@@ -137,7 +137,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
     );
     const ticketId = baseResult.rows[0].id_ticket;
 
-    // 2. Inserir o registro específico da movimentação (com colaborador_destino_email)
+    // 2. Inserir o registro específico da movimentação (SEM a coluna colaborador_destino_email)
     const insertMovimentacaoQuery = `
       INSERT INTO app_comissionamento.tickets_movimentacao_lead (
         ticket_id,
@@ -148,14 +148,13 @@ router.post('/ticket-movimentacao', async (req, res) => {
         cpf_cliente_informado, origem_cliente_informada,
         tipo_solicitacao,
         colaborador_destino_nome,
-        colaborador_destino_email,
         motivo_solicitacao,
         status_mapeamento,
         observacao_sales_ops,
         atualizado_em
       ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, $16, NOW()
+        $10, $11, $12, $13, $14, $15, NOW()
       )
       RETURNING id_ticket_movimentacao
     `;
@@ -169,7 +168,6 @@ router.post('/ticket-movimentacao', async (req, res) => {
       cpfFinal || null, origem_cliente_informada,
       tipo_solicitacao,
       colaborador_destino_nome,
-      colaborador_destino_email,
       motivoSolicitacao,
       status_mapeamento,
       observacaoInicial,
@@ -211,8 +209,9 @@ router.get('/tickets-movimentacao', async (req, res) => {
         COALESCE(ts.metadados->>'origem_colaborador', '') AS colaborador_origem_nome,
         COALESCE(ts.metadados->>'origem_equipe', '') AS equipe_origem_nome,
         tml.colaborador_destino_nome,
-        tml.colaborador_destino_email,
         COALESCE(ts.metadados->>'destino_equipe', '') AS equipe_destino_nome,
+        -- O e-mail destino está nos metadados, não na coluna
+        COALESCE(ts.metadados->>'colaborador_destino_email', '') AS colaborador_destino_email,
         tml.status_mapeamento,
         tml.observacao_sales_ops,
         tml.motivo_solicitacao,
