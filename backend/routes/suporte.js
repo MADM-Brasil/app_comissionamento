@@ -1,602 +1,696 @@
-// backend/routes/suporte.js
-import express from 'express';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import { pool } from '../services/db.js';
-import teamsNotificador from '../suporte/teams_notificacoes.js';
-import { broadcastNotification } from './notificacoes.js';
+// services/hubspot.js
+import { Client } from '@hubspot/api-client';
 
-const router = express.Router();
+const hubspotClient = new Client({
+  accessToken: process.env.CHV_Hubspot,
+});
 
-const PLACEHOLDER_UUID = '00000000-0000-0000-0000-000000000000';
+// IDs internos do HubSpot
+const PIPELINE_BASE_LEADS_ID = process.env.HUBSPOT_PIPELINE_BASE_LEADS_ID || '905901447';
+const PIPELINE_CLOSER_ID = process.env.HUBSPOT_PIPELINE_CLOSER_ID || '904458124';
+const STAGE_EM_CONTATO_ID = process.env.HUBSPOT_STAGE_EM_CONTATO_ID || '1368997801';
+const STAGE_DESQUALIFICADO_ID = process.env.HUBSPOT_STAGE_DESQUALIFICADO_ID || '1368997806';
 
-const STATUS_MAP = {
-  pendente: 'Aberto',
-  processando: 'Em Andamento',
-  concluido: 'Concluído',
-  suporte: 'Aguardando Suporte',
-  aviso: 'Aviso',
-  erro: 'Erro',
-  bloqueado: 'Bloqueado',
-  fora_pipeline: 'Fora do Pipeline',
-  no_pipeline: 'No Pipeline',
+export const HUBSPOT_PIPELINE_BASE_LEADS_ID = PIPELINE_BASE_LEADS_ID;
+export const HUBSPOT_PIPELINE_CLOSER_ID = PIPELINE_CLOSER_ID;
+export const HUBSPOT_STAGE_EM_CONTATO_ID = STAGE_EM_CONTATO_ID;
+export const HUBSPOT_STAGE_DESQUALIFICADO_ID = STAGE_DESQUALIFICADO_ID;
+
+// Mapeamento de nomes para mensagens
+const PIPELINE_NAMES = {
+  [PIPELINE_BASE_LEADS_ID]: 'Base de Leads',
+  [PIPELINE_CLOSER_ID]: 'Closer',
+  '905179189': 'Jurídico Auditoria de Ganho',
+  '905179471': 'PRO',
+  '926561825': 'Fator K',
+  '925690734': 'Quinquenio/concomitante',
 };
 
-// ==================== CONFIGURAÇÃO DE UPLOAD ====================
-const uploadDir = path.join(process.cwd(), 'uploads', 'suporte');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+// Mapeamento de nomes de estágios
+const STAGE_NAMES = {
+  [STAGE_EM_CONTATO_ID]: 'Em Contato',
+  [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
+};
+
+/**
+ * Normaliza telefone removendo todos os caracteres não numéricos.
+ */
+function normalizePhone(phone) {
+  return (phone || '').replace(/\D/g, '');
 }
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, `${uniqueSuffix}${ext}`);
-  }
-});
+/**
+ * Compara dois telefones considerando variações comuns:
+ * - com ou sem código do país (55)
+ * - 10 ou 11 dígitos
+ * Retorna true se forem iguais ou se um contém o outro.
+ */
+function phonesMatch(contactPhone, inputPhone) {
+  const a = normalizePhone(contactPhone);
+  const b = normalizePhone(inputPhone);
 
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|webp|pdf|doc|docx|xls|xlsx|txt|zip/;
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (allowed.test(ext)) cb(null, true);
-    else cb(new Error('Formato de arquivo não suportado'));
-  }
-});
+  if (!a || !b) return false;
 
-// ==================== REGISTRO DE TICKET DE MOVIMENTAÇÃO ====================
-router.post('/ticket-movimentacao', async (req, res) => {
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+
+  // Remove código do país para comparar
+  const aSem55 = a.startsWith('55') ? a.slice(2) : a;
+  const bSem55 = b.startsWith('55') ? b.slice(2) : b;
+
+  if (aSem55 === bSem55) return true;
+  if (aSem55.includes(bSem55) || bSem55.includes(aSem55)) return true;
+
+  return false;
+}
+
+/**
+ * Busca um contato por um único campo (função interna).
+ */
+async function searchContactByField(propertyName, value, operator) {
+  const filter = [{ propertyName, operator, value }];
   try {
-    const {
-  crm_origem = 'CRM',
-  crm_lead_id: rawCrmLeadId = null,
-  lead_id: rawLeadId = null,
-  nome_cliente_informado,
-  sobrenome_cliente_informado,
-  email_cliente_informado,
-  telefone_cliente_informado,
-  cpf_cliente_informado,
-  origem_cliente_informada,
-  tipo_solicitacao = 'Movimentação',
-  colaborador_origem_nome,
-  colaborador_origem_email,
-  equipe_origem_nome,
-  colaborador_destino_nome,
-  colaborador_destino_email,
-  equipe_destino_nome,
-  motivo_solicitacao: rawMotivo = null,
-  observacao_sales_ops: rawObs = null,
-  status_mapeamento = 'pendente',
-  idempotency_key,
-} = req.body;
+    const response = await hubspotClient.crm.contacts.searchApi.doSearch({
+      filterGroups: [{ filters: filter }],
+      properties: [
+        'email',
+        'firstname',
+        'lastname',
+        'phone',
+        'hs_whatsapp_phone_number',
+        'contact_cpf',
+        'contact_fonte'
+      ],
+      limit: 1,
+    });
+    return response.results?.[0] || null;
+  } catch (error) {
+    console.error(`❌ Erro ao buscar por ${propertyName}:`, error.message);
+    return null;
+  }
+}
 
-    // ---------- Validação de campos ----------
-    if (!nome_cliente_informado || !sobrenome_cliente_informado || !telefone_cliente_informado) {
-      return res.status(400).json({ success: false, error: 'Nome, sobrenome e telefone são obrigatórios.' });
-    }
+/**
+ * Busca contato por telefone usando busca textual (query) e validação manual.
+ */
+async function searchContactByPhone(phoneRaw, phoneDigits) {
+  const variants = [];
 
-    // ---------- Verificação de idempotência ----------
-    if (idempotency_key) {
-      const existing = await pool.query(
-        `SELECT id_ticket_movimentacao FROM app_comissionamento.tickets_movimentacao_lead
-         WHERE observacao_sales_ops IS NOT NULL
-           AND LTRIM(observacao_sales_ops) LIKE '{%'
-           AND observacao_sales_ops::jsonb->>'idempotency_key' = $1
-         LIMIT 1`,
-        [idempotency_key]
-      );
-      if (existing.rowCount > 0) {
-        console.log(`🔁 Requisição duplicada detectada (idempotency_key: ${idempotency_key}). Retornando ticket existente.`);
-        return res.status(200).json({
-          success: true,
-          message: 'Ticket de movimentação já registrado anteriormente.',
-          id: existing.rows[0].id_ticket_movimentacao,
+  if (phoneRaw?.trim()) variants.push(phoneRaw.trim());
+  if (phoneDigits) {
+    variants.push(phoneDigits);
+    variants.push(phoneDigits.slice(-11));
+    variants.push(phoneDigits.slice(-10));
+    variants.push(`55${phoneDigits}`);
+    variants.push(`+55${phoneDigits}`);
+  }
+
+  const uniqueVariants = [...new Set(variants)].filter(Boolean);
+
+  for (const query of uniqueVariants) {
+    try {
+      const response = await hubspotClient.crm.contacts.searchApi.doSearch({
+        query,
+        properties: [
+          'email',
+          'firstname',
+          'lastname',
+          'phone',
+          'hs_whatsapp_phone_number',
+          'contact_cpf',
+          'contact_fonte'
+        ],
+        limit: 10,
+      });
+
+      if (response.results?.length) {
+        const match = response.results.find(contact => {
+          const props = contact.properties || {};
+          const phoneValues = [
+            props.phone,
+            props.hs_whatsapp_phone_number
+          ].filter(Boolean);
+
+          return phoneValues.some(contactPhone =>
+            phonesMatch(contactPhone, phoneDigits)
+          );
         });
+
+        if (match) {
+          console.log(`✅ Contato encontrado via query "${query}"`);
+          return match;
+        }
+      }
+    } catch (error) {
+      console.error(`❌ Erro na busca textual por telefone "${query}":`, error.message);
+    }
+  }
+
+  console.warn('⚠️ Nenhum contato encontrado pelo telefone usando busca textual.');
+  return null;
+}
+
+/**
+ * Busca contato por telefone (prioridade), e‑mail e CPF, validando divergências.
+ * Retorna { found, divergente, contact, motivo? }.
+ */
+export async function findContactAndValidate({ email, phone, cpf }) {
+  const emailClean = (email || '').trim().toLowerCase();
+  const phoneRaw = (phone || '').trim();
+  const phoneClean = normalizePhone(phone);
+  const cpfClean = normalizePhone(cpf);
+
+  // 1) Telefone (prioridade)
+  if (phoneClean.length >= 10) {
+    const contact = await searchContactByPhone(phoneRaw, phoneClean);
+    if (contact) {
+      return validateContact(contact, {
+        emailClean,
+        phoneClean,
+        cpfClean,
+        matchedBy: 'phone',
+      });
+    }
+  }
+
+  // 2) E-mail
+  if (emailClean) {
+    const contact = await searchContactByField('email', emailClean, 'EQ');
+    if (contact) {
+      return validateContact(contact, {
+        emailClean,
+        phoneClean,
+        cpfClean,
+        matchedBy: 'email',
+      });
+    }
+  }
+
+  // 3) CPF
+  if (cpfClean.length === 11) {
+    const contact = await searchContactByField('contact_cpf', cpfClean, 'EQ');
+    if (contact) {
+      return validateContact(contact, {
+        emailClean,
+        phoneClean,
+        cpfClean,
+        matchedBy: 'cpf',
+      });
+    }
+  }
+
+  return { found: false, divergente: false, contact: null };
+}
+
+/**
+ * Compara os dados fornecidos com os do contato existente.
+ * Se matchedBy = 'phone', não reprova telefone.
+ */
+function validateContact(contact, { emailClean, phoneClean, cpfClean, matchedBy }) {
+  const props = contact.properties || {};
+  const divergencias = [];
+
+  if (emailClean) {
+    const contactEmail = (props.email || '').trim().toLowerCase();
+    if (contactEmail && contactEmail !== emailClean) {
+      divergencias.push('e-mail');
+    }
+  }
+
+  if (phoneClean && matchedBy !== 'phone') {
+    const phoneValues = [
+      props.phone,
+      props.hs_whatsapp_phone_number
+    ].filter(Boolean);
+
+    const matchesPhone = phoneValues.some(contactPhone =>
+      phonesMatch(contactPhone, phoneClean)
+    );
+
+    if (phoneValues.length > 0 && !matchesPhone) {
+      divergencias.push('telefone');
+    }
+  }
+
+  if (cpfClean) {
+    const contactCpf = normalizePhone(props.contact_cpf || '');
+    if (contactCpf && contactCpf !== cpfClean) {
+      divergencias.push('CPF');
+    }
+  }
+
+  if (divergencias.length > 0) {
+    return {
+      found: true,
+      divergente: true,
+      contact,
+      motivo: `Dados divergentes do cadastro: ${divergencias.join(', ')}`,
+    };
+  }
+
+  return { found: true, divergente: false, contact };
+}
+
+/**
+ * Busca simples (usada internamente ou por outros módulos).
+ */
+export async function searchContact({ email, phone, cpf }) {
+  const emailClean = (email || '').trim().toLowerCase();
+  const phoneRaw = (phone || '').trim();
+  const phoneClean = normalizePhone(phone);
+  const cpfClean = normalizePhone(cpf);
+
+  if (phoneClean.length >= 10) {
+    const contact = await searchContactByPhone(phoneRaw, phoneClean);
+    if (contact) return contact;
+  }
+  if (emailClean) {
+    const contact = await searchContactByField('email', emailClean, 'EQ');
+    if (contact) return contact;
+  }
+  if (cpfClean.length === 11) {
+    const contact = await searchContactByField('contact_cpf', cpfClean, 'EQ');
+    if (contact) return contact;
+  }
+  return null;
+}
+
+/**
+ * Cria um novo contato no HubSpot.
+ */
+export async function createContact({ firstName, lastName, email, phone, cpf, origem, ownerId }) {
+  const properties = {
+    firstname: firstName,
+    lastname: lastName,
+  };
+
+  if (email && email.trim()) {
+    properties.email = email.trim().toLowerCase();
+  }
+
+  if (phone && phone.trim()) {
+    properties.phone = phone.trim();
+    properties.hs_whatsapp_phone_number = phone.trim();
+  }
+
+  if (cpf) {
+    properties.contact_cpf = normalizePhone(cpf);
+  }
+
+  if (origem) {
+    properties.contact_fonte = origem;
+  }
+
+  if (ownerId) {
+    properties.hubspot_owner_id = ownerId;
+  }
+
+  console.log('✍️ [createContact] properties:', JSON.stringify(properties));
+
+  try {
+    const contact = await hubspotClient.crm.contacts.basicApi.create({
+      properties,
+      associations: [],
+    });
+    return contact;
+  } catch (error) {
+    if (error.code === 409) {
+      console.warn('⚠️ [createContact] Contato já existe. Buscando ID existente...');
+      const match = error.message?.match(/Existing ID: (\d+)/);
+      if (match) {
+        try {
+          const existingContact = await hubspotClient.crm.contacts.basicApi.getById(match[1], [
+            'email', 'firstname', 'lastname', 'phone', 'hs_whatsapp_phone_number', 'contact_cpf', 'contact_fonte', 'hubspot_owner_id'
+          ]);
+          return existingContact;
+        } catch (getErr) {
+          console.error('❌ Erro ao buscar contato existente:', getErr.message);
+        }
       }
     }
-
-    const toNull = (val) => (val === 'null' || val === null || val === undefined ? null : val);
-    const crmLeadId = toNull(rawCrmLeadId);
-    const leadId = toNull(rawLeadId);
-    const observacaoInicial = toNull(rawObs);
-
-    let motivoSolicitacao = toNull(rawMotivo);
-    if (motivoSolicitacao === null) motivoSolicitacao = '';
-
-    const cpfNumerico = cpf_cliente_informado ? cpf_cliente_informado.replace(/\D/g, '') : null;
-    const cpfFinal = cpfNumerico && cpfNumerico.length > 11 ? cpfNumerico.substring(0, 11) : cpfNumerico;
-
-    // 1. Criar ticket base na tabela tickets_suporte
-    const descricaoBase = `Movimentação de lead solicitada por ${colaborador_origem_nome || 'N/A'}`;
-    const metadadosBase = {
-      assunto: 'Movimentacao',
-      origem_colaborador: colaborador_origem_nome || '',
-      origem_equipe: equipe_origem_nome || '',
-      destino_colaborador: colaborador_destino_nome || '',
-      destino_equipe: equipe_destino_nome || '',
-      solicitante_email: colaborador_origem_email || req.user?.email || '',
-      solicitante_nome: colaborador_origem_nome || req.user?.nome || '',
-    };
-
-    const baseResult = await pool.query(
-      `INSERT INTO app_comissionamento.tickets_suporte 
-         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, encaminhado_em, atualizado_em, metadados)
-       VALUES ($1, 'Movimentacao', 'Movimentacao', 'NORMAL', 'Aberto', 'movimentacao card', $2, 'suporte comissionamento', NOW(), NOW(), $3)
-       RETURNING id_ticket`,
-      [PLACEHOLDER_UUID, descricaoBase, JSON.stringify(metadadosBase)]
-    );
-    const ticketId = baseResult.rows[0].id_ticket;
-
-    // 2. Inserir o registro específico da movimentação
-    const insertMovimentacaoQuery = `
-      INSERT INTO app_comissionamento.tickets_movimentacao_lead (
-        ticket_id,
-        lead_id,
-        crm_origem, crm_lead_id,
-        nome_cliente_informado, sobrenome_cliente_informado,
-        email_cliente_informado, telefone_cliente_informado,
-        cpf_cliente_informado, origem_cliente_informada,
-        tipo_solicitacao,
-        colaborador_destino_nome,
-        motivo_solicitacao,
-        status_mapeamento,
-        observacao_sales_ops,
-        atualizado_em
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, NOW()
-      )
-      RETURNING id_ticket_movimentacao
-    `;
-
-    const movValues = [
-      ticketId,
-      leadId,
-      crm_origem, crmLeadId,
-      nome_cliente_informado, sobrenome_cliente_informado,
-      email_cliente_informado, telefone_cliente_informado || null,
-      cpfFinal || null, origem_cliente_informada,
-      tipo_solicitacao,
-      colaborador_destino_nome,
-      motivoSolicitacao,
-      status_mapeamento,
-      observacaoInicial,
-    ];
-
-    const movResult = await pool.query(insertMovimentacaoQuery, movValues);
-    const movimentacaoId = movResult.rows[0].id_ticket_movimentacao;
-
-    // ==================== RESPOSTA IMEDIATA – FILA ASSUME ====================
-    return res.status(202).json({
-      success: true,
-      message: 'Solicitação de movimentação registrada e enfileirada para processamento.',
-      id: movimentacaoId,
-      status_mapeamento: 'pendente',
-    });
-  } catch (err) {
-    console.error('Erro ao registrar ticket:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+    throw error;
   }
-});
+}
 
-// ==================== REGISTRO DE TICKET DE SUPORTE (REPORTAR) COM UPLOAD ====================
-router.post('/ticket-suporte', upload.array('arquivos', 5), async (req, res) => {
+/**
+ * Atualiza o proprietário (hubspot_owner_id) de um contato existente.
+ */
+export async function updateContactOwner(contactId, ownerId) {
+  if (!contactId || !ownerId) return null;
+
   try {
-    const {
-      titulo,
-      assunto,
-      descricao,
-      solicitante_nome,
-      solicitante_email,
-      equipe_nome,
-    } = req.body;
+    return await hubspotClient.crm.contacts.basicApi.update(contactId, {
+      properties: {
+        hubspot_owner_id: ownerId,
+      },
+    });
+  } catch (error) {
+    console.error('❌ [updateContactOwner] Erro:', error.message);
+    throw error;
+  }
+}
 
-    if (!titulo || !titulo.trim()) {
-      return res.status(400).json({ success: false, error: 'Título é obrigatório.' });
-    }
-    if (!assunto || !descricao) {
-      return res.status(400).json({ success: false, error: 'Assunto e descrição são obrigatórios.' });
-    }
+/**
+ * Busca o ID de um proprietário no HubSpot pelo e‑mail.
+ */
+export async function findOwnerIdByEmail(email) {
+  if (!email) return null;
+  try {
+    const url = `https://api.hubapi.com/crm/v3/owners?email=${encodeURIComponent(email)}`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!response.ok) throw new Error(`Owners search error ${response.status}`);
+    const data = await response.json();
+    const owner = data.results?.[0];
+    return owner ? owner.id : null;
+  } catch (error) {
+    console.error('❌ [findOwnerIdByEmail] Erro:', error.message);
+    return null;
+  }
+}
 
-    const solicitanteNome = req.user?.nome || solicitante_nome || 'frontend';
-    const solicitanteEmail = solicitante_email || req.user?.email || '';
-    const equipeNome = req.user?.equipe || equipe_nome || '';
+/**
+ * Obtém os negócios associados a um contato.
+ * Lança erro em caso de falha (não retorna lista vazia).
+ */
+export async function getContactDeals(contactId) {
+  try {
+    const assocUrl = `https://api.hubapi.com/crm/v3/associations/contacts/deals/batch/read`;
+    const assocResponse = await fetch(assocUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ inputs: [{ id: contactId }] }),
+    });
+    if (!assocResponse.ok) throw new Error(`Associação error ${assocResponse.status}`);
 
-    const arquivos = req.files || [];
-    const baseUrl = `${req.protocol}://${req.get('host')}/uploads/suporte/`;
-    const arquivosComUrl = arquivos.map(file => ({
-      nome: file.originalname,
-      url: baseUrl + file.filename,
+    const assocData = await assocResponse.json();
+    const dealIds = assocData.results?.[0]?.to?.map(item => item.id) || [];
+    if (dealIds.length === 0) return [];
+
+    const dealSearchUrl = 'https://api.hubapi.com/crm/v3/objects/deals/search';
+    const dealResponse = await fetch(dealSearchUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        filterGroups: [{
+          filters: [{ propertyName: 'hs_object_id', operator: 'IN', values: dealIds }],
+        }],
+        properties: ['pipeline', 'dealstage', 'hubspot_owner_id'],
+        limit: 100,
+      }),
+    });
+    if (!dealResponse.ok) throw new Error(`Deal search error ${dealResponse.status}`);
+
+    const dealData = await dealResponse.json();
+    return (dealData.results || []).map(deal => ({
+      id: deal.id,
+      pipeline: deal.properties.pipeline,
+      stage: deal.properties.dealstage,
+      ownerId: deal.properties.hubspot_owner_id || null,
     }));
+  } catch (error) {
+    console.error('❌ [getContactDeals] Erro:', error.message);
+    throw error;
+  }
+}
 
-    const anexosMarkdown = arquivosComUrl.length > 0
-      ? arquivosComUrl.map(a => `[${a.nome}](${a.url})`).join(', ')
-      : 'Nenhum anexo';
+/**
+ * Obtém o primeiro estágio de um pipeline.
+ */
+export async function getFirstStageId(pipelineId) {
+  try {
+    const url = `https://api.hubapi.com/crm/v3/pipelines/deals/${pipelineId}/stages`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
+        'Content-Type': 'application/json',
+      },
+    });
+    if (!response.ok) throw new Error(`Get stages error ${response.status}`);
+    const data = await response.json();
+    const stages = data.results || [];
+    return stages.length > 0 ? stages[0].id : null;
+  } catch (error) {
+    console.error('❌ [getFirstStageId] Erro:', error.message);
+    return null;
+  }
+}
 
-    const metadados = {
-      arquivos: arquivosComUrl,
-      solicitante_nome: solicitanteNome,
-      solicitante_email: solicitanteEmail,
-      equipe_nome: equipeNome,
-      observacao_sales_ops: '',
-      assunto: assunto,
+/**
+ * Cria um negócio (deal) no pipeline especificado.
+ */
+export async function createDealForContact(contactId, dealName, pipelineId, stageId = null, ownerId = null) {
+  try {
+    let finalStageId = stageId;
+    if (!finalStageId) {
+      finalStageId = await getFirstStageId(pipelineId);
+      if (!finalStageId) throw new Error('Não foi possível obter um estágio válido.');
+    }
+
+    const properties = { dealname: dealName, pipeline: pipelineId, dealstage: finalStageId };
+    if (ownerId) properties.hubspot_owner_id = ownerId;
+
+    const createDealUrl = 'https://api.hubapi.com/crm/v3/objects/deals';
+    const createDealResponse = await fetch(createDealUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        properties,
+        associations: [{
+          to: { id: contactId },
+          types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }]
+        }]
+      })
+    });
+    if (!createDealResponse.ok) throw new Error(`Create deal error ${createDealResponse.status}: ${await createDealResponse.text()}`);
+    const dealData = await createDealResponse.json();
+    console.log('✅ [createDealForContact] Negócio criado:', dealData.id);
+    return dealData;
+  } catch (error) {
+    console.error('❌ [createDealForContact] Erro:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Move um negócio para o pipeline Closer, fase Em Contato.
+ */
+export async function moveDealToCloserEmContato(dealId, ownerId = null) {
+  try {
+    const properties = { pipeline: PIPELINE_CLOSER_ID, dealstage: STAGE_EM_CONTATO_ID };
+    if (ownerId) properties.hubspot_owner_id = ownerId;
+
+    const updateUrl = `https://api.hubapi.com/crm/v3/objects/deals/${dealId}`;
+    const updateResponse = await fetch(updateUrl, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ properties })
+    });
+    if (!updateResponse.ok) throw new Error(`Update deal error ${updateResponse.status}: ${await updateResponse.text()}`);
+    console.log('✅ [moveDealToCloserEmContato] Negócio movido:', dealId);
+    return await updateResponse.json();
+  } catch (error) {
+    console.error('❌ [moveDealToCloserEmContato] Erro:', error.message);
+    throw error;
+  }
+}
+
+/**
+ * Função principal para garantir o lead no pipeline Closer.
+ * Regras revisadas:
+ * - Sem negócio: cria no Base de Leads e move para Closer/Em Contato.
+ * - Negócio no Base de Leads: move para Closer/Em Contato.
+ * - Negócio no Closer, fase Desqualificado: move para Em Contato e atribui owner.
+ * - Negócio no Closer, Em Contato, sem owner: atribui owner (deal + contato) e retorna sucesso.
+ * - Negócio no Closer com o mesmo owner: sucesso idempotente (não bloqueia).
+ * - Negócio no Closer com outro owner: bloqueia.
+ * - Qualquer outro caso: bloqueia.
+ */
+export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
+  const deals = await getContactDeals(contactId);
+
+  // 1. Sem negócio: cria e move
+  if (deals.length === 0) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: PIPELINE_CLOSER_ID,
+        stage: STAGE_EM_CONTATO_ID,
+        pipelineNome: 'Closer',
+        stageNome: 'Em Contato',
+      };
+    }
+    const newDeal = await createDealForContact(contactId, dealName, PIPELINE_BASE_LEADS_ID, null, ownerId);
+    await moveDealToCloserEmContato(newDeal.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
+    return {
+      blocked: false,
+      pipeline: PIPELINE_CLOSER_ID,
+      stage: STAGE_EM_CONTATO_ID,
+      pipelineNome: 'Closer',
+      stageNome: 'Em Contato',
     };
-
-    const result = await pool.query(
-      `INSERT INTO app_comissionamento.tickets_suporte 
-         (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao, origem_ticket, encaminhado_em, atualizado_em, metadados)
-       VALUES ($1, $2, 'Reporte', 'NORMAL', 'Aberto', $3, $4, 'suporte comissionamento', NOW(), NOW(), $5)
-       RETURNING id_ticket`,
-      [
-        PLACEHOLDER_UUID,
-        assunto,
-        titulo.trim(),
-        descricao,
-        JSON.stringify(metadados),
-      ]
-    );
-
-    teamsNotificador.enviar({
-      titulo: titulo.trim(),
-      assunto,
-      descricao,
-      solicitante: solicitanteNome,
-      equipe: equipeNome,
-      anexosMarkdown,
-      arquivos: arquivosComUrl,
-    }).then((resNotif) => {
-      console.log('📤 Notificação Teams:', resNotif);
-    }).catch((err) => {
-      console.error('❌ Erro ao enviar notificação Teams:', err);
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: 'Ticket de suporte registado com sucesso.',
-      id_ticket: result.rows[0].id_ticket,
-    });
-  } catch (err) {
-    console.error('Erro ao registar ticket de suporte:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
   }
-});
 
-// ==================== LISTAGEM DE TICKETS DE MOVIMENTAÇÃO ====================
-router.get('/tickets-movimentacao', async (req, res) => {
-  try {
-    const { status_mapeamento, colaborador_origem_nome, todos, solicitante_email } = req.query;
-    let query = `
-      SELECT 
-        tml.id_ticket_movimentacao,
-        tml.ticket_id,
-        tml.lead_id,
-        tml.crm_origem,
-        tml.tipo_solicitacao,
-        tml.nome_cliente_informado,
-        tml.sobrenome_cliente_informado,
-        tml.email_cliente_informado,
-        tml.telefone_cliente_informado,
-        tml.cpf_cliente_informado,
-        tml.origem_cliente_informada,
-        COALESCE(ts.metadados->>'origem_colaborador', '') AS colaborador_origem_nome,
-        COALESCE(ts.metadados->>'origem_equipe', '') AS equipe_origem_nome,
-        tml.colaborador_destino_nome,
-        COALESCE(ts.metadados->>'destino_equipe', '') AS equipe_destino_nome,
-        tml.status_mapeamento,
-        tml.observacao_sales_ops,
-        tml.motivo_solicitacao,
-        tml.atualizado_em AS criado_em,
-        tml.analisado_em
-      FROM app_comissionamento.tickets_movimentacao_lead tml
-      LEFT JOIN app_comissionamento.tickets_suporte ts ON tml.ticket_id = ts.id_ticket
-      WHERE 1=1
-    `;
-    const params = [];
-    let paramIndex = 1;
-
-    if (status_mapeamento) {
-      query += ` AND tml.status_mapeamento = $${paramIndex++}`;
-      params.push(status_mapeamento);
+  // 2. Negócio no Base de Leads
+  const dealBase = deals.find(d => String(d.pipeline) === String(PIPELINE_BASE_LEADS_ID));
+  if (dealBase) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: dealBase.pipeline,
+        stage: dealBase.stage,
+        pipelineNome: PIPELINE_NAMES[dealBase.pipeline] || dealBase.pipeline,
+        stageNome: STAGE_NAMES[dealBase.stage] || dealBase.stage,
+      };
     }
-
-    if (todos === '1') {
-      query += ` AND (tml.status_mapeamento != 'concluido' OR tml.analisado_em IS NOT NULL)`;
-    } else {
-      if (solicitante_email) {
-        query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_email', ''))) = LOWER(TRIM($${paramIndex++}))`;
-        params.push(solicitante_email);
-      } else if (colaborador_origem_nome) {
-        query += ` AND LOWER(TRIM(COALESCE(ts.metadados->>'origem_colaborador', ''))) = LOWER(TRIM($${paramIndex++}))`;
-        params.push(colaborador_origem_nome);
-      } else {
-        return res.json({ success: true, data: [] });
-      }
-    }
-
-    query += ' ORDER BY tml.atualizado_em DESC';
-
-    const result = await pool.query(query, params);
-    return res.json({ success: true, data: result.rows });
-  } catch (err) {
-    console.error('Erro ao listar tickets:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+    await moveDealToCloserEmContato(dealBase.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
+    return {
+      blocked: false,
+      pipeline: PIPELINE_CLOSER_ID,
+      stage: STAGE_EM_CONTATO_ID,
+      pipelineNome: 'Closer',
+      stageNome: 'Em Contato',
+    };
   }
-});
 
-// ==================== LISTAGEM DE TICKETS DE SUPORTE ====================
-router.get('/ticket-suporte', async (req, res) => {
-  try {
-    const { solicitante_email, todos } = req.query;
-    let query = `
-      SELECT 
-        id_ticket AS id_ticket_suporte,
-        titulo,
-        COALESCE(metadados->>'assunto', titulo) AS assunto,
-        descricao,
-        status,
-        COALESCE(metadados->>'solicitante_nome', '') AS solicitante_nome,
-        COALESCE(metadados->>'equipe_nome', '') AS equipe_nome,
-        COALESCE(metadados->>'observacao_sales_ops', '') AS observacao_sales_ops,
-        encaminhado_em AS criado_em,
-        concluido_em
-      FROM app_comissionamento.tickets_suporte
-      WHERE tipo_ticket = 'Reporte'
-    `;
-    const params = [];
-    let paramIndex = 1;
-
-    if (todos === '1') {
-      // Admin pode ver todos os reportes
-    } else if (solicitante_email) {
-      query += ` AND LOWER(TRIM(COALESCE(metadados->>'solicitante_email', ''))) = LOWER(TRIM($${paramIndex++}))`;
-      params.push(solicitante_email);
-    } else {
-      return res.json({ success: true, data: [] });
+  // 3. Negócio no Closer, fase Desqualificado
+  const dealDesqualificado = deals.find(
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.stage) === String(STAGE_DESQUALIFICADO_ID)
+  );
+  if (dealDesqualificado) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: dealDesqualificado.pipeline,
+        stage: dealDesqualificado.stage,
+        pipelineNome: PIPELINE_NAMES[dealDesqualificado.pipeline] || dealDesqualificado.pipeline,
+        stageNome: STAGE_NAMES[dealDesqualificado.stage] || dealDesqualificado.stage,
+      };
     }
-
-    query += ' ORDER BY encaminhado_em DESC';
-
-    const result = await pool.query(query, params);
-    return res.json({ success: true, data: result.rows });
-  } catch (err) {
-    console.error('Erro ao listar tickets de suporte:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+    await moveDealToCloserEmContato(dealDesqualificado.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
+    return {
+      blocked: false,
+      pipeline: PIPELINE_CLOSER_ID,
+      stage: STAGE_EM_CONTATO_ID,
+      pipelineNome: 'Closer',
+      stageNome: 'Em Contato',
+    };
   }
-});
 
-// ==================== ATUALIZAÇÃO DE TICKET DE MOVIMENTAÇÃO ====================
-router.patch('/tickets-movimentacao/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status_mapeamento, observacao_sales_ops } = req.body;
-
-    if (status_mapeamento === undefined && observacao_sales_ops === undefined) {
-      return res.status(400).json({ success: false, error: 'Nenhum campo para atualizar.' });
+  // 4. Negócio no Closer, Em Contato, sem owner
+  const dealCloserSemOwner = deals.find(
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && !d.ownerId
+  );
+  if (dealCloserSemOwner) {
+    if (!ownerId) {
+      return {
+        blocked: true,
+        message: 'Movimentação bloqueada: responsável de destino não informado',
+        pipeline: dealCloserSemOwner.pipeline,
+        stage: dealCloserSemOwner.stage,
+        pipelineNome: PIPELINE_NAMES[dealCloserSemOwner.pipeline] || dealCloserSemOwner.pipeline,
+        stageNome: STAGE_NAMES[dealCloserSemOwner.stage] || dealCloserSemOwner.stage,
+      };
     }
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      const setClauses = [];
-      const values = [];
-      let paramIndex = 1;
-
-      if (status_mapeamento !== undefined) {
-        setClauses.push(`status_mapeamento = $${paramIndex++}`);
-        values.push(status_mapeamento);
-        setClauses.push(`analisado_em = NOW()`);
-      }
-
-      if (observacao_sales_ops !== undefined) {
-        const current = await client.query(
-          `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
-          [id]
-        );
-
-        let jsonAtual = {};
-        if (current.rowCount > 0 && current.rows[0].observacao_sales_ops) {
-          try {
-            jsonAtual = JSON.parse(current.rows[0].observacao_sales_ops);
-          } catch (e) {
-            jsonAtual = {};
-          }
-        }
-
-        jsonAtual.observacao = observacao_sales_ops;
-        setClauses.push(`observacao_sales_ops = $${paramIndex++}`);
-        values.push(JSON.stringify(jsonAtual));
-      }
-
-      setClauses.push(`atualizado_em = NOW()`);
-
-      const updateMovimentacaoQuery = `
-        UPDATE app_comissionamento.tickets_movimentacao_lead
-        SET ${setClauses.join(', ')}
-        WHERE id_ticket_movimentacao = $${paramIndex}
-        RETURNING id_ticket_movimentacao, ticket_id
-      `;
-      values.push(id);
-
-      const movResult = await client.query(updateMovimentacaoQuery, values);
-      if (movResult.rowCount === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ success: false, error: 'Ticket de movimentação não encontrado.' });
-      }
-
-      // Sincroniza status com tickets_suporte
-      if (status_mapeamento !== undefined) {
-        const ticketId = movResult.rows[0].ticket_id;
-        const mappedStatus = STATUS_MAP[status_mapeamento] || status_mapeamento;
-
-        if (status_mapeamento === 'concluido') {
-          await client.query(
-            `UPDATE app_comissionamento.tickets_suporte
-             SET status = $1, atualizado_em = NOW(), concluido_em = NOW()
-             WHERE id_ticket = $2`,
-            [mappedStatus, ticketId]
-          );
-        } else {
-          await client.query(
-            `UPDATE app_comissionamento.tickets_suporte
-             SET status = $1, atualizado_em = NOW()
-             WHERE id_ticket = $2`,
-            [mappedStatus, ticketId]
-          );
-        }
-      }
-
-      // Notificação SSE
-      try {
-        const ticketInfo = await client.query(
-          `SELECT ts.titulo, ts.metadados->>'solicitante_email' AS solicitante_email
-           FROM app_comissionamento.tickets_suporte ts
-           JOIN app_comissionamento.tickets_movimentacao_lead tml ON tml.ticket_id = ts.id_ticket
-           WHERE tml.id_ticket_movimentacao = $1`,
-          [id]
-        );
-
-        if (ticketInfo.rowCount > 0) {
-          const { titulo, solicitante_email } = ticketInfo.rows[0];
-          if (solicitante_email) {
-            const statusLabel = status_mapeamento || 'inalterado';
-            const obsLabel = observacao_sales_ops !== undefined ? observacao_sales_ops : 'inalterada';
-            broadcastNotification({
-              tipo: 'info',
-              titulo: '📢 Atualização da movimentação',
-              mensagem: `Sua solicitação de movimentação "${titulo}" foi atualizada.\nNovo status: ${statusLabel}.\nObservação: ${obsLabel}`,
-              destinatario: solicitante_email,
-              data: new Date().toISOString(),
-            });
-          }
-        }
-      } catch (notifErr) {
-        console.error('Erro ao enviar notificação SSE (movimentação):', notifErr);
-      }
-
-      await client.query('COMMIT');
-      return res.json({ success: true, message: 'Ticket atualizado com sucesso.' });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-  } catch (err) {
-    console.error('Erro ao atualizar ticket:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+    await moveDealToCloserEmContato(dealCloserSemOwner.id, ownerId);
+    await updateContactOwner(contactId, ownerId);
+    return {
+      blocked: false,
+      pipeline: PIPELINE_CLOSER_ID,
+      stage: STAGE_EM_CONTATO_ID,
+      pipelineNome: 'Closer',
+      stageNome: 'Em Contato',
+    };
   }
-});
 
-// ==================== ATUALIZAÇÃO DE TICKET DE SUPORTE ====================
-router.patch('/tickets-suporte/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status, observacao_sales_ops } = req.body;
-
-    if (!status && observacao_sales_ops === undefined) {
-      return res.status(400).json({ success: false, error: 'Nenhum campo para atualizar.' });
-    }
-
-    const setClauses = [];
-    const values = [];
-    let paramIndex = 1;
-
-    if (status) {
-      setClauses.push(`status = $${paramIndex++}`);
-      values.push(status);
-      if (status === 'CONCLUÍDO') {
-        setClauses.push(`concluido_em = NOW()`);
-      }
-    }
-
-    if (observacao_sales_ops !== undefined) {
-      setClauses.push(`metadados = jsonb_set(COALESCE(metadados, '{}'), '{observacao_sales_ops}', to_jsonb($${paramIndex++}::text))`);
-      values.push(observacao_sales_ops);
-    }
-
-    setClauses.push(`atualizado_em = NOW()`);
-
-    const query = `
-      UPDATE app_comissionamento.tickets_suporte
-      SET ${setClauses.join(', ')}
-      WHERE id_ticket = $${paramIndex}
-      RETURNING id_ticket 
-    `;
-    values.push(id);
-
-    const result = await pool.query(query, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Ticket de suporte não encontrado.' });
-    }
-
-    // Notificação SSE
-    try {
-      const ticketResult = await pool.query(
-        `SELECT titulo, metadados->>'solicitante_email' AS solicitante_email
-         FROM app_comissionamento.tickets_suporte
-         WHERE id_ticket = $1`,
-        [id]
-      );
-
-      if (ticketResult.rows.length > 0) {
-        const { titulo, solicitante_email } = ticketResult.rows[0];
-        if (solicitante_email) {
-          const statusLabel = status || 'inalterado';
-          const obsLabel = observacao_sales_ops !== undefined ? observacao_sales_ops : 'inalterada';
-          broadcastNotification({
-            tipo: 'info',
-            titulo: '📢 Atualização da solicitação',
-            mensagem: `Sua solicitação "${titulo}" foi atualizada.\nNovo status: ${statusLabel}.\nObservação: ${obsLabel}`,
-            destinatario: solicitante_email,
-            data: new Date().toISOString(),
-          });
-        }
-      }
-    } catch (notifErr) {
-      console.error('Erro ao enviar notificação SSE (suporte):', notifErr);
-    }
-
-    return res.json({ success: true, message: 'Ticket de suporte atualizado com sucesso.' });
-  } catch (err) {
-    console.error('Erro ao atualizar ticket de suporte:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno do servidor.' });
+  // 5. Negócio no Closer com o mesmo owner (sucesso idempotente)
+  const dealMesmoOwner = deals.find(
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && String(d.ownerId || '') === String(ownerId || '')
+  );
+  if (dealMesmoOwner) {
+    return {
+      blocked: false,
+      alreadyAssigned: true,
+      message: `Card já está com o colaborador '${collaboratorName}'`,
+      pipeline: dealMesmoOwner.pipeline,
+      stage: dealMesmoOwner.stage,
+      pipelineNome: PIPELINE_NAMES[dealMesmoOwner.pipeline] || dealMesmoOwner.pipeline,
+      stageNome: STAGE_NAMES[dealMesmoOwner.stage] || dealMesmoOwner.stage,
+    };
   }
-});
 
-// ==================== REPROCESSAR TICKET DE MOVIMENTAÇÃO ====================
-router.post('/tickets-movimentacao/:id/reprocessar', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const result = await pool.query(
-      `SELECT observacao_sales_ops FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1`,
-      [id]
-    );
-    if (result.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Ticket não encontrado' });
-    }
-
-    let obs = {};
-    try { obs = JSON.parse(result.rows[0].observacao_sales_ops || '{}'); } catch { obs = {}; }
-    delete obs.processado;
-
-    await pool.query(
-      `UPDATE app_comissionamento.tickets_movimentacao_lead
-       SET status_mapeamento = 'pendente', observacao_sales_ops = $1, atualizado_em = NOW()
-       WHERE id_ticket_movimentacao = $2`,
-      [JSON.stringify(obs), id]
-    );
-
-    return res.json({ success: true, message: 'Ticket reenfileirado.' });
-  } catch (err) {
-    console.error('Erro ao reprocessar:', err);
-    return res.status(500).json({ success: false, error: 'Erro interno' });
+  // 6. Negócio no Closer com outro owner
+  const dealCloserOutroOwner = deals.find(
+    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && d.ownerId && String(d.ownerId) !== String(ownerId || '')
+  );
+  if (dealCloserOutroOwner) {
+    return {
+      blocked: true,
+      message: 'Movimentação bloqueada: Card já está com outro colaborador',
+      pipeline: dealCloserOutroOwner.pipeline,
+      stage: dealCloserOutroOwner.stage,
+      pipelineNome: PIPELINE_NAMES[dealCloserOutroOwner.pipeline] || dealCloserOutroOwner.pipeline,
+      stageNome: STAGE_NAMES[dealCloserOutroOwner.stage] || dealCloserOutroOwner.stage,
+    };
   }
-});
 
-export default router;
+  // 7. Qualquer outro caso
+  const primeiro = deals[0];
+  return {
+    blocked: true,
+    message: `Movimentação bloqueada: Card em pipeline '${PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline}'`,
+    pipeline: primeiro.pipeline,
+    stage: primeiro.stage,
+    pipelineNome: PIPELINE_NAMES[primeiro.pipeline] || primeiro.pipeline,
+    stageNome: STAGE_NAMES[primeiro.stage] || primeiro.stage,
+  };
+}
+
+/**
+ * Função de compatibilidade.
+ */
+export async function verificarPipelineBaseELevio(contactId) {
+  const deal = await findDealInBaseLeads(contactId);
+  if (!deal) return { noPipelineBase: false, noFaseEnvio: false, pipeline: null, stage: null };
+  return { noPipelineBase: deal.pipeline === PIPELINE_BASE_LEADS_ID, noFaseEnvio: false, pipeline: deal.pipeline, stage: deal.stage };
+}
+
+/**
+ * Verifica se o contato está em um pipeline específico.
+ */
+export async function isContactInPipeline(contactId, pipelineId) {
+  const deals = await getContactDeals(contactId);
+  return deals.some(deal => deal.pipeline === pipelineId);
+}
+
+/**
+ * Encontra um negócio no pipeline Base de Leads.
+ */
+export async function findDealInBaseLeads(contactId) {
+  const deals = await getContactDeals(contactId);
+  return deals.find(deal => deal.pipeline === PIPELINE_BASE_LEADS_ID) || null;
+}
