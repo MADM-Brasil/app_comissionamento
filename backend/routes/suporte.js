@@ -66,7 +66,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       colaborador_origem_nome,
       equipe_origem_nome,
       colaborador_destino_nome,
-      colaborador_destino_email,
+      colaborador_destino_email,  // opcional – será armazenado nos metadados
       equipe_destino_nome,
       motivo_solicitacao: rawMotivo = null,
       observacao_sales_ops: rawObs = null,
@@ -79,9 +79,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Nome, sobrenome e telefone são obrigatórios.' });
     }
 
-    if (!colaborador_destino_email || !colaborador_destino_email.trim()) {
-      return res.status(400).json({ success: false, error: 'E-mail do colaborador de destino é obrigatório.' });
-    }
+    // Não exigimos e‑mail destino – o worker buscará pelo nome
 
     // ---------- Verificação de idempotência ----------
     if (idempotency_key) {
@@ -106,26 +104,13 @@ router.post('/ticket-movimentacao', async (req, res) => {
     const toNull = (val) => (val === 'null' || val === null || val === undefined ? null : val);
     const crmLeadId = toNull(rawCrmLeadId);
     const leadId = toNull(rawLeadId);
-    const motivoSolicitacao = toNull(rawMotivo) || '';
+    const observacaoInicial = toNull(rawObs);
+
+    let motivoSolicitacao = toNull(rawMotivo);
+    if (motivoSolicitacao === null) motivoSolicitacao = '';
 
     const cpfNumerico = cpf_cliente_informado ? cpf_cliente_informado.replace(/\D/g, '') : null;
     const cpfFinal = cpfNumerico && cpfNumerico.length > 11 ? cpfNumerico.substring(0, 11) : cpfNumerico;
-
-    // ---------- Preparar observacao_sales_ops com e-mail destino ----------
-    let observacaoInicial = toNull(rawObs);
-    let obsObj = {};
-    if (observacaoInicial && typeof observacaoInicial === 'string') {
-      try {
-        obsObj = JSON.parse(observacaoInicial);
-        if (typeof obsObj !== 'object' || obsObj === null) obsObj = {};
-      } catch {
-        obsObj = { observacao: observacaoInicial };
-      }
-    }
-    // Adiciona o e-mail destino e também a chave idempotency se necessário
-    obsObj.colaborador_destino_email = colaborador_destino_email;
-    if (idempotency_key) obsObj.idempotency_key = idempotency_key;
-    const observacaoFinal = JSON.stringify(obsObj);
 
     // 1. Criar ticket base na tabela tickets_suporte
     const descricaoBase = `Movimentação de lead solicitada por ${colaborador_origem_nome || 'N/A'}`;
@@ -137,6 +122,8 @@ router.post('/ticket-movimentacao', async (req, res) => {
       destino_equipe: equipe_destino_nome || '',
       solicitante_email: req.session.userId || '',
       solicitante_nome: colaborador_origem_nome || req.session.userId || 'Desconhecido',
+      // Armazena o e‑mail destino (se fornecido) para rastreabilidade
+      colaborador_destino_email: colaborador_destino_email || null,
     };
 
     const baseResult = await pool.query(
@@ -148,7 +135,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
     );
     const ticketId = baseResult.rows[0].id_ticket;
 
-    // 2. Inserir o registro específico da movimentação (SEM a coluna colaborador_destino_email)
+    // 2. Inserir o registro específico da movimentação (SEM colaborador_destino_email)
     const insertMovimentacaoQuery = `
       INSERT INTO app_comissionamento.tickets_movimentacao_lead (
         ticket_id,
@@ -181,7 +168,7 @@ router.post('/ticket-movimentacao', async (req, res) => {
       colaborador_destino_nome,
       motivoSolicitacao,
       status_mapeamento,
-      observacaoFinal, // agora contém o e-mail destino
+      observacaoInicial,
     ];
 
     const movResult = await pool.query(insertMovimentacaoQuery, movValues);
@@ -220,8 +207,8 @@ router.get('/tickets-movimentacao', async (req, res) => {
         COALESCE(ts.metadados->>'origem_equipe', '') AS equipe_origem_nome,
         tml.colaborador_destino_nome,
         COALESCE(ts.metadados->>'destino_equipe', '') AS equipe_destino_nome,
-        -- Extrai o e-mail destino do JSON de observacao
-        tml.observacao_sales_ops::jsonb->>'colaborador_destino_email' AS colaborador_destino_email,
+        -- O e-mail destino está nos metadados (opcional)
+        COALESCE(ts.metadados->>'colaborador_destino_email', '') AS colaborador_destino_email,
         tml.status_mapeamento,
         tml.observacao_sales_ops,
         tml.motivo_solicitacao,
