@@ -2,7 +2,7 @@
 import express from 'express';
 import bcrypt from 'bcrypt';
 import twoFactorService from '../services/twoFactorService.js';
-import db from '../services/db.js';
+import { pool } from '../services/db.js';
 import crypto from 'crypto';
 
 const router = express.Router();
@@ -30,22 +30,11 @@ router.get('/me', (req, res) => {
 });
 
 // ============================================================
-// FUNÇÃO AUXILIAR – período atual
-// ============================================================
-function getCurrentPeriod() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
-}
-
-// ============================================================
 // ROTA DE LOGIN (com suporte a rememberMe)
 // ============================================================
 router.post('/login', async (req, res) => {
   console.log('🔐 [LOGIN] Rota /login foi chamada');
   const { email, password, rememberMe } = req.body;
-  const periodo = getCurrentPeriod();
 
   const gruposPermitidos = [
     'Elite', 'Supervisor', 'Análise de segurado', 'Concomitante',
@@ -53,11 +42,10 @@ router.post('/login', async (req, res) => {
     'Coordenador', 'CEO', 'Diretoria'
   ];
 
-  console.log(`🔐 Tentativa de login: email=${email}, periodo=${periodo}, rememberMe=${rememberMe}`);
+  console.log(`🔐 Tentativa de login: email=${email}, rememberMe=${rememberMe}`);
 
   try {
-    // Leitura usa as views
-    const result = await db.query(
+    const result = await pool.query(
       `SELECT 
           a.id_assessor,
           c.email,
@@ -71,9 +59,8 @@ router.post('/login', async (req, res) => {
        INNER JOIN core.view_app_colaboradores c 
            ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
        WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
-         AND c.periodo = $2
-         AND TRIM(c.cargo) = ANY($3)`,
-      [email, periodo, gruposPermitidos]
+         AND TRIM(c.cargo) = ANY($2)`,
+      [email, gruposPermitidos]
     );
 
     const user = result.rows[0];
@@ -90,9 +77,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
 
-    // ============================================================
-    // DEFINE A DURAÇÃO DA SESSÃO COM BASE NO rememberMe
-    // ============================================================
+    // Define duração da sessão
     if (rememberMe) {
       req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias
       req.session.cookie.expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -103,9 +88,7 @@ router.post('/login', async (req, res) => {
       console.log('🔑 Sessão padrão de 1 dia (rememberMe desativado)');
     }
 
-    // ============================================================
-    // DADOS TEMPORÁRIOS PARA 2FA
-    // ============================================================
+    // Dados temporários para 2FA
     req.session.tempUser = {
       id_assessor: user.id_assessor,
       email: user.email,
@@ -116,7 +99,7 @@ router.post('/login', async (req, res) => {
       periodo: user.periodo
     };
 
-    // ENVIA CÓDIGO 2FA
+    // Envia código 2FA
     const sendResult = await twoFactorService.sendCode(user.email, user.nome);
     if (!sendResult.success) {
       console.log(`❌ Falha ao enviar código 2FA: ${sendResult.error}`);
@@ -207,7 +190,6 @@ router.post('/forgot-password', async (req, res) => {
     return res.status(400).json({ success: false, error: 'E-mail é obrigatório' });
   }
 
-  const periodo = getCurrentPeriod();
   const gruposPermitidos = [
     'Elite', 'Supervisor', 'Análise de segurado', 'Concomitante',
     'Salesops', 'Quinquenio', 'Quinquênio ',
@@ -215,8 +197,8 @@ router.post('/forgot-password', async (req, res) => {
   ];
 
   try {
-    // Leitura usa as views
-    const result = await db.query(
+    // ✅ CORRIGIDO: busca por e-mail sem exigir período
+    const result = await pool.query(
       `SELECT 
           c.nome,
           a.email
@@ -224,9 +206,8 @@ router.post('/forgot-password', async (req, res) => {
        INNER JOIN core.view_app_colaboradores c 
            ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
        WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
-         AND c.periodo = $2
-         AND TRIM(c.cargo) = ANY($3)`,
-      [email, periodo, gruposPermitidos]
+         AND TRIM(c.cargo) = ANY($2)`,
+      [email, gruposPermitidos]
     );
 
     if (result.rows.length === 0) {
@@ -307,7 +288,7 @@ router.post('/reset-password', async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
     // UPDATE na tabela original (não na view)
-    const updateResult = await db.query(
+    const updateResult = await pool.query(
       `UPDATE app_comissionamento.metricas_assessores
        SET senha_colaborador_hash = $1,
            updated_at = NOW()
