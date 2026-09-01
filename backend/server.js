@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { startTicketQueue } from './services/ticketQueue.js';
+
 import { pool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 import twoFactorService from './security/verif-2factory.js';
@@ -23,6 +23,7 @@ import suporteRouter from './routes/suporte.js';
 import campanhasRoutes from './routes/campanhas.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 import { startNotificationEngine } from './services/notificationEngine.js';
+import { startTicketQueue } from './services/ticketQueue.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -35,11 +36,7 @@ app.set('trust proxy', 1);
 
 // ---------- CORS ----------
 const isProduction = process.env.NODE_ENV === 'production';
-// Em produção, o domínio principal. Pode incluir localhost para desenvolvimento local.
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
-  'https://comissionamento.madmbrasil.com.br',
-  'http://localhost:3008'  // para desenvolvimento
-];
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3008'];
 
 app.use(cors({
   origin: allowedOrigins,
@@ -64,10 +61,10 @@ app.use(helmet({
         "'self'",
         "data:",
         "blob:",
-        "https://d2xsxph8kpxj0f.cloudfront.net",
+        "https://d2xsxph8kpxj0f.cloudfront.net",     // imagem do ranking
         "https://*.cloudfront.net"
       ],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", process.env.FRONTEND_URL || 'http://localhost:3007'],
       fontSrc: ["'self'"],
     },
   },
@@ -126,12 +123,9 @@ app.use(session({
   saveUninitialized: false,
   rolling: true,
   cookie: {
-    // ⚠️ IMPORTANTE: Defina `secure: false` para resolver o problema de sessão.
-    // Se o proxy (Nginx/Traefik) enviar X-Forwarded-Proto corretamente,
-    // você pode voltar para `secure: isProduction`.
-    secure: false,
+    secure: isProduction,
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: isProduction ? 'none' : 'lax',
   },
 }));
 
@@ -181,7 +175,6 @@ app.post('/api/auth/login', async (req, res) => {
         console.error('Erro ao salvar sessão:', err);
         return res.status(500).json({ success: false, error: 'Erro interno' });
       }
-      console.log('🍪 [LOGIN] Set-Cookie header:', res.getHeader('set-cookie'));
       return res.json({ success: true, requiresTwoFactor: true, tempToken: twoFactorResult.tempToken });
     });
   } catch (error) {
@@ -192,29 +185,12 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/auth/verify-2fa', async (req, res) => {
   try {
-    console.log('🔎 [2FA DEBUG] Sessão:', {
-      userId: req.session?.userId,
-      tempTokenSession: req.session?.tempToken,
-      body: req.body,
-      cookies: req.cookies,
-    });
-
     const { tempToken, code } = req.body;
     const userId = req.session.userId;
-    const sessionTempToken = req.session.tempToken;
-
-    if (!userId || !tempToken) {
-      return res.status(400).json({ success: false, error: 'Sessão inválida.' });
-    }
-
-    if (tempToken !== sessionTempToken) {
-      return res.status(400).json({ success: false, error: 'Token temporário inválido.' });
-    }
+    if (!userId || !tempToken) return res.status(400).json({ success: false, error: 'Sessão inválida.' });
 
     const verification = twoFactorService.verifyCode(userId, code);
-    if (!verification.success) {
-      return res.status(401).json({ success: false, error: verification.error });
-    }
+    if (!verification.success) return res.status(401).json({ success: false, error: verification.error });
 
     delete req.session.tempToken;
     req.session.isAuthenticated = true;
@@ -291,19 +267,18 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
-// ========== NOVAS ROTAS PÚBLICAS DE RECUPERAÇÃO DE SENHA ==========
+// ========== RECUPERAÇÃO DE SENHA ==========
 app.post('/api/auth/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ success: false, error: 'E-mail é obrigatório' });
 
-    const periodo = getCurrentPeriod();
+    // ✅ CORRIGIDO: busca somente por e-mail, sem exigir período
     const result = await pool.query(
       `SELECT nome, email
        FROM core.view_app_colaboradores
-       WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
-         AND periodo = $2`,
-      [email, periodo]
+       WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`,
+      [email]
     );
 
     if (result.rows.length === 0) {
@@ -447,7 +422,7 @@ app.get('/api/admin/months', async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT DISTINCT data_metrica::date 
-       FROM app_comissionamento.view_app_metricas_assessores  
+       FROM app_comissionamento.view_app_metricas_assessores 
        ORDER BY data_metrica DESC`
     );
     const months = result.rows.map(r => {
@@ -480,7 +455,7 @@ app.use((err, req, res, next) => {
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
       startNotificationEngine();
-      startTicketQueue(); 
+      startTicketQueue();
     });
   } catch (error) {
     console.error('❌ Erro ao conectar ao banco:', error);
