@@ -155,38 +155,59 @@ async function handleTicket(ticket, client) {
     });
 
     if (!busca.found) {
+      // Contato não encontrado – tentamos criar
       if (!ticket.email_cliente_informado) {
         hubspotData.status = 'aviso';
         hubspotData.mensagem = 'Campos pendentes: preencha e‑mail para tentar novamente.';
         resultado = { blocked: false, message: hubspotData.mensagem };
       } else {
-        const novoContato = await createContact({
-          firstName: ticket.nome_cliente_informado,
-          lastName: ticket.sobrenome_cliente_informado,
-          email: ticket.email_cliente_informado,
-          phone: ticket.telefone_cliente_informado,
-          cpf: ticket.cpf_cliente_informado,
-          origem: ticket.origem_cliente_informada,
-          ownerId,
-        });
+        // Tenta criar o contato com tratamento específico para e‑mail inválido
+        try {
+          const novoContato = await createContact({
+            firstName: ticket.nome_cliente_informado,
+            lastName: ticket.sobrenome_cliente_informado,
+            email: ticket.email_cliente_informado,
+            phone: ticket.telefone_cliente_informado,
+            cpf: ticket.cpf_cliente_informado,
+            origem: ticket.origem_cliente_informada,
+            ownerId,
+          });
 
-        contactId = novoContato.id;
-        hubspotData.contactId = contactId;
-        hubspotData.existe = true;
-        hubspotData.criadoAgora = true;
+          // Sucesso na criação
+          contactId = novoContato.id;
+          hubspotData.contactId = contactId;
+          hubspotData.existe = true;
+          hubspotData.criadoAgora = true;
 
-        resultado = await garantirLeadNoCloser(
-          contactId,
-          nomeCompleto,
-          ownerId,
-          ticket.colaborador_destino_nome
-        );
+          resultado = await garantirLeadNoCloser(
+            contactId,
+            nomeCompleto,
+            ownerId,
+            ticket.colaborador_destino_nome
+          );
 
-        if (resultado && !resultado.blocked && resultado.dealId) {
-          dealId = resultado.dealId;
+          if (resultado && !resultado.blocked && resultado.dealId) {
+            dealId = resultado.dealId;
+          }
+        } catch (createError) {
+          // Verifica se é erro de e‑mail inválido
+          const isInvalidEmail = createError.code === 400 &&
+            createError.body?.errors?.some(e => e.error === 'INVALID_EMAIL');
+
+          if (isInvalidEmail) {
+            // Trata como aviso – não bloqueia, mas não prossegue
+            hubspotData.status = 'aviso';
+            hubspotData.mensagem = `E-mail inválido: "${ticket.email_cliente_informado}". Corrija e reenvie.`;
+            resultado = { blocked: false, message: hubspotData.mensagem };
+            // Não define contactId, pois não foi criado
+          } else {
+            // Outro erro – repassa para o catch externo
+            throw createError;
+          }
         }
       }
     } else if (busca.divergente) {
+      // Contato existe com divergências
       contactId = busca.contact.id;
       hubspotData.status = 'suporte';
       hubspotData.mensagem = busca.motivo || 'Dados divergentes do cadastro. Aguardando suporte.';
@@ -198,6 +219,7 @@ async function handleTicket(ticket, client) {
       }
       resultado = { blocked: false, message: hubspotData.mensagem };
     } else {
+      // Contato encontrado sem divergências
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
@@ -218,7 +240,7 @@ async function handleTicket(ticket, client) {
       }
     }
 
-    // ✅ VALIDAÇÃO FINAL COM RETRY (aguarda associação no HubSpot)
+    // Se o contato foi criado ou já existia e não houve bloqueio, faz a validação final
     if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
       let finalCheck = null;
       let attempts = 0;
@@ -290,7 +312,7 @@ async function handleTicket(ticket, client) {
       [JSON.stringify(novoObservacao), statusFinal, ticket.id_ticket_movimentacao]
     );
 
-    // Atualiza tickets_suporte
+    // Atualiza tickets_suporte com status correspondente
     if (statusFinal === 'concluido') {
       await client.query(
         `UPDATE app_comissionamento.tickets_suporte
@@ -312,6 +334,13 @@ async function handleTicket(ticket, client) {
          WHERE id_ticket = $1`,
         [ticket.ticket_id]
       );
+    } else if (statusFinal === 'aviso') {
+      await client.query(
+        `UPDATE app_comissionamento.tickets_suporte
+         SET status = 'AVISO', atualizado_em = NOW()
+         WHERE id_ticket = $1`,
+        [ticket.ticket_id]
+      );
     } else {
       await client.query(
         `UPDATE app_comissionamento.tickets_suporte
@@ -321,7 +350,7 @@ async function handleTicket(ticket, client) {
       );
     }
 
-    // Notificação Teams para casos não concluídos
+    // Notificação Teams para casos não concluídos ou com aviso
     if (statusFinal !== 'concluido') {
       try {
         await teamsNotificador.enviar({
