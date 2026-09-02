@@ -360,7 +360,7 @@ function MovimentacaoTab() {
 
   useEffect(() => { loadUserHistory(); }, [currentUser?.nome]);
 
-  // ✅ Polling automático a cada 10 segundos enquanto houver tickets pendentes/processando
+  // Polling automático a cada 10 segundos enquanto houver tickets pendentes/processando
   useEffect(() => {
     const hasPending = movements.some(
       (m) => m.status === "pendente" || m.status === "processando"
@@ -370,7 +370,7 @@ function MovimentacaoTab() {
 
     const intervalId = setInterval(() => {
       loadUserHistory();
-    }, 10000); // 10 segundos
+    }, 10000);
 
     return () => clearInterval(intervalId);
   }, [movements]);
@@ -382,7 +382,6 @@ function MovimentacaoTab() {
     if (!lastName.trim()) { setMessage({ text: "Sobrenome é obrigatório", type: "error" }); return; }
     if (!telefone.trim()) { setMessage({ text: "Telefone é obrigatório", type: "error" }); return; }
 
-    // ✅ Validação de telefone (DDD+número)
     if (!isValidBrazilianPhone(telefone)) {
       setMessage({ text: "Telefone inválido. Informe DDD + número (ex.: 11 00000-1234).", type: "error" });
       return;
@@ -404,7 +403,6 @@ function MovimentacaoTab() {
       return v.toString(16);
     });
 
-    // Monta o telefone completo com +55 e hífens
     const telefoneSemMascara = telefone.replace(/\D/g, '');
     const telefoneCompleto = `+55-${telefoneSemMascara.slice(0, 2)}-${telefoneSemMascara.slice(2, 7)}-${telefoneSemMascara.slice(7)}`;
 
@@ -1129,6 +1127,7 @@ function MovimentacoesSuporteTab() {
   const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
   const [editForm, setEditForm] = useState<{ status_mapeamento: string; observacao_sales_ops: string }>({ status_mapeamento: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
+  const [showConcluidos, setShowConcluidos] = useState(false);
 
   const carregarTickets = async () => {
     try {
@@ -1140,7 +1139,7 @@ function MovimentacoesSuporteTab() {
       setMessage({ text: "Erro ao carregar tickets", type: "error" });
     } finally {
       setLoading(false);
-    } 
+    }
   };
 
   useEffect(() => {
@@ -1212,6 +1211,7 @@ function MovimentacoesSuporteTab() {
   const filteredTickets = tickets.filter(t => {
     const statusMatch = filterStatus === "todos" || t.status_mapeamento === filterStatus;
     if (!statusMatch) return false;
+    if (!showConcluidos && t.status_mapeamento === 'concluido') return false;
     return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
   });
 
@@ -1224,7 +1224,33 @@ function MovimentacoesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Movimentações (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Filtrar por status" aria-label="Filtrar tickets por status">
+            <button
+              type="button"
+              onClick={() => setShowConcluidos(!showConcluidos)}
+              className={cn(
+                "px-3 py-1 rounded text-sm flex items-center gap-1 transition-colors",
+                showConcluidos
+                  ? "bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90"
+                  : "bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0]"
+              )}
+            >
+              {showConcluidos ? (
+                <>
+                  <Eye className="w-3 h-3" /> Ocultar concluídos
+                </>
+              ) : (
+                <>
+                  <Eye className="w-3 h-3" /> Mostrar concluídos
+                </>
+              )}
+            </button>
+
+            <select
+              value={filterStatus}
+              onChange={e => setFilterStatus(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Filtrar por status"
+            >
               <option value="todos">Todos</option>
               <option value="pendente">Pendente</option>
               <option value="processando">Processando</option>
@@ -1233,6 +1259,7 @@ function MovimentacoesSuporteTab() {
               <option value="aviso">Aviso</option>
               <option value="erro">Erro</option>
             </select>
+
             <input
               type="date"
               value={filterDataInicio}
@@ -1250,6 +1277,7 @@ function MovimentacoesSuporteTab() {
             />
           </div>
         </div>
+
         {filteredTickets.length === 0 ? (
           <div className="text-center py-8 text-[#64748b]">Nenhum ticket de movimentação encontrado</div>
         ) : (
@@ -1319,7 +1347,6 @@ function MovimentacoesSuporteTab() {
         )}
       </div>
 
-      {/* Modal de Edição */}
       <EditModal
         isOpen={editingTicket !== null}
         onClose={closeEditModal}
@@ -1363,7 +1390,7 @@ function ReportesSuporteTab() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
-  const [filterAssunto, setFilterAssunto] = useState<string>("todos"); // Novo estado para filtro de assunto
+  const [filterAssunto, setFilterAssunto] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketSuporte | null>(null);
@@ -1387,7 +1414,6 @@ function ReportesSuporteTab() {
     carregarReportes();
   }, []);
 
-  // Extrai lista de assuntos únicos
   const assuntosDisponiveis = useMemo(() => {
     const assuntos = tickets.map(t => t.assunto).filter(Boolean);
     return Array.from(new Set(assuntos)).sort();
@@ -1445,13 +1471,11 @@ function ReportesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
-            {/* Filtro por assunto */}
             <select
               value={filterAssunto}
               onChange={e => setFilterAssunto(e.target.value)}
               className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
               title="Filtrar por assunto"
-              aria-label="Filtrar reportes por assunto"
             >
               <option value="todos">Todos os assuntos</option>
               {assuntosDisponiveis.map(assunto => (
@@ -1459,13 +1483,11 @@ function ReportesSuporteTab() {
               ))}
             </select>
 
-            {/* Filtro por status */}
             <select
               value={filterStatus}
               onChange={e => setFilterStatus(e.target.value)}
               className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
               title="Filtrar por status"
-              aria-label="Filtrar reportes por status"
             >
               <option value="todos">Todos</option>
               <option value="ENVIADO">Enviado</option>
@@ -1495,6 +1517,7 @@ function ReportesSuporteTab() {
             />
           </div>
         </div>
+
         {filteredTickets.length === 0 ? (
           <div className="text-center py-8 text-[#64748b]">Nenhum reporte encontrado</div>
         ) : (
@@ -1550,7 +1573,6 @@ function ReportesSuporteTab() {
         )}
       </div>
 
-      {/* Modal de Edição */}
       <EditModal
         isOpen={editingTicket !== null}
         onClose={closeEditModal}
