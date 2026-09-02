@@ -152,13 +152,13 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Visualiza dados da equipe; vê configurações sem editar',
   },
   [LEVELS.COORDENADOR]: {
-    canAccessDashboard: true,
-    canAccessComissoes: true,
-    canAccessRanking: true,
-    canAccessReports: true,
-    canAccessConfiguration: true,
-    canViewTeam: true,
-    canEditConfiguration: true,
+    canAccessDashboard: false, //true
+    canAccessComissoes: false, //true
+    canAccessRanking: false,   //true
+    canAccessReports: false,   //true
+    canAccessConfiguration: false, //true
+    canViewTeam: false, //true
+    canEditConfiguration: false, //true
     canEditBonus: false,
     canGenerateNextMonth: false,
     canExportData: true,
