@@ -317,7 +317,7 @@ function MovimentacaoTab() {
       if (data.success) {
         const historico: MovementItem[] = (data.data || []).map((ticket: any) => {
           let hubspotData;
-          let motivoOriginal = "Movimentação Concluida";
+          let motivoOriginal = "Registro Concluido";
           let observacao = '';
 
           if (ticket.observacao_sales_ops) {
