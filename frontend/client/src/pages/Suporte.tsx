@@ -1310,7 +1310,7 @@ function MovimentacoesSuporteTab() {
                         <div>{ticket.telefone_cliente_informado || "—"}</div>
                         <small className="text-[#94a3b8]">{ticket.cpf_cliente_informado || "—"}</small>
                       </td>
-                      <td>{ticket.equipe_origem_nome}</td>
+                      <td>{ticket.origem_cliente_informada || "—"}</td>
                       <td>{ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</td>
                       <td>
                         <span className={cn("badge", statusInfo.className)}>

@@ -657,13 +657,32 @@ export async function findDealInBaseLeads(contactId) {
 
 /**
  * VALIDAÇÃO FINAL - confirma se o contato e o deal estão com o owner e pipeline esperados.
- * Útil para revalidação após a movimentação.
+ * Agora com logs detalhados para depuração.
  */
 export async function validateFinalAssignment(contactId, expectedOwnerId, expectedDealId = null) {
   const deals = await getContactDeals(contactId);
-  const targetDeal = expectedDealId
-    ? deals.find(d => String(d.id) === String(expectedDealId))
-    : deals.find(d => String(d.pipeline) === String(PIPELINE_CLOSER_ID));
+  
+  let targetDeal = null;
+  if (expectedDealId) {
+    targetDeal = deals.find(d => String(d.id) === String(expectedDealId));
+  } else {
+    targetDeal = deals.find(d => String(d.pipeline) === String(PIPELINE_CLOSER_ID));
+  }
+
+  // Se não encontrar o deal, retorna falha com detalhes nulos
+  if (!targetDeal) {
+    console.warn(`⚠️ [validateFinalAssignment] Deal não encontrado para contactId=${contactId}, expectedDealId=${expectedDealId}`);
+    return {
+      ok: false,
+      error: 'Deal não encontrado',
+      details: {
+        dealPipeline: null,
+        dealStage: null,
+        dealOwnerId: null,
+        contactOwnerId: null
+      }
+    };
+  }
 
   try {
     const contact = await hubspotClient.crm.contacts.basicApi.getById(contactId, [
@@ -674,21 +693,33 @@ export async function validateFinalAssignment(contactId, expectedOwnerId, expect
     ]);
     const contactOwnerId = contact.properties?.hubspot_owner_id || null;
 
-    const okDeal = targetDeal &&
-      String(targetDeal.pipeline) === String(PIPELINE_CLOSER_ID) &&
-      String(targetDeal.stage) === String(STAGE_EM_CONTATO_ID) &&
-      String(targetDeal.ownerId || '') === String(expectedOwnerId || '');
+    // Converte tudo para string para comparação segura
+    const dealPipeline = String(targetDeal.pipeline || '');
+    const dealStage = String(targetDeal.stage || '');
+    const dealOwnerId = String(targetDeal.ownerId || '');
+    const expectedOwner = String(expectedOwnerId || '');
+    const expectedPipeline = String(PIPELINE_CLOSER_ID);
+    const expectedStage = String(STAGE_EM_CONTATO_ID);
 
-    const okContact = String(contactOwnerId || '') === String(expectedOwnerId || '');
+    const okDeal = dealPipeline === expectedPipeline &&
+                   dealStage === expectedStage &&
+                   dealOwnerId === expectedOwner;
+
+    const okContact = String(contactOwnerId || '') === expectedOwner;
+
+    const ok = okDeal && okContact;
+
+    // Log detalhado para depuração
+    console.log(`🔍 [validateFinalAssignment] contactId=${contactId}, expectedOwner=${expectedOwner}, dealOwner=${dealOwnerId}, contactOwner=${contactOwnerId}, okDeal=${okDeal}, okContact=${okContact}, ok=${ok}`);
 
     return {
-      ok: Boolean(okDeal && okContact),
+      ok,
       contactOwnerId,
-      deal: targetDeal || null,
+      deal: targetDeal,
       details: {
-        dealPipeline: targetDeal?.pipeline || null,
-        dealStage: targetDeal?.stage || null,
-        dealOwnerId: targetDeal?.ownerId || null,
+        dealPipeline: targetDeal.pipeline,
+        dealStage: targetDeal.stage,
+        dealOwnerId: targetDeal.ownerId,
         contactOwnerId: contactOwnerId,
       }
     };
