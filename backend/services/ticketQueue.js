@@ -244,7 +244,7 @@ async function handleTicket(ticket, client) {
     if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
       let finalCheck = null;
       let attempts = 0;
-      const maxAttempts = 5;
+      const maxAttempts = 8;
       const delayMs = 2000;
 
       while (attempts < maxAttempts) {
