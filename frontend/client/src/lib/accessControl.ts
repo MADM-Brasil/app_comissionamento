@@ -92,7 +92,7 @@ const GROUP_MAPPING: Record<string, Level> = {
   'analista de dados': LEVELS.ADMINISTRATIVO,
   'desenvolvedor make': LEVELS.ADMINISTRATIVO,
   'analista de discadora': LEVELS.ADMINISTRATIVO,
-  'Supervisor Sales Ops': LEVELS.ADMINISTRATIVO,
+  'supervisor sales ops': LEVELS.ADMINISTRATIVO,
 
   // Super Admin
 

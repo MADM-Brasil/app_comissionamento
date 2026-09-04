@@ -300,7 +300,8 @@ function MovimentacaoTab() {
       id: c.id.toString(),
       nome: c.name,
       email: c.email
-    }));
+    }))
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
   }, [collaborators, equipe]);
 
   useEffect(() => {
