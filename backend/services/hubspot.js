@@ -46,12 +46,16 @@ function phonesMatch(contactPhone, inputPhone) {
   const b = normalizePhone(inputPhone);
   if (!a || !b) return false;
   if (a === b) return true;
-  if (a.includes(b) || b.includes(a)) return true;
-  const aSem55 = a.startsWith('55') ? a.slice(2) : a;
-  const bSem55 = b.startsWith('55') ? b.slice(2) : b;
+
+  const aSem55 = a.startsWith('55') && a.length > 11 ? a.slice(2) : a;
+  const bSem55 = b.startsWith('55') && b.length > 11 ? b.slice(2) : b;
   if (aSem55 === bSem55) return true;
-  if (aSem55.includes(bSem55) || bSem55.includes(aSem55)) return true;
-  return false;
+
+  // Compara os últimos 8 dígitos (ignora DDD e o "9" extra de celular, que variam
+  // conforme a origem do dado). Evita falso positivo de substring em posição aleatória.
+  const aTail = aSem55.slice(-8);
+  const bTail = bSem55.slice(-8);
+  return aTail.length === 8 && aTail === bTail;
 }
 
 /**
@@ -217,7 +221,7 @@ function validateContact(contact, { emailClean, phoneClean, cpfClean, matchedBy 
       found: true,
       divergente: true,
       contact,
-      motivo: `Dados divergentes do cadastro: ${divergencias.join(', ')}`,
+      motivo: 'Já possui um lead cadastrado com essas informações',
     };
   }
 
