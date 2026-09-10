@@ -130,8 +130,8 @@ const isValidBrazilianPhone = (phone: string): boolean => {
   const number = digits.slice(2);
   const dddNum = parseInt(ddd, 10);
 
-  // DDD não pode ser 55 nem estar fora da faixa 11-99
-  if (isNaN(dddNum) || dddNum < 11 || dddNum > 99 || ddd === '55') return false;
+  // DDD deve estar na faixa válida 11-99 (55 é um DDD real de Santa Maria/RS, não deve ser bloqueado)
+  if (isNaN(dddNum) || dddNum < 11 || dddNum > 99) return false;
 
   // Número deve ter 8 ou 9 dígitos
   if (number.length !== 8 && number.length !== 9) return false;
@@ -599,7 +599,7 @@ function MovimentacaoTab() {
           filteredMovements.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada no período</div> :
           <div className="overflow-x-auto">
             <table className="simple-table">
-              <thead><tr><th>Data/Hora</th><th>Cliente</th><th>E-mail</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Obs. SalesOps</th><th>Resultado</th></tr></thead>
+              <thead><tr><th>Data/Hora</th><th>Cliente</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Obs. SalesOps</th><th>Resultado</th></tr></thead>
               <tbody>{filteredMovements.map(m => {
                 const statusParaExibir = m.status;
                 const info = getStatusInfo(statusParaExibir);
@@ -607,8 +607,11 @@ function MovimentacaoTab() {
                   <tr key={m.id}>
                     <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
                     <td>{m.cliente}</td>
-                    <td>{m.email}</td>
-                    <td><div>{m.telefone}</div><small className="text-[#94a3b8]">{m.cpf}</small></td>
+                    <td>
+                      <div>{m.telefone}</div>
+                      <div className="text-[#64748b]">{m.email}</div>
+                      <small className="text-[#94a3b8]">{m.cpf}</small>
+                    </td>
                     <td><div>{m.equipe}</div><small>{m.assessor}</small></td>
                     <td>
                       <span className={cn("badge", info.className)} title={m.hubspot?.mensagem || info.label}>
@@ -1309,6 +1312,7 @@ function MovimentacoesSuporteTab() {
                       <td>{`${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`}</td>
                       <td>
                         <div>{ticket.telefone_cliente_informado || "—"}</div>
+                        <div className="text-[#64748b]">{ticket.email_cliente_informado || "—"}</div>
                         <small className="text-[#94a3b8]">{ticket.cpf_cliente_informado || "—"}</small>
                       </td>
                       <td>{ticket.origem_cliente_informada || "—"}</td>
