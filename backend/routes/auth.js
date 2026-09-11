@@ -4,6 +4,7 @@ import bcrypt from 'bcrypt';
 import twoFactorService from '../services/twoFactorService.js';
 import { pool } from '../services/db.js';
 import crypto from 'crypto';
+import { applyCargoOverride } from '../config/accessOverrides.js';
 
 const router = express.Router();
 console.log('✅ [AUTH] Módulo de autenticação carregado');
@@ -46,7 +47,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT 
+      `SELECT
           a.id_assessor,
           c.email,
           c.nome,
@@ -56,20 +57,29 @@ router.post('/login', async (req, res) => {
           c.status,
           c.periodo
        FROM app_comissionamento.view_app_metricas_assessores a
-       INNER JOIN core.view_app_colaboradores c 
+       INNER JOIN core.view_app_colaboradores c
            ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
-         AND TRIM(c.cargo) = ANY($2)`,
-      [email, gruposPermitidos]
+       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))`,
+      [email]
     );
 
-    const user = result.rows[0];
+    const user = applyCargoOverride(result.rows[0]);
     if (!user) {
       console.log(`❌ Login falhou: usuário não encontrado para ${email}`);
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
 
+    if (!gruposPermitidos.includes((user.cargo || '').trim())) {
+      console.log(`❌ Login falhou: cargo "${user.cargo}" sem permissão para ${email}`);
+      return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
+    }
+
     console.log(`👤 Usuário encontrado: ${user.nome}, cargo="${user.cargo}", status=${user.status}`);
+
+    if (!user.senha_colaborador_hash) {
+      console.log(`❌ Login falhou: sem senha cadastrada para ${email}`);
+      return res.status(401).json({ success: false, error: 'Nenhuma senha cadastrada. Use "Esqueci minha senha" para criar uma.' });
+    }
 
     const match = await bcrypt.compare(password, user.senha_colaborador_hash);
     if (!match) {
@@ -199,22 +209,22 @@ router.post('/forgot-password', async (req, res) => {
   try {
     // ✅ CORRIGIDO: busca por e-mail sem exigir período
     const result = await pool.query(
-      `SELECT 
+      `SELECT
           c.nome,
-          a.email
+          a.email,
+          c.cargo
        FROM app_comissionamento.view_app_metricas_assessores a
-       INNER JOIN core.view_app_colaboradores c 
+       INNER JOIN core.view_app_colaboradores c
            ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
-         AND TRIM(c.cargo) = ANY($2)`,
-      [email, gruposPermitidos]
+       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))`,
+      [email]
     );
 
-    if (result.rows.length === 0) {
+    const user = applyCargoOverride(result.rows[0]);
+
+    if (!user || !gruposPermitidos.includes((user.cargo || '').trim())) {
       return res.status(404).json({ success: false, error: 'E-mail não encontrado ou sem permissão.' });
     }
-
-    const user = result.rows[0];
     const userId = user.nome;
     const userEmail = user.email;
 
