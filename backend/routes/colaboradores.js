@@ -170,21 +170,17 @@ router.get('/collaborators', requireAuth, async (req, res) => {
 // ============================================================
 // GET /api/equipes
 // ============================================================
-router.get('/equipes', requireAuth, async (req, res) => {
-  const mesParam = req.query.mes;
-  const dataMetrica = parseMesToDataMetrica(mesParam);
+router.get('/equipes', requireAuth, async (_req, res) => {
   try {
+    // Parte de core.colaboradores (nao de metricas_assessores): assim a equipe
+    // aparece mesmo quando ninguem dela ainda tem metrica lancada no mes (ex.:
+    // supervisor recem-liberado, sem historico de comissao ainda).
     const result = await db.query(
-      `SELECT DISTINCT COALESCE(c.nome_equipe, 'Sem Equipe') AS nome
-       FROM app_comissionamento.view_app_metricas_assessores m
-       LEFT JOIN core.view_app_colaboradores c
-         ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
-       WHERE m.data_metrica::date = $1::date
-         AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
-         -- Exclui apenas equipes de colaboradores desativados
+      `SELECT DISTINCT TRIM(c.nome_equipe) AS nome
+       FROM core.view_app_colaboradores c
+       WHERE c.nome_equipe IS NOT NULL AND TRIM(c.nome_equipe) != ''
          AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
-         AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')`,
-      [dataMetrica]
+         AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')`
     );
 
     const equipes = result.rows
