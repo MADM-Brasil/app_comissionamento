@@ -382,7 +382,8 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
     }
 
     const client = await pool.connect();
-    client.on('error', (err) => console.error('⚠️ Erro na conexão (client suporte):', err.message));
+    const onClientError = (err) => console.error('⚠️ Erro na conexão (client suporte):', err.message);
+    client.on('error', onClientError);
     try {
       await client.query('BEGIN');
 
@@ -485,6 +486,7 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
       await client.query('ROLLBACK');
       throw err;
     } finally {
+      client.removeListener('error', onClientError);
       client.release();
     }
   } catch (err) {
