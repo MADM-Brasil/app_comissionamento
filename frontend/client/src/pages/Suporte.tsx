@@ -21,7 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, fetchColaboradoresDiretorio } from "@/lib/api";
 
 // ---------------------- Tipos ----------------------
 interface MovementItem {
@@ -253,9 +253,11 @@ function MovimentacaoTab() {
     currentUser,
     equipeConfigs,
     loadEquipeConfigs,
-    collaborators,
-    loadCollaborators,
   } = useAppStore();
+
+  const [colaboradoresDiretorio, setColaboradoresDiretorio] = useState<
+    { id: string; name: string; email: string; equipeNome: string }[]
+  >([]);
 
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -285,7 +287,12 @@ function MovimentacaoTab() {
   useEffect(() => {
     let isMounted = true;
     const carregar = async () => {
-      if (collaborators.length === 0) { try { await loadCollaborators(); } catch (error) { console.error("Falha ao carregar colaboradores:", error); } }
+      try {
+        const data = await fetchColaboradoresDiretorio();
+        if (isMounted) setColaboradoresDiretorio(data);
+      } catch (error) {
+        console.error("Falha ao carregar colaboradores:", error);
+      }
       if (isMounted) setLoadingColaboradores(false);
     };
     carregar();
@@ -293,16 +300,16 @@ function MovimentacaoTab() {
   }, []);
 
   const assessoresDisponiveis = useMemo(() => {
-    if (!collaborators.length) return [];
-    let filtered = collaborators.filter(c => !isExcludedTeam(c.equipeNome));
+    if (!colaboradoresDiretorio.length) return [];
+    let filtered = colaboradoresDiretorio.filter(c => !isExcludedTeam(c.equipeNome));
     if (equipe) filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(equipe));
     return filtered.map(c => ({
-      id: c.id.toString(),
+      id: c.id,
       nome: c.name,
       email: c.email
     }))
     .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-  }, [collaborators, equipe]);
+  }, [colaboradoresDiretorio, equipe]);
 
   useEffect(() => {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");

@@ -168,6 +168,37 @@ router.get('/collaborators', requireAuth, async (req, res) => {
 });
 
 // ============================================================
+// GET /api/colaboradores-diretorio
+// Lista simples (nome/email/equipe) direto de core.colaboradores, sem
+// depender de metrica lancada no mes. Usado pela aba Suporte > Movimentar,
+// que so precisa saber "quem e de qual equipe", nao numeros de comissao.
+// ============================================================
+router.get('/colaboradores-diretorio', requireAuth, async (_req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT c.email, c.nome, c.nome_equipe
+       FROM core.view_app_colaboradores c
+       WHERE c.nome_equipe IS NOT NULL AND TRIM(c.nome_equipe) != ''
+         AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
+         AND (c.cargo IS NULL OR LOWER(c.cargo) != 'desativado')
+       ORDER BY c.nome`
+    );
+
+    const colaboradores = result.rows.map(c => ({
+      id: c.email,
+      name: c.nome || c.email,
+      email: c.email,
+      equipeNome: c.nome_equipe || '',
+    }));
+
+    res.json({ success: true, data: colaboradores });
+  } catch (err) {
+    console.error('❌ Erro ao buscar diretório de colaboradores:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================
 // GET /api/equipes
 // ============================================================
 router.get('/equipes', requireAuth, async (_req, res) => {
