@@ -4,7 +4,6 @@ import bcrypt from 'bcrypt';
 import twoFactorService from '../services/twoFactorService.js';
 import { pool } from '../services/db.js';
 import crypto from 'crypto';
-import { applyCargoOverride } from '../config/accessOverrides.js';
 
 const router = express.Router();
 console.log('✅ [AUTH] Módulo de autenticação carregado');
@@ -46,8 +45,6 @@ router.post('/login', async (req, res) => {
   console.log(`🔐 Tentativa de login: email=${email}, rememberMe=${rememberMe}`);
 
   try {
-    // LEFT JOIN: colaboradores sem linha ainda em metricas_assessores (ex.: supervisor
-    // novo, nunca teve senha/comissão lançada) continuam podendo logar/criar senha.
     const result = await pool.query(
       `SELECT
           a.id_assessor,
@@ -59,7 +56,7 @@ router.post('/login', async (req, res) => {
           c.status,
           c.periodo
        FROM core.view_app_colaboradores c
-       LEFT JOIN LATERAL (
+       INNER JOIN LATERAL (
          SELECT id_assessor, senha_colaborador_hash
          FROM app_comissionamento.view_app_metricas_assessores a
          WHERE LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
@@ -70,7 +67,7 @@ router.post('/login', async (req, res) => {
       [email]
     );
 
-    const user = applyCargoOverride(result.rows[0]);
+    const user = result.rows[0];
     if (!user) {
       console.log(`❌ Login falhou: usuário não encontrado para ${email}`);
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
@@ -214,19 +211,19 @@ router.post('/forgot-password', async (req, res) => {
   ];
 
   try {
-    // ✅ CORRIGIDO: busca por e-mail sem exigir período
-    // LEFT JOIN: mesma lógica do /login, cobre colaboradores sem linha em metricas_assessores
     const result = await pool.query(
       `SELECT
           c.nome,
           c.email,
           c.cargo
        FROM core.view_app_colaboradores c
+       INNER JOIN app_comissionamento.view_app_metricas_assessores a
+         ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
        WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))`,
       [email]
     );
 
-    const user = applyCargoOverride(result.rows[0]);
+    const user = result.rows[0];
 
     if (!user || !gruposPermitidos.includes((user.cargo || '').trim())) {
       return res.status(404).json({ success: false, error: 'E-mail não encontrado ou sem permissão.' });
@@ -314,25 +311,10 @@ router.post('/reset-password', async (req, res) => {
     );
 
     if (updateResult.rowCount === 0) {
-      // Colaborador existe em core.colaboradores mas ainda não tem nenhuma linha em
-      // metricas_assessores (ex.: supervisor recém-liberado, nunca teve métrica lançada).
-      // Cria a linha na primeira definição de senha, em vez de bloquear o cadastro.
-      const colaborador = await pool.query(
-        `SELECT colaborador_id, nome FROM core.colaboradores WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`,
-        [email]
-      );
-
-      if (colaborador.rowCount === 0) {
-        return res.status(404).json({ success: false, error: 'Assessor não encontrado' });
-      }
-
-      const { colaborador_id, nome } = colaborador.rows[0];
-      await pool.query(
-        `INSERT INTO app_comissionamento.metricas_assessores
-           (id_assessor, email, email_normalizado, senha_colaborador_hash, data_metrica, colaborador)
-         VALUES ($1, $2, LOWER(TRIM($2)), $3, date_trunc('month', CURRENT_DATE), $4)`,
-        [colaborador_id, email, hashedPassword, nome]
-      );
+      return res.status(404).json({
+        success: false,
+        error: 'Assessor não encontrado ou sem cadastro de métricas'
+      });
     }
 
     // Limpa a sessão
