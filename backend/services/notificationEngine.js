@@ -39,7 +39,8 @@ export async function checkIncentiveNotifications() {
         a.meta_gols_assinados,
         a.meta_gols_ganhos
       FROM app_comissionamento.metricas_assessores a
-      JOIN core.view_app_colaboradores c ON a.email = c.email
+      JOIN core.view_app_colaboradores c
+        ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
       WHERE c.status = 'ativo'
         AND c.cargo NOT IN ('supervisor', 'coordenador', 'administrativo', 'desativado')
         AND a.data_metrica::date = CURRENT_DATE
