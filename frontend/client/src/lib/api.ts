@@ -58,12 +58,6 @@ export async function fetchCollaborators(queryString = "") {
   return data.data || [];
 }
 
-export async function fetchColaboradoresDiretorio() {
-  const response = await fetch(`${API_BASE}/colaboradores-diretorio`, { credentials: 'include' });
-  const data = await handleResponse(response, 'Erro ao carregar diretório de colaboradores');
-  return data.data || [];
-}
-
 export async function fetchEquipes() {
   const response = await fetch(`${API_BASE}/equipes`, { credentials: 'include' });
   const data = await handleResponse(response, 'Erro ao carregar equipes');

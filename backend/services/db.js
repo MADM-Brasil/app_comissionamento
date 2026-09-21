@@ -38,24 +38,6 @@ if (connectionString) {
 // ─── Criação do pool ───────────────────────────────────────────
 const pool = new Pool(dbConfig);
 
-// Diagnóstico temporário – ver o que o backend enxerga
-pool.on('connect', async (client) => {
-  try {
-    const dbRes = await client.query('SELECT current_database() AS db');
-    const schemaRes = await client.query('SHOW search_path');
-    const tablesRes = await client.query(`
-      SELECT schemaname, tablename 
-      FROM pg_tables 
-      WHERE schemaname NOT IN ('pg_catalog', 'information_schema')
-      ORDER BY schemaname, tablename
-    `);
-    console.log('🔎 [DB DEBUG] database:', dbRes.rows[0].db);
-    console.log('🔎 [DB DEBUG] search_path:', schemaRes.rows[0].search_path);
-  } catch (err) {
-    console.error('❌ [DB DEBUG] Erro ao obter diagnóstico:', err);
-  }
-});
-
 pool.on('connect', () => {
   console.log('✅ Conectado ao PostgreSQL com sucesso');
 });
@@ -68,6 +50,23 @@ pool.on('error', (err) => {
 // ─── Função auxiliar de query ──────────────────────────────────
 const query = (text, params) => pool.query(text, params);
 
+const logDatabaseAccess = async () => {
+  const result = await pool.query(`
+    SELECT current_database() AS db,
+           current_user AS db_user,
+           has_schema_privilege(current_user, 'core', 'USAGE') AS core_usage,
+           has_table_privilege(current_user, 'core.view_app_colaboradores', 'SELECT') AS colaboradores_select
+  `);
+  const schemaResult = await pool.query('SHOW search_path');
+  const details = result.rows[0];
+
+  console.log('🔎 [DB DEBUG] database:', details.db);
+  console.log('🔎 [DB DEBUG] user:', details.db_user);
+  console.log('🔎 [DB DEBUG] core USAGE:', details.core_usage);
+  console.log('🔎 [DB DEBUG] view SELECT:', details.colaboradores_select);
+  console.log('🔎 [DB DEBUG] search_path:', schemaResult.rows[0].search_path);
+};
+
 // Exportações
-export { pool, query };
+export { pool, query, logDatabaseAccess };
 export default { pool, query };
