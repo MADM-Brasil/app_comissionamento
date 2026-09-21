@@ -46,7 +46,7 @@ router.post('/login', async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT
+      `SELECT 
           a.id_assessor,
           c.email,
           c.nome,
@@ -55,16 +55,12 @@ router.post('/login', async (req, res) => {
           c.cargo,
           c.status,
           c.periodo
-       FROM core.view_app_colaboradores c
-       INNER JOIN LATERAL (
-         SELECT id_assessor, senha_colaborador_hash
-         FROM app_comissionamento.view_app_metricas_assessores a
-         WHERE LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-         ORDER BY data_metrica DESC
-         LIMIT 1
-       ) a ON true
-       WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))`,
-      [email]
+       FROM app_comissionamento.view_app_metricas_assessores a
+       INNER JOIN core.view_app_colaboradores c 
+           ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
+       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
+         AND TRIM(c.cargo) = ANY($2)`,
+      [email, gruposPermitidos]
     );
 
     const user = result.rows[0];
@@ -73,17 +69,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
 
-    if (!gruposPermitidos.includes((user.cargo || '').trim())) {
-      console.log(`❌ Login falhou: cargo "${user.cargo}" sem permissão para ${email}`);
-      return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
-    }
-
     console.log(`👤 Usuário encontrado: ${user.nome}, cargo="${user.cargo}", status=${user.status}`);
-
-    if (!user.senha_colaborador_hash) {
-      console.log(`❌ Login falhou: sem senha cadastrada para ${email}`);
-      return res.status(401).json({ success: false, error: 'Nenhuma senha cadastrada. Use "Esqueci minha senha" para criar uma.' });
-    }
 
     const match = await bcrypt.compare(password, user.senha_colaborador_hash);
     if (!match) {
@@ -211,23 +197,24 @@ router.post('/forgot-password', async (req, res) => {
   ];
 
   try {
+    // ✅ CORRIGIDO: busca por e-mail sem exigir período
     const result = await pool.query(
-      `SELECT
+      `SELECT 
           c.nome,
-          c.email,
-          c.cargo
-       FROM core.view_app_colaboradores c
-       INNER JOIN app_comissionamento.view_app_metricas_assessores a
-         ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))`,
-      [email]
+          a.email
+       FROM app_comissionamento.view_app_metricas_assessores a
+       INNER JOIN core.view_app_colaboradores c 
+           ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
+       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
+         AND TRIM(c.cargo) = ANY($2)`,
+      [email, gruposPermitidos]
     );
 
-    const user = result.rows[0];
-
-    if (!user || !gruposPermitidos.includes((user.cargo || '').trim())) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'E-mail não encontrado ou sem permissão.' });
     }
+
+    const user = result.rows[0];
     const userId = user.nome;
     const userEmail = user.email;
 
@@ -311,10 +298,7 @@ router.post('/reset-password', async (req, res) => {
     );
 
     if (updateResult.rowCount === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Assessor não encontrado ou sem cadastro de métricas'
-      });
+      return res.status(404).json({ success: false, error: 'Assessor não encontrado' });
     }
 
     // Limpa a sessão

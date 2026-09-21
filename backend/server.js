@@ -9,7 +9,7 @@ import bcrypt from 'bcrypt';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { pool } from './services/db.js';
+import { pool, logDatabaseAccess } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 import twoFactorService from './security/verif-2factory.js';
 
@@ -149,45 +149,16 @@ app.get('/api/auth/ping', (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password, rememberMe } = req.body;
-    if (!email || !password) {
-      return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
-    }
-
     const userResult = await pool.query(
-      `SELECT
-         c.email,
-         c.nome,
-         c.nome_equipe,
-         c.cargo,
-         c.status,
-         c.periodo,
-         a.senha_colaborador_hash
-       FROM core.view_app_colaboradores c
-       INNER JOIN LATERAL (
-         SELECT senha_colaborador_hash
-         FROM app_comissionamento.view_app_metricas_assessores a
-         WHERE LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-         ORDER BY a.data_metrica DESC
-         LIMIT 1
-       ) a ON true
-       WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))`,
+      `SELECT email, nome, nome_equipe, cargo, status, periodo
+       FROM core.view_app_colaboradores
+       WHERE email = $1`,
       [email]
     );
     if (userResult.rows.length === 0) {
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
     const user = userResult.rows[0];
-    if (!user.senha_colaborador_hash) {
-      return res.status(401).json({
-        success: false,
-        error: 'Nenhuma senha cadastrada. Use "Esqueci minha senha" para criar uma.'
-      });
-    }
-
-    const passwordMatches = await bcrypt.compare(password, user.senha_colaborador_hash);
-    if (!passwordMatches) {
-      return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
-    }
 
     const twoFactorResult = await twoFactorService.sendCode(user.email, user.nome);
     if (!twoFactorResult.success) {
@@ -228,7 +199,7 @@ app.post('/api/auth/verify-2fa', async (req, res) => {
     const userResult = await pool.query(
       `SELECT email, nome, nome_equipe, cargo, status, periodo
        FROM core.view_app_colaboradores
-       WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`,
+       WHERE email = $1`,
       [userId]
     );
     const user = userResult.rows[0];
@@ -248,9 +219,7 @@ app.post('/api/auth/resend-code', async (req, res) => {
     const userId = req.session.userId;
     if (!userId) return res.status(401).json({ success: false, error: 'Sessão não encontrada' });
     const userResult = await pool.query(
-      `SELECT email, nome
-       FROM core.view_app_colaboradores
-       WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`,
+      `SELECT email, nome FROM core.view_app_colaboradores WHERE email = $1`,
       [userId]
     );
     if (userResult.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
@@ -288,7 +257,7 @@ app.get('/api/auth/me', (req, res) => {
   pool.query(
     `SELECT email, nome, nome_equipe, cargo, status, periodo
      FROM core.view_app_colaboradores
-     WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`,
+     WHERE email = $1`,
     [req.session.userId]
   ).then(result => {
     if (result.rows.length === 0) return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
@@ -307,12 +276,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     // ✅ CORRIGIDO: busca somente por e-mail, sem exigir período
     const result = await pool.query(
-      `SELECT c.nome, c.email
-       FROM core.view_app_colaboradores c
-       INNER JOIN app_comissionamento.view_app_metricas_assessores a
-         ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))
-       LIMIT 1`,
+      `SELECT nome, email
+       FROM core.view_app_colaboradores
+       WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))`,
       [email]
     );
 
@@ -344,11 +310,7 @@ app.post('/api/auth/verify-reset-code', async (req, res) => {
     const { email, code } = req.body;
     if (!email || !code) return res.status(400).json({ success: false, error: 'E-mail e código são obrigatórios' });
 
-    if (
-      !req.session.resetName ||
-      !req.session.resetEmail ||
-      req.session.resetEmail.trim().toLowerCase() !== email.trim().toLowerCase()
-    ) {
+    if (!req.session.resetName || req.session.resetEmail !== email) {
       return res.status(400).json({ success: false, error: 'Sessão de recuperação inválida.' });
     }
 
@@ -390,7 +352,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
     );
 
     if (updateResult.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Usuário não encontrado ou sem cadastro de métricas' });
+      return res.status(404).json({ success: false, error: 'Usuário não encontrado' });
     }
 
     delete req.session.resetToken;
@@ -490,6 +452,7 @@ app.use((err, req, res, next) => {
 (async () => {
   try {
     await pool.query('SELECT 1');
+    await logDatabaseAccess();
     console.log('✅ Conectado ao PostgreSQL');
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);

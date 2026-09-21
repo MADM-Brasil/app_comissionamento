@@ -21,7 +21,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
-import { API_BASE, fetchColaboradoresDiretorio } from "@/lib/api";
+import { API_BASE } from "@/lib/api";
 
 // ---------------------- Tipos ----------------------
 interface MovementItem {
@@ -130,7 +130,7 @@ const isValidBrazilianPhone = (phone: string): boolean => {
   const number = digits.slice(2);
   const dddNum = parseInt(ddd, 10);
 
-  // DDD deve estar na faixa válida 11-99 (55 é um DDD real de Santa Maria/RS, não deve ser bloqueado)
+  // DDD não pode ser 55 nem estar fora da faixa 11-99
   if (isNaN(dddNum) || dddNum < 11 || dddNum > 99) return false;
 
   // Número deve ter 8 ou 9 dígitos
@@ -253,11 +253,9 @@ function MovimentacaoTab() {
     currentUser,
     equipeConfigs,
     loadEquipeConfigs,
+    collaborators,
+    loadCollaborators,
   } = useAppStore();
-
-  const [colaboradoresDiretorio, setColaboradoresDiretorio] = useState<
-    { id: string; name: string; email: string; equipeNome: string }[]
-  >([]);
 
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -287,12 +285,7 @@ function MovimentacaoTab() {
   useEffect(() => {
     let isMounted = true;
     const carregar = async () => {
-      try {
-        const data = await fetchColaboradoresDiretorio();
-        if (isMounted) setColaboradoresDiretorio(data);
-      } catch (error) {
-        console.error("Falha ao carregar colaboradores:", error);
-      }
+      if (collaborators.length === 0) { try { await loadCollaborators(); } catch (error) { console.error("Falha ao carregar colaboradores:", error); } }
       if (isMounted) setLoadingColaboradores(false);
     };
     carregar();
@@ -300,16 +293,16 @@ function MovimentacaoTab() {
   }, []);
 
   const assessoresDisponiveis = useMemo(() => {
-    if (!colaboradoresDiretorio.length) return [];
-    let filtered = colaboradoresDiretorio.filter(c => !isExcludedTeam(c.equipeNome));
+    if (!collaborators.length) return [];
+    let filtered = collaborators.filter(c => !isExcludedTeam(c.equipeNome));
     if (equipe) filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(equipe));
     return filtered.map(c => ({
-      id: c.id,
+      id: c.id.toString(),
       nome: c.name,
       email: c.email
     }))
     .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-  }, [colaboradoresDiretorio, equipe]);
+  }, [collaborators, equipe]);
 
   useEffect(() => {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
