@@ -38,11 +38,11 @@ const isExcludedTeam = (teamName: string): boolean => {
 
 const TEAM_TO_PRODUCT: Record<string, string> = {
   "Equipe Concomitante": "Concomitante",
-  "Equipe Tatiane": "Quinquenio",
-  "Equipe Quinquênio": "Quinquenio",
+  "Equipe Tatiane": "QUINQUENIO",
+  "Equipe Quinquênio": "QUINQUENIO",
 };
 
-const PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante"];
+const PRODUCT_OPTIONS = ["Todos", "AUXILIO ACIDENTE", "QUINQUENIO", "Concomitante"];
 
 const STORAGE_KEY = "madm_filterBar_state_v1";
 

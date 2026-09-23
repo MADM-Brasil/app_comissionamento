@@ -114,8 +114,12 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (!currentUser) return;
 
     let eventSource: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
 
-    try {
+    const connect = () => {
+      if (stopped) return;
+
       eventSource = new EventSource(`${API_BASE}/notificacoes/stream`, {
         withCredentials: true,
       } as any);
@@ -147,13 +151,22 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
       eventSource.onerror = (err) => {
         console.error("Erro na conexão SSE:", err);
-        // Opcional: reconectar após alguns segundos
+        eventSource?.close();
+        eventSource = null;
+        if (!stopped && !reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 5000);
+        }
       };
-    } catch (err) {
-      console.error("Não foi possível criar EventSource:", err);
-    }
+    };
+
+    connect();
 
     return () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       if (eventSource) eventSource.close();
     };
   }, [currentUser]);

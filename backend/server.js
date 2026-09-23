@@ -9,7 +9,7 @@ import bcrypt from 'bcrypt';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { pool, logDatabaseAccess } from './services/db.js';
+import { pool, logDatabaseAccess, waitForDatabase } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 import twoFactorService from './security/verif-2factory.js';
 
@@ -451,8 +451,12 @@ app.use((err, req, res, next) => {
 // ---------- Inicialização ----------
 (async () => {
   try {
-    await pool.query('SELECT 1');
-    await logDatabaseAccess();
+    await waitForDatabase();
+    try {
+      await logDatabaseAccess();
+    } catch (error) {
+      console.warn('⚠️ Diagnóstico do banco indisponível; o servidor continuará e tentará consultar normalmente:', error.message);
+    }
     console.log('✅ Conectado ao PostgreSQL');
     app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
@@ -461,7 +465,6 @@ app.use((err, req, res, next) => {
     });
   } catch (error) {
     console.error('❌ Erro ao conectar ao banco:', error);
-    process.exit(1);
   }
 })();
 

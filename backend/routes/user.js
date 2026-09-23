@@ -99,16 +99,19 @@ router.get('/data', async (req, res) => {
 
     const query = `
       SELECT
-        (SELECT COUNT(*) FROM madm.view_app_emitidos_e_assinados 
-         WHERE consultor_responsavel_emissao = $1 AND data_envio BETWEEN $2 AND $3) as emitidos,
-        (SELECT COUNT(*) FROM madm.view_app_emitidos_e_assinados 
-         WHERE consultor_responsavel_assinatura = $1 AND data_assinatura BETWEEN $2 AND $3) as assinados,
-        (SELECT COUNT(*) FROM madm.view_app_kommo_leads 
-         WHERE lead_usuario_responsavel = $1 AND data_ganho BETWEEN $2 AND $3 
-           AND etapa_lead IN ('PROTOCOLADO', 'AG PROTOCOLO', 'Venda ganha')) as ganhos,
-        (SELECT COUNT(*) FROM madm.view_app_kommo_leads 
-         WHERE lead_usuario_responsavel = $1 AND data_ganho BETWEEN $2 AND $3 
-           AND etapa_lead = 'Venda perdida') as perdidos
+        (SELECT COUNT(*) FROM core.view_app_assinaturas
+         WHERE responsavel_emissao = $1 AND data_emissao BETWEEN $2 AND $3) as emitidos,
+        (SELECT COUNT(*) FROM core.view_app_assinaturas
+         WHERE responsavel_assinatura = $1 AND data_assinatura BETWEEN $2 AND $3
+           AND status_assinatura = 'ASSINADO') as assinados,
+        (SELECT COUNT(*) FROM core.view_app_juridico_auditoria
+         WHERE responsavel_lead = $1 AND data_ganho BETWEEN $2 AND $3
+           AND pipeline IN ('Jurídico Auditoria de Ganho', 'PRO', 'Quinquenio/concomitante', 'Fator K')
+           AND etapa IN ('Protocolado', 'Ag Protocolo', 'Venda ganha', 'Processo Finalizado')) as ganhos,
+        (SELECT COUNT(*) FROM core.view_app_juridico_auditoria
+         WHERE responsavel_lead = $1 AND data_perda BETWEEN $2 AND $3
+           AND pipeline IN ('Jurídico Auditoria de Ganho', 'PRO', 'Quinquenio/concomitante', 'Fator K')
+           AND etapa = 'Venda perdida') as perdidos
     `;
     const result = await db.query(query, [user.nome, startDate, endDate]);
     const data = result.rows[0] || { emitidos: 0, assinados: 0, ganhos: 0, perdidos: 0 };

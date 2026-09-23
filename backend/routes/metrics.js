@@ -42,28 +42,25 @@ router.get('/emitidos', requireAuth, async (req, res) => {
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
 
-    // view_app_emitidos_e_assinados não possui equipe_responsavel_emissao; faremos JOIN com colaboradores
     let query = `
       SELECT 
-        e.consultor_responsavel_emissao as colaborador,
+        COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável') as colaborador,
         COALESCE(c.nome_equipe, '') as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          e.consultor_responsavel_emissao as colaborador,
+          COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável') as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', e.data_envio) AT TIME ZONE 'UTC')::date as periodo,
+          (DATE_TRUNC('${gran}', e.data_emissao) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.view_app_emitidos_e_assinados e
-      LEFT JOIN core.view_app_colaboradores c ON e.consultor_responsavel_emissao = c.nome
-      WHERE (e.data_envio AT TIME ZONE 'UTC')::date >= $1 AND (e.data_envio AT TIME ZONE 'UTC')::date < $2
-        AND e.consultor_responsavel_emissao IS NOT NULL
-        AND e.consultor_responsavel_emissao != ''
+      FROM core.view_app_assinaturas e
+      LEFT JOIN core.view_app_colaboradores c ON e.responsavel_emissao = c.nome
+      WHERE (e.data_emissao AT TIME ZONE 'UTC')::date >= $1 AND (e.data_emissao AT TIME ZONE 'UTC')::date < $2
     `;
     const params = [start, end];
     let idx = 3;
@@ -88,9 +85,9 @@ router.get('/emitidos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY e.consultor_responsavel_emissao, c.nome_equipe, DATE_TRUNC('${gran}', e.data_envio) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', e.data_emissao) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY e.consultor_responsavel_emissao, c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -120,25 +117,23 @@ router.get('/assinados', requireAuth, async (req, res) => {
 
     let query = `
       SELECT 
-        consultor_responsavel_assinatura as colaborador,
+        COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável') as colaborador,
         equipe_responsavel_assinatura as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          consultor_responsavel_assinatura as colaborador,
+          COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável') as colaborador,
           equipe_responsavel_assinatura as equipe,
           (DATE_TRUNC('${gran}', data_assinatura) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.view_app_emitidos_e_assinados
+      FROM core.view_app_assinaturas
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status = 'signed'
-        AND consultor_responsavel_assinatura IS NOT NULL
-        AND consultor_responsavel_assinatura != ''
+        AND status_assinatura = 'ASSINADO'
     `;
     const params = [start, end];
     let idx = 3;
@@ -163,9 +158,9 @@ router.get('/assinados', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY consultor_responsavel_assinatura, equipe_responsavel_assinatura, DATE_TRUNC('${gran}', data_assinatura) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura, DATE_TRUNC('${gran}', data_assinatura) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY consultor_responsavel_assinatura, equipe_responsavel_assinatura ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -195,12 +190,12 @@ router.get('/assinados-diario-por-equipe', requireAuth, async (req, res) => {
         equipe_responsavel_assinatura as equipe,
         (data_assinatura AT TIME ZONE 'UTC')::date as dia,
         COUNT(*)::int as total
-      FROM madm.view_app_emitidos_e_assinados
+      FROM core.view_app_assinaturas
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1
         AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status = 'signed'
-        AND consultor_responsavel_assinatura IS NOT NULL
-        AND consultor_responsavel_assinatura != ''
+        AND status_assinatura = 'ASSINADO'
+        AND responsavel_assinatura IS NOT NULL
+        AND responsavel_assinatura != ''
     `;
     const params = [inicio, fim];
 
@@ -237,16 +232,16 @@ router.get('/assinados-diario-colaborador', requireAuth, async (req, res) => {
     const query = `
       SELECT 
         (data_assinatura AT TIME ZONE 'UTC')::date as dia,
-        consultor_responsavel_assinatura as colaborador,
+        responsavel_assinatura as colaborador,
         COUNT(*)::int as total
-      FROM madm.view_app_emitidos_e_assinados
+      FROM core.view_app_assinaturas
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 
         AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status = 'signed'
-        AND consultor_responsavel_assinatura IS NOT NULL
-        AND consultor_responsavel_assinatura != ''
-      GROUP BY dia, consultor_responsavel_assinatura
-      ORDER BY dia, consultor_responsavel_assinatura
+        AND status_assinatura = 'ASSINADO'
+        AND responsavel_assinatura IS NOT NULL
+        AND responsavel_assinatura != ''
+      GROUP BY dia, responsavel_assinatura
+      ORDER BY dia, responsavel_assinatura
     `;
 
     const result = await db.query(query, [inicio, fim]);
@@ -273,26 +268,24 @@ router.get('/protocolados', requireAuth, async (req, res) => {
 
     let query = `
       SELECT 
-        l.lead_usuario_responsavel as colaborador,
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
         COALESCE(c.nome_equipe, '') as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          l.lead_usuario_responsavel as colaborador,
+          COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', l.data_protocolo_juridico_auditoria) AT TIME ZONE 'UTC')::date as periodo,
+          (DATE_TRUNC('${gran}', l.data_protocolo) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.view_app_kommo_leads l
-      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
-      WHERE (l.data_protocolo_juridico_auditoria AT TIME ZONE 'UTC')::date >= $1
-        AND (l.data_protocolo_juridico_auditoria AT TIME ZONE 'UTC')::date < $2
-        AND l.lead_usuario_responsavel IS NOT NULL
-        AND l.lead_usuario_responsavel != ''
+      FROM core.view_app_juridico_auditoria l
+      LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
+      WHERE (l.data_protocolo AT TIME ZONE 'UTC')::date >= $1
+        AND (l.data_protocolo AT TIME ZONE 'UTC')::date < $2
     `;
     const params = [start, end];
     let idx = 3;
@@ -309,17 +302,17 @@ router.get('/protocolados', requireAuth, async (req, res) => {
       if (productVariants[produto]) {
         const variants = productVariants[produto];
         const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produtos IN (${placeholders})`;
+        query += ` AND l.produto IN (${placeholders})`;
         params.push(...variants); idx += variants.length;
       } else {
-        query += ` AND l.produtos = $${idx}`;
+        query += ` AND l.produto = $${idx}`;
         params.push(produto); idx++;
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_protocolo_juridico_auditoria) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY l.responsavel_lead, c.nome_equipe, DATE_TRUNC('${gran}', l.data_protocolo) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY l.responsavel_lead, c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -347,40 +340,30 @@ router.get('/ganhos', requireAuth, async (req, res) => {
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
 
-    const funis = ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO'];
-    const etapas = [
-      'Venda ganha', 'PROTOCOLADO', 'AG PROTOCOLO', 'ANALISE DE PRONTUÁRIO',
-      'ENTRADA', 'E-MAIL NÃO RESPONDIDO', 'E-MAIL RESPONDIDO', 'AÇÃO DO CLIENTE',
-      'ASSINATURA DO ADV', 'AG PRONTUÁRIO', 'PENDÊNCIA PRO', 'VALIDAÇÃO SUPERVISOR',
-      'protocolado'
-    ];
-
     let query = `
       SELECT 
-        l.lead_usuario_responsavel as colaborador,
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
         COALESCE(c.nome_equipe, '') as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          l.lead_usuario_responsavel as colaborador,
+          COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
           (DATE_TRUNC('${gran}', l.data_ganho) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.view_app_kommo_leads l
-      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
+      FROM core.view_app_juridico_auditoria l
+      LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
       WHERE (l.data_ganho AT TIME ZONE 'UTC')::date >= $1 AND (l.data_ganho AT TIME ZONE 'UTC')::date < $2
-        AND l.funil_vendas = ANY($3)
-        AND l.etapa_lead = ANY($4)
-        AND l.lead_usuario_responsavel IS NOT NULL
-        AND l.lead_usuario_responsavel != ''
+        AND REPLACE(LOWER(TRIM(l.pipeline)), chr(237), 'i') IN ('juridico auditoria de ganho', 'pro', 'quinquenio/concomitante', 'fator k')
+        AND REPLACE(LOWER(TRIM(l.etapa)), chr(237), 'i') IN ('protocolado', 'ag protocolo', 'venda ganha', 'processo finalizado')
     `;
-    const params = [start, end, funis, etapas];
-    let idx = 5;
+    const params = [start, end];
+    let idx = 3;
 
     if (equipe && equipe !== 'todas') {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
@@ -395,17 +378,17 @@ router.get('/ganhos', requireAuth, async (req, res) => {
       if (productVariants[produto]) {
         const variants = productVariants[produto];
         const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produtos IN (${placeholders})`;
+        query += ` AND l.produto IN (${placeholders})`;
         params.push(...variants); idx += variants.length;
       } else {
-        query += ` AND l.produtos = $${idx}`;
+        query += ` AND l.produto = $${idx}`;
         params.push(produto); idx++;
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -433,34 +416,30 @@ router.get('/perdidos', requireAuth, async (req, res) => {
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
 
-    const funis = ['AUDITORIA DE GANHO', 'JURIDICO AUDITORIA DE GANHO', 'NOVO - AUDITORIA DE GANHO', 'PRO'];
-
     let query = `
       SELECT 
-        l.lead_usuario_responsavel as colaborador,
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
         COALESCE(c.nome_equipe, '') as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          l.lead_usuario_responsavel as colaborador,
+          COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', l.data_ganho) AT TIME ZONE 'UTC')::date as periodo,
+          (DATE_TRUNC('${gran}', l.data_perda) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.view_app_kommo_leads l
-      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
-      WHERE (l.data_ganho AT TIME ZONE 'UTC')::date >= $1 AND (l.data_ganho AT TIME ZONE 'UTC')::date < $2
-        AND l.funil_vendas = ANY($3)
-        AND l.etapa_lead = 'Venda perdida'
-        AND l.lead_usuario_responsavel IS NOT NULL
-        AND l.lead_usuario_responsavel != ''
+      FROM core.view_app_juridico_auditoria l
+      LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
+      WHERE (l.data_perda AT TIME ZONE 'UTC')::date >= $1 AND (l.data_perda AT TIME ZONE 'UTC')::date < $2
+        AND REPLACE(LOWER(TRIM(l.pipeline)), chr(237), 'i') IN ('juridico auditoria de ganho', 'pro', 'quinquenio/concomitante', 'fator k')
+        AND l.etapa = 'Venda perdida'
     `;
-    const params = [start, end, funis];
-    let idx = 4;
+    const params = [start, end];
+    let idx = 3;
 
     if (equipe && equipe !== 'todas') {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
@@ -474,17 +453,17 @@ router.get('/perdidos', requireAuth, async (req, res) => {
       if (productVariants[produto]) {
         const variants = productVariants[produto];
         const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produtos IN (${placeholders})`;
+        query += ` AND l.produto IN (${placeholders})`;
         params.push(...variants); idx += variants.length;
       } else {
-        query += ` AND l.produtos = $${idx}`;
+        query += ` AND l.produto = $${idx}`;
         params.push(produto); idx++;
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_perda) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -514,25 +493,26 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
 
     let query = `
       SELECT 
-        l.lead_usuario_responsavel as colaborador,
+        l.responsavel_lead as colaborador,
         COALESCE(c.nome_equipe, '') as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          l.lead_usuario_responsavel as colaborador,
+          l.responsavel_lead as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', l.data_qualificacao) AT TIME ZONE 'UTC')::date as periodo,
+          (DATE_TRUNC('${gran}', l.data_distribuicao_comercial) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM madm.view_app_kommo_leads l
-      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
-      WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1 AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
-        AND l.lead_usuario_responsavel IS NOT NULL
-        AND l.lead_usuario_responsavel != ''
+      FROM core.view_app_juridico_auditoria l
+      LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
+      WHERE (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date >= $1
+        AND (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date < $2
+        AND l.responsavel_lead IS NOT NULL
+        AND l.responsavel_lead != ''
     `;
     const params = [start, end];
     let idx = 3;
@@ -549,17 +529,17 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       if (productVariants[produto]) {
         const variants = productVariants[produto];
         const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produtos IN (${placeholders})`;
+        query += ` AND l.produto IN (${placeholders})`;
         params.push(...variants); idx += variants.length;
       } else {
-        query += ` AND l.produtos = $${idx}`;
+        query += ` AND l.produto = $${idx}`;
         params.push(produto); idx++;
       }
     }
     if (gran) {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe, DATE_TRUNC('${gran}', l.data_qualificacao) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY l.responsavel_lead, c.nome_equipe, DATE_TRUNC('${gran}', l.data_distribuicao_comercial) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.lead_usuario_responsavel, c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY l.responsavel_lead, c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -588,14 +568,12 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
 
     let query = `
       SELECT 
-        l.lead_usuario_responsavel as colaborador,
-        l.etapa_lead,
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
+        l.etapa as etapa_lead,
         COUNT(*)::int as total
-      FROM madm.view_app_kommo_leads l
-      LEFT JOIN core.view_app_colaboradores c ON l.lead_usuario_responsavel = c.nome
-      WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1 AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
-        AND l.lead_usuario_responsavel IS NOT NULL
-        AND l.lead_usuario_responsavel != ''
+      FROM core.view_app_juridico_auditoria l
+      LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
+      WHERE (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date >= $1 AND (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date < $2
     `;
     const params = [start, end];
     let idx = 3;
@@ -612,14 +590,14 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
       if (productVariants[produto]) {
         const variants = productVariants[produto];
         const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produtos IN (${placeholders})`;
+        query += ` AND l.produto IN (${placeholders})`;
         params.push(...variants); idx += variants.length;
       } else {
-        query += ` AND l.produtos = $${idx}`;
+        query += ` AND l.produto = $${idx}`;
         params.push(produto); idx++;
       }
     }
-    query += ` GROUP BY l.lead_usuario_responsavel, l.etapa_lead, c.nome_equipe ORDER BY colaborador`;
+    query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), l.etapa, c.nome_equipe ORDER BY colaborador`;
 
     const result = await db.query(query, params);
     let rows = result.rows;
@@ -647,10 +625,10 @@ router.get('/weekly', requireAuth, async (req, res) => {
       SELECT 
         (DATE_TRUNC('week', data_assinatura) AT TIME ZONE 'UTC')::date as semana,
         COUNT(*)::int as vendas
-      FROM madm.view_app_emitidos_e_assinados
+      FROM core.view_app_assinaturas
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status = 'signed'
-        AND consultor_responsavel_assinatura IS NOT NULL
+        AND status_assinatura = 'ASSINADO'
+        AND responsavel_assinatura IS NOT NULL
       GROUP BY semana
       ORDER BY semana
     `;

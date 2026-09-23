@@ -15,7 +15,16 @@ const sseClients = new Set();
 export function broadcastNotification(notification) {
   const data = `data: ${JSON.stringify(notification)}\n\n`;
   for (const client of sseClients) {
-    client.write(data);
+    try {
+      if (client.destroyed || client.writableEnded) {
+        sseClients.delete(client);
+        continue;
+      }
+      client.write(data);
+    } catch (error) {
+      sseClients.delete(client);
+      console.warn('⚠️ Cliente SSE desconectado durante o envio:', error.message);
+    }
   }
 }
 
@@ -38,9 +47,13 @@ router.get('/stream', (req, res) => {
   // Adiciona a conexão ao conjunto
   sseClients.add(res);
 
+  const removeClient = () => sseClients.delete(res);
+  res.on('close', removeClient);
+  res.on('error', removeClient);
+
   // Remove a conexão quando o cliente desconectar
   req.on('close', () => {
-    sseClients.delete(res);
+    removeClient();
   });
 });
 

@@ -83,13 +83,14 @@ const productToGroup: Record<string, string | string[] | undefined> = {
 // CONFIGURAÇÃO DE AGRUPAMENTO DE ETAPAS (EDITÁVEL)
 // ============================================================
 const STAGE_GROUPING: (string | { label: string; stages: string[] })[] = [
-  { label: "BASE DE LEADS", stages: ["Umbler",
-"Recebidos/ primeiro contato",
+  { label: "Base de leads", stages: ["Umbler",
+"Umbler",
+"Distribuicção Comercial",
+"Direcionado para Judit",
 "Telefonia",
-"Sem retorno",
+"Sem retorno/Em recuperação",
 "Desqualificados",
 "Histórico base",
-"Em recuperação",
 "Venda Perdida"] },
 
 //Funil do closer
@@ -247,7 +248,11 @@ async function fetchLeadsByStage(params: {
   if (!res.ok) throw new Error(`Erro ${res.status} ao buscar leads por etapa`);
   const data = await res.json();
   if (!data.success) throw new Error(data.error || 'Erro ao carregar leads');
-  return data.data.map((item: any) => ({ ...item, total: Number(item.total) || 0 }));
+  return data.data.map((item: any) => ({
+    ...item,
+    etapa_lead: item.etapa_lead ?? item.etapa ?? "Sem etapa",
+    total: Number(item.total) || 0,
+  }));
 }
 
 export default function Funil() {
@@ -444,7 +449,8 @@ export default function Funil() {
     const stageMap = new Map<string, number>();
     leadsStageData.forEach(item => {
       const etapa = item.etapa_lead || "Sem etapa";
-      stageMap.set(etapa, (stageMap.get(etapa) || 0) + item.total);
+      const stageKey = normalize(etapa);
+      stageMap.set(stageKey, (stageMap.get(stageKey) || 0) + item.total);
     });
 
     const result: { etapa_lead: string; total: number }[] = [];
@@ -452,12 +458,12 @@ export default function Funil() {
     for (const entry of STAGE_GROUPING) {
       if (typeof entry === 'string') {
         // Etapa única
-        result.push({ etapa_lead: entry, total: stageMap.get(entry) || 0 });
+        result.push({ etapa_lead: entry, total: stageMap.get(normalize(entry)) || 0 });
       } else {
         // Grupo de etapas
         let sum = 0;
         for (const stageName of entry.stages) {
-          sum += stageMap.get(stageName) || 0;
+          sum += stageMap.get(normalize(stageName)) || 0;
         }
         result.push({ etapa_lead: entry.label, total: sum });
       }
