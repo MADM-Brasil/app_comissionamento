@@ -36,7 +36,14 @@ if (connectionString) {
 }
 
 // ─── Criação do pool ───────────────────────────────────────────
-const pool = new Pool(dbConfig);
+const pool = new Pool({
+  ...dbConfig,
+  max: Number(process.env.DB_POOL_MAX || 20),
+  idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 30000),
+  connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10000),
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
+});
 
 pool.on('connect', () => {
   console.log('✅ Conectado ao PostgreSQL com sucesso');
@@ -44,8 +51,20 @@ pool.on('connect', () => {
 
 pool.on('error', (err) => {
   console.error('❌ Erro inesperado no pool do PostgreSQL:', err);
-  process.exit(-1);
+  console.warn('⚠️ O cliente afetado foi descartado. O pool tentará estabelecer uma nova conexão na próxima operação.');
 });
+
+export async function waitForDatabase({ retryDelayMs = 5000 } = {}) {
+  while (true) {
+    try {
+      await pool.query('SELECT 1');
+      return;
+    } catch (error) {
+      console.error(`❌ Banco indisponível. Nova tentativa em ${retryDelayMs} ms: ${error.message}`);
+      await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+    }
+  }
+}
 
 // ─── Função auxiliar de query ──────────────────────────────────
 const query = (text, params) => pool.query(text, params);

@@ -382,7 +382,6 @@ router.patch('/tickets-movimentacao/:id', async (req, res) => {
     }
 
     const client = await pool.connect();
-    client.on('error', (err) => console.error('⚠️ Erro na conexão (client suporte):', err.message));
     try {
       await client.query('BEGIN');
 

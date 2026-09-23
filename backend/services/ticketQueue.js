@@ -24,7 +24,6 @@ async function processTicketQueue() {
   if (isProcessing) return;
 
   const lockClient = await pool.connect();
-  lockClient.on('error', (err) => console.error('⚠️ Erro na conexão (lockClient):', err.message));
   let hasLock = false;
   try {
     const lockResult = await lockClient.query(`SELECT pg_try_advisory_lock($1)`, [LOCK_KEY]);
@@ -40,7 +39,6 @@ async function processTicketQueue() {
 
   isProcessing = true;
   const client = await pool.connect();
-  client.on('error', (err) => console.error('⚠️ Erro na conexão (client da fila):', err.message));
   try {
     while (true) {
       const result = await client.query(
@@ -83,7 +81,6 @@ async function processTicketQueue() {
     isProcessing = false;
 
     const unlockClient = await pool.connect();
-    unlockClient.on('error', (err) => console.error('⚠️ Erro na conexão (unlockClient):', err.message));
     try {
       await unlockClient.query(`SELECT pg_advisory_unlock($1)`, [LOCK_KEY]);
     } catch (unlockErr) {

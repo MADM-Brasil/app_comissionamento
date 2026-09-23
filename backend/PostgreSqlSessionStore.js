@@ -11,7 +11,10 @@ export class PostgreSqlSessionStore extends session.Store {
 
     this.pool.on('error', (err) => {
       console.error('❌ Erro no pool PostgreSQL (store):', err);
-      this.emit('disconnect');
+    });
+
+    this.pool.on('connect', () => {
+      this.emit('connect');
     });
 
     this._startCleanupTimer();

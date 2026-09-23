@@ -57,19 +57,21 @@ export async function checkIncentiveNotifications() {
         SUM(ganhos) AS ganhos
       FROM (
         -- Assinados
-        SELECT consultor_responsavel_assinatura AS colaborador, 1 AS tipo, COUNT(*) AS assinados, 0 AS ganhos
-        FROM madm.view_app_emitidos_e_assinados
+        SELECT responsavel_assinatura AS colaborador, 1 AS tipo, COUNT(*) AS assinados, 0 AS ganhos
+        FROM core.view_app_assinaturas
         WHERE data_assinatura::date = CURRENT_DATE
-        GROUP BY consultor_responsavel_assinatura
+          AND status_assinatura = 'ASSINADO'
+        GROUP BY responsavel_assinatura
 
         UNION ALL
 
         -- Ganhos
-        SELECT lead_usuario_responsavel AS colaborador, 2 AS tipo, 0 AS assinados, COUNT(*) AS ganhos
-        FROM madm.view_app_kommo_leads
+        SELECT responsavel_lead AS colaborador, 2 AS tipo, 0 AS assinados, COUNT(*) AS ganhos
+        FROM core.view_app_juridico_auditoria
         WHERE data_ganho::date = CURRENT_DATE
-          AND etapa_lead IN ('PROTOCOLADO', 'AG PROTOCOLO', 'Venda ganha')
-        GROUP BY lead_usuario_responsavel
+          AND pipeline IN ('Jurídico Auditoria de Ganho', 'PRO', 'Quinquenio/concomitante', 'Fator K')
+          AND etapa IN ('Protocolado', 'Ag Protocolo', 'Venda ganha', 'Processo Finalizado')
+        GROUP BY responsavel_lead
       ) sub
       GROUP BY colaborador
     `;
@@ -84,10 +86,11 @@ export async function checkIncentiveNotifications() {
 
     // 3. Totais mensais de assinados para verificar próxima faixa
     const monthlyAssinadosQuery = `
-      SELECT consultor_responsavel_assinatura AS colaborador, COUNT(*) AS assinados
-      FROM madm.view_app_emitidos_e_assinados
+      SELECT responsavel_assinatura AS colaborador, COUNT(*) AS assinados
+      FROM core.view_app_assinaturas
       WHERE data_assinatura::date BETWEEN $1::date AND $2::date
-      GROUP BY consultor_responsavel_assinatura
+        AND status_assinatura = 'ASSINADO'
+      GROUP BY responsavel_assinatura
     `;
     const monthlyResult = await pool.query(monthlyAssinadosQuery, [monthStart, monthEnd]);
     const monthlyAssinadosMap = new Map();
