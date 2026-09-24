@@ -128,26 +128,26 @@ function getHoursSince(dateValue) {
 }
 
 /**
- * Decide se um deal pode ser movimentado com base em notes_last_updated
+ * Decide se um deal pode ser movimentado com base em hs_lastmodifieddate
  * e na etapa atual:
  *   - Coleta de documentação → > 72h
  *   - Entrada               → > 24h
  *   - Em Contato            → > 24h
  *   - outras etapas         → bloqueado
  *
- * Se notes_last_updated estiver ausente/inválido → bloqueia.
+ * Se hs_lastmodifieddate estiver ausente/inválido → bloqueia.
  */
-function canMoveByNotesLastUpdated(deal) {
+function canMoveByLastModifiedDate(deal) {
   const stage = String(deal?.stage || '');
-  const hoursSinceNote = getHoursSince(deal?.notesLastUpdated);
+  const hoursSinceModification = getHoursSince(deal?.lastModifiedDate);
 
-  if (hoursSinceNote === null) {
+  if (hoursSinceModification === null) {
     return {
       allowed: false,
-      reason: 'notes_last_updated ausente ou inválido',
+      reason: 'hs_lastmodifieddate ausente ou inválido',
       hoursSinceNote: null,
       requiredHours: null,
-      lastUpdated: deal?.notesLastUpdated || null,
+      lastUpdated: deal?.lastModifiedDate || null,
     };
   }
 
@@ -157,13 +157,13 @@ function canMoveByNotesLastUpdated(deal) {
     return {
       allowed: false,
       reason: 'Etapa não elegível para movimentação por tempo',
-      hoursSinceNote,
+      hoursSinceNote: hoursSinceModification,
       requiredHours: null,
-      lastUpdated: deal.notesLastUpdated,
+      lastUpdated: deal.lastModifiedDate,
     };
   }
 
-  const allowed = hoursSinceNote > requiredHours;
+  const allowed = hoursSinceModification > requiredHours;
   const stageLabel = STAGE_NAMES[stage] || stage;
 
   return {
@@ -171,9 +171,9 @@ function canMoveByNotesLastUpdated(deal) {
     reason: allowed
       ? `Card em ${stageLabel} há mais de ${requiredHours}h`
       : `Card em ${stageLabel} há menos de ${requiredHours}h`,
-    hoursSinceNote,
+    hoursSinceNote: hoursSinceModification,
     requiredHours,
-    lastUpdated: deal.notesLastUpdated,
+    lastUpdated: deal.lastModifiedDate,
   };
 }
 
@@ -756,7 +756,7 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
       pipelineNome: PIPELINE_NAMES[dealMesmoOwner.pipeline] || dealMesmoOwner.pipeline,
       stageNome: STAGE_NAMES[dealMesmoOwner.stage] || dealMesmoOwner.stage,
       ruleApplied: 'already_assigned',
-      lastUpdatedAt: dealMesmoOwner.notesLastUpdated || dealMesmoOwner.lastModifiedDate || null,
+      lastUpdatedAt: dealMesmoOwner.lastModifiedDate || dealMesmoOwner.notesLastUpdated || null,
     };
   }
 
@@ -767,7 +767,7 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
          String(d.ownerId) !== String(ownerId || '')
   );
   if (dealCloserOutroOwner) {
-    const movementCheck = canMoveByNotesLastUpdated(dealCloserOutroOwner);
+    const movementCheck = canMoveByLastModifiedDate(dealCloserOutroOwner);
 
     if (movementCheck.allowed) {
       const { lastUpdatedAt } = await moveDealToCloserEmContato(dealCloserOutroOwner.id, ownerId);
@@ -816,7 +816,7 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     pipelineNome: PIPELINE_NAMES[primeiro?.pipeline] || primeiro?.pipeline || null,
     stageNome: STAGE_NAMES[primeiro?.stage] || primeiro?.stage || null,
     ruleApplied: 'fallback_block',
-    lastUpdatedAt: primeiro?.notesLastUpdated || primeiro?.lastModifiedDate || null,
+    lastUpdatedAt: primeiro?.lastModifiedDate || primeiro?.notesLastUpdated || null,
   };
 }
 
@@ -929,7 +929,7 @@ export async function validateFinalAssignment(contactId, expectedOwnerId, expect
       resolvedBy,
       contactOwnerId,
       deal: targetDeal,
-      lastUpdatedAt: targetDeal.notesLastUpdated || targetDeal.lastModifiedDate || null,
+      lastUpdatedAt: targetDeal.lastModifiedDate || targetDeal.notesLastUpdated || null,
       details: {
         dealPipeline: targetDeal.pipeline,
         dealStage: targetDeal.stage,

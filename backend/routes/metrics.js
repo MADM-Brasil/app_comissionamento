@@ -277,15 +277,16 @@ router.get('/protocolados', requireAuth, async (req, res) => {
         SELECT 
           COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', l.data_protocolo) AT TIME ZONE 'UTC')::date as periodo,
+          (DATE_TRUNC('${gran}', l.data_ganho) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
       FROM core.view_app_juridico_auditoria l
       LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
-      WHERE (l.data_protocolo AT TIME ZONE 'UTC')::date >= $1
-        AND (l.data_protocolo AT TIME ZONE 'UTC')::date < $2
+      WHERE (l.data_ganho AT TIME ZONE 'UTC')::date >= $1
+        AND (l.data_ganho AT TIME ZONE 'UTC')::date < $2
+        AND l.etapa IN ('Protocolado')
     `;
     const params = [start, end];
     let idx = 3;
@@ -310,9 +311,9 @@ router.get('/protocolados', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY l.responsavel_lead, c.nome_equipe, DATE_TRUNC('${gran}', l.data_protocolo) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.responsavel_lead, c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -359,8 +360,7 @@ router.get('/ganhos', requireAuth, async (req, res) => {
       FROM core.view_app_juridico_auditoria l
       LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
       WHERE (l.data_ganho AT TIME ZONE 'UTC')::date >= $1 AND (l.data_ganho AT TIME ZONE 'UTC')::date < $2
-        AND REPLACE(LOWER(TRIM(l.pipeline)), chr(237), 'i') IN ('juridico auditoria de ganho', 'pro', 'quinquenio/concomitante', 'fator k')
-        AND REPLACE(LOWER(TRIM(l.etapa)), chr(237), 'i') IN ('protocolado', 'ag protocolo', 'venda ganha', 'processo finalizado')
+        AND l.etapa <> 'Venda perdida'
     `;
     const params = [start, end];
     let idx = 3;
@@ -435,7 +435,6 @@ router.get('/perdidos', requireAuth, async (req, res) => {
       FROM core.view_app_juridico_auditoria l
       LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
       WHERE (l.data_perda AT TIME ZONE 'UTC')::date >= $1 AND (l.data_perda AT TIME ZONE 'UTC')::date < $2
-        AND REPLACE(LOWER(TRIM(l.pipeline)), chr(237), 'i') IN ('juridico auditoria de ganho', 'pro', 'quinquenio/concomitante', 'fator k')
         AND l.etapa = 'Venda perdida'
     `;
     const params = [start, end];
@@ -493,26 +492,24 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
 
     let query = `
       SELECT 
-        l.responsavel_lead as colaborador,
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
         COALESCE(c.nome_equipe, '') as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          l.responsavel_lead as colaborador,
+          COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', l.data_distribuicao_comercial) AT TIME ZONE 'UTC')::date as periodo,
+          (DATE_TRUNC('${gran}', l.data_qualificacao) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM core.view_app_juridico_auditoria l
+      FROM core.view_qualificados l
       LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
-      WHERE (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date >= $1
-        AND (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date < $2
-        AND l.responsavel_lead IS NOT NULL
-        AND l.responsavel_lead != ''
+      WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1
+        AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
     `;
     const params = [start, end];
     let idx = 3;
@@ -521,25 +518,10 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
-    if (produto && produto !== 'Todos') {
-      const productVariants = {
-        'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
-      };
-      if (productVariants[produto]) {
-        const variants = productVariants[produto];
-        const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produto IN (${placeholders})`;
-        params.push(...variants); idx += variants.length;
-      } else {
-        query += ` AND l.produto = $${idx}`;
-        params.push(produto); idx++;
-      }
-    }
     if (gran) {
-      query += ` GROUP BY l.responsavel_lead, c.nome_equipe, DATE_TRUNC('${gran}', l.data_distribuicao_comercial) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_qualificacao) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY l.responsavel_lead, c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -569,11 +551,11 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
     let query = `
       SELECT 
         COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
-        l.etapa as etapa_lead,
+        l.etapa_lead,
         COUNT(*)::int as total
-      FROM core.view_app_juridico_auditoria l
+      FROM core.view_qualificados l
       LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
-      WHERE (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date >= $1 AND (l.data_distribuicao_comercial AT TIME ZONE 'UTC')::date < $2
+      WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1 AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
     `;
     const params = [start, end];
     let idx = 3;
@@ -582,22 +564,7 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
-    if (produto && produto !== 'Todos') {
-      const productVariants = {
-        'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
-      };
-      if (productVariants[produto]) {
-        const variants = productVariants[produto];
-        const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produto IN (${placeholders})`;
-        params.push(...variants); idx += variants.length;
-      } else {
-        query += ` AND l.produto = $${idx}`;
-        params.push(produto); idx++;
-      }
-    }
-    query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), l.etapa, c.nome_equipe ORDER BY colaborador`;
+    query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), l.etapa_lead, c.nome_equipe ORDER BY colaborador`;
 
     const result = await db.query(query, params);
     let rows = result.rows;
