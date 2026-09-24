@@ -44,29 +44,28 @@ router.get('/emitidos', requireAuth, async (req, res) => {
 
     let query = `
       SELECT 
-        COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável') as colaborador,
-        COALESCE(c.nome_equipe, '') as equipe,
+        COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável') as colaborador,
+        COALESCE(e.equipe_responsavel_emissao, '') as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável') as colaborador,
-          COALESCE(c.nome_equipe, '') as equipe,
+          COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável') as colaborador,
+          COALESCE(e.equipe_responsavel_emissao, '') as equipe,
           (DATE_TRUNC('${gran}', e.data_emissao) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM core.view_app_assinaturas e
-      LEFT JOIN core.view_app_colaboradores c ON e.responsavel_emissao = c.nome
+      FROM core.view_emitidos e
       WHERE (e.data_emissao AT TIME ZONE 'UTC')::date >= $1 AND (e.data_emissao AT TIME ZONE 'UTC')::date < $2
     `;
     const params = [start, end];
     let idx = 3;
 
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
+      query += ` AND LOWER(TRIM(e.equipe_responsavel_emissao)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
     if (produto && produto !== 'Todos') {
@@ -85,9 +84,9 @@ router.get('/emitidos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', e.data_emissao) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'), e.equipe_responsavel_emissao, DATE_TRUNC('${gran}', e.data_emissao) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(e.responsavel_emissao), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'), e.equipe_responsavel_emissao ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -117,23 +116,22 @@ router.get('/assinados', requireAuth, async (req, res) => {
 
     let query = `
       SELECT 
-        COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável') as colaborador,
+        COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável') as colaborador,
         equipe_responsavel_assinatura as equipe,
         COUNT(*)::int as total
     `;
     if (gran) {
       query = `
         SELECT 
-          COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável') as colaborador,
+          COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável') as colaborador,
           equipe_responsavel_assinatura as equipe,
           (DATE_TRUNC('${gran}', data_assinatura) AT TIME ZONE 'UTC')::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
-      FROM core.view_app_assinaturas
+      FROM core.view_assinados
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status_assinatura = 'ASSINADO'
     `;
     const params = [start, end];
     let idx = 3;
@@ -158,9 +156,9 @@ router.get('/assinados', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura, DATE_TRUNC('${gran}', data_assinatura) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura, DATE_TRUNC('${gran}', data_assinatura) ORDER BY periodo, colaborador`;
     } else {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura ORDER BY colaborador`;
+      query += ` GROUP BY COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura ORDER BY colaborador`;
     }
 
     const result = await db.query(query, params);
@@ -190,12 +188,9 @@ router.get('/assinados-diario-por-equipe', requireAuth, async (req, res) => {
         equipe_responsavel_assinatura as equipe,
         (data_assinatura AT TIME ZONE 'UTC')::date as dia,
         COUNT(*)::int as total
-      FROM core.view_app_assinaturas
+      FROM core.view_assinados
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1
         AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status_assinatura = 'ASSINADO'
-        AND responsavel_assinatura IS NOT NULL
-        AND responsavel_assinatura != ''
     `;
     const params = [inicio, fim];
 
@@ -232,16 +227,13 @@ router.get('/assinados-diario-colaborador', requireAuth, async (req, res) => {
     const query = `
       SELECT 
         (data_assinatura AT TIME ZONE 'UTC')::date as dia,
-        responsavel_assinatura as colaborador,
+        consultor_responsavel_assinatura as colaborador,
         COUNT(*)::int as total
-      FROM core.view_app_assinaturas
+      FROM core.view_assinados
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 
         AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status_assinatura = 'ASSINADO'
-        AND responsavel_assinatura IS NOT NULL
-        AND responsavel_assinatura != ''
-      GROUP BY dia, responsavel_assinatura
-      ORDER BY dia, responsavel_assinatura
+      GROUP BY dia, consultor_responsavel_assinatura
+      ORDER BY dia, consultor_responsavel_assinatura
     `;
 
     const result = await db.query(query, [inicio, fim]);
@@ -592,10 +584,8 @@ router.get('/weekly', requireAuth, async (req, res) => {
       SELECT 
         (DATE_TRUNC('week', data_assinatura) AT TIME ZONE 'UTC')::date as semana,
         COUNT(*)::int as vendas
-      FROM core.view_app_assinaturas
+      FROM core.view_assinados
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-        AND status_assinatura = 'ASSINADO'
-        AND responsavel_assinatura IS NOT NULL
       GROUP BY semana
       ORDER BY semana
     `;
