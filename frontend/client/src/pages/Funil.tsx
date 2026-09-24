@@ -447,25 +447,38 @@ export default function Funil() {
   // ============================================================
   const aggregatedLeadStages = useMemo(() => {
     const stageMap = new Map<string, number>();
+    const stageLabels = new Map<string, string>();
     leadsStageData.forEach(item => {
       const etapa = item.etapa_lead || "Sem etapa";
       const stageKey = normalize(etapa);
+      stageLabels.set(stageKey, etapa);
       stageMap.set(stageKey, (stageMap.get(stageKey) || 0) + item.total);
     });
 
     const result: { etapa_lead: string; total: number }[] = [];
+    const mappedStages = new Set<string>();
 
     for (const entry of STAGE_GROUPING) {
       if (typeof entry === 'string') {
         // Etapa única
-        result.push({ etapa_lead: entry, total: stageMap.get(normalize(entry)) || 0 });
+        const stageKey = normalize(entry);
+        mappedStages.add(stageKey);
+        result.push({ etapa_lead: entry, total: stageMap.get(stageKey) || 0 });
       } else {
         // Grupo de etapas
         let sum = 0;
         for (const stageName of entry.stages) {
-          sum += stageMap.get(normalize(stageName)) || 0;
+          const stageKey = normalize(stageName);
+          mappedStages.add(stageKey);
+          sum += stageMap.get(stageKey) || 0;
         }
         result.push({ etapa_lead: entry.label, total: sum });
+      }
+    }
+
+    for (const [stageKey, total] of stageMap) {
+      if (!mappedStages.has(stageKey)) {
+        result.push({ etapa_lead: stageLabels.get(stageKey) || stageKey, total });
       }
     }
 
