@@ -137,7 +137,7 @@ export default function Configuration() {
   const [teamBonus, setTeamBonus] = useState<number>(150);
 
   const [campanhaCategoria, setCampanhaCategoria] = useState<string>("outros");
-  const [campanhaMultiplicador, setCampanhaMultiplicador] = useState<number>(2.0);
+  const [campanhaMultiplicador, setCampanhaMultiplicador] = useState<number>(3.0);
   const [campanhaProduto, setCampanhaProduto] = useState<string>("Todos");
   const [campanhaDescricao, setCampanhaDescricao] = useState<string>("");
 
@@ -167,9 +167,7 @@ export default function Configuration() {
 
   useEffect(() => {
     if (isAssinados) {
-      // não fixa mais; permite edição do multiplicador
-      // opcional: pode definir um valor padrão inicial se desejar
-      // setCampanhaMultiplicador(5);
+      setCampanhaMultiplicador(3);
     } else if (isProgressiva) {
       setCampanhaMultiplicador(3);
     } else {

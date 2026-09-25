@@ -197,7 +197,7 @@ router.patch('/validacao', requireAuth, async (req, res) => {
 // Aplica campanhas ativas aos dados diários.
 // Tipos suportados:
 //   - GOLS: multiplica os gols do dia pelo multiplicador.
-//   - ASSINADOS: cada assinado vale 1 gol.
+//   - ASSINADOS: a cada quantidade configurada de assinados, 1 gol.
 //   - PROGRESSIVA: a partir de uma meta mínima de assinados, os gols = total de assinados.
 // ============================================================
 router.post('/aplicar', requireAuth, async (req, res) => {
@@ -232,7 +232,7 @@ router.post('/aplicar', requireAuth, async (req, res) => {
 
     function aplicarCampanhas(dailyData, campanhasGols, campanhasAssinados, campanhasProgressivas, metaGolsAssinados, metaGolsGanhos) {
       const golsMap = new Map();       // data -> multiplicador máximo (campanha GOLS)
-      const assinadosMap = new Map();  // data -> boolean (campanha ASSINADOS)
+      const assinadosMap = new Map();  // data -> quantidade de assinados por gol
       const progressivaMap = new Map(); // data -> meta mínima de assinados
 
       // Preencher mapas de GOLS
@@ -246,7 +246,8 @@ router.post('/aplicar', requireAuth, async (req, res) => {
       // Preencher mapas de ASSINADOS
       for (const camp of campanhasAssinados) {
         const dateKey = (camp.data_publicacao || '').split('T')[0];
-        assinadosMap.set(dateKey, true);
+        const quantidadePorGol = Number(camp.multiplicador) || 3;
+        assinadosMap.set(dateKey, quantidadePorGol);
       }
 
       // Preencher mapas de PROGRESSIVA
@@ -271,9 +272,10 @@ router.post('/aplicar', requireAuth, async (req, res) => {
         const mult = golsMap.get(dateKey);
         if (mult) golsDoDia = golsDoDia * mult;
 
-        // Aplica ASSINADOS (+1 por assinado)
-        if (assinadosMap.has(dateKey)) {
-          golsDoDia += assinados;
+        // Aplica ASSINADOS (+1 a cada quantidade configurada de assinados)
+        const quantidadePorGol = assinadosMap.get(dateKey);
+        if (quantidadePorGol) {
+          golsDoDia += Math.floor(assinados / quantidadePorGol);
         }
 
         // Aplica PROGRESSIVA (substitui os gols se atingir meta)

@@ -45,7 +45,7 @@ export class Calculator {
      * Aplica campanhas ativas (aprovadas) aos gols diários.
      * Tipos suportados:
      * - GOLS: multiplica os gols do dia pelo multiplicador.
-     * - ASSINADOS: adiciona 1 gol por assinado no dia.
+    * - ASSINADOS: adiciona 1 gol a cada multiplicador de assinados no dia.
      * - PROGRESSIVA: se assinados >= meta mínima (multiplicador), gols = assinados.
      */
     applyCampaignsToDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos, campanhasAtivas = []) {
@@ -58,7 +58,7 @@ export class Calculator {
         const base = this.calculateDailyGoals(normalizedDailyData, metaGolsAssinados, metaGolsGanhos);
 
         const golsMap = new Map();           // data -> multiplicador máximo
-        const assinadosMap = new Map();      // data -> true
+        const assinadosMap = new Map();      // data -> quantidade de assinados por gol
         const progressivaMap = new Map();    // data -> meta mínima
 
         for (const camp of campanhasAtivas) {
@@ -70,7 +70,8 @@ export class Calculator {
                 const mult = Number(camp.multiplicador) || 1;
                 if (mult > atual) golsMap.set(dateKey, mult);
             } else if (tipo === 'ASSINADOS') {
-                assinadosMap.set(dateKey, true);
+                const quantidadePorGol = Number(camp.multiplicador) || 3;
+                assinadosMap.set(dateKey, quantidadePorGol);
             } else if (tipo === 'PROGRESSIVA') {
                 progressivaMap.set(dateKey, Number(camp.multiplicador) || 0);
             }
@@ -85,10 +86,11 @@ export class Calculator {
             const mult = golsMap.get(dateKey);
             if (mult) gols = gols * mult;
 
-            // ASSINADOS: +1 por assinado
-            if (assinadosMap.has(dateKey)) {
+            // ASSINADOS: +1 a cada quantidade configurada de assinados
+            const quantidadePorGol = assinadosMap.get(dateKey);
+            if (quantidadePorGol) {
                 const dayData = normalizedDailyData.find(d => d.date === dateKey);
-                if (dayData) gols += (dayData.assinados || 0);
+                if (dayData) gols += Math.floor((dayData.assinados || 0) / quantidadePorGol);
             }
 
             // PROGRESSIVA: substitui gols
