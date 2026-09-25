@@ -186,7 +186,7 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                         {campanhasAssinados.map((camp: any, cIdx: number) => (
                           <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
                             <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Assinados valem Gols</span>
-                            <span className="font-bold text-[#16A34A]">+1 gol/assinado</span>
+                            <span className="font-bold text-[#16A34A]">1 gol/{camp.multiplicador || 3} assinados</span>
                           </div>
                         ))}
                         {campanhasProgressivas.map((camp: any, cIdx: number) => (

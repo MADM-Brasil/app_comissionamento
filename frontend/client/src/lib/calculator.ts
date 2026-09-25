@@ -137,7 +137,7 @@ export class Calculator {
    * Aplica campanhas ativas (aprovadas) aos gols diários.
    * Tipos suportados:
    * - GOLS: multiplica os gols do dia pelo multiplicador.
-   * - ASSINADOS: adiciona 1 gol por assinado no dia.
+  * - ASSINADOS: adiciona 1 gol a cada multiplicador de assinados no dia.
    * - PROGRESSIVA: se assinados >= meta mínima (multiplicador), gols = assinados.
    */
   applyCampaignsToDailyGoals(
@@ -154,7 +154,7 @@ export class Calculator {
     const base = this.calculateDailyGoals(normalizedDailyData, metaGolsAssinados, metaGolsGanhos);
 
     const golsMap = new Map<string, number>();
-    const assinadosMap = new Map<string, boolean>();
+    const assinadosMap = new Map<string, number>();
     const progressivaMap = new Map<string, number>();
 
     for (const camp of campanhasAtivas) {
@@ -166,7 +166,8 @@ export class Calculator {
         const mult = Number(camp.multiplicador) || 1;
         if (mult > atual) golsMap.set(dateKey, mult);
       } else if (tipo === 'ASSINADOS') {
-        assinadosMap.set(dateKey, true);
+        const quantidadePorGol = Number(camp.multiplicador) || 3;
+        assinadosMap.set(dateKey, quantidadePorGol);
       } else if (tipo === 'PROGRESSIVA') {
         progressivaMap.set(dateKey, Number(camp.multiplicador) || 0);
       }
@@ -180,10 +181,11 @@ export class Calculator {
       const mult = golsMap.get(dateKey);
       if (mult) gols = gols * mult;
 
-      if (assinadosMap.has(dateKey)) {
+      const quantidadePorGol = assinadosMap.get(dateKey);
+      if (quantidadePorGol) {
         const dayData = normalizedDailyData.find(d => d.date === dateKey);
         if (dayData) {
-          gols += dayData.assinados || 0;
+          gols += Math.floor((dayData.assinados || 0) / quantidadePorGol);
         }
       }
 
