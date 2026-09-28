@@ -524,15 +524,15 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
         SELECT 
           COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
           COALESCE(c.nome_equipe, '') as equipe,
-          (DATE_TRUNC('${gran}', l.data_qualificacao) AT TIME ZONE 'UTC')::date as periodo,
+          DATE_TRUNC('${gran}', l.data_qualificacao::timestamp)::date as periodo,
           COUNT(*)::int as total
       `;
     }
     query += `
       FROM core.view_qualificados l
       LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
-      WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1
-        AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
+      WHERE l.data_qualificacao::date >= $1::date
+        AND l.data_qualificacao::date < $2::date
     `;
     const params = [start, end];
     let idx = 3;
@@ -734,7 +734,8 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
         COUNT(*)::int as total
       FROM core.view_qualificados l
       LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
-      WHERE (l.data_qualificacao AT TIME ZONE 'UTC')::date >= $1 AND (l.data_qualificacao AT TIME ZONE 'UTC')::date < $2
+      WHERE l.data_qualificacao::date >= $1::date
+        AND l.data_qualificacao::date < $2::date
     `;
     const params = [start, end];
     let idx = 3;
