@@ -7,7 +7,7 @@ import { useAccessControl } from "@/hooks/useAccessControl";
 import {
   DollarSign, Award, FileCheck, Target, Loader2, RefreshCw,
   FileText, Archive, XCircle, CalendarDays, TrendingUp, TrendingDown,
-  Users, PhoneCall, CalendarClock, MessageCircle, ChevronDown,
+  Users, PhoneCall, CalendarClock, MessageCircle, ChevronDown, Search,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -25,6 +25,7 @@ import {
   type CallTabulationCategory,
 } from "@/lib/api";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
@@ -343,6 +344,7 @@ export default function Comissoes() {
   const commissionOverviewRequest = useRef(0);
   const [loadingDaily, setLoadingDaily] = useState(false);
   const [showExtrato, setShowExtrato] = useState(false);
+  const [filterBarKey, setFilterBarKey] = useState(0);
   const isLoadingRef = useRef(false);
 
   const reloadData = useCallback(async (showRefreshing = false) => {
@@ -534,7 +536,52 @@ export default function Comissoes() {
   }, [currentStartDate, currentEndDate, filters, currentUser, canUseFilterBar, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, storeColabs, campaigns]);
 
   const handleRefresh = useCallback(async () => { await reloadData(true); }, [reloadData]);
-  const handleFilterChange = useCallback((newFilters: any) => { setFilters(newFilters); }, []);
+
+  const handleFilterChange = useCallback((newFilters: any) => {
+    setFilters(prev => {
+      if (
+        prev.equipe === newFilters.equipe &&
+        prev.colaborador === newFilters.colaborador &&
+        String(prev.colaboradorId ?? '') === String(newFilters.colaboradorId ?? '') &&
+        prev.produto === newFilters.produto
+      ) {
+        return prev; // evita re-render e reload desnecessário
+      }
+      return newFilters;
+    });
+  }, []);
+
+  const handleSelectFromOverview = useCallback((item: CommissionOverviewItem) => {
+    if (item.role === 'coordenador') {
+      toast.info('Coordenadores não possuem visualização individual detalhada.');
+      return;
+    }
+
+    // Persiste no localStorage para que o FilterBar leia a seleção no remount
+    try {
+      const stored = localStorage.getItem("madm_filterBar_state_v1");
+      const parsed = stored ? JSON.parse(stored) : {};
+      localStorage.setItem("madm_filterBar_state_v1", JSON.stringify({
+        equipe: item.team,
+        colaborador: item.name,
+        produto: parsed.produto || "Todos",
+        searchTerm: "",
+      }));
+    } catch { /* ignore */ }
+
+    setFilters({
+      equipe: item.team,
+      colaborador: item.name,
+      colaboradorId: item.collaborator.id,
+      produto: "Todos",
+    });
+
+    // Força o FilterBar a remontar lendo os novos valores persistidos
+    setFilterBarKey((k) => k + 1);
+
+    toast.success(`Visualizando ${item.name}`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
 
   useEffect(() => {
     if (!currentStartDate || !currentEndDate || !currentUser) return;
@@ -573,6 +620,13 @@ export default function Comissoes() {
 
   const isSupervisorUser = (userColab?.cargo || '').toLowerCase() === 'supervisor';
   const isSpecialUser = userColab ? isSpecialGroupColaborador(userColab) : false;
+
+  // A Visão Geral só aparece quando nenhum filtro específico está aplicado
+  const isOverviewVisible =
+    canViewCommissionOverview &&
+    !loading &&
+    filters.equipe === 'todas' &&
+    filters.colaborador === 'todos';
 
   const commissionData = useMemo(() => {
     if (!userColab) return [];
@@ -954,7 +1008,13 @@ export default function Comissoes() {
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Suas comissões, calculadas pela soma de Gols diários, semanais e mensais">
       {canUseFilterBar && (
-        <FilterBar onFilterChange={handleFilterChange} showColaboradorFilter={true} className="mb-6" onRefresh={handleRefresh} />
+        <FilterBar
+          key={filterBarKey}
+          onFilterChange={handleFilterChange}
+          showColaboradorFilter={true}
+          className="mb-6"
+          onRefresh={handleRefresh}
+        />
       )}
 
       {showExtrato && (
@@ -980,6 +1040,124 @@ export default function Comissoes() {
         <div className="bg-red-50 text-red-700 p-4 rounded-lg text-sm mb-4">
           <p>{error}</p>
           <button onClick={() => reloadData(true)} className="mt-2 px-4 py-2 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700">Tentar novamente</button>
+        </div>
+      )}
+
+      {/* Aviso quando a Visão Geral está oculta por causa de filtro ativo */}
+      {canViewCommissionOverview && !loading && !isOverviewVisible && (
+        <div className="mb-6 flex items-center gap-2 text-xs text-[#64748b] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg px-3 py-2">
+          <Users className="w-3.5 h-3.5 text-[#2F6FED]" />
+          <span>
+            A Visão Geral das Comissões fica disponível quando nenhum filtro de equipe ou colaborador está aplicado.
+          </span>
+        </div>
+      )}
+
+      {isOverviewVisible && (
+        <div className="card p-5 mb-6 animate-fade-in-up">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+            <div className="flex items-center gap-2">
+              <Users className="w-4 h-4 text-[#2F6FED]" />
+              <h3 className="text-sm font-bold text-[#0f172a]">Visão Geral das Comissões</h3>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#eff6ff] text-[#2F6FED] font-medium">
+                {filteredCommissionOverview.length} colaboradores
+              </span>
+            </div>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Buscar por nome ou equipe..."
+                value={commissionOverviewSearch}
+                onChange={(e) => setCommissionOverviewSearch(e.target.value)}
+                className="pl-8 pr-3 py-1.5 text-xs rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20 w-64"
+              />
+            </div>
+          </div>
+
+          {commissionOverviewLoading ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" />
+            </div>
+          ) : commissionOverviewError ? (
+            <div className="bg-red-50 text-red-700 p-3 rounded-lg text-xs">
+              {commissionOverviewError}
+            </div>
+          ) : filteredCommissionOverview.length === 0 ? (
+            <div className="text-center text-[#94a3b8] py-6 text-xs">
+              {commissionOverviewSearch ? "Nenhum resultado encontrado." : "Nenhum dado disponível."}
+            </div>
+          ) : (
+            <div className="overflow-x-auto max-h-[420px] overflow-y-auto custom-scrollbar">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-white z-10">
+                  <tr className="border-b border-[#e2e8f0] text-left text-[#64748b]">
+                    <th className="py-2 px-3 font-medium">Colaborador</th>
+                    <th className="py-2 px-3 font-medium">Equipe</th>
+                    <th className="py-2 px-3 font-medium">Cargo</th>
+                    <th className="py-2 px-3 font-medium text-right">Assinados</th>
+                    <th className="py-2 px-3 font-medium text-right">Comissão</th>
+                    <th className="py-2 px-3 font-medium text-center">Ação</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredCommissionOverview.map((item) => (
+                    <tr
+                      key={item.id}
+                      className={cn(
+                        "border-b border-[#f1f5f9] hover:bg-[#f8fafc] transition-colors",
+                        updatingCommissionId === item.id && "opacity-60"
+                      )}
+                    >
+                      <td className="py-2 px-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center font-bold text-[10px] flex-shrink-0">
+                            {item.collaborator.avatar || item.name.charAt(0).toUpperCase()}
+                          </div>
+                          <span className="font-medium text-[#0f172a] truncate">{item.name}</span>
+                        </div>
+                      </td>
+                      <td className="py-2 px-3 text-[#475569] truncate">{item.team || '—'}</td>
+                      <td className="py-2 px-3">
+                        <span
+                          className={cn(
+                            "inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium capitalize",
+                            item.role === 'supervisor' && "bg-[#eff6ff] text-[#2F6FED]",
+                            item.role === 'coordenador' && "bg-[#f5f3ff] text-[#8B5CF6]",
+                            item.role === 'assessor' && "bg-[#f0fdf4] text-[#16A34A]",
+                          )}
+                        >
+                          {item.role}
+                          {item.isSupervisorSR && ' SR'}
+                        </span>
+                      </td>
+                      <td className="py-2 px-3 text-right font-semibold text-[#0f172a]">
+                        {formatInt(item.assinados)}
+                      </td>
+                      <td className="py-2 px-3 text-right font-semibold text-[#2F6FED]">
+                        {item.commission == null ? '—' : displayCurrency(item.commission)}
+                      </td>
+                      <td className="py-2 px-3 text-center">
+                        <button
+                          onClick={() => handleSelectFromOverview(item)}
+                          disabled={item.role === 'coordenador' || updatingCommissionId === item.id}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-medium text-[#2F6FED] hover:bg-[#eff6ff] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                          title={
+                            item.role === 'coordenador'
+                              ? 'Coordenadores não têm visualização individual'
+                              : 'Ver detalhes deste colaborador'
+                          }
+                        >
+                          <Target className="w-3 h-3" />
+                          Ver detalhes
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

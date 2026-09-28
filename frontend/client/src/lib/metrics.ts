@@ -5,7 +5,7 @@ import { API_BASE } from '@/lib/api';
 // ============================================================
 // MÉTRICAS DE DESEMPENHO (EMITIDOS, ASSINADOS, ETC.)
 // ============================================================ 
- 
+  
 export async function fetchEmitidos(
   params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
