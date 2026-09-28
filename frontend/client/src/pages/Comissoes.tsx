@@ -7,7 +7,7 @@ import { useAccessControl } from "@/hooks/useAccessControl";
 import {
   DollarSign, Award, FileCheck, Target, Loader2, RefreshCw,
   FileText, Archive, XCircle, CalendarDays, TrendingUp, TrendingDown,
-  Users,
+  Users, ArrowDown, PhoneCall, CalendarClock, MessageCircle, ChevronDown,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -15,6 +15,13 @@ import {
 } from "recharts";
 import { calculator } from "@/lib/calculator";
 import { fetchDailyMetrics } from "@/lib/metrics";
+import {
+  fetchLigacoes,
+  fetchLigacoesTabulacoes,
+  type CallMetrics,
+  type CallTabulation,
+  type CallTabulationCategory,
+} from "@/lib/api";
 import { toast } from "sonner";
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
@@ -235,6 +242,12 @@ export default function Comissoes() {
   const [dailyGols, setDailyGols] = useState<any[]>([]);
   const [weeklyMetrics, setWeeklyMetrics] = useState<any[]>([]);
   const [weeklyGols, setWeeklyGols] = useState<any[]>([]);
+  const [callMetrics, setCallMetrics] = useState<CallMetrics[]>([]);
+  const [expandedCallStage, setExpandedCallStage] = useState<CallTabulationCategory | null>(null);
+  const [callTabulations, setCallTabulations] = useState<CallTabulation[]>([]);
+  const [loadingCallTabulations, setLoadingCallTabulations] = useState(false);
+  const [callTabulationsError, setCallTabulationsError] = useState<string | null>(null);
+  const callTabulationsRequest = useRef(0);
   const [loadingDaily, setLoadingDaily] = useState(false);
   const [showExtrato, setShowExtrato] = useState(false);
   const isLoadingRef = useRef(false);
@@ -268,11 +281,21 @@ export default function Comissoes() {
         }
       }
 
-      await Promise.all([
+      const [calls] = await Promise.all([
+        fetchLigacoes({
+          start: currentStartDate,
+          end: currentEndDate,
+          equipe: equipeApi,
+          colaborador: colaboradorApi,
+        }).catch(err => {
+          console.error('Erro ao carregar ligações:', err);
+          return [] as CallMetrics[];
+        }),
         loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi),
         loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi }),
         loadWeeklyPerformanceData(),
       ]);
+      setCallMetrics(calls);
 
       const colaboradoresAtualizados = useAppStore.getState().collaborators;
       let targetColab: any;
@@ -424,7 +447,10 @@ export default function Comissoes() {
 
   const userColab = useMemo(() => {
     if (canUseFilterBar) {
-      return filteredColabs.find(c => c.id === (filters.colaboradorId || filters.colaborador));
+      return filteredColabs.find(c =>
+        (filters.colaboradorId != null && String(c.id) === String(filters.colaboradorId)) ||
+        c.name === filters.colaborador
+      );
     }
     return filteredColabs.find(c => c.id === currentUser?.id);
   }, [filteredColabs, currentUser, filters, canUseFilterBar]);
@@ -500,6 +526,19 @@ export default function Comissoes() {
     }];
   }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics, userColab, campaigns]);
 
+  const commissionChartData = useMemo(() => {
+    const item = commissionData[0];
+    if (!item) return [];
+
+    const data = [
+      { name: 'Comissão Assinados', value: item.comissaoAssinados, color: '#2F6FED' },
+    ];
+    if (!item.isSpecial && !isSupervisorUser) {
+      data.push({ name: 'Comissão Gols', value: item.comissaoGols, color: '#16A34A' });
+    }
+    return data;
+  }, [commissionData, isSupervisorUser]);
+
   const teamMembers = useMemo(() => {
     if (!isSupervisorUser || !userColab) return [];
     return storeColabs.filter(c => c.equipeNome === userColab.equipeNome && c.id !== userColab.id);
@@ -526,8 +565,8 @@ export default function Comissoes() {
   const summaryCards = [
     { label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign, color: "#2F6FED", isCurrency: true },
     { label: "Gols", value: totals.ciclos, icon: Award, color: "#16A34A", isInteger: true },
-    { label: "Vendas Fechadas", value: rawMetrics.assinados, icon: FileCheck, color: "#EA8C1D", isInteger: true },
-    { label: "Progresso Médio", value: avgProgress, icon: Target, color: "#8B5CF6", isPercent: true },
+    { label: "Vendas Fechadas", value: rawMetrics.ganhos, icon: FileCheck, color: "#EA8C1D", isInteger: true },
+    { label: "Atingimento da meta", value: avgProgress, icon: Target, color: "#8B5CF6", isPercent: true },
   ];
 
   const userData = commissionData[0] || null;
@@ -560,6 +599,70 @@ export default function Comissoes() {
   }
 
   const calcPercent = (value: number, target: number) => target > 0 ? Math.min((value / target) * 100, 100) : 0;
+
+  const callFunnelStages = useMemo(() => {
+    const totals = callMetrics.reduce((sum, row) => ({
+      total: sum.total + (Number(row.total_ligacoes) || 0),
+      productive: sum.productive + (Number(row.produtivas) || 0),
+      appointments: sum.appointments + (Number(row.agendamentos) || 0),
+      occurrences: sum.occurrences + (Number(row.ocorrencias) || 0),
+      failures: sum.failures + (Number(row.insucessos) || 0),
+    }), { total: 0, productive: 0, appointments: 0, occurrences: 0, failures: 0 });
+
+    return [
+      { key: null, label: 'Total de ligações', count: totals.total, color: '#09175b', icon: PhoneCall },
+      { key: 'productive' as const, label: 'Produtivas', count: totals.productive, color: '#34a853', icon: FileCheck },
+      { key: 'appointments' as const, label: 'Agendamentos', count: totals.appointments, color: '#f59e0b', icon: CalendarClock },
+      { key: 'occurrences' as const, label: 'Ocorrências', count: totals.occurrences, color: '#64748b', icon: MessageCircle },
+      { key: 'failures' as const, label: 'Sem sucessos', count: totals.failures, color: '#ef4444', icon: XCircle },
+    ];
+  }, [callMetrics]);
+
+  const callFunnelLayout = useMemo(() => {
+    const widths = [100, 82, 64, 46, 28];
+    return callFunnelStages.map((stage, index) => ({
+      ...stage,
+      widthPct: widths[index],
+    }));
+  }, [callFunnelStages]);
+
+  const toggleCallStage = async (category: CallTabulationCategory) => {
+    if (expandedCallStage === category) {
+      callTabulationsRequest.current++;
+      setExpandedCallStage(null);
+      setLoadingCallTabulations(false);
+      return;
+    }
+
+    const requestId = ++callTabulationsRequest.current;
+    setExpandedCallStage(category);
+    setCallTabulations([]);
+    setCallTabulationsError(null);
+    setLoadingCallTabulations(true);
+
+    try {
+      const equipe = canUseFilterBar
+        ? (filters.equipe !== 'todas' ? filters.equipe : undefined)
+        : userColab?.equipeNome;
+      const colaborador = canUseFilterBar
+        ? (filters.colaborador !== 'todos' ? filters.colaborador : undefined)
+        : userColab?.name;
+      const data = await fetchLigacoesTabulacoes({
+        start: currentStartDate,
+        end: currentEndDate,
+        equipe,
+        colaborador,
+        categoria: category,
+      });
+      if (requestId === callTabulationsRequest.current) setCallTabulations(data);
+    } catch (err: any) {
+      if (requestId === callTabulationsRequest.current) {
+        setCallTabulationsError(err.message || 'Erro ao carregar tabulações.');
+      }
+    } finally {
+      if (requestId === callTabulationsRequest.current) setLoadingCallTabulations(false);
+    }
+  };
 
   const evolucaoDiariaData = useMemo(() => {
     const now = new Date();
@@ -598,7 +701,7 @@ export default function Comissoes() {
         label: formatLabel(date),
         assinados: metricas.assinados || 0,
         ganhos: metricas.ganhos || 0,
-        goals: golsMap.get(key) || 0,
+        gols: golsMap.get(key) || 0,
       };
     });
   }, [weeklyMetrics, weeklyGols]);
@@ -662,7 +765,7 @@ export default function Comissoes() {
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-                <div className="card p-5 flex flex-col">
+                <div className="card p-5 flex flex-col order-3 lg:col-span-2">
                   <h3 className="text-sm font-bold mb-4">Comissão Total do Colaborador</h3>
                   {commissionData.length === 0 ? (
                     <div className="text-center text-[#94a3b8] py-8">Nenhum dado disponível.</div>
@@ -670,21 +773,20 @@ export default function Comissoes() {
                     <>
                       <div className="flex-1" style={{ minHeight: '300px' }}>
                         <ResponsiveContainer width="100%" height={300}>
-                          <BarChart data={commissionData} margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                            <XAxis dataKey="name" tick={{ fontSize: 11, fill: "#64748b" }} />
-                            <YAxis
-                              domain={[0, 10000]}
+                          <BarChart data={commissionChartData} layout="vertical" margin={{ top: 5, right: 20, left: 20, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                            <XAxis
+                              type="number"
+                              domain={[0, 9000]}
                               ticks={[0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000]}
                               tickFormatter={v => hideValues ? "***" : formatCurrency(v)}
                               tick={{ fontSize: 11, fill: "#64748b" }}
                             />
+                            <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: "#64748b" }} />
                             <Tooltip content={<CustomTooltip hideValues={hideValues} />} />
-                            <Legend wrapperStyle={{ fontSize: 12 }} />
-                            <Bar dataKey="comissaoAssinados" fill="#2F6FED" name="Comissão Assinados" radius={[4, 4, 0, 0]} />
-                            {!commissionData[0]?.isSpecial && !isSupervisorUser && (
-                              <Bar dataKey="comissaoGols" fill="#16A34A" name="Comissão Gols" radius={[4, 4, 0, 0]} />
-                            )}
+                            <Bar dataKey="value" name="Comissão" barSize={44} radius={[0, 4, 4, 0]}>
+                              {commissionChartData.map(item => <Cell key={item.name} fill={item.color} />)}
+                            </Bar>
                           </BarChart>
                         </ResponsiveContainer>
                       </div>
@@ -768,7 +870,7 @@ export default function Comissoes() {
                 </div>
 
                 {!isSupervisorUser && (
-                  <div className="card p-5">
+                  <div className="card p-5 order-1">
                     <h3 className="text-sm font-bold mb-4">Metas vs Realizado</h3>
                     <div className="space-y-5 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
                       {commissionData.map((item) => {
@@ -883,8 +985,96 @@ export default function Comissoes() {
                   </div>
                 )}
 
+                <div className="card p-5 order-2">
+                  <h3 className="text-sm font-bold mb-5 text-[#09175b]">Ligações (Pipeline Visual)</h3>
+                  {callMetrics.length === 0 ? (
+                    <div className="text-center text-[#94a3b8] py-8">Nenhuma ligação encontrada no período.</div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-0 w-full">
+                      {callFunnelLayout.map((stage, index) => {
+                        const Icon = stage.icon;
+                        const isExpanded = stage.key != null && expandedCallStage === stage.key;
+                        return (
+                          <div key={stage.label} className="w-full flex flex-col items-center">
+                            {stage.key ? (
+                              <button
+                                type="button"
+                                aria-expanded={isExpanded}
+                                aria-controls={`call-tabulations-${stage.key}`}
+                                onClick={() => toggleCallStage(stage.key!)}
+                                className="flex items-center justify-between gap-2 px-3 py-2 sm:px-4 sm:py-3 rounded-xl flex-wrap text-left transition-colors"
+                                style={{
+                                  width: `${stage.widthPct}%`,
+                                  maxWidth: '100%',
+                                  minWidth: '0',
+                                  background: `${stage.color}15`,
+                                  border: `1.5px solid ${stage.color}30`,
+                                }}
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <Icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: stage.color }} />
+                                  <span className="text-xs font-semibold break-words" style={{ color: stage.color }}>{stage.label}</span>
+                                </div>
+                                <span className="flex items-center gap-2 flex-shrink-0">
+                                  <span className="text-sm font-black" style={{ color: stage.color }}>{formatInt(stage.count)}</span>
+                                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-180' : ''}`} style={{ color: stage.color }} />
+                                </span>
+                              </button>
+                            ) : (
+                              <div
+                                className="flex items-center justify-between gap-2 px-3 py-2 sm:px-4 sm:py-3 rounded-xl flex-wrap"
+                                style={{
+                                  width: `${stage.widthPct}%`,
+                                  maxWidth: '100%',
+                                  background: `${stage.color}15`,
+                                  border: `1.5px solid ${stage.color}30`,
+                                }}
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <Icon className="w-3.5 h-3.5 flex-shrink-0" style={{ color: stage.color }} />
+                                  <span className="text-xs font-semibold break-words" style={{ color: stage.color }}>{stage.label}</span>
+                                </div>
+                                <span className="text-sm font-black flex-shrink-0" style={{ color: stage.color }}>{formatInt(stage.count)}</span>
+                              </div>
+                            )}
+                            {isExpanded && (
+                              <div
+                                id={`call-tabulations-${stage.key}`}
+                                className="mt-2 w-full p-3 rounded-lg border border-[#e2e8f0] bg-white"
+                              >
+                                {loadingCallTabulations ? (
+                                  <div className="flex justify-center py-3"><Loader2 className="w-4 h-4 animate-spin text-[#09175b]" /></div>
+                                ) : callTabulationsError ? (
+                                  <p className="text-xs text-red-600">{callTabulationsError}</p>
+                                ) : callTabulations.length > 0 ? (
+                                  <div className="space-y-2">
+                                    {callTabulations.map(item => (
+                                      <div key={item.tabulacao} className="flex items-center justify-between gap-3 text-xs">
+                                        <span className="text-[#475569]">{item.tabulacao}</span>
+                                        <span className="font-bold text-[#0f172a]">{formatInt(item.total)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="text-xs text-[#64748b]">Nenhuma tabulação encontrada.</p>
+                                )}
+                              </div>
+                            )}
+                            {index < callFunnelStages.length - 1 && (
+                              <div className="flex items-center gap-1 py-1 text-[10px] text-[#64748b]">
+                                <ArrowDown className="w-3 h-3" />
+                                <span>{callFunnelStages[0].count > 0 ? `${((stage.count / callFunnelStages[0].count) * 100).toFixed(1)}% do total` : '0% do total'}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
                 {isSupervisorUser && (
-                  <div className="card p-5">
+                  <div className="card p-5 order-1">
                     <h3 className="text-sm font-bold mb-4">Equipe (Assinados)</h3>
                     <div className="space-y-2 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
                       {teamMembers.length > 0 ? (
@@ -934,7 +1124,7 @@ export default function Comissoes() {
                         <Legend wrapperStyle={{ fontSize: 12 }} />
                         <Bar dataKey="assinados" fill="#2F6FED" name="Assinados" radius={[4, 4, 0, 0]} />
                         <Bar dataKey="ganhos" fill="#16A34A" name="Ganhos" radius={[4, 4, 0, 0]} />
-                        <Bar dataKey="goals" fill="#8B5CF6" name="Goals" radius={[4, 4, 0, 0]} />
+                        <Bar dataKey="gols" fill="#8B5CF6" name="Gols" radius={[4, 4, 0, 0]} />
                       </BarChart>
                     </ResponsiveContainer>
                   ) : (
