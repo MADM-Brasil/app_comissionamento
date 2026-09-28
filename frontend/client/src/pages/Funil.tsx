@@ -4,6 +4,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, Collaborator } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
+import { API_BASE } from "@/lib/api";
 import {
   FileText,
   CheckCircle,
@@ -28,8 +29,6 @@ import {
   Cell,
 } from "recharts";
 import { cn } from "@/lib/utils";
-
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3007/api";
 
 // ============================================================
 // CONSTANTES DE EXCLUSÃO
@@ -421,6 +420,7 @@ export default function Funil() {
   }, [totalsForCards, totalLeadsRecebidos]);
 
   const totalBase = funnelData[0]?.count || 1;
+  const pipelineWidths = [100, 82, 64, 46, 28, 18];
 
   // ========== TAXAS DE CONVERSÃO AJUSTADAS À NOVA ORDEM ==========
   const conversionByStage = useMemo(() => {
@@ -619,15 +619,15 @@ export default function Funil() {
             <div className="madm-card p-6 animate-fade-in-up" style={{ animationDelay: "360ms" }}>
               <h3 className="text-sm font-bold text-[#09175b] mb-5">Pipeline Visual (Evolução Etapas)</h3>
               <div className="flex flex-col items-center gap-0 w-full">
-                {funnelData.slice(0, -1).map((stage, i) => {
+                {funnelData.map((stage, i) => {
                   const Icon = stage.icon;
                   const nextStage = funnelData[i + 1];
-                  const widthPct = totalBase > 0 ? Math.max(30, (stage.count / totalBase) * 100) : 30;
+                  const widthPct = pipelineWidths[i] ?? 28;
                   const color = stage.color;
                   return (
                     <div key={stage.stage} className="w-full flex flex-col items-center">
                       <div
-                        className="flex items-center justify-between gap-2 px-3 py-2 sm:px-4 sm:py-3 rounded-xl transition-all hover:scale-[1.02] flex-wrap"
+                        className="flex items-center gap-2 px-2.5 py-2 sm:px-4 sm:py-3 rounded-xl transition-all hover:scale-[1.02]"
                         style={{
                           width: `clamp(140px, ${Math.min(widthPct, 100)}%, 100%)`,
                           maxWidth: "100%",
@@ -635,17 +635,17 @@ export default function Funil() {
                           border: `1.5px solid ${color}30`,
                         }}
                       >
-                        <div className="flex items-center gap-1 sm:gap-2">
+                        <div className="flex items-center gap-1 sm:gap-2 flex-1 min-w-0">
                           <Icon className="w-3 h-3 sm:w-3.5 sm:h-3.5 flex-shrink-0" style={{ color }} />
-                          <span className="text-[10px] sm:text-xs font-semibold break-words" style={{ color }}>
+                          <span className="text-[10px] sm:text-xs font-semibold truncate whitespace-nowrap" style={{ color }}>
                             {stage.stage}
                           </span>
                         </div>
-                        <span className="text-xs sm:text-sm font-black flex-shrink-0" style={{ color }}>
+                        <span className="text-xs sm:text-sm font-black flex-shrink-0 whitespace-nowrap" style={{ color }}>
                           {formatInt(stage.count)}
                         </span>
                       </div>
-                      {nextStage && nextStage.stage !== "Perdidos" && (
+                      {nextStage && (
                         <ConversionArrow from={stage.count} to={nextStage.count} />
                       )}
                     </div>
@@ -681,7 +681,7 @@ export default function Funil() {
                 {period === "Hoje" && <span className="text-xs text-gray-400">(semana atual)</span>}
               </h3>
               <div className="text-xs text-gray-500">
-                Total de leads: <span className="font-bold text-[#09175b]">{formatInt(totalLeadsRecebidos)}</span>
+                Total de leads recebidos: <span className="font-bold text-[#09175b]">{formatInt(totalLeadsRecebidos)}</span>
               </div>
             </div>
             {loadingLeads && leadsStageData.length === 0 ? (

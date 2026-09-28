@@ -7,7 +7,7 @@ import { useAccessControl } from "@/hooks/useAccessControl";
 import {
   DollarSign, Award, FileCheck, Target, Loader2, RefreshCw,
   FileText, Archive, XCircle, CalendarDays, TrendingUp, TrendingDown,
-  Users, ArrowDown, PhoneCall, CalendarClock, MessageCircle, ChevronDown,
+  Users, PhoneCall, CalendarClock, MessageCircle, ChevronDown,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -991,9 +991,12 @@ export default function Comissoes() {
                     <div className="text-center text-[#94a3b8] py-8">Nenhuma ligação encontrada no período.</div>
                   ) : (
                     <div className="flex flex-col items-center gap-0 w-full">
-                      {callFunnelLayout.map((stage, index) => {
+                      {callFunnelLayout.map(stage => {
                         const Icon = stage.icon;
                         const isExpanded = stage.key != null && expandedCallStage === stage.key;
+                        const percentageOfTotal = callFunnelStages[0].count > 0
+                          ? (stage.count / callFunnelStages[0].count) * 100
+                          : 0;
                         return (
                           <div key={stage.label} className="w-full flex flex-col items-center">
                             {stage.key ? (
@@ -1037,6 +1040,9 @@ export default function Comissoes() {
                                 <span className="text-sm font-black flex-shrink-0" style={{ color: stage.color }}>{formatInt(stage.count)}</span>
                               </div>
                             )}
+                            <p className="py-1 text-[10px] text-[#64748b]">
+                              {percentageOfTotal.toFixed(1)}% do total
+                            </p>
                             {isExpanded && (
                               <div
                                 id={`call-tabulations-${stage.key}`}
@@ -1058,12 +1064,6 @@ export default function Comissoes() {
                                 ) : (
                                   <p className="text-xs text-[#64748b]">Nenhuma tabulação encontrada.</p>
                                 )}
-                              </div>
-                            )}
-                            {index < callFunnelStages.length - 1 && (
-                              <div className="flex items-center gap-1 py-1 text-[10px] text-[#64748b]">
-                                <ArrowDown className="w-3 h-3" />
-                                <span>{callFunnelStages[0].count > 0 ? `${((stage.count / callFunnelStages[0].count) * 100).toFixed(1)}% do total` : '0% do total'}</span>
                               </div>
                             )}
                           </div>
