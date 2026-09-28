@@ -46,7 +46,14 @@ const PRODUCT_OPTIONS = ["Todos", "AUXILIO ACIDENTE", "QUINQUENIO", "Concomitant
 
 const STORAGE_KEY = "madm_filterBar_state_v1";
 
-function getStoredFilters(): { equipe: string; colaborador: string; produto: string; searchTerm: string } {
+interface StoredFilters {
+  equipe: string;
+  colaborador: string;
+  produto: string;
+  searchTerm: string;
+}
+
+function getStoredFilters(): StoredFilters {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
@@ -58,7 +65,7 @@ function getStoredFilters(): { equipe: string; colaborador: string; produto: str
         searchTerm: parsed.searchTerm || "",
       };
     }
-  } catch (e) { /* ignore */ }
+  } catch { /* ignore */ }
   return { equipe: "todas", colaborador: "todos", produto: "Todos", searchTerm: "" };
 }
 
@@ -74,12 +81,11 @@ export default function FilterBar({
   const { collaborators, equipeConfigs, setCollaborators, setEquipeConfigs } = useAppStore();
   const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
 
-  // ⚠️ Necessário adicionar esta função na store (dataStore.ts):
-  // setSelectedCollaboratorEmail: (email: string | null) => set({ selectedCollaboratorEmail: email })
+  // Necessário na store (dataStore.ts): setSelectedCollaboratorEmail
   const setSelectedCollaboratorEmail = useAppStore((state) => (state as any).setSelectedCollaboratorEmail);
 
-  // Inicializa estados com valores persistidos (uma única vez)
-  const [initialStored] = useState(getStoredFilters);
+  // Inicializa estados com valores persistidos (uma única vez por mount)
+  const [initialStored] = useState<StoredFilters>(getStoredFilters);
 
   const [selectedEquipe, setSelectedEquipe] = useState(initialStored.equipe);
   const [selectedColaborador, setSelectedColaborador] = useState(initialStored.colaborador);
@@ -97,7 +103,9 @@ export default function FilterBar({
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
 
-  // Obtém a equipe do usuário com fallback para o registro em collaborators
+  // ============================================================
+  // EQUIPE DO USUÁRIO (com fallback em collaborators)
+  // ============================================================
   const userTeam = useMemo(() => {
     if (!currentUser) return '';
     const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
@@ -109,7 +117,9 @@ export default function FilterBar({
     return '';
   }, [currentUser, collaborators]);
 
-  // Sincroniza o e-mail do colaborador selecionado na store
+  // ============================================================
+  // SINCRONIZA E-MAIL DO COLABORADOR SELECIONADO NA STORE
+  // ============================================================
   useEffect(() => {
     if (!isReady) return;
     if (selectedColaborador !== "todos") {
@@ -124,7 +134,7 @@ export default function FilterBar({
     }
   }, [selectedColaborador, collaborators, isReady, setSelectedCollaboratorEmail]);
 
-  // Atualiza a hora quando os dados ficam prontos
+  // Atualiza o horário quando os dados ficam prontos
   useEffect(() => {
     if (isReady) {
       setLastUpdated(new Date().toLocaleTimeString());
@@ -142,7 +152,9 @@ export default function FilterBar({
     return () => clearTimeout(timeout);
   }, [isReady]);
 
-  // Carrega equipes (fallback)
+  // ============================================================
+  // CARREGA EQUIPES (FALLBACK)
+  // ============================================================
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -171,7 +183,9 @@ export default function FilterBar({
     return () => { mounted = false; };
   }, [equipeConfigs.length, setEquipeConfigs]);
 
-  // Carrega colaboradores (fallback)
+  // ============================================================
+  // CARREGA COLABORADORES (FALLBACK)
+  // ============================================================
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -204,10 +218,21 @@ export default function FilterBar({
     return () => { mounted = false; };
   }, [collaborators.length, setCollaborators]);
 
-  // Aplica restrições de acesso (uma única vez)
+  // ============================================================
+  // APLICA RESTRIÇÕES DE ACESSO (UMA ÚNICA VEZ)
+  // CORREÇÃO: só roda quando há usuário logado; caso contrário,
+  // já marca restrictions como aplicadas após ready para que
+  // o notify inicial possa disparar.
+  // ============================================================
   useEffect(() => {
-    if (!currentUser) return;
+    if (!isReady) return;
     if (hasAppliedRestrictions) return;
+
+    if (!currentUser) {
+      // Sem usuário, nada a restringir — libera o fluxo inicial.
+      setHasAppliedRestrictions(true);
+      return;
+    }
 
     console.log('🔒 FilterBar: aplicando restrições de acesso para', currentUser.cargo);
 
@@ -225,9 +250,11 @@ export default function FilterBar({
       setSearchTerm(initialStored.searchTerm);
     }
     setHasAppliedRestrictions(true);
-  }, [currentUser, isAssessor, isSupervisor, hasAppliedRestrictions, userTeam, initialStored]);
+  }, [isReady, currentUser, isAssessor, isSupervisor, hasAppliedRestrictions, userTeam, initialStored]);
 
-  // Efeito de sincronização forçada: garante que a equipe do supervisor/assessor fique sempre correta
+  // ============================================================
+  // SINCRONIZAÇÃO FORÇADA: assessor/supervisor sempre na sua equipe
+  // ============================================================
   useEffect(() => {
     if (!currentUser) return;
     if (!isAssessor && !isSupervisor) return;
@@ -236,15 +263,24 @@ export default function FilterBar({
     }
   }, [currentUser, isAssessor, isSupervisor, userTeam, selectedEquipe]);
 
-  // Sincronia equipe ⇄ produto
+  // ============================================================
+  // SINCRONIA EQUIPE ⇄ PRODUTO
+  // CORREÇÃO: agora também notifica o pai quando o produto
+  // é ajustado automaticamente pela equipe.
+  // ============================================================
   useEffect(() => {
+    if (!isReady || !hasAppliedRestrictions) return;
     if (selectedEquipe && TEAM_TO_PRODUCT[selectedEquipe]) {
       const mapped = TEAM_TO_PRODUCT[selectedEquipe];
-      if (selectedProduto !== mapped) setSelectedProduto(mapped);
+      if (selectedProduto !== mapped) {
+        setSelectedProduto(mapped);
+      }
     }
-  }, [selectedEquipe]);
+  }, [selectedEquipe, isReady, hasAppliedRestrictions]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Lista de equipes disponíveis
+  // ============================================================
+  // LISTA DE EQUIPES DISPONÍVEIS
+  // ============================================================
   const equipesDisponiveis = useMemo(() => {
     let nomes = equipeConfigs.map((eq) => eq.nome).filter((nome) => !isExcludedTeam(nome));
     if ((isAssessor || isSupervisor) && currentUser) {
@@ -253,7 +289,9 @@ export default function FilterBar({
     return ["todas", ...nomes];
   }, [equipeConfigs, isAssessor, isSupervisor, currentUser, userTeam]);
 
-  // Colaboradores filtrados
+  // ============================================================
+  // COLABORADORES FILTRADOS (para o dropdown)
+  // ============================================================
   const filteredColaboradores = useMemo(() => {
     if (!isReady || !collaborators.length) return [];
     let filtered = [...collaborators];
@@ -282,7 +320,23 @@ export default function FilterBar({
     return filtered;
   }, [collaborators, selectedEquipe, isAssessor, isSupervisor, currentUser, searchTerm, isReady, userTeam]);
 
-  // Notifica o pai imediatamente
+  // ============================================================
+  // GARANTE QUE O COLABORADOR SELECIONADO ESTEJA NA LISTA
+  // CORREÇÃO: se o selecionado não existir na lista filtrada,
+  // adiciona ele como fallback (evita select mostrando vazio).
+  // ============================================================
+  const colaboradoresParaSelect = useMemo(() => {
+    if (selectedColaborador === "todos") return filteredColaboradores;
+    const exists = filteredColaboradores.some(c => c.name === selectedColaborador);
+    if (exists) return filteredColaboradores;
+    const selected = collaborators.find(c => c.name === selectedColaborador);
+    if (!selected) return filteredColaboradores;
+    return [selected, ...filteredColaboradores];
+  }, [filteredColaboradores, selectedColaborador, collaborators]);
+
+  // ============================================================
+  // NOTIFICA O PAI (referência estável)
+  // ============================================================
   const onFilterChangeRef = useRef(onFilterChange);
   useEffect(() => {
     onFilterChangeRef.current = onFilterChange;
@@ -292,16 +346,17 @@ export default function FilterBar({
     equipe: string,
     colaborador: string,
     produto: string,
-    search?: string
+    _search?: string
   ) => {
-    if (!isReady || !hasAppliedRestrictions || !currentUser) return;
+    if (!isReady || !hasAppliedRestrictions) return;
 
     let finalEquipe = equipe;
     let finalColaborador = colaborador;
-    if (isAssessor && currentUser) {
+
+    if (currentUser && isAssessor) {
       finalEquipe = userTeam || "todas";
       finalColaborador = currentUser.nome || "todos";
-    } else if (isSupervisor && currentUser) {
+    } else if (currentUser && isSupervisor) {
       finalEquipe = userTeam || "todas";
       finalColaborador = colaborador;
     }
@@ -319,9 +374,11 @@ export default function FilterBar({
     });
   };
 
-  // Persistência no localStorage
+  // ============================================================
+  // PERSISTÊNCIA NO LOCALSTORAGE
+  // ============================================================
   useEffect(() => {
-    const state = {
+    const state: StoredFilters = {
       equipe: selectedEquipe,
       colaborador: selectedColaborador,
       produto: selectedProduto,
@@ -330,29 +387,50 @@ export default function FilterBar({
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [selectedEquipe, selectedColaborador, selectedProduto, searchTerm]);
 
-  // Notifica o pai após ready + restrições
+  // ============================================================
+  // NOTIFICA O PAI APÓS READY + RESTRIÇÕES
+  // CORREÇÃO: dispara mesmo sem currentUser (após ready),
+  // evitando que o pai fique sem os filtros iniciais.
+  // ============================================================
   const initialNotifyDone = useRef(false);
   useEffect(() => {
-    if (isReady && hasAppliedRestrictions && !initialNotifyDone.current) {
-      initialNotifyDone.current = true;
-      notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
-    }
+    if (!isReady || !hasAppliedRestrictions) return;
+    if (initialNotifyDone.current) return;
+    initialNotifyDone.current = true;
+    notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
   }, [isReady, hasAppliedRestrictions, selectedEquipe, selectedColaborador, selectedProduto, searchTerm]);
 
-  // Handlers de mudança
+  // ============================================================
+  // HANDLERS
+  // ============================================================
   const handleEquipeChange = (novaEquipe: string) => {
     setSelectedEquipe(novaEquipe);
+
     const produtoMapeado = TEAM_TO_PRODUCT[novaEquipe] || selectedProduto;
     if (TEAM_TO_PRODUCT[novaEquipe]) {
       setSelectedProduto(produtoMapeado);
     }
-    notifyParent(novaEquipe, selectedColaborador, produtoMapeado);
+
+    // CORREÇÃO: se o colaborador selecionado não pertence à nova
+    // equipe, reseta para "todos" para manter consistência.
+    let nextColaborador = selectedColaborador;
+    if (selectedColaborador !== "todos" && novaEquipe !== "todas") {
+      const stillInTeam = collaborators.some(
+        (c) => c.name === selectedColaborador && normalize(c.equipeNome) === normalize(novaEquipe)
+      );
+      if (!stillInTeam) {
+        nextColaborador = "todos";
+        setSelectedColaborador("todos");
+        if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+      }
+    }
+
+    notifyParent(novaEquipe, nextColaborador, produtoMapeado);
   };
 
   const handleColaboradorChange = (novoColaborador: string) => {
     setSelectedColaborador(novoColaborador);
-    
-    // Atualiza o e-mail do colaborador selecionado na store
+
     if (novoColaborador !== "todos") {
       const selected = collaborators.find(c => c.name === novoColaborador);
       if (selected && setSelectedCollaboratorEmail) {
@@ -363,7 +441,7 @@ export default function FilterBar({
     } else {
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
     }
-    
+
     notifyParent(selectedEquipe, novoColaborador, selectedProduto);
   };
 
@@ -374,13 +452,14 @@ export default function FilterBar({
 
   const handleSearchChange = (novoTermo: string) => {
     setSearchTerm(novoTermo);
-    if (!isReady || !hasAppliedRestrictions || !currentUser) return;
+    if (!isReady || !hasAppliedRestrictions) return;
+
     let finalEquipe = selectedEquipe;
     let finalColaborador = selectedColaborador;
-    if (isAssessor && currentUser) {
+    if (currentUser && isAssessor) {
       finalEquipe = userTeam || "todas";
       finalColaborador = currentUser.nome || "todos";
-    } else if (isSupervisor && currentUser) {
+    } else if (currentUser && isSupervisor) {
       finalEquipe = userTeam || "todas";
     }
     const colaboradorId =
@@ -447,7 +526,9 @@ export default function FilterBar({
   const isColaboradorDisabled = isAssessor || loadingCollaborators || !isReady;
   const isProdutoDisabled = !!selectedEquipe && TEAM_TO_PRODUCT[selectedEquipe] !== undefined;
 
-  // Render
+  // ============================================================
+  // RENDER: LOADING
+  // ============================================================
   if (!isReady || loadingEquipes || loadingCollaborators) {
     return (
       <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
@@ -459,6 +540,9 @@ export default function FilterBar({
     );
   }
 
+  // ============================================================
+  // RENDER: ERRO
+  // ============================================================
   if (colabError) {
     return (
       <div className={cn("bg-white rounded-xl border border-red-200 shadow-sm p-4", className)}>
@@ -478,6 +562,9 @@ export default function FilterBar({
     );
   }
 
+  // ============================================================
+  // RENDER PRINCIPAL
+  // ============================================================
   return (
     <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
       <div className="flex flex-col gap-4">
@@ -531,7 +618,7 @@ export default function FilterBar({
               </label>
               <select
                 id="filterColaborador"
-                key={filteredColaboradores.length}
+                key={colaboradoresParaSelect.length}
                 value={selectedColaborador}
                 onChange={(e) => handleColaboradorChange(e.target.value)}
                 disabled={isColaboradorDisabled}
@@ -543,10 +630,10 @@ export default function FilterBar({
                 title="Selecione um colaborador para filtrar os dados"
               >
                 <option value="todos">Todos os colaboradores</option>
-                {filteredColaboradores.length === 0 && (
+                {colaboradoresParaSelect.length === 0 && (
                   <option disabled>Nenhum colaborador disponível</option>
                 )}
-                {filteredColaboradores.map((colab) => (
+                {colaboradoresParaSelect.map((colab) => (
                   <option key={colab.id} value={colab.name}>
                     {colab.name}
                     {!isAssessor && !isSupervisor && selectedEquipe === "todas"

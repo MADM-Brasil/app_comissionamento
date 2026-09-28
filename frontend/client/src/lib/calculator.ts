@@ -9,7 +9,7 @@ export interface CalculatorConfig {
   bonusExtraPorMeta: number;
 }
 
-export interface TeamMember {
+export interface TeamMember { 
   id?: string | number;
   nome?: string;
   ganhos?: number;
