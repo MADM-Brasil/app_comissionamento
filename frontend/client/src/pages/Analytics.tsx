@@ -23,6 +23,7 @@ import {
   fetchGanhos,
   fetchProtocolados,
   fetchPerdidos,
+  fetchLigacoesProdutivas,
 } from "@/lib/api";
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
@@ -137,6 +138,7 @@ export default function Analytics() {
   const [dailyChartData, setDailyChartData] = useState<any[]>([]);
   const [totalLeads, setTotalLeads] = useState(0);
   const [totalAssinados, setTotalAssinados] = useState(0);
+  const [totalLigacoesProdutivas, setTotalLigacoesProdutivas] = useState(0);
   const [apiError, setApiError] = useState<string | null>(null);
 
   const [userBonus, setUserBonus] = useState<number | null>(null);
@@ -172,6 +174,8 @@ export default function Analytics() {
 
       setDailyChartData([]);
       setTotalLeads(0);
+      setTotalAssinados(0);
+      setTotalLigacoesProdutivas(0);
     } catch (err: any) {
       console.error("❌ Analytics: erro ao recarregar dados:", err);
       setError(err.message || "Falha ao recarregar dados.");
@@ -244,8 +248,9 @@ export default function Analytics() {
         const colaboradorApi = colaborador === "todos" ? undefined : colaborador;
         const produtoApi = produto === "Todos" ? undefined : produto;
         const baseParams = { start: chartDateRange.start, end: chartDateRange.end, equipe: equipeApi, colaborador: colaboradorApi, colaboradorId, produto: produtoApi, granularity: 'daily' as const };
-        const [leadsData, assinadosData, ganhosData, protocoladosData, perdidosData] = await Promise.all([
+        const [leadsData, assinadosData, ganhosData, protocoladosData, perdidosData, ligacoesProdutivas] = await Promise.all([
           fetchLeadsRecebidos(baseParams), fetchAssinados(baseParams), fetchGanhos(baseParams), fetchProtocolados(baseParams), fetchPerdidos(baseParams),
+          fetchLigacoesProdutivas(baseParams),
         ]);
         if (signal.aborted) return;
         const dataMap = new Map<string, { leads: number; assinados: number; ganhos: number; protocolados: number; perdidos: number }>();
@@ -275,6 +280,7 @@ export default function Analytics() {
         setDailyChartData(chartArray); lastFetchChartTime.current = Date.now();
         setTotalLeads(Array.from(dataMap.values()).reduce((s,v)=>s+v.leads,0));
         setTotalAssinados(Array.from(dataMap.values()).reduce((s,v)=>s+v.assinados,0));
+        setTotalLigacoesProdutivas(ligacoesProdutivas);
         setApiError(null);
       } catch (err: any) { if (err.name !== 'AbortError') setApiError(err.message||"Erro ao carregar dados do gráfico"); }
       finally { isFetchingRef.current = false; }
@@ -316,7 +322,8 @@ export default function Analytics() {
     return Math.floor(Math.min(assinados/(pesoAss||1), ganhos/(pesoGan||1)));
   }, [currentUserData, periodoMetaUser, isSpecialGroup]);
   const userBonusCiclo = userBonus!==null ? userBonus : 0;
-  const taxaConversaoGeral = totalLeads>0 ? (totalAssinados/totalLeads)*100 : 0;
+  const totalBaseConversao = totalLeads + totalLigacoesProdutivas;
+  const taxaConversaoGeral = totalBaseConversao > 0 ? (totalAssinados / totalBaseConversao) * 100 : 0;
   const mediaDiariaVendas = dailyChartData.length>0 ? totalAssinados/dailyChartData.length : 0;
 
   const funnelChartData = [
