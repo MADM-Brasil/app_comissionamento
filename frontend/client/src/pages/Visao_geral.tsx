@@ -42,7 +42,7 @@ import {
   ResponsiveContainer,
   Cell,
 } from "recharts";
-import { fetchLeadsRecebidos } from "@/lib/api";
+import { fetchLeadsRecebidos, fetchLigacoesProdutivas } from "@/lib/api";
 
 // ========== CONSTANTES DE EXCLUSÃO ==========
 const EXCLUDED_TEAMS = [
@@ -160,6 +160,7 @@ export default function VisaoGeral() {
   const [refreshing, setRefreshing] = useState(false);
   const [modalAberto, setModalAberto] = useState<"discador" | "judit" | null>(null);
   const [totalLeads, setTotalLeads] = useState(0);
+  const [totalLigacoesProdutivas, setTotalLigacoesProdutivas] = useState(0);
 
   const lastFetchLeads = useRef<number>(0);
   const LEADS_CACHE_TTL = 60000;
@@ -170,6 +171,7 @@ export default function VisaoGeral() {
   // -----------------------------------------------------------
   useEffect(() => {
     setTotalLeads(0);
+    setTotalLigacoesProdutivas(0);
     lastFetchLeads.current = 0;
   }, [currentStartDate, currentEndDate, filters]);
 
@@ -177,7 +179,7 @@ export default function VisaoGeral() {
   const fetchLeadsData = useCallback(async () => {
     if (!currentStartDate || !currentEndDate) return;
     const now = Date.now();
-    if (totalLeads > 0 && (now - lastFetchLeads.current) < LEADS_CACHE_TTL) return;
+    if (lastFetchLeads.current > 0 && (now - lastFetchLeads.current) < LEADS_CACHE_TTL) return;
 
     try {
       const equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
@@ -190,14 +192,18 @@ export default function VisaoGeral() {
         colaborador: colaboradorApi,
         produto: produtoApi,
       };
-      const leadsData = await fetchLeadsRecebidos(params);
+      const [leadsData, ligacoesProdutivas] = await Promise.all([
+        fetchLeadsRecebidos(params),
+        fetchLigacoesProdutivas(params),
+      ]);
       const total = leadsData.reduce((sum: number, item: any) => sum + (Number(item.total) || 0), 0);
       setTotalLeads(total);
+      setTotalLigacoesProdutivas(ligacoesProdutivas);
       lastFetchLeads.current = Date.now();
     } catch (err) {
       console.error("Erro ao buscar leads:", err);
     }
-  }, [currentStartDate, currentEndDate, filters, totalLeads]);
+  }, [currentStartDate, currentEndDate, filters]);
 
   // Função principal de carregamento
   const fetchData = useCallback(async (showRefreshing = false) => {
@@ -326,8 +332,9 @@ export default function VisaoGeral() {
   const totalEmitidos = rawMetrics.emitidos;
   const totalPerdidos = rawMetrics.perdidos;
 
-  // Conversão geral: Assinados / Leads
-  const conversaoGeral = totalLeads > 0 ? (totalAssinados / totalLeads) * 100 : 0;
+  // Conversão geral: Assinados / (ligações produtivas + recebidos)
+  const totalContatosConversao = totalLigacoesProdutivas + totalLeads;
+  const conversaoGeral = totalContatosConversao > 0 ? (totalAssinados / totalContatosConversao) * 100 : 0;
 
   const periodoSelecionado = { inicio: currentStartDate, fim: currentEndDate };
   const diasUteisPeriodoSelecionado = useMemo(() => contarDiasUteis(periodoSelecionado), [periodoSelecionado]);

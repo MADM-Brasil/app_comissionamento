@@ -1,7 +1,6 @@
 // src/lib/metrics.ts
 import { Period } from '@/contexts/period';
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
+import { API_BASE } from '@/lib/api';
 
 // ============================================================
 // MÉTRICAS DE DESEMPENHO (EMITIDOS, ASSINADOS, ETC.)

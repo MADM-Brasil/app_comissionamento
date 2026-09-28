@@ -24,6 +24,7 @@ import {
   fetchPerdidos,
   fetchCollaborators,
   fetchProtocolados,
+  fetchLigacoesProdutivas,
 } from "@/lib/api";
 
 // ============================================================
@@ -398,18 +399,23 @@ export default function Home() {
       await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
       await loadWeeklyPerformanceData();
 
-      const leadsData = await fetchLeadsRecebidos({
-       start: currentStartDate,
-       end: currentEndDate,
-       equipe: equipeApi,
-       colaborador: colaboradorApi,
-       produto: produtoApi,
-      });
+      const metricParams = {
+        start: currentStartDate,
+        end: currentEndDate,
+        equipe: equipeApi,
+        colaborador: colaboradorApi,
+        produto: produtoApi,
+      };
+      const [leadsData, ligacoesProdutivas] = await Promise.all([
+        fetchLeadsRecebidos(metricParams),
+        fetchLigacoesProdutivas(metricParams),
+      ]);
       const totalLeadsRecebidos = (leadsData || []).reduce(
        (acc, item) => acc + (Number(item.total) || 0),
         0
       );
       setTotalLeads(totalLeadsRecebidos);
+      setTotalLigacoesProdutivas(ligacoesProdutivas);
 
       await loadWeeklyPerformanceData();
 
@@ -558,6 +564,7 @@ export default function Home() {
 
   const totals = rawMetrics;
   const [totalLeads, setTotalLeads] = useState(0);
+  const [totalLigacoesProdutivas, setTotalLigacoesProdutivas] = useState(0);
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
   const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos";
 
@@ -751,7 +758,8 @@ export default function Home() {
     return { totalAssinados, totalGanhos, performanceAssinados, performanceGanhos, bestDay: best, avgGanhos, daysWithMeta, totalDays };
   }, [isSpecialGroup, weeklyDetailed, displayCollaborators, totalTargetGanhos]);
   
-  const conversaoPercentual = totalLeads > 0 ? (totals.assinados / totalLeads) * 100 : 0;
+  const totalBaseConversao = totalLeads + totalLigacoesProdutivas;
+  const conversaoPercentual = totalBaseConversao > 0 ? (totals.assinados / totalBaseConversao) * 100 : 0;
 
   const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
 

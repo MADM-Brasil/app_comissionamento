@@ -1,7 +1,6 @@
 // src/lib/auth.ts
 import { useAppStore } from "@/lib/dataStore";
-
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3007/api';
+import { API_BASE } from "@/lib/api";
 
 export interface UserData {
   id: string;               // e‑mail (identificador único)

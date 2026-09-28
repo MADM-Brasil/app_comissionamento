@@ -192,6 +192,51 @@ export async function fetchLeadsRecebidos(params: MetricParams): Promise<{ data:
   return data.data || [];
 }
 
+export async function fetchLigacoesProdutivas(params: MetricParams): Promise<number> {
+  const url = buildMetricUrl(`${API_BASE}/metrics/ligacoes-produtivas`, params);
+  const res = await fetch(url, { credentials: 'include', signal: params.signal });
+  const data = await handleResponse(res, 'Erro ao carregar ligações produtivas');
+  return Number(data.total) || 0;
+}
+
+export interface CallMetrics {
+  periodo?: string;
+  colaborador: string;
+  equipe: string;
+  campanha: string;
+  total_ligacoes: number;
+  leads_distintos: number;
+  produtivas: number;
+  agendamentos: number;
+  ocorrencias: number;
+  insucessos: number;
+  tma_medio: number | null;
+}
+
+export type CallTabulationCategory = 'productive' | 'appointments' | 'occurrences' | 'failures';
+
+export interface CallTabulation {
+  tabulacao: string;
+  total: number;
+}
+
+export async function fetchLigacoes(params: MetricParams): Promise<CallMetrics[]> {
+  const url = buildMetricUrl(`${API_BASE}/metrics/ligacoes`, params);
+  const res = await fetch(url, { credentials: 'include', signal: params.signal });
+  const data = await handleResponse(res, 'Erro ao carregar métricas de ligações');
+  return data.data || [];
+}
+
+export async function fetchLigacoesTabulacoes(
+  params: MetricParams & { categoria: CallTabulationCategory },
+): Promise<CallTabulation[]> {
+  const url = new URL(buildMetricUrl(`${API_BASE}/metrics/ligacoes/tabulacoes`, params), window.location.origin);
+  url.searchParams.append('categoria', params.categoria);
+  const res = await fetch(url.toString(), { credentials: 'include', signal: params.signal });
+  const data = await handleResponse(res, 'Erro ao carregar tabulações das ligações');
+  return data.data || [];
+}
+
 // ============================================================
 // PERFORMANCE SEMANAL
 // ============================================================

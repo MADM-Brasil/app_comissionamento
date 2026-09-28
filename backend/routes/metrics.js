@@ -34,6 +34,37 @@ function normalize(str) {
   return (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
+const QUALIFICATIONS = {
+  productive: [
+    'Transferida a Outro Módulo',
+    'SMS Enviado',
+    'Pediu contato via WhatsApp',
+    'Coleta de documentacao',
+    'Emissao de contrato',
+    'Tratativa via WhatsApp',
+    'Ja tem advogado',
+    'Ja em processo de revisao',
+    'Ja revisado',
+  ],
+  appointments: ['Retornar ligacao', 'Trabalhando', 'Ja tem advogado'],
+  occurrences: [
+    'Nao tabulada - tempo excedido', 'Não tabulada - tempo excedido',
+    'Mudo', 'Queda de ligacao', 'Queda de ligação', 'Caixa postal',
+  ],
+  failures: [
+    'Sem interesse', 'Nao pertence ao cliente', 'Faleceu', 'Ja tem acao',
+    'Nao tem direito', 'Nunca trabalhou de carteira assinada', 'Nunca sofreu acidente',
+    'Cliente desconhece o cadastro', 'Nao quer mais contato', 'Nao concomitante',
+    'Nao aposentado', 'Fora do periodo aquisitivo', 'Pensionista', 'Aposentadoria RPPS',
+    'Aposentado antes de 2015', 'BPC - LOAS Desqualificado', 'BPC - LOAS Ganho',
+    'Ja recebe o auxilio-acidente', 'Em processo com a MADM', 'Sem sequela',
+    'Aposentado', 'Sem documentacao', 'Contribuinte individual - autonomo',
+    'Acidente a mais de 20 anos', 'Ja tem advogado', 'Ja tem processo de auxilio acidente',
+    'Cliente Atritado', 'Ja em processo de revisao', 'Recebendo auxilio-doenca',
+    'Acidente recente', 'Fora do periodo de graca', 'Cliente desqualificado',
+  ],
+};
+
 // --- EMITIDOS ---
 router.get('/emitidos', requireAuth, async (req, res) => {
   try {
@@ -529,6 +560,162 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /leads-recebidos:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- METRICAS DE LIGACOES ---
+router.get('/ligacoes', requireAuth, async (req, res) => {
+  try {
+    const { start, end, equipe, colaborador, granularity } = req.query;
+    if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+
+    const gran = mapGranularity(granularity);
+    let query = `
+      SELECT
+        agent_name AS colaborador,
+        equipe,
+        campaign_name AS campanha,
+        COUNT(*)::int AS total_ligacoes,
+        COUNT(DISTINCT lead_id)::int AS leads_distintos,
+        COUNT(*) FILTER (WHERE qualification_name = ANY($3::text[]))::int AS produtivas,
+        COUNT(*) FILTER (WHERE qualification_name = ANY($4::text[]))::int AS agendamentos,
+        COUNT(*) FILTER (WHERE LOWER(BTRIM(qualification_name)) = ANY($5::text[]))::int AS ocorrencias,
+        COUNT(*) FILTER (WHERE qualification_name = ANY($6::text[]))::int AS insucessos,
+        AVG(tma)::numeric(12, 2) AS tma_medio
+    `;
+    if (gran) {
+      query = `
+        SELECT
+          (DATE_TRUNC('${gran}', call_date) AT TIME ZONE 'UTC')::date AS periodo,
+          agent_name AS colaborador,
+          equipe,
+          campaign_name AS campanha,
+          COUNT(*)::int AS total_ligacoes,
+          COUNT(DISTINCT lead_id)::int AS leads_distintos,
+          COUNT(*) FILTER (WHERE qualification_name = ANY($3::text[]))::int AS produtivas,
+          COUNT(*) FILTER (WHERE qualification_name = ANY($4::text[]))::int AS agendamentos,
+          COUNT(*) FILTER (WHERE LOWER(BTRIM(qualification_name)) = ANY($5::text[]))::int AS ocorrencias,
+          COUNT(*) FILTER (WHERE qualification_name = ANY($6::text[]))::int AS insucessos,
+          AVG(tma)::numeric(12, 2) AS tma_medio
+      `;
+    }
+    query += `
+      FROM madm.view_base_olos_temp
+      WHERE call_date::date >= $1::date
+        AND call_date::date < $2::date
+    `;
+    const params = [
+      start,
+      end,
+      QUALIFICATIONS.productive,
+      QUALIFICATIONS.appointments,
+      QUALIFICATIONS.occurrences.map(value => value.trim().toLowerCase()),
+      QUALIFICATIONS.failures,
+    ];
+    let idx = 7;
+
+    if (equipe && equipe !== 'todas') {
+      query += ` AND LOWER(TRIM(equipe)) = LOWER(TRIM($${idx}))`;
+      params.push(equipe);
+      idx++;
+    }
+    if (colaborador) {
+      query += ` AND LOWER(TRIM(agent_name)) = LOWER(TRIM($${idx}))`;
+      params.push(colaborador);
+      idx++;
+    }
+    if (gran) {
+      query += ` GROUP BY DATE_TRUNC('${gran}', call_date), agent_name, equipe, campaign_name ORDER BY periodo, colaborador`;
+    } else {
+      query += ` GROUP BY agent_name, equipe, campaign_name ORDER BY colaborador`;
+    }
+
+    const result = await db.query(query, params);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Erro em /ligacoes:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
+  try {
+    const { start, end, equipe, colaborador, categoria } = req.query;
+    if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+
+    const categories = {
+      productive: QUALIFICATIONS.productive,
+      appointments: QUALIFICATIONS.appointments,
+      occurrences: QUALIFICATIONS.occurrences,
+      failures: QUALIFICATIONS.failures,
+    };
+    const qualifications = typeof categoria === 'string' ? categories[categoria] : null;
+    if (!qualifications) return res.status(400).json({ success: false, error: 'categoria inválida' });
+
+    let query = `
+      SELECT qualification_name AS tabulacao, COUNT(*)::int AS total
+      FROM madm.view_base_olos_temp
+      WHERE call_date::date >= $1::date
+        AND call_date::date < $2::date
+        AND LOWER(BTRIM(qualification_name)) = ANY($3::text[])
+    `;
+    const params = [start, end, qualifications.map(value => value.trim().toLowerCase())];
+    let idx = 4;
+
+    if (equipe && equipe !== 'todas') {
+      query += ` AND LOWER(TRIM(equipe)) = LOWER(TRIM($${idx}))`;
+      params.push(equipe);
+      idx++;
+    }
+    if (colaborador) {
+      query += ` AND LOWER(TRIM(agent_name)) = LOWER(TRIM($${idx}))`;
+      params.push(colaborador);
+    }
+
+    query += ` GROUP BY qualification_name ORDER BY total DESC, tabulacao`;
+    const result = await db.query(query, params);
+    res.json({
+      success: true,
+      data: result.rows.map(row => ({ ...row, total: Number(row.total) || 0 })),
+    });
+  } catch (err) {
+    console.error('Erro em /ligacoes/tabulacoes:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- LIGACOES PRODUTIVAS ---
+router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
+  try {
+    const { start, end, equipe, colaborador } = req.query;
+    if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+
+    let query = `
+      SELECT COUNT(*)::int AS total
+      FROM madm.view_base_olos_temp
+      WHERE qualification_name = ANY($1::text[])
+        AND call_date::date >= $2::date
+        AND call_date::date < $3::date
+    `;
+    const params = [QUALIFICATIONS.productive, start, end];
+    let idx = 4;
+
+    if (equipe && equipe !== 'todas') {
+      query += ` AND LOWER(TRIM(equipe)) = LOWER(TRIM($${idx}))`;
+      params.push(equipe);
+      idx++;
+    }
+    if (colaborador) {
+      query += ` AND LOWER(TRIM(agent_name)) = LOWER(TRIM($${idx}))`;
+      params.push(colaborador);
+    }
+
+    const result = await db.query(query, params);
+
+    res.json({ success: true, total: Number(result.rows[0]?.total) || 0 });
+  } catch (err) {
+    console.error('Erro em /ligacoes-produtivas:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
