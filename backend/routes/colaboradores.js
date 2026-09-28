@@ -120,7 +120,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       const produto = isJudit ? 'Judit' : mapGrupoToProduto(colab.cargo, colab.classificacao_operacional);
 
       // Verifica se o e‑mail está na lista de Supervisores SR
-      const isSupervisorSR = SUPERVISORES_SR_EMAILS.includes(colab.email);
+      const isSupervisorSR = SUPERVISORES_SR_EMAILS.some(email => normalize(email) === emailNormalizado);
 
       return {
         id: colab.email,

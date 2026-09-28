@@ -577,7 +577,7 @@ export default function Home() {
     }
 
     const isSupervisor = (currentUserData.cargo || '').toLowerCase() === 'supervisor';
-    const isSR = calculator.isSupervisorSR(currentUserData.email);
+    const isSR = Boolean(currentUserData.isSupervisorSR) || calculator.isSupervisorSR(currentUserData.email);
     const isEspecial = isSpecialGroupColaborador(currentUserData);
 
     if (isSupervisor) {

@@ -2,7 +2,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
-import { useAppStore, formatCurrency } from "@/lib/dataStore";
+import { useAppStore, formatCurrency, type Campaign, type Collaborator, type TabelaComissaoItem } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import {
   DollarSign, Award, FileCheck, Target, Loader2, RefreshCw,
@@ -16,6 +16,8 @@ import {
 import { calculator } from "@/lib/calculator";
 import { fetchDailyMetrics } from "@/lib/metrics";
 import {
+  fetchAssinados,
+  fetchGanhos,
   fetchLigacoes,
   fetchLigacoesTabulacoes,
   type CallMetrics,
@@ -41,6 +43,90 @@ const EXCLUDED_CARGOS = [
 ];
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
+const normalizeName = (text: string) => normalizeText(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+type CommissionOverviewRole = 'assessor' | 'supervisor' | 'coordenador';
+
+interface CommissionOverviewItem {
+  id: string;
+  name: string;
+  team: string;
+  role: CommissionOverviewRole;
+  assinados: number;
+  commission: number | null;
+  isSupervisorSR: boolean;
+  collaborator: Collaborator;
+}
+
+function getCommissionOverviewRole(colaborador: Collaborator): CommissionOverviewRole | null {
+  const cargo = normalizeName(colaborador.cargo);
+  const status = normalizeName(colaborador.status);
+  if (!cargo || status === 'inativo' || status === 'desativado') return null;
+  if (cargo === 'supervisor' || cargo === 'supervisor sr') return 'supervisor';
+  if (cargo === 'coordenador') return 'coordenador';
+  if (EXCLUDED_CARGOS.some(excluded => normalizeName(excluded) === cargo)) return null;
+  return 'assessor';
+}
+
+function mapDailyMetricsByCollaborator(assinadosRows: any[], ganhosRows: any[]) {
+  const metrics = new Map<string, Map<string, { date: string; assinados: number; ganhos: number }>>();
+  const addRows = (rows: any[], field: 'assinados' | 'ganhos') => {
+    rows.forEach(row => {
+      const collaboratorKey = normalizeName(row.colaborador || '');
+      const rawDate = row.periodo || row.data;
+      if (!collaboratorKey || !rawDate) return;
+      const date = String(rawDate).slice(0, 10);
+      if (!metrics.has(collaboratorKey)) metrics.set(collaboratorKey, new Map());
+      const byDate = metrics.get(collaboratorKey)!;
+      const day = byDate.get(date) || { date, assinados: 0, ganhos: 0 };
+      day[field] += Number(row.total) || 0;
+      byDate.set(date, day);
+    });
+  };
+
+  addRows(assinadosRows, 'assinados');
+  addRows(ganhosRows, 'ganhos');
+
+  return new Map(Array.from(metrics, ([name, byDate]) => [
+    name,
+    Array.from(byDate.values()).sort((left, right) => left.date.localeCompare(right.date)),
+  ]));
+}
+
+function sumTeamAssinados(collaborators: any[], teamName: string): number {
+  return collaborators.reduce((total, collaborator) => {
+    if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
+
+    const cargo = normalizeText(collaborator.cargo);
+    if (cargo.startsWith('supervisor') || cargo === 'coordenador' || cargo === 'administrativo') return total;
+
+    return total + (Number(collaborator.assinados) || 0);
+  }, 0);
+}
+
+function calculateAssessorCommission(
+  collaborator: Collaborator,
+  dailyMetrics: Array<{ date: string; assinados: number; ganhos: number }>,
+  commissionBands: TabelaComissaoItem[],
+  campaigns: Campaign[],
+): number {
+  const assinados = dailyMetrics.reduce((total, day) => total + day.assinados, 0);
+  const isSpecial = isSpecialGroupColaborador(collaborator);
+  const productType = getFaixaProductType(collaborator);
+  const commissionAssinados = calculator.calculateProductCommission(assinados, productType, commissionBands);
+  if (isSpecial || dailyMetrics.length === 0) return commissionAssinados;
+
+  const result = calculator.calculateTotalCommission(
+    dailyMetrics,
+    collaborator.metaGolsAssinados ?? 3,
+    collaborator.metaGolsGanhos ?? 3,
+    assinados,
+    productType,
+    commissionBands,
+    campaigns.filter(campaign => campaign.validacao_financeiro),
+  );
+  return result.totalCommission;
+}
 
 function isSpecialGroupColaborador(colaborador: any): boolean {
   const produto = (colaborador.produto || '').toLowerCase();
@@ -227,6 +313,7 @@ export default function Comissoes() {
 
   const { currentUser, hasPermission } = useAccessControl();
   const canUseFilterBar = hasPermission("canViewTeam") || hasPermission("canAccessReports");
+  const canViewCommissionOverview = hasPermission("canAccessReports");
 
   const [filters, setFilters] = useState<{
     equipe: string;
@@ -243,11 +330,17 @@ export default function Comissoes() {
   const [weeklyMetrics, setWeeklyMetrics] = useState<any[]>([]);
   const [weeklyGols, setWeeklyGols] = useState<any[]>([]);
   const [callMetrics, setCallMetrics] = useState<CallMetrics[]>([]);
+  const [commissionOverview, setCommissionOverview] = useState<CommissionOverviewItem[]>([]);
+  const [commissionOverviewLoading, setCommissionOverviewLoading] = useState(false);
+  const [commissionOverviewError, setCommissionOverviewError] = useState<string | null>(null);
+  const [commissionOverviewSearch, setCommissionOverviewSearch] = useState('');
+  const [updatingCommissionId, setUpdatingCommissionId] = useState<string | null>(null);
   const [expandedCallStage, setExpandedCallStage] = useState<CallTabulationCategory | null>(null);
   const [callTabulations, setCallTabulations] = useState<CallTabulation[]>([]);
   const [loadingCallTabulations, setLoadingCallTabulations] = useState(false);
   const [callTabulationsError, setCallTabulationsError] = useState<string | null>(null);
   const callTabulationsRequest = useRef(0);
+  const commissionOverviewRequest = useRef(0);
   const [loadingDaily, setLoadingDaily] = useState(false);
   const [showExtrato, setShowExtrato] = useState(false);
   const isLoadingRef = useRef(false);
@@ -281,6 +374,23 @@ export default function Comissoes() {
         }
       }
 
+      const collaboratorsForSelection = useAppStore.getState().collaborators;
+      const requestedColaborador = canUseFilterBar
+        ? collaboratorsForSelection.find(c =>
+          (colaboradorIdApi != null && String(c.id) === String(colaboradorIdApi)) ||
+          (colaboradorApi != null && c.name === colaboradorApi)
+        ) || (filters.colaborador === 'todos'
+          ? collaboratorsForSelection.find(c => String(c.id) === String(currentUser.id))
+          : undefined)
+        : collaboratorsForSelection.find(c => String(c.id) === String(currentUser.id));
+      const isSupervisorSelection = normalizeText(requestedColaborador?.cargo || '') === 'supervisor';
+
+      if (isSupervisorSelection && requestedColaborador) {
+        equipeApi = requestedColaborador.equipeNome || equipeApi;
+        colaboradorApi = undefined;
+        colaboradorIdApi = undefined;
+      }
+
       const [calls] = await Promise.all([
         fetchLigacoes({
           start: currentStartDate,
@@ -301,9 +411,13 @@ export default function Comissoes() {
       let targetColab: any;
 
       if (canUseFilterBar) {
-        targetColab = colaboradoresAtualizados.find(c => c.id === colaboradorIdApi || c.name === colaboradorApi);
+        targetColab = requestedColaborador
+          ? colaboradoresAtualizados.find(c => String(c.id) === String(requestedColaborador.id))
+          : colaboradoresAtualizados.find(c => c.id === colaboradorIdApi || c.name === colaboradorApi);
       } else {
-        targetColab = colaboradoresAtualizados.find(c => c.id === currentUser.id);
+        targetColab = requestedColaborador
+          ? colaboradoresAtualizados.find(c => String(c.id) === String(requestedColaborador.id))
+          : colaboradoresAtualizados.find(c => c.id === currentUser.id);
       }
 
       setDailyMetrics([]);
@@ -450,7 +564,9 @@ export default function Comissoes() {
       return filteredColabs.find(c =>
         (filters.colaboradorId != null && String(c.id) === String(filters.colaboradorId)) ||
         c.name === filters.colaborador
-      );
+      ) || (filters.colaborador === 'todos'
+        ? filteredColabs.find(c => String(c.id) === String(currentUser?.id))
+        : undefined);
     }
     return filteredColabs.find(c => c.id === currentUser?.id);
   }, [filteredColabs, currentUser, filters, canUseFilterBar]);
@@ -476,7 +592,7 @@ export default function Comissoes() {
       const equipe = (userColab.equipeNome || '').toLowerCase();
       return produto === 'concomitante' || cargo === 'concomitante' || equipe.includes('concomitante');
     })();
-    const isSR = calculator.isSupervisorSR(userColab.email);
+    const isSR = Boolean(userColab.isSupervisorSR) || calculator.isSupervisorSR(userColab.email);
 
     let totalCommission = 0;
     let totalGols = 0;
@@ -484,8 +600,7 @@ export default function Comissoes() {
     let comissaoGols = 0;
 
     if (isSupervisor) {
-      const equipeColabs = storeColabs.filter(c => c.equipeNome === userColab.equipeNome && c.id !== userColab.id);
-      const totalAssEquipe = equipeColabs.reduce((s, c) => s + (c.assinados || 0), 0);
+      const totalAssEquipe = sumTeamAssinados(storeColabs, userColab.equipeNome);
       totalCommission = calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
       comissaoAssinados = totalCommission;
     } else if (isQuinquenio || isConcomitante) {
@@ -525,6 +640,136 @@ export default function Comissoes() {
       originalColab: userColab,
     }];
   }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics, userColab, campaigns]);
+
+  const loadCommissionOverview = useCallback(async () => {
+    const requestId = ++commissionOverviewRequest.current;
+    if (!canViewCommissionOverview || !currentStartDate || !currentEndDate || storeColabs.length === 0) {
+      setCommissionOverview([]);
+      setCommissionOverviewLoading(false);
+      return;
+    }
+
+    setCommissionOverviewLoading(true);
+    setCommissionOverviewError(null);
+    try {
+      const params = { start: currentStartDate, end: currentEndDate, granularity: 'daily' as const };
+      const [assinadosRows, ganhosRows] = await Promise.all([
+        fetchAssinados(params),
+        fetchGanhos(params),
+      ]);
+      if (requestId !== commissionOverviewRequest.current) return;
+
+      const dailyByCollaborator = mapDailyMetricsByCollaborator(assinadosRows, ganhosRows);
+      const collaboratorsWithMetrics = storeColabs.map(collaborator => {
+        const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
+        return {
+          ...collaborator,
+          assinados: daily.reduce((total, day) => total + day.assinados, 0),
+        };
+      });
+      const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
+
+      const rows = storeColabs.flatMap(collaborator => {
+        const role = getCommissionOverviewRole(collaborator);
+        if (!role) return [];
+
+        const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
+        const individualSigned = daily.reduce((total, day) => total + day.assinados, 0);
+        const isSupervisorSR = Boolean(collaborator.isSupervisorSR) || calculator.isSupervisorSR(collaborator.email);
+        let assinados = individualSigned;
+        let commission: number | null;
+
+        if (role === 'supervisor') {
+          assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
+          commission = calculator.calculateSupervisorCommission(assinados, isSupervisorSR, tabelaComissoes);
+        } else if (role === 'coordenador') {
+          assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
+          commission = null;
+        } else {
+          commission = calculateAssessorCommission(collaborator, daily, tabelaComissoes, activeCampaigns);
+        }
+
+        return [{
+          id: String(collaborator.id),
+          name: collaborator.name,
+          team: collaborator.equipeNome,
+          role,
+          assinados,
+          commission,
+          isSupervisorSR,
+          collaborator,
+        }];
+      }).sort((left, right) => left.team.localeCompare(right.team) || left.name.localeCompare(right.name));
+
+      setCommissionOverview(rows);
+    } catch (err: any) {
+      if (requestId === commissionOverviewRequest.current) {
+        setCommissionOverviewError(err.message || 'Não foi possível carregar a visão geral das comissões.');
+      }
+    } finally {
+      if (requestId === commissionOverviewRequest.current) setCommissionOverviewLoading(false);
+    }
+  }, [canViewCommissionOverview, currentStartDate, currentEndDate, storeColabs, campaigns, tabelaComissoes]);
+
+  useEffect(() => {
+    void loadCommissionOverview();
+    return () => { commissionOverviewRequest.current++; };
+  }, [loadCommissionOverview]);
+
+  const refreshCommissionOverviewItem = async (item: CommissionOverviewItem) => {
+    if (item.role === 'coordenador') return;
+    setUpdatingCommissionId(item.id);
+    setCommissionOverviewError(null);
+    try {
+      let assinados = item.assinados;
+      let commission: number;
+
+      if (item.role === 'supervisor') {
+        const assessorNames = new Set(storeColabs
+          .filter(collaborator => getCommissionOverviewRole(collaborator) === 'assessor')
+          .filter(collaborator => normalizeName(collaborator.equipeNome) === normalizeName(item.team))
+          .map(collaborator => normalizeName(collaborator.name)));
+        const rows = await fetchAssinados({
+          start: currentStartDate,
+          end: currentEndDate,
+          equipe: item.team,
+          granularity: 'daily',
+        });
+        assinados = rows.reduce((total, row) =>
+          assessorNames.has(normalizeName(row.colaborador)) ? total + (Number(row.total) || 0) : total, 0);
+        commission = calculator.calculateSupervisorCommission(assinados, item.isSupervisorSR, tabelaComissoes);
+      } else {
+        const daily = await fetchDailyMetrics({
+          start: currentStartDate,
+          end: currentEndDate,
+          colaborador: item.name,
+        });
+        assinados = daily.reduce((total, day) => total + (Number(day.assinados) || 0), 0);
+        commission = calculateAssessorCommission(
+          item.collaborator,
+          daily,
+          tabelaComissoes,
+          campaigns.filter(campaign => campaign.validacao_financeiro),
+        );
+      }
+
+      setCommissionOverview(items => items.map(entry => entry.id === item.id
+        ? { ...entry, assinados, commission }
+        : entry));
+    } catch (err: any) {
+      setCommissionOverviewError(err.message || `Falha ao atualizar ${item.name}.`);
+    } finally {
+      setUpdatingCommissionId(null);
+    }
+  };
+
+  const filteredCommissionOverview = useMemo(() => {
+    const query = normalizeName(commissionOverviewSearch);
+    if (!query) return commissionOverview;
+    return commissionOverview.filter(item =>
+      normalizeName(item.name).includes(query) || normalizeName(item.team).includes(query)
+    );
+  }, [commissionOverview, commissionOverviewSearch]);
 
   const commissionChartData = useMemo(() => {
     const item = commissionData[0];
@@ -614,7 +859,7 @@ export default function Comissoes() {
       { key: 'productive' as const, label: 'Produtivas', count: totals.productive, color: '#34a853', icon: FileCheck },
       { key: 'appointments' as const, label: 'Agendamentos', count: totals.appointments, color: '#f59e0b', icon: CalendarClock },
       { key: 'occurrences' as const, label: 'Ocorrências', count: totals.occurrences, color: '#64748b', icon: MessageCircle },
-      { key: 'failures' as const, label: 'Sem sucessos', count: totals.failures, color: '#ef4444', icon: XCircle },
+      { key: 'failures' as const, label: 'Improdutiva', count: totals.failures, color: '#ef4444', icon: XCircle },
     ];
   }, [callMetrics]);
 
@@ -811,9 +1056,8 @@ export default function Comissoes() {
 
                         let supervisorGapInfo: { gap: number; nextValue: number } | null = null;
                         if (isSupervisorUser) {
-                          const equipeColabs = storeColabs.filter(c => c.equipeNome === colab.equipeNome && c.id !== colab.id);
-                          const totalAssEquipe = equipeColabs.reduce((s, c) => s + (c.assinados || 0), 0);
-                          const isSR = calculator.isSupervisorSR(colab.email);
+                          const totalAssEquipe = sumTeamAssinados(storeColabs, colab.equipeNome);
+                          const isSR = Boolean(colab.isSupervisorSR) || calculator.isSupervisorSR(colab.email);
                           supervisorGapInfo = calculator.calculateSupervisorGap(totalAssEquipe, isSR, tabelaComissoes);
                         }
 
