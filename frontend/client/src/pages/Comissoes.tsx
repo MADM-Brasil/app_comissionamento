@@ -36,7 +36,7 @@ const EXCLUDED_TEAMS = [
 
 const EXCLUDED_CARGOS = [
   "desativado","assistente","analista juridico","gestor de projetos","analista",
-  "analista de discadora","supervisor","coordenador","salesops","ceo",
+  "analista de discadora","coordenador","salesops","ceo",
   "analista de crm","desenvolvedor","diretora","analista de dados","desenvolvedor make",
 ];
 
