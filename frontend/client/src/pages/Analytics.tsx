@@ -52,7 +52,7 @@ function isExcludedGroup(group: string): boolean {
 // ========== Função local para obter meta do colaborador ==========
 // Substitui a antiga getCollaboratorMeta (obsoleta) importada de metricsHelper
 type PeriodoMeta = 'diario' | 'semanal' | 'mensal';
-function getMeta(c: any, periodo: PeriodoMeta, tipo: 'assinados' | 'ganhos'): number {
+function getMeta(c: any, periodo: PeriodoMeta, tipo: 'assinados' | 'ganhos' | 'protocolados'): number {
   const key = `meta${periodo.charAt(0).toUpperCase() + periodo.slice(1)}${tipo.charAt(0).toUpperCase() + tipo.slice(1)}`;
   return Number(c?.[key] ?? 0);
 }
@@ -288,16 +288,17 @@ export default function Analytics() {
   const isSpecialGroup = produto === 'Quinquenio' || produto === 'Concomitante';
   const filteredCollaborators = useMemo(() => collaborators.filter(c => !isExcludedTeam(c.equipeNome) && (equipe==="todas"||c.equipeNome===equipe) && (colaborador==="todos"||c.name===colaborador)), [collaborators, equipe, colaborador]);
   const baseCollaborators = useMemo(() => filteredCollaborators.filter(c => { const g = (c.grupo||'').trim().toLowerCase(); return g!=='supervisor' && g!=='coordenador' && g!=='administrativo' && g!=='desativado'; }), [filteredCollaborators]);
-  const { targetAssinados, targetGanhos } = useMemo(() => {
+  const { targetAssinados, targetGanhos, targetProtocolados } = useMemo(() => {
     if (equipe==="todas" && colaborador==="todos") {
-      if (currentStartDate===currentEndDate) return { targetAssinados:100, targetGanhos:100 };
-      if (new Date(currentEndDate).getTime()-new Date(currentStartDate).getTime() <= 7*86400000) return { targetAssinados:500, targetGanhos:500 };
-      return { targetAssinados:2000, targetGanhos:2000 };
+      if (currentStartDate===currentEndDate) return { targetAssinados:100, targetGanhos:100, targetProtocolados:100 };
+      if (new Date(currentEndDate).getTime()-new Date(currentStartDate).getTime() <= 7*86400000) return { targetAssinados:500, targetGanhos:500, targetProtocolados:500 };
+      return { targetAssinados:2000, targetGanhos:2000, targetProtocolados:1300 };
     }
     const periodoMeta='mensal';
     return {
       targetAssinados: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'assinados'),0),
-      targetGanhos: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'ganhos'),0)
+      targetGanhos: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'ganhos'),0),
+      targetProtocolados: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'protocolados'),0)
     };
   }, [baseCollaborators, equipe, colaborador, currentStartDate, currentEndDate]);
   const percentAssinados = targetAssinados>0 ? (totals.assinados/targetAssinados)*100 : 0;
@@ -510,7 +511,7 @@ const conversionByStage = useMemo(() => {
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Gols</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">Seus Gols</div></div>
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div><div className="text-xs text-[#94a3b8]">meta: {formatInt(targetAssinados)}</div></div>
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Trophy className="w-4 h-4 text-[#ffcc00] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
-              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Protocolados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.protocolados)}</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Protocolados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.protocolados)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetProtocolados)}`}</div></div>
             </div>
           </div>
         </>
