@@ -54,6 +54,7 @@ interface CommissionOverviewItem {
   team: string;
   role: CommissionOverviewRole;
   assinados: number;
+  ganhos: number;
   commission: number | null;
   isSupervisorSR: boolean;
   collaborator: Collaborator;
@@ -94,14 +95,23 @@ function mapDailyMetricsByCollaborator(assinadosRows: any[], ganhosRows: any[]) 
   ]));
 }
 
+/** Soma de assinados da equipe — mantida para exibição. */
 function sumTeamAssinados(collaborators: any[], teamName: string): number {
   return collaborators.reduce((total, collaborator) => {
     if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
-
     const cargo = normalizeText(collaborator.cargo);
     if (cargo.startsWith('supervisor') || cargo === 'coordenador' || cargo === 'administrativo') return total;
-
     return total + (Number(collaborator.assinados) || 0);
+  }, 0);
+}
+
+/** Soma de ganhos da equipe — alimenta as faixas de SUPERVISOR/SUPERVISOR SR. */
+function sumTeamGanhos(collaborators: any[], teamName: string): number {
+  return collaborators.reduce((total, collaborator) => {
+    if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
+    const cargo = normalizeText(collaborator.cargo);
+    if (cargo.startsWith('supervisor') || cargo === 'coordenador' || cargo === 'administrativo') return total;
+    return total + (Number(collaborator.ganhos) || 0);
   }, 0);
 }
 
@@ -111,17 +121,19 @@ function calculateAssessorCommission(
   commissionBands: TabelaComissaoItem[],
   campaigns: Campaign[],
 ): number {
-  const assinados = dailyMetrics.reduce((total, day) => total + day.assinados, 0);
+  const ganhos = dailyMetrics.reduce((total, day) => total + (day.ganhos || 0), 0);
   const isSpecial = isSpecialGroupColaborador(collaborator);
   const productType = getFaixaProductType(collaborator);
-  const commissionAssinados = calculator.calculateProductCommission(assinados, productType, commissionBands);
-  if (isSpecial || dailyMetrics.length === 0) return commissionAssinados;
+
+  // Faixa de produto puxada por GANHOS.
+  const commissionGanhos = calculator.calculateProductCommission(ganhos, productType, commissionBands);
+  if (isSpecial || dailyMetrics.length === 0) return commissionGanhos;
 
   const result = calculator.calculateTotalCommission(
     dailyMetrics,
     collaborator.metaGolsAssinados ?? 3,
     collaborator.metaGolsGanhos ?? 3,
-    assinados,
+    ganhos,
     productType,
     commissionBands,
     campaigns.filter(campaign => campaign.validacao_financeiro),
@@ -265,8 +277,10 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                       )}
                     </div>
                     <div className="mt-3 pt-3 border-t border-[#e2e8f0] flex justify-between items-center">
-                      <span className="text-xs font-semibold">{isSupervisor ? "Total de assinados" : "Gols do dia"}</span>
-                      <span className={`text-lg font-black ${golsDoDia > 0 ? 'text-[#16A34A]' : 'text-[#94a3b8]'}`}>{isSupervisor ? formatInt(day.assinados || 0) : golsDoDia}</span>
+                      <span className="text-xs font-semibold">{isSupervisor ? "Total de ganhos" : "Gols do dia"}</span>
+                      <span className={`text-lg font-black ${golsDoDia > 0 ? 'text-[#16A34A]' : 'text-[#94a3b8]'}`}>
+                        {isSupervisor ? formatInt(day.ganhos || 0) : golsDoDia}
+                      </span>
                     </div>
                     {temCampanhas && (
                       <div className="mt-3 pt-3 border-t border-[#e2e8f0]">
@@ -279,14 +293,14 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                         ))}
                         {campanhasAssinados.map((camp: any, cIdx: number) => (
                           <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Assinados valem Gols</span>
-                            <span className="font-bold text-[#16A34A]">1 gol/{camp.multiplicador || 3} assinados</span>
+                            <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Ganhos valem Gols</span>
+                            <span className="font-bold text-[#16A34A]">1 gol/{camp.multiplicador || 3} ganhos</span>
                           </div>
                         ))}
                         {campanhasProgressivas.map((camp: any, cIdx: number) => (
                           <div key={`p-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-purple-500" />Progressiva (mín. {camp.multiplicador} assin.)</span>
-                            <span className="font-bold text-purple-500">1 gol por assinado</span>
+                            <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-purple-500" />Progressiva (mín. {camp.multiplicador} ganhos)</span>
+                            <span className="font-bold text-purple-500">1 gol por ganho</span>
                           </div>
                         ))}
                       </div>
@@ -545,7 +559,7 @@ export default function Comissoes() {
         String(prev.colaboradorId ?? '') === String(newFilters.colaboradorId ?? '') &&
         prev.produto === newFilters.produto
       ) {
-        return prev; // evita re-render e reload desnecessário
+        return prev;
       }
       return newFilters;
     });
@@ -557,7 +571,6 @@ export default function Comissoes() {
       return;
     }
 
-    // Persiste no localStorage para que o FilterBar leia a seleção no remount
     try {
       const stored = localStorage.getItem("madm_filterBar_state_v1");
       const parsed = stored ? JSON.parse(stored) : {};
@@ -576,7 +589,6 @@ export default function Comissoes() {
       produto: "Todos",
     });
 
-    // Força o FilterBar a remontar lendo os novos valores persistidos
     setFilterBarKey((k) => k + 1);
 
     toast.success(`Visualizando ${item.name}`);
@@ -621,7 +633,6 @@ export default function Comissoes() {
   const isSupervisorUser = (userColab?.cargo || '').toLowerCase() === 'supervisor';
   const isSpecialUser = userColab ? isSpecialGroupColaborador(userColab) : false;
 
-  // A Visão Geral só aparece quando nenhum filtro específico está aplicado
   const isOverviewVisible =
     canViewCommissionOverview &&
     !loading &&
@@ -654,24 +665,27 @@ export default function Comissoes() {
     let comissaoGols = 0;
 
     if (isSupervisor) {
-      const totalAssEquipe = sumTeamAssinados(storeColabs, userColab.equipeNome);
-      totalCommission = calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
+      // Faixa SUPERVISOR/SUPERVISOR SR puxada por GANHOS da equipe.
+      const totalGanEquipe = sumTeamGanhos(storeColabs, userColab.equipeNome);
+      totalCommission = calculator.calculateSupervisorCommission(totalGanEquipe, isSR, tabelaComissoes);
       comissaoAssinados = totalCommission;
     } else if (isQuinquenio || isConcomitante) {
+      // Faixa QUINQUENIO/CONCOMITANTE puxada por GANHOS.
       const tipoTabela = isQuinquenio ? 'QUINQUENIO' : 'CONCOMITANTE';
-      totalCommission = calculator.calculateProductCommission(userColab.assinados || 0, tipoTabela, tabelaComissoes);
+      totalCommission = calculator.calculateProductCommission(userColab.ganhos || 0, tipoTabela, tabelaComissoes);
       comissaoAssinados = totalCommission;
     } else {
       if (dailyMetrics.length > 0) {
         const metaAss = userColab.metaGolsAssinados ?? 3;
         const metaGan = userColab.metaGolsGanhos ?? 3;
-        const assinados = userColab.assinados || 0;
+        const ganhos = userColab.ganhos || 0;
         const productType = getFaixaProductType(userColab);
         const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
         const golsResult = calculator.applyCampaignsToDailyGoals(dailyMetrics, metaAss, metaGan, activeCampaigns);
         totalGols = golsResult.totalGols;
         comissaoGols = calculator.calculateGoalCommission(totalGols, tabelaComissoes);
-        comissaoAssinados = calculator.calculateProductCommission(assinados, productType, tabelaComissoes);
+        // Faixa AUXILIO ACIDENTE puxada por GANHOS.
+        comissaoAssinados = calculator.calculateProductCommission(ganhos, productType, tabelaComissoes);
         totalCommission = comissaoGols + comissaoAssinados;
       }
     }
@@ -719,6 +733,7 @@ export default function Comissoes() {
         return {
           ...collaborator,
           assinados: daily.reduce((total, day) => total + day.assinados, 0),
+          ganhos: daily.reduce((total, day) => total + day.ganhos, 0),
         };
       });
       const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
@@ -729,15 +744,20 @@ export default function Comissoes() {
 
         const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
         const individualSigned = daily.reduce((total, day) => total + day.assinados, 0);
+        const individualGanhos = daily.reduce((total, day) => total + day.ganhos, 0);
         const isSupervisorSR = Boolean(collaborator.isSupervisorSR) || calculator.isSupervisorSR(collaborator.email);
         let assinados = individualSigned;
+        let ganhos = individualGanhos;
         let commission: number | null;
 
         if (role === 'supervisor') {
+          // Supervisor: soma ganhos dos assessores da equipe e puxa faixa por ganhos.
           assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
-          commission = calculator.calculateSupervisorCommission(assinados, isSupervisorSR, tabelaComissoes);
+          ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
+          commission = calculator.calculateSupervisorCommission(ganhos, isSupervisorSR, tabelaComissoes);
         } else if (role === 'coordenador') {
           assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
+          ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
           commission = null;
         } else {
           commission = calculateAssessorCommission(collaborator, daily, tabelaComissoes, activeCampaigns);
@@ -749,6 +769,7 @@ export default function Comissoes() {
           team: collaborator.equipeNome,
           role,
           assinados,
+          ganhos,
           commission,
           isSupervisorSR,
           collaborator,
@@ -776,6 +797,7 @@ export default function Comissoes() {
     setCommissionOverviewError(null);
     try {
       let assinados = item.assinados;
+      let ganhos = item.ganhos;
       let commission: number;
 
       if (item.role === 'supervisor') {
@@ -783,15 +805,29 @@ export default function Comissoes() {
           .filter(collaborator => getCommissionOverviewRole(collaborator) === 'assessor')
           .filter(collaborator => normalizeName(collaborator.equipeNome) === normalizeName(item.team))
           .map(collaborator => normalizeName(collaborator.name)));
-        const rows = await fetchAssinados({
-          start: currentStartDate,
-          end: currentEndDate,
-          equipe: item.team,
-          granularity: 'daily',
-        });
-        assinados = rows.reduce((total, row) =>
+
+        // Supervisor: recalcula ganhos da equipe (base da faixa).
+        const [assinadosRows, ganhosRows] = await Promise.all([
+          fetchAssinados({
+            start: currentStartDate,
+            end: currentEndDate,
+            equipe: item.team,
+            granularity: 'daily',
+          }),
+          fetchGanhos({
+            start: currentStartDate,
+            end: currentEndDate,
+            equipe: item.team,
+            granularity: 'daily',
+          }),
+        ]);
+
+        assinados = assinadosRows.reduce((total, row) =>
           assessorNames.has(normalizeName(row.colaborador)) ? total + (Number(row.total) || 0) : total, 0);
-        commission = calculator.calculateSupervisorCommission(assinados, item.isSupervisorSR, tabelaComissoes);
+        ganhos = ganhosRows.reduce((total, row) =>
+          assessorNames.has(normalizeName(row.colaborador)) ? total + (Number(row.total) || 0) : total, 0);
+
+        commission = calculator.calculateSupervisorCommission(ganhos, item.isSupervisorSR, tabelaComissoes);
       } else {
         const daily = await fetchDailyMetrics({
           start: currentStartDate,
@@ -799,6 +835,7 @@ export default function Comissoes() {
           colaborador: item.name,
         });
         assinados = daily.reduce((total, day) => total + (Number(day.assinados) || 0), 0);
+        ganhos = daily.reduce((total, day) => total + (Number(day.ganhos) || 0), 0);
         commission = calculateAssessorCommission(
           item.collaborator,
           daily,
@@ -808,7 +845,7 @@ export default function Comissoes() {
       }
 
       setCommissionOverview(items => items.map(entry => entry.id === item.id
-        ? { ...entry, assinados, commission }
+        ? { ...entry, assinados, ganhos, commission }
         : entry));
     } catch (err: any) {
       setCommissionOverviewError(err.message || `Falha ao atualizar ${item.name}.`);
@@ -830,7 +867,7 @@ export default function Comissoes() {
     if (!item) return [];
 
     const data = [
-      { name: 'Comissão Assinados', value: item.comissaoAssinados, color: '#2F6FED' },
+      { name: 'Comissão Ganhos', value: item.comissaoAssinados, color: '#2F6FED' },
     ];
     if (!item.isSpecial && !isSupervisorUser) {
       data.push({ name: 'Comissão Gols', value: item.comissaoGols, color: '#16A34A' });
@@ -1043,7 +1080,6 @@ export default function Comissoes() {
         </div>
       )}
 
-      {/* Aviso quando a Visão Geral está oculta por causa de filtro ativo */}
       {canViewCommissionOverview && !loading && !isOverviewVisible && (
         <div className="mb-6 flex items-center gap-2 text-xs text-[#64748b] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg px-3 py-2">
           <Users className="w-3.5 h-3.5 text-[#2F6FED]" />
@@ -1096,6 +1132,7 @@ export default function Comissoes() {
                     <th className="py-2 px-3 font-medium">Equipe</th>
                     <th className="py-2 px-3 font-medium">Cargo</th>
                     <th className="py-2 px-3 font-medium text-right">Assinados</th>
+                    <th className="py-2 px-3 font-medium text-right">Ganhos</th>
                     <th className="py-2 px-3 font-medium text-right">Comissão</th>
                     <th className="py-2 px-3 font-medium text-center">Ação</th>
                   </tr>
@@ -1131,8 +1168,11 @@ export default function Comissoes() {
                           {item.isSupervisorSR && ' SR'}
                         </span>
                       </td>
-                      <td className="py-2 px-3 text-right font-semibold text-[#0f172a]">
+                      <td className="py-2 px-3 text-right text-[#475569]">
                         {formatInt(item.assinados)}
+                      </td>
+                      <td className="py-2 px-3 text-right font-semibold text-[#0f172a]">
+                        {formatInt(item.ganhos)}
                       </td>
                       <td className="py-2 px-3 text-right font-semibold text-[#2F6FED]">
                         {item.commission == null ? '—' : displayCurrency(item.commission)}
@@ -1222,32 +1262,35 @@ export default function Comissoes() {
                           .sort((a, b) => a.faixa_min - b.faixa_min);
                         const goalGap = calculator.calculateGoalGap(item.totalCycles, tabelaComissoes);
 
+                        // Gap de produto baseado em GANHOS.
                         let productGapInfo: { gap: number; nextValue: number } | null = null;
                         if (faixas.length > 0) {
-                          const proximaFaixa = faixas.find(f => f.faixa_min > item.assinados);
+                          const ganhosAtuais = item.ganhos;
+                          const proximaFaixa = faixas.find(f => f.faixa_min > ganhosAtuais);
                           if (proximaFaixa) {
-                            productGapInfo = { gap: proximaFaixa.faixa_min - item.assinados, nextValue: proximaFaixa.faixa_min };
-                          } else if (item.assinados < faixas[0].faixa_min) {
-                            productGapInfo = { gap: faixas[0].faixa_min - item.assinados, nextValue: faixas[0].faixa_min };
+                            productGapInfo = { gap: proximaFaixa.faixa_min - ganhosAtuais, nextValue: proximaFaixa.faixa_min };
+                          } else if (ganhosAtuais < faixas[0].faixa_min) {
+                            productGapInfo = { gap: faixas[0].faixa_min - ganhosAtuais, nextValue: faixas[0].faixa_min };
                           }
                         }
 
+                        // Gap de supervisor baseado em GANHOS da equipe.
                         let supervisorGapInfo: { gap: number; nextValue: number } | null = null;
                         if (isSupervisorUser) {
-                          const totalAssEquipe = sumTeamAssinados(storeColabs, colab.equipeNome);
+                          const totalGanEquipe = sumTeamGanhos(storeColabs, colab.equipeNome);
                           const isSR = Boolean(colab.isSupervisorSR) || calculator.isSupervisorSR(colab.email);
-                          supervisorGapInfo = calculator.calculateSupervisorGap(totalAssEquipe, isSR, tabelaComissoes);
+                          supervisorGapInfo = calculator.calculateSupervisorGap(totalGanEquipe, isSR, tabelaComissoes);
                         }
 
                         return (
                           <div key={item.id} className="mt-4 p-3 bg-[#f8fafc] rounded-lg text-xs space-y-2">
                             {isSupervisorUser ? (
                               <>
-                                <p><span className="font-semibold text-[#2F6FED]">Assinados da equipe:</span> {formatInt(item.assinados)}</p>
+                                <p><span className="font-semibold text-[#2F6FED]">Ganhos da equipe:</span> {formatInt(sumTeamGanhos(storeColabs, colab.equipeNome))}</p>
                                 {supervisorGapInfo ? (
                                   <p>
                                     <span className="font-semibold text-[#8B5CF6]">Próxima faixa:</span>{' '}
-                                    faltam <span className="font-bold">{formatInt(supervisorGapInfo.gap)}</span> assinados para a faixa mínima de {formatInt(supervisorGapInfo.nextValue)}.
+                                    faltam <span className="font-bold">{formatInt(supervisorGapInfo.gap)}</span> ganhos para a faixa mínima de {formatInt(supervisorGapInfo.nextValue)}.
                                   </p>
                                 ) : (
                                   <p className="text-[#94a3b8]">Você já está na faixa máxima de supervisor.</p>
@@ -1262,10 +1305,10 @@ export default function Comissoes() {
                                 )}
 
                                 {productGapInfo ? (
-                                  <p><span className="font-semibold text-[#2F6FED]">Assinados:</span> faltam <span className="font-bold">{formatInt(productGapInfo.gap)}</span> assinados para a próxima faixa (mín. {formatInt(productGapInfo.nextValue)}).</p>
+                                  <p><span className="font-semibold text-[#2F6FED]">Ganhos:</span> faltam <span className="font-bold">{formatInt(productGapInfo.gap)}</span> ganhos para a próxima faixa (mín. {formatInt(productGapInfo.nextValue)}).</p>
                                 ) : (
                                   <p className="text-[#94a3b8]">
-                                    {faixas.length === 0 ? `Nenhuma faixa de assinados configurada para ${productType}.` : "Você já está na faixa máxima de assinados."}
+                                    {faixas.length === 0 ? `Nenhuma faixa de ganhos configurada para ${productType}.` : "Você já está na faixa máxima de ganhos."}
                                   </p>
                                 )}
                               </>
@@ -1497,7 +1540,7 @@ export default function Comissoes() {
 
                 {isSupervisorUser && (
                   <div className="card p-5 order-1">
-                    <h3 className="text-sm font-bold mb-4">Equipe (Assinados)</h3>
+                    <h3 className="text-sm font-bold mb-4">Equipe (Assinados / Ganhos)</h3>
                     <div className="space-y-2 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
                       {teamMembers.length > 0 ? (
                         teamMembers.map(member => (
@@ -1571,8 +1614,8 @@ export default function Comissoes() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos de apuração:</span> Diário, semanal e mensal.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Gols por período:</span> mínimo entre assinados e ganhos.</div>
-                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma das faixas de assinados + gols.</div>
-                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Campanhas aprovadas:</span> multiplicam gols (tipo GOLS), adicionam 1 gol por assinado (tipo ASSINADOS) ou progressivas (tipo PROGRESSIVA).</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma da faixa de ganhos + faixa de gols.</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Faixas por ganhos:</span> produtos (AUXILIO ACIDENTE, QUINQUENIO, CONCOMITANTE) e supervisores (SUPERVISOR, SUPERVISOR SR) usam <b>ganhos</b> como base.</div>
                 </div>
               </div>
             </>

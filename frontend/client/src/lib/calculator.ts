@@ -9,7 +9,7 @@ export interface CalculatorConfig {
   bonusExtraPorMeta: number;
 }
 
-export interface TeamMember { 
+export interface TeamMember {
   id?: string | number;
   nome?: string;
   ganhos?: number;
@@ -137,8 +137,9 @@ export class Calculator {
    * Aplica campanhas ativas (aprovadas) aos gols diários.
    * Tipos suportados:
    * - GOLS: multiplica os gols do dia pelo multiplicador.
-  * - ASSINADOS: adiciona 1 gol a cada multiplicador de assinados no dia.
-   * - PROGRESSIVA: se assinados >= meta mínima (multiplicador), gols = assinados.
+   * - ASSINADOS: adiciona 1 gol a cada multiplicador de GANHOS no dia
+   *              (mantém o nome histórico, mas a base é GANHOS).
+   * - PROGRESSIVA: se GANHOS >= meta mínima (multiplicador), gols = ganhos do dia.
    */
   applyCampaignsToDailyGoals(
     dailyData: DailyData[],
@@ -154,7 +155,7 @@ export class Calculator {
     const base = this.calculateDailyGoals(normalizedDailyData, metaGolsAssinados, metaGolsGanhos);
 
     const golsMap = new Map<string, number>();
-    const assinadosMap = new Map<string, number>();
+    const ganhosMap = new Map<string, number>();
     const progressivaMap = new Map<string, number>();
 
     for (const camp of campanhasAtivas) {
@@ -167,7 +168,7 @@ export class Calculator {
         if (mult > atual) golsMap.set(dateKey, mult);
       } else if (tipo === 'ASSINADOS') {
         const quantidadePorGol = Number(camp.multiplicador) || 3;
-        assinadosMap.set(dateKey, quantidadePorGol);
+        ganhosMap.set(dateKey, quantidadePorGol);
       } else if (tipo === 'PROGRESSIVA') {
         progressivaMap.set(dateKey, Number(camp.multiplicador) || 0);
       }
@@ -181,20 +182,20 @@ export class Calculator {
       const mult = golsMap.get(dateKey);
       if (mult) gols = gols * mult;
 
-      const quantidadePorGol = assinadosMap.get(dateKey);
+      const quantidadePorGol = ganhosMap.get(dateKey);
       if (quantidadePorGol) {
         const dayData = normalizedDailyData.find(d => d.date === dateKey);
         if (dayData) {
-          gols += Math.floor((dayData.assinados || 0) / quantidadePorGol);
+          gols += Math.floor((dayData.ganhos || 0) / quantidadePorGol);
         }
       }
 
       const metaProgressiva = progressivaMap.get(dateKey);
       if (metaProgressiva !== undefined) {
         const dayData = normalizedDailyData.find(d => d.date === dateKey);
-        const assinados = dayData ? (dayData.assinados || 0) : 0;
-        if (assinados >= metaProgressiva) {
-          gols = assinados;
+        const ganhos = dayData ? (dayData.ganhos || 0) : 0;
+        if (ganhos >= metaProgressiva) {
+          gols = ganhos;
         } else {
           gols = 0;
         }
@@ -241,31 +242,38 @@ export class Calculator {
     return faixa ? faixa.valor_comissao : 0;
   }
 
+  /**
+   * Comissão por produto — puxada por GANHOS.
+   * Tipos: 'AUXILIO ACIDENTE' | 'QUINQUENIO' | 'CONCOMITANTE'
+   */
   calculateProductCommission(
-    totalAssinados: number,
+    totalGanhos: number,
     productType: string,
     tabelaComissoes: TabelaComissaoItem[]
   ): number {
     const tipo = productType.toUpperCase();
-    const faixa = this.getFaixa(tabelaComissoes, tipo, totalAssinados);
+    const faixa = this.getFaixa(tabelaComissoes, tipo, totalGanhos);
     return faixa ? faixa.valor_comissao : 0;
   }
 
   calculateQuinquenioCommission(
-    totalAssinados: number,
+    totalGanhos: number,
     tabelaComissoes: TabelaComissaoItem[]
   ): number {
-    const faixa = this.getFaixa(tabelaComissoes, 'QUINQUENIO', totalAssinados);
+    const faixa = this.getFaixa(tabelaComissoes, 'QUINQUENIO', totalGanhos);
     return faixa ? faixa.valor_comissao : 0;
   }
 
+  /**
+   * Comissão de supervisor — puxada por GANHOS da equipe.
+   */
   calculateSupervisorCommission(
-    totalAssinadosEquipe: number,
+    totalGanhosEquipe: number,
     isSR: boolean,
     tabelaComissoes: TabelaComissaoItem[]
   ): number {
     const tipo = isSR ? 'SUPERVISOR SR' : 'SUPERVISOR';
-    const faixa = this.getFaixa(tabelaComissoes, tipo, totalAssinadosEquipe);
+    const faixa = this.getFaixa(tabelaComissoes, tipo, totalGanhosEquipe);
     return faixa ? faixa.valor_comissao : 0;
   }
 
@@ -273,7 +281,7 @@ export class Calculator {
     dailyData: DailyData[],
     metaGolsAssinados: number,
     metaGolsGanhos: number,
-    totalAssinados: number,
+    totalGanhos: number,
     productType: string,
     tabelaComissoes: TabelaComissaoItem[],
     campanhasAtivas: any[] = []
@@ -285,7 +293,7 @@ export class Calculator {
       campanhasAtivas
     );
     const goalCommission = this.calculateGoalCommission(totalGols, tabelaComissoes);
-    const productCommission = this.calculateProductCommission(totalAssinados, productType, tabelaComissoes);
+    const productCommission = this.calculateProductCommission(totalGanhos, productType, tabelaComissoes);
     return {
       goalCommission,
       productCommission,
@@ -307,14 +315,17 @@ export class Calculator {
     };
   }
 
+  /**
+   * Gap de produto — baseado em GANHOS.
+   */
   calculateProductGap(
-    totalAssinados: number,
+    totalGanhos: number,
     productType: string,
     tabelaComissoes: TabelaComissaoItem[]
   ): GapResult | null {
     const tipo = productType.toUpperCase();
-    const current = this.getFaixa(tabelaComissoes, tipo, totalAssinados);
-    const next = this.getNextFaixa(tabelaComissoes, tipo, totalAssinados);
+    const current = this.getFaixa(tabelaComissoes, tipo, totalGanhos);
+    const next = this.getNextFaixa(tabelaComissoes, tipo, totalGanhos);
     if (!next) return null;
     return {
       currentFaixa: current,
@@ -325,20 +336,23 @@ export class Calculator {
   }
 
   calculateQuinquenioGap(
-    totalAssinados: number,
+    totalGanhos: number,
     tabelaComissoes: TabelaComissaoItem[]
   ): GapResult | null {
-    return this.calculateProductGap(totalAssinados, 'QUINQUENIO', tabelaComissoes);
+    return this.calculateProductGap(totalGanhos, 'QUINQUENIO', tabelaComissoes);
   }
 
+  /**
+   * Gap de supervisor — baseado em GANHOS da equipe.
+   */
   calculateSupervisorGap(
-    totalAssinadosEquipe: number,
+    totalGanhosEquipe: number,
     isSR: boolean,
     tabelaComissoes: TabelaComissaoItem[]
   ): GapResult | null {
     const tipo = isSR ? 'SUPERVISOR SR' : 'SUPERVISOR';
-    const current = this.getFaixa(tabelaComissoes, tipo, totalAssinadosEquipe);
-    const next = this.getNextFaixa(tabelaComissoes, tipo, totalAssinadosEquipe);
+    const current = this.getFaixa(tabelaComissoes, tipo, totalGanhosEquipe);
+    const next = this.getNextFaixa(tabelaComissoes, tipo, totalGanhosEquipe);
     if (!next) return null;
     return {
       currentFaixa: current,
