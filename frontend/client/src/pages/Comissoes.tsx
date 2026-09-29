@@ -34,7 +34,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
   'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
   'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro', 'Equipe Reciclagem','','Equipe Leonardo'
+  'Equipe Thales','Financeiro', 'Equipe Reciclagem','','Equipe Leonardo','Equipe Ariana'
 ];
 
 const EXCLUDED_CARGOS = [
@@ -45,8 +45,6 @@ const EXCLUDED_CARGOS = [
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 const normalizeName = (text: string) => normalizeText(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-/** Pré-computado para consultas O(1) na Visão Geral. */
 const EXCLUDED_TEAMS_SET = new Set(EXCLUDED_TEAMS.map(normalizeText));
 
 type CommissionOverviewRole = 'assessor' | 'supervisor' | 'coordenador';
@@ -739,7 +737,6 @@ export default function Comissoes() {
       const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
 
       const rows = storeColabs
-        // ✅ CORREÇÃO 1: exclui equipes da lista EXCLUDED_TEAMS antes de montar a tabela.
         .filter(collaborator => !EXCLUDED_TEAMS_SET.has(normalizeText(collaborator.equipeNome)))
         .flatMap(collaborator => {
           const role = getCommissionOverviewRole(collaborator);
