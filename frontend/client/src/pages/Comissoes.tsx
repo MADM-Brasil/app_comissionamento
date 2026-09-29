@@ -34,7 +34,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
   'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
   'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro', 'Equipe Reciclagem',''
+  'Equipe Thales','Financeiro', 'Equipe Reciclagem','','Equipe Leonardo','Equipe Ariana'
 ];
 
 const EXCLUDED_CARGOS = [
@@ -45,6 +45,7 @@ const EXCLUDED_CARGOS = [
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 const normalizeName = (text: string) => normalizeText(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+const EXCLUDED_TEAMS_SET = new Set(EXCLUDED_TEAMS.map(normalizeText));
 
 type CommissionOverviewRole = 'assessor' | 'supervisor' | 'coordenador';
 
@@ -95,7 +96,6 @@ function mapDailyMetricsByCollaborator(assinadosRows: any[], ganhosRows: any[]) 
   ]));
 }
 
-/** Soma de assinados da equipe — mantida para exibição. */
 function sumTeamAssinados(collaborators: any[], teamName: string): number {
   return collaborators.reduce((total, collaborator) => {
     if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
@@ -105,7 +105,6 @@ function sumTeamAssinados(collaborators: any[], teamName: string): number {
   }, 0);
 }
 
-/** Soma de ganhos da equipe — alimenta as faixas de SUPERVISOR/SUPERVISOR SR. */
 function sumTeamGanhos(collaborators: any[], teamName: string): number {
   return collaborators.reduce((total, collaborator) => {
     if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
@@ -125,7 +124,6 @@ function calculateAssessorCommission(
   const isSpecial = isSpecialGroupColaborador(collaborator);
   const productType = getFaixaProductType(collaborator);
 
-  // Faixa de produto puxada por GANHOS.
   const commissionGanhos = calculator.calculateProductCommission(ganhos, productType, commissionBands);
   if (isSpecial || dailyMetrics.length === 0) return commissionGanhos;
 
@@ -326,9 +324,12 @@ export default function Comissoes() {
     hideValues, tabelaComissoes, campaigns,
   } = useAppStore();
 
-  const { currentUser, hasPermission } = useAccessControl();
+  const { currentUser, hasPermission, getAccessLevel, LEVELS } = useAccessControl();
   const canUseFilterBar = hasPermission("canViewTeam") || hasPermission("canAccessReports");
-  const canViewCommissionOverview = hasPermission("canAccessReports");
+
+  // A Visão Geral das Comissões é exclusiva para ADMINISTRATIVO e SUPER_ADMIN.
+  const userLevel = getAccessLevel();
+  const canViewCommissionOverview = userLevel === LEVELS.ADMINISTRATIVO || userLevel === LEVELS.SUPER_ADMIN;
 
   const [filters, setFilters] = useState<{
     equipe: string;
@@ -665,12 +666,10 @@ export default function Comissoes() {
     let comissaoGols = 0;
 
     if (isSupervisor) {
-      // Faixa SUPERVISOR/SUPERVISOR SR puxada por GANHOS da equipe.
       const totalGanEquipe = sumTeamGanhos(storeColabs, userColab.equipeNome);
       totalCommission = calculator.calculateSupervisorCommission(totalGanEquipe, isSR, tabelaComissoes);
       comissaoAssinados = totalCommission;
     } else if (isQuinquenio || isConcomitante) {
-      // Faixa QUINQUENIO/CONCOMITANTE puxada por GANHOS.
       const tipoTabela = isQuinquenio ? 'QUINQUENIO' : 'CONCOMITANTE';
       totalCommission = calculator.calculateProductCommission(userColab.ganhos || 0, tipoTabela, tabelaComissoes);
       comissaoAssinados = totalCommission;
@@ -684,7 +683,6 @@ export default function Comissoes() {
         const golsResult = calculator.applyCampaignsToDailyGoals(dailyMetrics, metaAss, metaGan, activeCampaigns);
         totalGols = golsResult.totalGols;
         comissaoGols = calculator.calculateGoalCommission(totalGols, tabelaComissoes);
-        // Faixa AUXILIO ACIDENTE puxada por GANHOS.
         comissaoAssinados = calculator.calculateProductCommission(ganhos, productType, tabelaComissoes);
         totalCommission = comissaoGols + comissaoAssinados;
       }
@@ -738,43 +736,45 @@ export default function Comissoes() {
       });
       const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
 
-      const rows = storeColabs.flatMap(collaborator => {
-        const role = getCommissionOverviewRole(collaborator);
-        if (!role) return [];
+      const rows = storeColabs
+        .filter(collaborator => !EXCLUDED_TEAMS_SET.has(normalizeText(collaborator.equipeNome)))
+        .flatMap(collaborator => {
+          const role = getCommissionOverviewRole(collaborator);
+          if (!role) return [];
 
-        const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
-        const individualSigned = daily.reduce((total, day) => total + day.assinados, 0);
-        const individualGanhos = daily.reduce((total, day) => total + day.ganhos, 0);
-        const isSupervisorSR = Boolean(collaborator.isSupervisorSR) || calculator.isSupervisorSR(collaborator.email);
-        let assinados = individualSigned;
-        let ganhos = individualGanhos;
-        let commission: number | null;
+          const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
+          const individualSigned = daily.reduce((total, day) => total + day.assinados, 0);
+          const individualGanhos = daily.reduce((total, day) => total + day.ganhos, 0);
+          const isSupervisorSR = Boolean(collaborator.isSupervisorSR) || calculator.isSupervisorSR(collaborator.email);
+          let assinados = individualSigned;
+          let ganhos = individualGanhos;
+          let commission: number | null;
 
-        if (role === 'supervisor') {
-          // Supervisor: soma ganhos dos assessores da equipe e puxa faixa por ganhos.
-          assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
-          ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
-          commission = calculator.calculateSupervisorCommission(ganhos, isSupervisorSR, tabelaComissoes);
-        } else if (role === 'coordenador') {
-          assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
-          ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
-          commission = null;
-        } else {
-          commission = calculateAssessorCommission(collaborator, daily, tabelaComissoes, activeCampaigns);
-        }
+          if (role === 'supervisor') {
+            assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
+            ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
+            commission = calculator.calculateSupervisorCommission(ganhos, isSupervisorSR, tabelaComissoes);
+          } else if (role === 'coordenador') {
+            assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
+            ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
+            commission = null;
+          } else {
+            commission = calculateAssessorCommission(collaborator, daily, tabelaComissoes, activeCampaigns);
+          }
 
-        return [{
-          id: String(collaborator.id),
-          name: collaborator.name,
-          team: collaborator.equipeNome,
-          role,
-          assinados,
-          ganhos,
-          commission,
-          isSupervisorSR,
-          collaborator,
-        }];
-      }).sort((left, right) => left.team.localeCompare(right.team) || left.name.localeCompare(right.name));
+          return [{
+            id: String(collaborator.id),
+            name: collaborator.name,
+            team: collaborator.equipeNome,
+            role,
+            assinados,
+            ganhos,
+            commission,
+            isSupervisorSR,
+            collaborator,
+          }];
+        })
+        .sort((left, right) => left.team.localeCompare(right.team) || left.name.localeCompare(right.name));
 
       setCommissionOverview(rows);
     } catch (err: any) {
@@ -806,7 +806,6 @@ export default function Comissoes() {
           .filter(collaborator => normalizeName(collaborator.equipeNome) === normalizeName(item.team))
           .map(collaborator => normalizeName(collaborator.name)));
 
-        // Supervisor: recalcula ganhos da equipe (base da faixa).
         const [assinadosRows, ganhosRows] = await Promise.all([
           fetchAssinados({
             start: currentStartDate,
@@ -867,7 +866,7 @@ export default function Comissoes() {
     if (!item) return [];
 
     const data = [
-      { name: 'Comissão Ganhos', value: item.comissaoAssinados, color: '#2F6FED' },
+      { name: 'Comissão mês', value: item.comissaoAssinados, color: '#2F6FED' },
     ];
     if (!item.isSpecial && !isSupervisorUser) {
       data.push({ name: 'Comissão Gols', value: item.comissaoGols, color: '#16A34A' });
@@ -977,12 +976,23 @@ export default function Comissoes() {
     setLoadingCallTabulations(true);
 
     try {
-      const equipe = canUseFilterBar
+      // ✅ CORREÇÃO 2: quando o colaborador em foco é supervisor, as tabulações
+      // devem representar a soma dos assessores da equipe. Para isso, removemos
+      // o filtro por colaborador e mantemos apenas o filtro por equipe.
+      const isSupervisorFocus = (userColab?.cargo || '').toLowerCase() === 'supervisor';
+
+      let equipe = canUseFilterBar
         ? (filters.equipe !== 'todas' ? filters.equipe : undefined)
         : userColab?.equipeNome;
-      const colaborador = canUseFilterBar
+      let colaborador = canUseFilterBar
         ? (filters.colaborador !== 'todos' ? filters.colaborador : undefined)
         : userColab?.name;
+
+      if (isSupervisorFocus) {
+        equipe = userColab?.equipeNome || equipe;
+        colaborador = undefined;
+      }
+
       const data = await fetchLigacoesTabulacoes({
         start: currentStartDate,
         end: currentEndDate,
@@ -1262,7 +1272,6 @@ export default function Comissoes() {
                           .sort((a, b) => a.faixa_min - b.faixa_min);
                         const goalGap = calculator.calculateGoalGap(item.totalCycles, tabelaComissoes);
 
-                        // Gap de produto baseado em GANHOS.
                         let productGapInfo: { gap: number; nextValue: number } | null = null;
                         if (faixas.length > 0) {
                           const ganhosAtuais = item.ganhos;
@@ -1274,7 +1283,6 @@ export default function Comissoes() {
                           }
                         }
 
-                        // Gap de supervisor baseado em GANHOS da equipe.
                         let supervisorGapInfo: { gap: number; nextValue: number } | null = null;
                         if (isSupervisorUser) {
                           const totalGanEquipe = sumTeamGanhos(storeColabs, colab.equipeNome);
