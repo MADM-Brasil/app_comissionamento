@@ -43,7 +43,9 @@ class AccessControl {
             'ceo': this.LEVELS.SUPER_ADMIN,
             'desenvolvedor': this.LEVELS.SUPER_ADMIN,
             'diretora': this.LEVELS.SUPER_ADMIN,
-            'coordenador SalesOps': this.LEVELS.SUPER_ADMIN,
+            'Coordenador Sales Ops': this.LEVELS.SUPER_ADMIN,
+            'coordenador Sales Ops': this.LEVELS.SUPER_ADMIN,
+            'coordenador sales ops': this.LEVELS.SUPER_ADMIN,
         };
 
         // Permissões por nível

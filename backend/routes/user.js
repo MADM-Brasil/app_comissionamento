@@ -49,8 +49,8 @@ router.get('/metricas-assessores', async (req, res) => {
         peso_meta_ganho_semanal,
         peso_meta_assinados_mensal,
         peso_meta_ganho_mensal,
-        meta_gols_assinados,   -- ✅ adicionado
-        meta_gols_ganhos       -- ✅ adicionado
+        meta_gols_assinados,   
+        meta_gols_ganhos       
       FROM app_comissionamento.view_app_metricas_assessores
       WHERE TO_CHAR(data_metrica::date, 'YYYY-MM') = $1
     `;
@@ -244,8 +244,8 @@ router.post('/config', async (req, res) => {
       peso_meta_ganho_semanal,
       peso_meta_assinados_mensal,
       peso_meta_ganho_mensal,
-      meta_gols_assinados,   // ✅ adicionado
-      meta_gols_ganhos       // ✅ adicionado
+      meta_gols_assinados,   
+      meta_gols_ganhos       
     } = req.body;
 
     const campos = [
