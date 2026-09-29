@@ -45,22 +45,45 @@ const pool = new Pool({
   keepAliveInitialDelayMillis: 10000,
 });
 
-pool.on('connect', () => {
+// ─── Listeners ─────────────────────────────────────────────────
+// ✅ Correção CRÍTICA: anexa um listener de erro em CADA cliente novo.
+// Sem isso, erros emitidos no Client (não no Pool) derrubam o processo.
+pool.on('connect', (client) => {
   console.log('✅ Conectado ao PostgreSQL com sucesso');
+
+  client.on('error', (err) => {
+    console.error('❌ [DB Client] Erro em cliente PostgreSQL:', err.message);
+    // Não relançar — o pool descarta o cliente e cria um novo na próxima query.
+  });
 });
 
+// Mantido: cobre erros emitidos diretamente pelo Pool (clientes idle).
 pool.on('error', (err) => {
-  console.error('❌ Erro inesperado no pool do PostgreSQL:', err);
+  console.error('❌ [DB Pool] Erro inesperado no pool do PostgreSQL:', err.message);
   console.warn('⚠️ O cliente afetado foi descartado. O pool tentará estabelecer uma nova conexão na próxima operação.');
 });
 
-export async function waitForDatabase({ retryDelayMs = 5000 } = {}) {
+pool.on('remove', () => {
+  // Log opcional para debug de churn de conexões
+  // console.log('🔌 [DB Pool] Cliente removido do pool');
+});
+
+// ─── Aguardar banco ficar disponível ───────────────────────────
+export async function waitForDatabase({ retryDelayMs = 5000, maxAttempts = Infinity } = {}) {
+  let attempt = 0;
   while (true) {
+    attempt += 1;
     try {
       await pool.query('SELECT 1');
+      if (attempt > 1) {
+        console.log(`✅ Banco disponível após ${attempt} tentativa(s).`);
+      }
       return;
     } catch (error) {
-      console.error(`❌ Banco indisponível. Nova tentativa em ${retryDelayMs} ms: ${error.message}`);
+      console.error(`❌ Banco indisponível (tentativa ${attempt}). Nova tentativa em ${retryDelayMs} ms: ${error.message}`);
+      if (attempt >= maxAttempts) {
+        throw new Error(`Banco inacessível após ${attempt} tentativa(s): ${error.message}`);
+      }
       await new Promise(resolve => setTimeout(resolve, retryDelayMs));
     }
   }
@@ -86,6 +109,16 @@ const logDatabaseAccess = async () => {
   console.log('🔎 [DB DEBUG] search_path:', schemaResult.rows[0].search_path);
 };
 
-// Exportações
+// ─── Encerramento gracioso ─────────────────────────────────────
+export async function closePool() {
+  try {
+    await pool.end();
+    console.log('🔌 [DB Pool] Encerrado com sucesso.');
+  } catch (err) {
+    console.error('❌ [DB Pool] Erro ao encerrar:', err.message);
+  }
+}
+
+// ─── Exportações ───────────────────────────────────────────────
 export { pool, query, logDatabaseAccess };
 export default { pool, query };
