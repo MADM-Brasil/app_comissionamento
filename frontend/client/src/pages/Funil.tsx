@@ -677,7 +677,7 @@ export default function Funil() {
           <div className="madm-card p-6 mb-6 animate-fade-in-up">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-bold text-[#09175b] flex items-center gap-2">
-                <BarChart3 className="w-4 h-4" /> Distribuição de Leads por Etapa
+                <BarChart3 className="w-4 h-4" /> Distribuição de Leads Recebidos por Etapa
                 {period === "Hoje" && <span className="text-xs text-gray-400">(semana atual)</span>}
               </h3>
               <div className="text-xs text-gray-500">
@@ -716,7 +716,7 @@ export default function Funil() {
             <div className="madm-card animate-fade-in-up">
               <div className="p-5 border-b border-gray-100 flex justify-between items-center">
                 <h3 className="text-sm font-bold text-[#09175b]">
-                  Detalhamento por Colaborador
+                  Detalhamento por Colaborador (leads recebidos)
                 </h3>
                 <span className="text-xs text-gray-400">
                   {collaboratorStageSummary.length} colaboradores

@@ -1,5 +1,5 @@
 // src/pages/Equipe.tsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import { Link, useLocation } from "wouter";
 import {
   ArrowLeft,
@@ -10,7 +10,7 @@ import {
   UserCheck,
   Users,
   RefreshCw,
-  Loader2, 
+  Loader2,
   TrendingUp,
   Target,
   ShieldCheck,
@@ -57,6 +57,22 @@ function formatMoeda(valor: number): string {
     currency: "BRL",
     maximumFractionDigits: 0,
   }).format(valor);
+}
+
+/**
+ * Lê a meta mensal de ganhos do colaborador.
+ *
+ * A meta de assinados foi descontinuada. Os valores vêm dos campos
+ * históricos do banco `peso_meta_ganho_mensal`, que chegam ao frontend
+ * como `pesoMensalGanhos`. Fallback para `metaMensalGanhos` e, por
+ * último, 60.
+ */
+function getMetaGanhosMensal(colab: any): number {
+  const peso = Number(colab?.pesoMensalGanhos);
+  if (Number.isFinite(peso) && peso > 0) return peso;
+  const meta = Number(colab?.metaMensalGanhos);
+  if (Number.isFinite(meta) && meta > 0) return meta;
+  return 60;
 }
 
 // Medalhas – apenas para pódio, sem status
@@ -124,14 +140,28 @@ const EXCLUDED_TEAMS = [
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo'
 ];
 
-const normalize = (str: string): string =>
+// ✅ Assinatura ampliada para aceitar undefined/null — evita TS2345 em
+// chamadas como `normalize(c.cargo)` quando `cargo` é opcional.
+const normalize = (str: string | undefined | null): string =>
   (str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 const isExcludedTeam = (teamName: string) =>
   EXCLUDED_TEAMS.some((t) => normalize(t) === normalize(teamName));
 
-// Removemos completamente os filtros de status e cargo
 const normalizarNome = (nome: string) => normalize(nome);
+
+/**
+ * Retorna true para cargos cujos totais no dataStore são hierárquicos
+ * (supervisor = soma da equipe; coordenador/administrativo = soma de todos
+ * os supervisores). NÃO devem ser somados junto com os assessores, senão
+ * ocorre dupla contagem nas agregações por time.
+ */
+function isAggregatedRole(cargo: string | undefined): boolean {
+  const c = normalize(cargo);
+  if (c.includes("supervisor")) return true;
+  if (c === "coordenador" || c === "administrativo") return true;
+  return false;
+}
 
 // ============================================================
 //  SUBCOMPONENTES VISUAIS
@@ -218,13 +248,13 @@ interface PaceData {
   gap: number;
 }
 function calcularPaceProjecao(
-  assinados: number,
+  realizado: number,
   metaMensal: number,
   diasUteisDecorridos: number,
   diasUteisTotaisMes: number
 ): PaceData | null {
   if (metaMensal <= 0 || diasUteisTotaisMes === 0) return null;
-  const paceAtual = diasUteisDecorridos > 0 ? assinados / diasUteisDecorridos : 0;
+  const paceAtual = diasUteisDecorridos > 0 ? realizado / diasUteisDecorridos : 0;
   const paceEsperado = metaMensal / diasUteisTotaisMes;
   const projecao = paceAtual * diasUteisTotaisMes;
   return { paceAtual, paceEsperado, projecao: Math.round(projecao), gap: Math.round(projecao - metaMensal) };
@@ -256,7 +286,7 @@ function CardPodioTime({ item, posicao }: { item: any; posicao: 1 | 2 | 3 }) {
         <span className="mt-2 text-[13px] font-semibold text-slate-800 text-center group-hover:underline truncate max-w-full">{item.nomeTime}</span>
         <span className="text-[11px] text-slate-500 mt-0.5">{item.pessoas} colaborador(es)</span>
         <span className="text-sm font-bold mt-1" style={{ color: estilo.cor }}>{formatNumero(item.pontuacao)} score</span>
-        <span className="text-[11px] text-slate-500 mt-0.5">{formatNumero(item.assinados)} ass. · {formatMoeda(item.vendaGanha)}</span>
+        <span className="text-[11px] text-slate-500 mt-0.5">{formatNumero(item.ganhos)} ganhos · {formatMoeda(item.vendaGanha)}</span>
       </Link>
       <div className={cn("w-24 md:w-28 mt-3 rounded-t-lg flex flex-col items-center justify-start pt-3 gap-1.5 shadow-lg", estilo.altura)} style={{ borderTop: `3px solid ${estilo.cor}`, background: estilo.gradiente, boxShadow: `0 8px 20px -6px ${estilo.cor}66` }}>
         <span className="text-2xl font-bold leading-none" style={{ color: estilo.cor }}>{posicao}º</span>
@@ -316,7 +346,6 @@ export default function Equipe() {
     loadRawMetrics();
   }, [currentStartDate, currentEndDate]);
 
-  // 🔧 Correção: obtém a equipe do supervisor com fallback
   const userTeam = useMemo(() => {
     if (!currentUser) return '';
     const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
@@ -341,7 +370,6 @@ export default function Equipe() {
     return undefined;
   }, [location]);
 
-  // Redirecionamento robusto para supervisor/assessor
   useEffect(() => {
     if (!currentUser) return;
     if (isSupervisor) {
@@ -360,7 +388,6 @@ export default function Equipe() {
     }
   }, [currentUser, isSupervisor, isAssessor, supervisor, rawCollaborators, userTeam]);
 
-  // ✅ FILTRO PRINCIPAL – sem status e sem desativado, apenas exclusão de equipes
   const colaboradores = useMemo(() => {
     let filtered = rawCollaborators.filter(
       (c) => !isExcludedTeam(c.equipeNome)
@@ -388,10 +415,10 @@ export default function Equipe() {
     ? "Meus Dados"
     : "Equipes";
   const subtitulo = supervisor
-    ? `Performance individual de cada consultor. Assinados de ${labelPeriodo}.`
+    ? `Performance individual de cada consultor. Ganhos de ${labelPeriodo}.`
     : isAssessor
     ? "Seus indicadores de desempenho."
-    : `Visão geral das equipes. Assinados de ${labelPeriodo}.`;
+    : `Visão geral das equipes. Ganhos de ${labelPeriodo}.`;
 
   if (initialLoading) {
     return (
@@ -424,7 +451,14 @@ export default function Equipe() {
   return (
     <DashboardLayout title={titulo} subtitle={subtitulo}>
       {!supervisor && !colaboradorId && canSeeAll ? (
-        <ListaEquipes colaboradores={colaboradores} busca={busca} setBusca={setBusca} />
+        <ListaEquipes
+          colaboradores={colaboradores}
+          busca={busca}
+          setBusca={setBusca}
+          currentStartDate={currentStartDate}
+          currentEndDate={currentEndDate}
+          period={period}
+        />
       ) : supervisor ? (
         <ColaboradoresDaEquipe equipe={supervisor} colaboradores={colaboradores} />
       ) : colaboradorId ? (
@@ -434,7 +468,14 @@ export default function Equipe() {
       ) : isSupervisor ? (
         <ColaboradoresDaEquipe equipe={userTeam} colaboradores={colaboradores} />
       ) : (
-        <ListaEquipes colaboradores={colaboradores} busca={busca} setBusca={setBusca} />
+        <ListaEquipes
+          colaboradores={colaboradores}
+          busca={busca}
+          setBusca={setBusca}
+          currentStartDate={currentStartDate}
+          currentEndDate={currentEndDate}
+          period={period}
+        />
       )}
     </DashboardLayout>
   );
@@ -463,10 +504,16 @@ function ListaEquipes({
   colaboradores,
   busca,
   setBusca,
+  currentStartDate,
+  currentEndDate,
+  period,
 }: {
   colaboradores: Collaborator[];
   busca: string;
   setBusca: (v: string) => void;
+  currentStartDate: string;
+  currentEndDate: string;
+  period: string;
 }) {
   const [visualizacao, setVisualizacao] = useState<"cards" | "tabela">("cards");
   const [ordenarPor, setOrdenarPor] = useState<OrdenarPor>("desempenho");
@@ -475,25 +522,58 @@ function ListaEquipes({
   const [refreshing, setRefreshing] = useState(false);
   const { loadCollaborators, loadMetricsForPeriod } = useAppStore();
 
-  const carregarDiario = async () => {
+  // ============================================================
+  // PERÍODO ATIVO — espelha exatamente o filtro selecionado
+  // (Hoje, Semana, Mês ou Custom), em vez dos últimos 30 dias.
+  // ============================================================
+  const { inicio: inicioPeriodo, fim: fimPeriodo } = useMemo(() => {
+    if (currentStartDate && currentEndDate) {
+      return { inicio: currentStartDate, fim: currentEndDate };
+    }
+    const hoje = new Date().toISOString().slice(0, 10);
+    return { inicio: hoje, fim: hoje };
+  }, [currentStartDate, currentEndDate]);
+
+  const diasPeriodo = useMemo(() => {
+    const dias: string[] = [];
+    const cursor = new Date(inicioPeriodo);
+    const fimData = new Date(fimPeriodo);
+    while (cursor <= fimData) {
+      const pad = (n: number) => String(n).padStart(2, "0");
+      dias.push(`${cursor.getFullYear()}-${pad(cursor.getMonth() + 1)}-${pad(cursor.getDate())}`);
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return dias;
+  }, [inicioPeriodo, fimPeriodo]);
+
+  /** Rótulo amigável do período para o cabeçalho do mini-gráfico. */
+  const labelPeriodoGrafico = useMemo(() => {
+    if (period === "Custom") return `${inicioPeriodo} → ${fimPeriodo}`;
+    if (period === "Hoje") return "hoje";
+    if (period === "Semana") return "semana atual";
+    if (period === "Mês") return "mês atual";
+    return "período selecionado";
+  }, [period, inicioPeriodo, fimPeriodo]);
+
+  // ============================================================
+  // Carrega a série diária por time usando o MESMO período do filtro
+  // ============================================================
+  const carregarDiario = useCallback(async () => {
+    if (!inicioPeriodo || !fimPeriodo) return;
     setLoadingDiario(true);
-    const hoje = new Date();
-    const fim = hoje.toISOString().slice(0, 10);
-    const inicio = new Date(hoje);
-    inicio.setDate(inicio.getDate() - 29);
     try {
-      const dados = await fetchAssinadosDiarioPorTime(inicio.toISOString().slice(0, 10), fim);
+      const dados = await fetchAssinadosDiarioPorTime(inicioPeriodo, fimPeriodo);
       setDiario(dados);
     } catch {
       setDiario([]);
     } finally {
       setLoadingDiario(false);
     }
-  };
+  }, [inicioPeriodo, fimPeriodo]);
 
   useEffect(() => {
     void carregarDiario();
-  }, []);
+  }, [carregarDiario]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -506,26 +586,6 @@ function ListaEquipes({
 
   const times = Array.from(new Set(colaboradores.map((c) => c.equipeNome))).sort();
 
-  const { inicio: inicio30, fim: fim30 } = useMemo(() => {
-    const hoje = new Date();
-    const fim = hoje.toISOString().slice(0, 10);
-    const inicio = new Date(hoje);
-    inicio.setDate(inicio.getDate() - 29);
-    return { inicio: inicio.toISOString().slice(0, 10), fim };
-  }, []);
-
-  const dias30 = useMemo(() => {
-    const dias: string[] = [];
-    const cursor = new Date(inicio30);
-    const fimData = new Date(fim30);
-    while (cursor <= fimData) {
-      const pad = (n: number) => String(n).padStart(2, "0");
-      dias.push(`${cursor.getFullYear()}-${pad(cursor.getMonth() + 1)}-${pad(cursor.getDate())}`);
-      cursor.setDate(cursor.getDate() + 1);
-    }
-    return dias;
-  }, [inicio30, fim30]);
-
   const diarioPorTime = useMemo(() => {
     const mapa = new Map<string, Map<string, number>>();
     for (const linha of diario) {
@@ -536,23 +596,37 @@ function ListaEquipes({
     return mapa;
   }, [diario]);
 
+  // ============================================================
+  // AGREGAÇÃO POR TIME
+  //
+  // Soma SOMENTE os colaboradores cujos valores não são hierárquicos.
+  // Supervisores e coordenadores recebem, via `applyHierarchyTotals`
+  // do dataStore, a soma dos seus subordinados — incluí-los aqui
+  // duplicaria a contagem e explicaria a divergência com o resto do
+  // sistema (`rawMetrics`).
+  // ============================================================
   const dadosPorTime = times.map((nome, indice) => {
     const membros = colaboradores.filter((c) => c.equipeNome === nome);
-    const recebidos = membros.reduce((s, c) => s + (c.emitidos || 0), 0);
-    const assinados = membros.reduce((s, c) => s + (c.assinados || 0), 0);
-    const protocolados = membros.reduce((s, c) => s + (c.protocolados || 0), 0);
-    const vendaGanha = membros.reduce((s, c) => s + (c.ganhos || 0), 0);
-    const metaMensal = membros.reduce((s, c) => s + (c.metaMensalAssinados || 0), 0);
-    const taxaConversao = assinados ? (protocolados / assinados) * 100 : 0;
-    const serieDiaria = dias30.map((dia) => diarioPorTime.get(nome)?.get(dia) ?? 0);
+    const membrosAgregaveis = membros.filter((c) => !isAggregatedRole(c.cargo));
+
+    const recebidos = membrosAgregaveis.reduce((s, c) => s + (c.emitidos || 0), 0);
+    const assinados = membrosAgregaveis.reduce((s, c) => s + (c.assinados || 0), 0);
+    const protocolados = membrosAgregaveis.reduce((s, c) => s + (c.protocolados || 0), 0);
+    const ganhos = membrosAgregaveis.reduce((s, c) => s + (c.ganhos || 0), 0);
+    // Meta de ganhos: lê de `pesoMensalGanhos` (campo histórico `peso_meta_ganho_mensal`)
+    const metaMensalGanhos = membrosAgregaveis.reduce((s, c) => s + getMetaGanhosMensal(c), 0);
+    const taxaConversao = ganhos ? (protocolados / ganhos) * 100 : 0;
+    const serieDiaria = diasPeriodo.map((dia) => diarioPorTime.get(nome)?.get(dia) ?? 0);
+
     return {
       nome,
+      // "pessoas" continua contando todos os membros visíveis (inclusive supervisores)
       pessoas: membros.length,
       recebidos,
       assinados,
       protocolados,
-      vendaGanha,
-      metaMensal,
+      ganhos,
+      metaMensalGanhos,
       taxaConversao,
       serieDiaria,
       cor: CORES_TIME[indice % CORES_TIME.length],
@@ -563,11 +637,11 @@ function ListaEquipes({
     if (ordenarPor === "desempenho") return b.taxaConversao - a.taxaConversao;
     if (ordenarPor === "recebidos") return b.recebidos - a.recebidos;
     if (ordenarPor === "assinados") return b.assinados - a.assinados;
-    if (ordenarPor === "comissao") return b.vendaGanha - a.vendaGanha;
+    if (ordenarPor === "comissao") return b.ganhos - a.ganhos;
     return b.protocolados - a.protocolados;
   });
 
-  const dadosEvolucao = dias30.map((dia) => {
+  const dadosEvolucao = diasPeriodo.map((dia) => {
     const ponto: Record<string, string | number> = { dia: dia.slice(5) };
     for (const nome of times) ponto[nome] = diarioPorTime.get(nome)?.get(dia) ?? 0;
     return ponto;
@@ -685,12 +759,12 @@ function ListaEquipes({
                     </div>
                     <div className="grid grid-cols-3 gap-2 mb-3">
                       <div>
-                        <p className="text-[11px] text-slate-500">Assinados</p>
-                        <p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.assinados)}</p>
+                        <p className="text-[11px] text-slate-500">Ganhos</p>
+                        <p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.ganhos)}</p>
                       </div>
                       <div>
                         <p className="text-[11px] text-slate-500 text-center">Meta</p>
-                        <p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.metaMensal)}</p>
+                        <p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.metaMensalGanhos)}</p>
                       </div>
                       <div>
                         <p className="text-[11px] text-slate-500">Protocolados</p>
@@ -739,7 +813,7 @@ function ListaEquipes({
                     <tr className="text-slate-500 border-b border-slate-200">
                       <th className="py-2 pr-4 font-medium w-10">#</th>
                       <th className="py-2 pr-4 font-medium">Equipe</th>
-                      <th className="py-2 pr-4 font-medium">Assinados</th>
+                      <th className="py-2 pr-4 font-medium">Ganhos</th>
                       <th className="py-2 pr-4 font-medium">Meta</th>
                       <th className="py-2 pr-4 font-medium">Comissão</th>
                       <th className="py-2 pr-4 font-medium">Taxa de conversão</th>
@@ -754,9 +828,9 @@ function ListaEquipes({
                             {t.nome}
                           </Link>
                         </td>
-                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.assinados)}</td>
-                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.metaMensal)}</td>
-                        <td className="py-2.5 pr-4 text-slate-600">{formatMoeda(t.vendaGanha)}</td>
+                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.ganhos)}</td>
+                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.metaMensalGanhos)}</td>
+                        <td className="py-2.5 pr-4 text-slate-600">{formatMoeda(t.ganhos)}</td>
                         <td className="py-2.5 pr-4 text-slate-700 font-semibold">{formatPct(t.taxaConversao, 1)}</td>
                       </tr>
                     ))}
@@ -769,12 +843,19 @@ function ListaEquipes({
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6">
             <Card>
               <h3 className="text-sm font-semibold text-slate-700 mb-3">
-                Evolução das Equipes <span className="font-normal text-slate-400">· últimos 30 dias</span>
+                Evolução das Equipes <span className="font-normal text-slate-400">· {labelPeriodoGrafico}</span>
               </h3>
               <ResponsiveContainer width="100%" height={220}>
                 <LineChart data={dadosEvolucao} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
                   <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="dia" stroke="#64748b" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} interval={4} />
+                  <XAxis
+                    dataKey="dia"
+                    stroke="#64748b"
+                    tick={{ fontSize: 10 }}
+                    tickLine={false}
+                    axisLine={false}
+                    interval={Math.max(0, Math.floor(dadosEvolucao.length / 8) - 1)}
+                  />
                   <YAxis stroke="#64748b" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={28} />
                   <Tooltip contentStyle={{ background: "#ffffff", border: "1px solid #e2e8f0", borderRadius: 10, fontSize: 12 }} />
                   {times.map((nome, indice) => (
@@ -807,11 +888,19 @@ function ListaEquipes({
 //  COLABORADOR CARD
 // ============================================================
 function ColaboradorCard({ c }: { c: Collaborator }) {
+  // Cargos agregados (supervisor, coordenador, administrativo) carregam
+  // a soma da equipe em `ganhos`/`assinados`/etc. Sinalizamos isso ao
+  // usuário para evitar confusão com o ganho individual.
+  const agregado = isAggregatedRole(c.cargo);
+
   const recebidos = c.emitidos || 0;
   const assinados = c.assinados || 0;
   const protocolados = c.protocolados || 0;
-  const metaMensal = c.metaMensalAssinados || 0;
-  const taxa = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
+  const ganhos = c.ganhos || 0;
+  // Meta de ganhos lida do campo histórico `peso_meta_ganho_mensal` (exposto como `pesoMensalGanhos`)
+  const metaMensalGanhos = getMetaGanhosMensal(c);
+  const taxa = recebidos > 0 ? (ganhos / recebidos) * 100 : 0;
+
   return (
     <Link to={`/colaboradores/${c.id}`}>
       <Card className="h-full transition-all duration-200 hover:border-blue-500/40 hover:-translate-y-0.5 hover:shadow-[0_0_24px_rgba(37,99,235,0.35)] group">
@@ -820,7 +909,10 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
             <Avatar nome={c.name} size={40} />
             <div>
               <p className="text-sm font-semibold text-slate-900">{c.name}</p>
-              <p className="text-[12px] text-slate-500">{c.cargo} · {c.equipeNome}</p>
+              <p className="text-[12px] text-slate-500">
+                {c.cargo} · {c.equipeNome}
+                {agregado && <span className="ml-1 text-[10px] text-amber-600">(totais da equipe)</span>}
+              </p>
             </div>
           </div>
           <ArrowRight size={16} className="text-slate-400 group-hover:text-blue-600 transition-colors shrink-0" />
@@ -828,11 +920,11 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 mb-4">
           <div><p className="text-[11px] text-slate-500">Recebidos</p><p className="text-sm font-semibold text-slate-700">{formatNumero(recebidos)}</p></div>
           <div><p className="text-[11px] text-slate-500">Assinados</p><p className="text-sm font-semibold text-slate-700">{formatNumero(assinados)}</p></div>
-          <div><p className="text-[11px] text-slate-500">Meta mensal</p><p className="text-sm font-semibold text-slate-700">{formatNumero(metaMensal)}</p></div>
-          <div><p className="text-[11px] text-slate-500">Protocolados</p><p className="text-sm font-semibold text-slate-700">{formatNumero(protocolados)}</p></div>
+          <div><p className="text-[11px] text-slate-500">Meta mensal (ganhos)</p><p className="text-sm font-semibold text-slate-700">{formatNumero(metaMensalGanhos)}</p></div>
+          <div><p className="text-[11px] text-slate-500">Ganhos</p><p className="text-sm font-semibold text-slate-700">{formatNumero(ganhos)}</p></div>
         </div>
         <div className="flex items-center justify-between">
-          <div><p className="text-[11px] text-slate-500">Taxa de Assinados</p><p className="text-base font-semibold text-slate-900">{formatPct(taxa)}</p></div>
+          <div><p className="text-[11px] text-slate-500">Taxa de Ganhos</p><p className="text-base font-semibold text-slate-900">{formatPct(taxa)}</p></div>
         </div>
       </Card>
     </Link>
@@ -981,7 +1073,8 @@ function DetalhesColaborador({
   const assinados = colaborador?.assinados || 0;
   const protocolados = colaborador?.protocolados || 0;
   const ganhos = colaborador?.ganhos || 0;
-  const metaMensal = colaborador?.metaMensalAssinados || 0;
+  // Meta de ganhos lida do campo histórico `peso_meta_ganho_mensal` (exposto como `pesoMensalGanhos`)
+  const metaMensalGanhos = colaborador ? getMetaGanhosMensal(colaborador) : 0;
 
   const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
   const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
@@ -994,7 +1087,8 @@ function DetalhesColaborador({
   const fimPeriodo = currentEndDate ? new Date(currentEndDate) : new Date();
   const diasUteisTotais = contarDiasUteis(inicioPeriodo, fimPeriodo);
   const diasUteisDecorridos = contarDiasUteis(inicioPeriodo, hoje < fimPeriodo ? hoje : fimPeriodo);
-  const pace = calcularPaceProjecao(assinados, metaMensal, diasUteisDecorridos, diasUteisTotais);
+  // Pace agora calculado sobre ganhos realizados
+  const pace = calcularPaceProjecao(ganhos, metaMensalGanhos, diasUteisDecorridos, diasUteisTotais);
 
   const equipe = colaboradores.filter((c) => c.equipeNome === colaborador?.equipeNome);
   const mediaEquipe = useMemo(() => {
@@ -1016,25 +1110,28 @@ function DetalhesColaborador({
       { metrica: "Recebidos", colaborador: recebidos, equipe: mediaEquipe.recebidos, max: Math.max(recebidos, mediaEquipe.recebidos) * 1.2 },
       { metrica: "Assinados", colaborador: assinados, equipe: mediaEquipe.assinados, max: Math.max(assinados, mediaEquipe.assinados) * 1.2 },
       { metrica: "Protocolados", colaborador: protocolados, equipe: mediaEquipe.protocolados, max: Math.max(protocolados, mediaEquipe.protocolados) * 1.2 },
-      { metrica: "Comissão", colaborador: ganhos, equipe: mediaEquipe.ganhos, max: Math.max(ganhos, mediaEquipe.ganhos) * 1.2 },
+      { metrica: "Ganhos", colaborador: ganhos, equipe: mediaEquipe.ganhos, max: Math.max(ganhos, mediaEquipe.ganhos) * 1.2 },
       { metrica: "Tx Conversão", colaborador: taxaConversaoGeral, equipe: mediaEquipe.taxaConversao, max: 100 },
     ];
   }, [recebidos, assinados, protocolados, ganhos, taxaConversaoGeral, mediaEquipe]);
 
+  // ============================================================
+  // RECOMENDAÇÕES — comparação baseada em GANHOS
+  // ============================================================
   const recomendacoes: string[] = [];
-  if (pace && metaMensal > 0) {
-    const gapRatio = pace.projecao / metaMensal;
+  if (pace && metaMensalGanhos > 0) {
+    const gapRatio = pace.projecao / metaMensalGanhos;
     if (gapRatio < 0.75) {
-      recomendacoes.push(`Pace muito abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — no ritmo atual não fecha o período.`);
+      recomendacoes.push(`Pace de ganhos muito abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — no ritmo atual não fecha o período.`);
     } else if (gapRatio < 0.9) {
-      recomendacoes.push(`Pace abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — acompanhar de perto.`);
+      recomendacoes.push(`Pace de ganhos abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — acompanhar de perto.`);
     }
   }
   if (taxaConversaoProtocolados < 60) {
     recomendacoes.push("Revisar imediatamente a carteira de assinados sem protocolo.");
   }
-  if (metaMensal > 0 && assinados < metaMensal * 0.7) {
-    recomendacoes.push("Redefinir plano de recuperação de meta com acompanhamento semanal.");
+  if (metaMensalGanhos > 0 && ganhos < metaMensalGanhos * 0.7) {
+    recomendacoes.push("Redefinir plano de recuperação da meta de ganhos com acompanhamento semanal.");
   }
   if (taxaConversaoGeral < 70) {
     recomendacoes.push("Reforçar técnicas de fechamento comercial (etapa emissão → assinatura).");
@@ -1085,29 +1182,29 @@ function DetalhesColaborador({
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
         <KpiCard titulo="Recebidos" valor={formatNumero(recebidos)} icon={FileStack} accent="info" />
         <KpiCard
-          titulo="Assinados"
-          valor={metaMensal > 0 ? `${formatNumero(assinados)} / ${formatNumero(metaMensal)}` : formatNumero(assinados)}
+          titulo="Ganhos"
+          valor={metaMensalGanhos > 0 ? `${formatNumero(ganhos)} / ${formatNumero(metaMensalGanhos)}` : formatNumero(ganhos)}
           icon={FilePenLine}
           accent="brand"
-          subtitulo="Meta do período"
+          subtitulo="Meta de ganhos do período"
         />
         <KpiCard titulo="Protocolados" valor={formatNumero(protocolados)} icon={FileCheck2} accent="success" />
-        <KpiCard titulo="Venda Ganha" valor={formatNumero(ganhos)} icon={Award} accent="warning" />
+        <KpiCard titulo="Assinados" valor={formatNumero(assinados)} icon={FilePenLine} accent="warning" />
         <KpiCard
-          titulo={metaMensal > 0 ? "Atingimento da Meta" : "Conversão Geral"}
-          valor={formatPct(metaMensal > 0 ? (assinados / metaMensal) * 100 : taxaConversaoGeral, 0)}
+          titulo={metaMensalGanhos > 0 ? "Atingimento da Meta (ganhos)" : "Conversão Geral"}
+          valor={formatPct(metaMensalGanhos > 0 ? (ganhos / metaMensalGanhos) * 100 : taxaConversaoGeral, 0)}
           icon={Target}
-          accent={metaMensal === 0 ? "info" : (assinados / metaMensal) * 100 >= 90 ? "success" : "warning"}
-          subtitulo={metaMensal === 0 ? "Meta não cadastrada" : undefined}
+          accent={metaMensalGanhos === 0 ? "info" : (ganhos / metaMensalGanhos) * 100 >= 90 ? "success" : "warning"}
+          subtitulo={metaMensalGanhos === 0 ? "Meta não cadastrada" : undefined}
         />
       </div>
 
-      {metaMensal > 0 && pace && (
+      {metaMensalGanhos > 0 && pace && (
         <Card className="mb-6 border-l-4 border-l-blue-500">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-slate-700">Pace do mês</h3>
+            <h3 className="text-sm font-semibold text-slate-700">Pace do mês (ganhos)</h3>
             <span className="text-[11px] text-slate-500">
-              {diasUteisDecorridos} de {diasUteisTotais} dias úteis decorridos · meta: {formatNumero(metaMensal)}
+              {diasUteisDecorridos} de {diasUteisTotais} dias úteis decorridos · meta: {formatNumero(metaMensalGanhos)}
             </span>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1300,7 +1397,7 @@ function DetalhesColaborador({
       </div>
 
       <p className="mt-4 text-xs text-slate-400">
-        Período analisado: {currentStartDate} até {currentEndDate} · Meta do período: {formatNumero(metaMensal)}
+        Período analisado: {currentStartDate} até {currentEndDate} · Meta de ganhos: {formatNumero(metaMensalGanhos)}
       </p>
     </div>
   );

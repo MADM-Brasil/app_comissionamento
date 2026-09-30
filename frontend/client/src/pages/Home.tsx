@@ -96,10 +96,19 @@ const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', numb
   emitidos: 2,
 };
 
+/**
+ * Metas globais usadas como fallback quando nenhum colaborador está
+ * selecionado. Apenas a meta de GANHOS é utilizada — a meta de assinados
+ * foi descontinuada deste painel.
+ *
+ * Os valores são lidos do banco nos campos históricos `peso_meta_ganho_*`
+ * (`peso_meta_ganho_diario`, `peso_meta_ganho_semanal`, `peso_meta_ganho_mensal`),
+ * que chegam ao frontend como `meta*Ganhos`.
+ */
 const GLOBAL_META = {
-  diario: { assinados: 100, ganhos: 100 },
-  semanal: { assinados: 500, ganhos: 500 },
-  mensal: { assinados: 2000, ganhos: 2000 },
+  diario: { ganhos: 65 },
+  semanal: { ganhos: 325 },
+  mensal: { ganhos: 1300 },
 };
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
@@ -612,35 +621,52 @@ export default function Home() {
     return 0;
   }, [currentUserData, tabelaComissoes, dailyMetrics]);
 
-  const { totalTargetAssinados, totalTargetGanhos, totalMetasBatidas } = useMemo(() => {
+  // ============================================================
+  // METAS DE GANHOS
+  //
+  // A meta de assinados foi descontinuada deste painel. Apenas a meta
+  // de GANHOS é contabilizada agora.
+  //
+  // Os valores são lidos dos campos históricos do banco
+  // `peso_meta_ganho_diario`, `peso_meta_ganho_semanal` e
+  // `peso_meta_ganho_mensal`, que chegam ao frontend como
+  // `metaDiarioGanhos`, `metaSemanalGanhos` e `metaMensalGanhos`.
+  // ============================================================
+  const { totalTargetGanhos, totalMetasBatidas } = useMemo(() => {
     if (isGlobalView) {
+      // Visão global (sem filtro): usa a meta de ganhos por período.
       const meta = GLOBAL_META[periodKey as keyof typeof GLOBAL_META] || GLOBAL_META.mensal;
-      const assinados = rawMetrics.assinados, ganhos = rawMetrics.ganhos;
-      let metasBatidas;
-      if (isSpecialGroup) metasBatidas = Math.floor(assinados / (meta.assinados || 1));
-      else metasBatidas = Math.floor(Math.min(assinados / (meta.assinados || 1), ganhos / (meta.ganhos || 1)));
-      return { totalTargetAssinados: meta.assinados, totalTargetGanhos: meta.ganhos, totalMetasBatidas: metasBatidas };
+      const ganhos = rawMetrics.ganhos;
+      // Metas batidas = floor(ganhos realizados / meta de ganhos do período)
+      const metasBatidas = Math.floor(ganhos / (meta.ganhos || 1));
+      return { totalTargetGanhos: meta.ganhos, totalMetasBatidas: metasBatidas };
     }
-    let sumAss = 0, sumGan = 0, metas = 0;
+
+    // Visão por colaborador: soma as metas de ganhos individuais
+    // (lidas de `meta*Ganhos`) e conta quantas vezes cada colaborador
+    // atingiu a própria meta.
+    let sumGan = 0;
+    let metas = 0;
     displayCollaborators.forEach(c => {
-      const pesoAssKey = `meta${periodKey.charAt(0).toUpperCase() + periodKey.slice(1)}Assinados` as keyof Collaborator;
       const pesoGanKey = `meta${periodKey.charAt(0).toUpperCase() + periodKey.slice(1)}Ganhos` as keyof Collaborator;
-      const pesoAss = Number(c[pesoAssKey]) || 0, pesoGan = Number(c[pesoGanKey]) || 0;
-      sumAss += pesoAss; sumGan += pesoGan;
-      const assinados = c.assinados || 0, ganhos = isSpecialGroup ? 0 : (c.ganhos || 0);
-      if (pesoAss === 0) return;
-      if (pesoGan === 0) metas += Math.floor(assinados / pesoAss);
-      else metas += Math.floor(Math.min(assinados / pesoAss, ganhos / pesoGan));
+      const pesoGan = Number(c[pesoGanKey]) || 0;
+      sumGan += pesoGan;
+
+      // Para grupos especiais (Quinquênio/Concomitante), ganhos são zerados
+      // no dataStore, então a meta atingida também é 0.
+      const ganhos = isSpecialGroup ? 0 : (c.ganhos || 0);
+      if (pesoGan === 0) return;
+      metas += Math.floor(ganhos / pesoGan);
     });
-    return { totalTargetAssinados: sumAss, totalTargetGanhos: sumGan, totalMetasBatidas: metas };
+
+    return { totalTargetGanhos: sumGan, totalMetasBatidas: metas };
   }, [isGlobalView, displayCollaborators, rawMetrics, isSpecialGroup, periodKey]);
 
+  // Progresso da meta: apenas ganhos.
   const goalProgress = useMemo(() => {
-    const progressAss = totalTargetAssinados > 0 ? (totals.assinados / totalTargetAssinados) * 100 : 0;
-    const progressGan = totalTargetGanhos > 0 ? (totals.ganhos / totalTargetGanhos) * 100 : 100;
-    if (isSpecialGroup || totalTargetGanhos === 0) return Math.min(progressAss, 100);
-    return Math.min(progressAss, progressGan, 100);
-  }, [totalTargetAssinados, totalTargetGanhos, totals.assinados, totals.ganhos, isSpecialGroup]);
+    if (totalTargetGanhos === 0) return 100;
+    return Math.min((totals.ganhos / totalTargetGanhos) * 100, 100);
+  }, [totalTargetGanhos, totals.ganhos]);
 
   // ============================================================
   // GRÁFICOS DE PERFORMANCE
@@ -740,24 +766,41 @@ export default function Home() {
     fetchDailyData();
   }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
 
+  // ============================================================
+  // STATS DA SEMANA — agora apenas ganhos
+  //
+  // A meta de assinados foi descontinuada. O "melhor dia" e os "dias
+  // com meta atingida" são calculados sobre GANHOS realizados.
+  // ============================================================
   const stats = useMemo(() => {
-    if (isSpecialGroup || weeklyDetailed.length === 0) return { totalAssinados: 0, totalGanhos: 0, performanceAssinados: 0, performanceGanhos: 0, bestDay: { day: '', value: 0 }, avgGanhos: 0, daysWithMeta: 0, totalDays: 0 };
-    const { start, end } = getCurrentWeekDatesUTC();
-    const weekdaysCount = countWeekdaysUTC(start, end);
-    const totalMetaDiariaAssinados = displayCollaborators.reduce((sum, c) => sum + (c.metaDiarioAssinados || 3), 0);
-    const targetAssinadosSemanal = totalMetaDiariaAssinados * weekdaysCount;
-    const totalAssinados = weeklyDetailed.reduce((a, d) => a + d.assinados, 0);
+    if (isSpecialGroup || weeklyDetailed.length === 0) {
+      return {
+        totalGanhos: 0,
+        performanceGanhos: 0,
+        bestDay: { day: '', value: 0 },
+        avgGanhos: 0,
+        daysWithMeta: 0,
+        totalDays: 0,
+      };
+    }
     const totalGanhos = weeklyDetailed.reduce((a, d) => a + d.ganhos, 0);
     const totalDays = weeklyDetailed.length;
-    const performanceAssinados = targetAssinadosSemanal > 0 ? (totalAssinados / targetAssinadosSemanal) * 100 : 0;
     const performanceGanhos = totalTargetGanhos > 0 ? (totalGanhos / totalTargetGanhos) * 100 : 0;
     const avgGanhos = totalDays > 0 ? totalGanhos / totalDays : 0;
-    let best = { day: '', value: 0 }, daysWithMeta = 0;
-    const dailyTarget = totalMetaDiariaAssinados;
-    weeklyDetailed.forEach(d => { if (d.assinados > best.value) best = { day: d.day, value: d.assinados }; if (dailyTarget > 0 && d.assinados >= dailyTarget) daysWithMeta++; });
-    return { totalAssinados, totalGanhos, performanceAssinados, performanceGanhos, bestDay: best, avgGanhos, daysWithMeta, totalDays };
+
+    // Meta diária de ganhos (soma das metas de ganhos por colaborador)
+    const dailyTarget = displayCollaborators.reduce((sum, c) => sum + (c.metaDiarioGanhos || 0), 0);
+
+    let best = { day: '', value: 0 };
+    let daysWithMeta = 0;
+    weeklyDetailed.forEach(d => {
+      if (d.ganhos > best.value) best = { day: d.day, value: d.ganhos };
+      if (dailyTarget > 0 && d.ganhos >= dailyTarget) daysWithMeta++;
+    });
+
+    return { totalGanhos, performanceGanhos, bestDay: best, avgGanhos, daysWithMeta, totalDays };
   }, [isSpecialGroup, weeklyDetailed, displayCollaborators, totalTargetGanhos]);
-  
+
   const totalBaseConversao = totalLeads + totalLigacoesProdutivas;
   const conversaoPercentual = totalBaseConversao > 0 ? (totals.assinados / totalBaseConversao) * 100 : 0;
 
@@ -773,9 +816,11 @@ export default function Home() {
     return maxFaixa.valor_comissao || 5000;
   }, [currentUserData, tabelaComissoes]);
 
+  // Cards KPI — "Vendas Fechadas" agora mostra ganhos realizados contra
+  // a meta de ganhos. A meta de assinados foi descontinuada.
   const kpiCards = [
     { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
-    { label: "Vendas Fechadas", value: totals.assinados, target: totalTargetAssinados, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
+    { label: "Ganhos", value: totals.ganhos, target: totalTargetGanhos, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
     { label: "Protocolados", value: totals.protocolados, target: 1200, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
   ];
@@ -846,15 +891,29 @@ export default function Home() {
                 {hasActiveFilters && <span className="text-[10px] text-[#EA8C1D] ml-auto">(filtrada)</span>}
               </div>
               {mounted && <GoalArc percent={goalProgress} label="progresso geral" />}
-              <div className={`grid ${isSpecialGroup ? 'grid-cols-1' : 'grid-cols-2'} gap-4 w-full mt-6`}>
-                <div className="text-center"><div className="eyebrow mb-1">📄 Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}<span className="text-sm font-normal text-[#64748b]">/{formatInt(totalTargetAssinados)}</span></div></div>
-                {!isSpecialGroup && <div className="text-center"><div className="eyebrow mb-1">🏆 Ganhos</div><div className="kpi-value text-[#16A34A]">{formatInt(totals.ganhos)}<span className="text-sm font-normal text-[#64748b]">/{formatInt(totalTargetGanhos)}</span></div></div>}
+
+              {/* Meta de ganhos (única meta ativa). A meta de assinados foi descontinuada. */}
+              <div className="grid grid-cols-1 gap-4 w-full mt-6">
+                <div className="text-center">
+                  <div className="eyebrow mb-1">🏆 Ganhos</div>
+                  <div className="kpi-value text-[#16A34A]">
+                    {formatInt(totals.ganhos)}
+                    <span className="text-sm font-normal text-[#64748b]">/{formatInt(totalTargetGanhos)}</span>
+                  </div>
+                </div>
               </div>
-              <div className="mt-4 text-center"><div className="text-3xl font-black text-[#0f172a]">{formatInt(totalMetasBatidas)}</div><div className="eyebrow">Gols</div></div>
+
+              <div className="mt-4 text-center">
+                <div className="text-3xl font-black text-[#0f172a]">{formatInt(totalMetasBatidas)}</div>
+                <div className="eyebrow">Metas de ganhos</div>
+              </div>
+
               <div className="mt-4 w-full">
                 <div className="rounded-lg p-3 text-center" style={{ background: goalProgress >= 70 ? "#f0fdf4" : "#eff6ff" }}>
                   <p className="text-xs font-semibold" style={{ color: goalProgress >= 70 ? "#16A34A" : "#2F6FED" }}>
-                    {goalProgress >= 100 ? "🎯 Meta atingida! Parabéns!" : `💪 Faltam ${formatInt(Math.max(0, totalTargetAssinados - totals.assinados))} assinado(s)` + (!isSpecialGroup && totalTargetGanhos > 0 ? ` e ${formatInt(Math.max(0, totalTargetGanhos - totals.ganhos))} ganho(s)` : '') + ' para atingir a meta'}
+                    {goalProgress >= 100
+                      ? "🎯 Meta de ganhos atingida! Parabéns!"
+                      : `💪 Faltam ${formatInt(Math.max(0, totalTargetGanhos - totals.ganhos))} ganho(s) para atingir a meta`}
                   </p>
                 </div>
               </div>
@@ -897,14 +956,13 @@ export default function Home() {
                 <div className="mt-4 pt-3 border-t border-[#e2e8f0]">
                   <div className="grid grid-cols-2 gap-4 text-xs">
                     <div>
-                      <div className="flex justify-between items-center mb-2"><span className="text-[#64748b]">Total de vendas:</span><span className="font-bold text-[#0f172a]">{formatInt(stats.totalAssinados)}</span></div>
-                      <div className="flex justify-between items-center mb-2"><span className="text-[#64748b]">Performance Assinados:</span><span className={cn("font-bold", stats.performanceAssinados >= 100 ? "text-[#16A34A]" : "text-[#EA8C1D]")}>{Math.round(stats.performanceAssinados)}%</span></div>
+                      <div className="flex justify-between items-center mb-2"><span className="text-[#64748b]">Total de ganhos:</span><span className="font-bold text-[#0f172a]">{formatInt(stats.totalGanhos)}</span></div>
                       <div className="flex justify-between items-center mb-2"><span className="text-[#64748b]">Performance Ganhos:</span><span className={cn("font-bold", stats.performanceGanhos >= 100 ? "text-[#16A34A]" : "text-[#EA8C1D]")}>{Math.round(stats.performanceGanhos)}%</span></div>
                       <div className="flex justify-between items-center"><span className="text-[#64748b]">Média diária (ganhos):</span><span className="font-medium text-[#0f172a]">{stats.avgGanhos.toFixed(2)}</span></div>
                     </div>
                     <div>
-                      <div className="flex justify-between items-center mb-2"><span className="text-[#64748b]">Melhor dia (assinados):</span><span className="font-medium text-[#0f172a]">{stats.bestDay.day} ({formatInt(stats.bestDay.value)})</span></div>
-                      <div className="flex justify-between items-center"><span className="text-[#64748b]">Dias com gols realizados:</span><span className="font-medium text-[#16A34A]">{stats.daysWithMeta}/{stats.totalDays}</span></div>
+                      <div className="flex justify-between items-center mb-2"><span className="text-[#64748b]">Melhor dia (ganhos):</span><span className="font-medium text-[#0f172a]">{stats.bestDay.day} ({formatInt(stats.bestDay.value)})</span></div>
+                      <div className="flex justify-between items-center"><span className="text-[#64748b]">Dias com meta de ganhos:</span><span className="font-medium text-[#16A34A]">{stats.daysWithMeta}/{stats.totalDays}</span></div>
                     </div>
                   </div>
                 </div>
@@ -964,7 +1022,7 @@ export default function Home() {
                             <span className="font-bold text-[#2F6FED]">{formatInt(item.score)} pts</span>
                           </div>
                         );
-                      })} 
+                      })}
                     </div>
                   </div>
                 </>
