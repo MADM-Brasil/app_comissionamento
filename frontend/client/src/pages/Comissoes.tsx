@@ -45,7 +45,7 @@ const EXCLUDED_CARGOS = [
 
 const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 const normalizeName = (text: string) => normalizeText(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-const EXCLUDED_TEAMS_SET = new Set(EXCLUDED_TEAMS.map(normalizeText));
+const EXCLUDED_TEAMS_SET = new Set(EXCLUDED_TEAMS.map(normalizeName));
 
 type CommissionOverviewRole = 'assessor' | 'supervisor' | 'coordenador';
 
@@ -603,8 +603,8 @@ export default function Comissoes() {
 
   const filteredColabs = useMemo(() => {
     let filtered = storeColabs.filter(c => {
-      if (EXCLUDED_TEAMS.some(team => normalizeText(c.equipeNome) === normalizeText(team))) return false;
-      if (EXCLUDED_CARGOS.some(cargo => normalizeText(c.cargo) === normalizeText(cargo))) return false;
+      if (EXCLUDED_TEAMS_SET.has(normalizeName(c.equipeNome))) return false;
+      if (EXCLUDED_CARGOS.some(cargo => normalizeName(c.cargo) === normalizeName(cargo))) return false;
       return true;
     });
     if (!canUseFilterBar) {
@@ -697,11 +697,11 @@ export default function Comissoes() {
       comissaoGols,
       assinados: userColab.assinados || 0,
       ganhos: isSpecial ? 0 : (userColab.ganhos || 0),
+      protocolados: userColab.protocolados || 0,
       avatar: userColab.avatar || userColab.name.charAt(0).toUpperCase(),
       cargo: userColab.cargo,
       isSpecial,
       emitidos: userColab.emitidos || 0,
-      protocolados: userColab.protocolados || 0,
       perdidos: userColab.perdidos || 0,
       originalColab: userColab,
     }];
@@ -737,7 +737,7 @@ export default function Comissoes() {
       const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
 
       const rows = storeColabs
-        .filter(collaborator => !EXCLUDED_TEAMS_SET.has(normalizeText(collaborator.equipeNome)))
+        .filter(collaborator => !EXCLUDED_TEAMS_SET.has(normalizeName(collaborator.equipeNome)))
         .flatMap(collaborator => {
           const role = getCommissionOverviewRole(collaborator);
           if (!role) return [];
@@ -885,12 +885,21 @@ export default function Comissoes() {
     return { comissao, ciclos };
   }, [commissionData]);
 
+  // ============================================================
+  // ATINGIMENTO DA META — APENAS GANHOS
+  //
+  // A meta de assinados foi descontinuada deste painel. Apenas a
+  // meta de GANHOS é utilizada agora, comparando `ganhos` do
+  // colaborador contra a meta armazenada nos campos históricos do
+  // banco `peso_meta_ganho_mensal` (exposta como `metaMensalGanhos`).
+  // ============================================================
   const avgProgress = useMemo(() => {
     if (!commissionData.length) return 0;
     const sum = commissionData.reduce((acc, i) => {
-      const pctAss = i.originalColab?.metaMensalAssinados ? (i.assinados / i.originalColab.metaMensalAssinados) * 100 : 0;
-      const pctGan = i.originalColab?.metaMensalGanhos ? (i.ganhos / i.originalColab.metaMensalGanhos) * 100 : 100;
-      return acc + Math.min(pctAss, pctGan);
+      const pctGan = i.originalColab?.metaMensalGanhos
+        ? (i.ganhos / i.originalColab.metaMensalGanhos) * 100
+        : 100;
+      return acc + Math.min(pctGan, 100);
     }, 0);
     return sum / commissionData.length;
   }, [commissionData]);
@@ -900,7 +909,7 @@ export default function Comissoes() {
   const summaryCards = [
     { label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign, color: "#2F6FED", isCurrency: true },
     { label: "Gols", value: totals.ciclos, icon: Award, color: "#16A34A", isInteger: true },
-    { label: "Vendas Fechadas", value: rawMetrics.ganhos, icon: FileCheck, color: "#EA8C1D", isInteger: true },
+    { label: "Ganhos", value: rawMetrics.ganhos, icon: FileCheck, color: "#EA8C1D", isInteger: true },
     { label: "Atingimento da meta", value: avgProgress, icon: Target, color: "#8B5CF6", isPercent: true },
   ];
 
@@ -917,10 +926,15 @@ export default function Comissoes() {
   const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
   const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
 
+  // ============================================================
+  // RECOMENDAÇÕES — a referência à meta de assinados foi removida.
+  // Agora compara ganhos contra a meta de ganhos (`metaMensalGanhos`,
+  // proveniente do campo `peso_meta_ganho_mensal` do banco).
+  // ============================================================
   const recomendacoes: string[] = [];
   if (userData) {
-    if (userData.originalColab?.metaMensalAssinados && userData.assinados < userData.originalColab.metaMensalAssinados * 0.7) {
-      recomendacoes.push("Você está abaixo de 70% da meta de assinados. Reforce as atividades de fechamento.");
+    if (userData.originalColab?.metaMensalGanhos && userData.ganhos < userData.originalColab.metaMensalGanhos * 0.7) {
+      recomendacoes.push("Você está abaixo de 70% da meta de ganhos. Reforce as atividades de fechamento.");
     }
     if (taxaConversaoGeral < 50) {
       recomendacoes.push("Sua taxa de conversão (recebidos → assinados) está baixa. Revise sua abordagem de qualificação.");
@@ -976,9 +990,6 @@ export default function Comissoes() {
     setLoadingCallTabulations(true);
 
     try {
-      // ✅ CORREÇÃO 2: quando o colaborador em foco é supervisor, as tabulações
-      // devem representar a soma dos assessores da equipe. Para isso, removemos
-      // o filtro por colaborador e mantemos apenas o filtro por equipe.
       const isSupervisorFocus = (userColab?.cargo || '').toLowerCase() === 'supervisor';
 
       let equipe = canUseFilterBar
@@ -1348,12 +1359,22 @@ export default function Comissoes() {
                     <div className="space-y-5 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
                       {commissionData.map((item) => {
                         const colabOriginal = item.originalColab;
-                        const metaDiarioAss = Number(colabOriginal?.pesoDiarioAssinados ?? colabOriginal?.metaDiarioAssinados ?? 3);
+
+                        // ============================================================
+                        // METAS DE GANHOS
+                        //
+                        // A meta de assinados foi descontinuada deste painel.
+                        // Os valores exibidos abaixo são lidos dos campos históricos
+                        // do banco `peso_meta_ganho_diario`, `peso_meta_ganho_semanal`
+                        // e `peso_meta_ganho_mensal`, que chegam ao frontend como
+                        // `peso*Ganhos`. A comparação usa a coluna `ganhos` do
+                        // colaborador.
+                        // ============================================================
                         const metaDiarioGan = Number(colabOriginal?.pesoDiarioGanhos ?? colabOriginal?.metaDiarioGanhos ?? 3);
-                        const metaSemanalAss = Number(colabOriginal?.pesoSemanalAssinados ?? colabOriginal?.metaSemanalAssinados ?? 15);
                         const metaSemanalGan = Number(colabOriginal?.pesoSemanalGanhos ?? colabOriginal?.metaSemanalGanhos ?? 15);
-                        const metaMensalAss = Number(colabOriginal?.pesoMensalAssinados ?? colabOriginal?.metaMensalAssinados ?? 60);
                         const metaMensalGan = Number(colabOriginal?.pesoMensalGanhos ?? colabOriginal?.metaMensalGanhos ?? 60);
+
+                        // Metas de gol (usadas no bloco "Gols (hoje)" — conceito separado).
                         const metaGolsAss = Number(colabOriginal?.metaGolsAssinados ?? 3);
                         const metaGolsGan = Number(colabOriginal?.metaGolsGanhos ?? 3);
 
@@ -1375,17 +1396,18 @@ export default function Comissoes() {
                         const dailyDataSemanal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= mondayStr && d.date.slice(0,10) <= sundayStr);
                         const dailyDataMensal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= monthStartStr && d.date.slice(0,10) <= monthEndStr);
 
-                        const assinadosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                        // Realizado — ganhos (alvo das metas `peso*Ganhos`)
                         const ganhosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-                        const assinadosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
                         const ganhosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-                        const assinadosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
                         const ganhosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
 
+                        // Assinados (usado apenas no bloco "Gols (hoje)")
+                        const assinadosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+
                         const periodos = [
-                          { label: "Diário (hoje)", metaAss: metaDiarioAss, metaGan: metaDiarioGan, atualAss: assinadosDiario, atualGan: ganhosDiario, colorAss: "#2F6FED", colorGan: "#16A34A" },
-                          { label: "Semanal (semana atual)", metaAss: metaSemanalAss, metaGan: metaSemanalGan, atualAss: assinadosSemanal, atualGan: ganhosSemanal, colorAss: "#EA8C1D", colorGan: "#16A34A" },
-                          { label: "Mensal (mês atual)", metaAss: metaMensalAss, metaGan: metaMensalGan, atualAss: assinadosMensal, atualGan: ganhosMensal, colorAss: "#8B5CF6", colorGan: "#16A34A" },
+                          { label: "Diário (hoje)", metaGan: metaDiarioGan, atualGan: ganhosDiario, colorGan: "#16A34A" },
+                          { label: "Semanal (semana atual)", metaGan: metaSemanalGan, atualGan: ganhosSemanal, colorGan: "#16A34A" },
+                          { label: "Mensal (mês atual)", metaGan: metaMensalGan, atualGan: ganhosMensal, colorGan: "#16A34A" },
                         ];
 
                         return (
@@ -1395,37 +1417,22 @@ export default function Comissoes() {
                               <div><span className="font-medium text-[#0f172a] text-sm">{item.name}</span></div>
                             </div>
 
-                            {periodos.map((p) => {
-                              const pctAss = calcPercent(p.atualAss, p.metaAss);
+                            {/* Metas de ganhos (assinados removidos) */}
+                            {!item.isSpecial && periodos.map((p) => {
                               const pctGan = p.metaGan > 0 ? calcPercent(p.atualGan, p.metaGan) : 0;
-                              const faltaAss = Math.max(0, p.metaAss - p.atualAss);
                               const faltaGan = Math.max(0, p.metaGan - p.atualGan);
-
                               return (
                                 <div key={p.label} className="mb-3 last:mb-0">
                                   <p className="text-xs font-semibold text-[#475569] mb-1">{p.label}</p>
                                   <div className="flex items-center gap-2 mb-1">
-                                    <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
+                                    <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
                                     <div className="flex-1 progress-bar h-2">
-                                      <div className="progress-fill" style={{ width: `${pctAss}%`, background: p.colorAss }} />
+                                      <div className="progress-fill" style={{ width: `${pctGan}%`, background: p.colorGan }} />
                                     </div>
-                                    <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualAss)}/{formatInt(p.metaAss)}</span>
-                                    <span className="text-[10px] font-medium" style={{ color: p.colorAss }}>{pctAss.toFixed(0)}%</span>
+                                    <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualGan)}/{formatInt(p.metaGan)}</span>
+                                    <span className="text-[10px] font-medium" style={{ color: p.colorGan }}>{pctGan.toFixed(0)}%</span>
                                   </div>
-                                  <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaAss > 0 ? `Faltam ${formatInt(faltaAss)}` : "Atingido"}</div>
-                                  {!item.isSpecial && (
-                                    <>
-                                      <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
-                                        <div className="flex-1 progress-bar h-2">
-                                          <div className="progress-fill" style={{ width: `${pctGan}%`, background: p.colorGan }} />
-                                        </div>
-                                        <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualGan)}/{formatInt(p.metaGan)}</span>
-                                        <span className="text-[10px] font-medium" style={{ color: p.colorGan }}>{pctGan.toFixed(0)}%</span>
-                                      </div>
-                                      <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaGan > 0 ? `Faltam ${formatInt(faltaGan)}` : "Atingido"}</div>
-                                    </>
-                                  )}
+                                  <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaGan > 0 ? `Faltam ${formatInt(faltaGan)}` : "Atingido"}</div>
                                 </div>
                               );
                             })}

@@ -403,7 +403,7 @@ const conversionByStage = useMemo(() => {
           {/* KPI Cards */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <KpiCard label="Comissão Estimada" value={userMetasBatidas * userBonusCiclo} target={5000} unit="R$" icon={DollarSign} color="#2F6FED" simple hideValues={hideValues} />
-            <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.assinados : totals.assinados} target={isSpecialGroup ? targetAssinados : targetAssinados} unit="" icon={FileCheck} color="#16A34A" hideValues={hideValues} />
+            <KpiCard label={isSpecialGroup ? "Assinados" : "Vendas Fechadas"} value={isSpecialGroup ? totals.ganhos : totals.ganhos} target={isSpecialGroup ? targetGanhos : targetGanhos} unit="" icon={FileCheck} color="#16A34A" hideValues={hideValues} />
             <KpiCard label="Protocolados" value={totals.protocolados} target={60} unit="" icon={BarChart2} color="#8B5CF6" hideValues={hideValues} />
             <KpiCard label="Progresso da Meta" value={goalProgress} target={100} unit="%" icon={Activity} color="#EA8C1D" hideValues={hideValues} />
           </div>
@@ -418,7 +418,7 @@ const conversionByStage = useMemo(() => {
             <div className="card animate-fade-in-up" style={{ animationDelay: "80ms" }}>
               <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Taxa de Conversão</span><Target className="w-4 h-4 text-[#2F6FED]" /></div>
               <div className="kpi-value text-[#0f172a]">{taxaConversaoGeral.toFixed(1)}%</div>
-              <div className="text-xs text-[#94a3b8] mt-1">{formatInt(totalAssinados)} vendas / {formatInt(totalLeads)} leads</div>
+              <div className="text-xs text-[#94a3b8] mt-1">{formatInt(totalAssinados)} Assinados / ({formatInt(totalLeads)} leads + ligações produtivas)</div>
             </div>
             <div className="card animate-fade-in-up" style={{ animationDelay: "160ms" }}>
               <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Média Diária (assinados)</span><ShoppingBag className="w-4 h-4 text-[#16A34A]" /></div>
@@ -516,9 +516,9 @@ const conversionByStage = useMemo(() => {
             <h3 className="text-sm font-bold text-[#0f172a] mb-4">Resumo de Comissões e Metas</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Gols</div><div className="kpi-value text-[#0f172a]">{formatInt(userMetasBatidas)}</div><div className="text-xs text-[#94a3b8]">Seus Gols</div></div>
-              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div><div className="text-xs text-[#94a3b8]">meta: {formatInt(targetAssinados)}</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div></div>
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Trophy className="w-4 h-4 text-[#ffcc00] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
-              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Protocolados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.protocolados)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetProtocolados)}`}</div></div>
+              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Protocolados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.protocolados)}</div></div>
             </div>
           </div>
         </>

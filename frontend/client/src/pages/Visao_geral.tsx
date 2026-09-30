@@ -70,11 +70,28 @@ const isSupervisor = (c: Collaborator) => {
   return cargo === 'supervisor' || cargo === 'supervisora' || cargo.includes('supervisor');
 };
 
+/**
+ * Lê a meta mensal de ganhos do colaborador.
+ *
+ * A meta de assinados foi descontinuada deste painel. Os valores agora
+ * são lidos dos campos históricos do banco `peso_meta_ganho_mensal`
+ * (expostos como `pesoMensalGanhos`), com fallback para `metaMensalGanhos`
+ * e por fim para 60.
+ */
+function getMetaGanhosMensal(colab: any): number {
+  const peso = Number(colab?.pesoMensalGanhos);
+  if (Number.isFinite(peso) && peso > 0) return peso;
+  const meta = Number(colab?.metaMensalGanhos);
+  if (Number.isFinite(meta) && meta > 0) return meta;
+  return 60;
+}
+
 // ========== RADAR DE CONVERSÃO (colaboradores individuais) ==========
+// Antes baseado em assinados; agora reflete ganhos realizados.
 function RadarConversaoLigacoes({ colaboradores }: { colaboradores: Collaborator[] }) {
   const dados = colaboradores.map((colab) => ({
     name: colab.name,
-    value: Math.max(0, Math.min(100, (colab.assinados || 0) * 10)),
+    value: Math.max(0, Math.min(100, (colab.ganhos || 0) * 10)),
   }));
 
   return (
@@ -105,7 +122,7 @@ const CORES_TIME = ['#2563eb', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#06b
 
 interface DadoDesempenho {
   nome: string;
-  assinados: number;
+  ganhos: number;
 }
 
 function DesempenhoEquipes({ dados }: { dados: DadoDesempenho[] }) {
@@ -120,8 +137,8 @@ function DesempenhoEquipes({ dados }: { dados: DadoDesempenho[] }) {
           <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
           <XAxis dataKey="nome" tick={{ fontSize: 10, fill: '#475569' }} tickLine={false} axisLine={false} />
           <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={28} allowDecimals={false} />
-          <Tooltip formatter={(v) => [formatNumero(Number(v)), 'Assinados']} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-          <Bar dataKey="assinados" radius={[4, 4, 0, 0]} barSize={32}>
+          <Tooltip formatter={(v) => [formatNumero(Number(v)), 'Ganhos']} contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+          <Bar dataKey="ganhos" radius={[4, 4, 0, 0]} barSize={32}>
             {dados.map((_, indice) => (
               <Cell key={indice} fill={CORES_TIME[indice % CORES_TIME.length]} />
             ))}
@@ -256,7 +273,7 @@ export default function VisaoGeral() {
     setFilters(newFilters);
   };
 
-  // ================== FILTRO DE COLABORADORES (CORRIGIDO) ==================
+  // ================== FILTRO DE COLABORADORES ==================
   const collaborators = useMemo(() => {
     let list = rawCollaborators.filter(c => !isDesativado(c));
 
@@ -305,27 +322,35 @@ export default function VisaoGeral() {
     [collaborators]
   );
 
-  // Totais Discador
-  const totalAssinadosDiscador = useMemo(
-    () => collaboratorsDiscador.reduce((sum, c) => sum + (c.assinados || 0), 0),
+  // ============================================================
+  // TOTAIS E METAS — APENAS GANHOS
+  //
+  // A meta de assinados foi descontinuada deste painel. Os totais
+  // agora refletem GANHOS realizados, e a meta é lida do campo
+  // histórico `peso_meta_ganho_mensal` (exposto como `pesoMensalGanhos`).
+  // ============================================================
+
+  // Totais Discador — ganhos
+  const totalGanhosDiscador = useMemo(
+    () => collaboratorsDiscador.reduce((sum, c) => sum + (c.ganhos || 0), 0),
     [collaboratorsDiscador]
   );
-  const metaMensalDiscador = useMemo(
-    () => collaboratorsDiscador.reduce((sum, c) => sum + (c.metaMensalAssinados || 0), 0),
+  const metaGanhosMensalDiscador = useMemo(
+    () => collaboratorsDiscador.reduce((sum, c) => sum + getMetaGanhosMensal(c), 0),
     [collaboratorsDiscador]
   );
 
-  // Totais Judit
-  const totalAssinadosJudit = useMemo(
-    () => collaboratorsJudit.reduce((sum, c) => sum + (c.assinados || 0), 0),
+  // Totais Judit — ganhos
+  const totalGanhosJudit = useMemo(
+    () => collaboratorsJudit.reduce((sum, c) => sum + (c.ganhos || 0), 0),
     [collaboratorsJudit]
   );
-  const metaMensalJudit = useMemo(
-    () => collaboratorsJudit.reduce((sum, c) => sum + (c.metaMensalAssinados || 0), 0),
+  const metaGanhosMensalJudit = useMemo(
+    () => collaboratorsJudit.reduce((sum, c) => sum + getMetaGanhosMensal(c), 0),
     [collaboratorsJudit]
   );
 
-  // Totais gerais
+  // Totais gerais (rawMetrics continuam como dados brutos)
   const totalAssinados = rawMetrics.assinados;
   const totalProtocolados = rawMetrics.protocolados;
   const totalGanhos = rawMetrics.ganhos;
@@ -333,6 +358,7 @@ export default function VisaoGeral() {
   const totalPerdidos = rawMetrics.perdidos;
 
   // Conversão geral: Assinados / (ligações produtivas + recebidos)
+  // (métrica de funil — mantida com assinados por representar o estágio do funil)
   const totalContatosConversao = totalLigacoesProdutivas + totalLeads;
   const conversaoGeral = totalContatosConversao > 0 ? (totalAssinados / totalContatosConversao) * 100 : 0;
 
@@ -343,54 +369,60 @@ export default function VisaoGeral() {
   const hoje = new Date().toISOString().slice(0, 10);
   const diasUteisDecorridos = useMemo(() => contarDiasUteis({ inicio: mesPeriodo.inicio, fim: hoje }), [mesPeriodo, hoje]);
 
-  const paceDiscador = calcularPaceProjecao(totalAssinadosDiscador, metaMensalDiscador, diasUteisDecorridos, diasUteisTotaisMes);
-  const paceJudit = calcularPaceProjecao(totalAssinadosJudit, metaMensalJudit, diasUteisDecorridos, diasUteisTotaisMes);
+  // Pace agora calculado sobre GANHOS e meta de ganhos
+  const paceDiscador = calcularPaceProjecao(totalGanhosDiscador, metaGanhosMensalDiscador, diasUteisDecorridos, diasUteisTotaisMes);
+  const paceJudit = calcularPaceProjecao(totalGanhosJudit, metaGanhosMensalJudit, diasUteisDecorridos, diasUteisTotaisMes);
 
+  // Produtividade agora sobre GANHOS
   const produtividadeMedia = useMemo(() => {
     const ativos = collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo');
     if (ativos.length === 0 || diasUteisPeriodoSelecionado === 0) return 0;
-    return totalAssinados / ativos.length / diasUteisPeriodoSelecionado;
-  }, [collaborators, totalAssinados, diasUteisPeriodoSelecionado]);
+    return totalGanhos / ativos.length / diasUteisPeriodoSelecionado;
+  }, [collaborators, totalGanhos, diasUteisPeriodoSelecionado]);
 
+  // Melhor / precisa atenção agora por GANHOS
   const melhor = useMemo(() => {
     let best: Collaborator | null = null;
-    let maxAss = -1;
+    let maxGanhos = -1;
     for (const c of collaborators) {
-      if (c.assinados > maxAss) { maxAss = c.assinados; best = c; }
+      if ((c.ganhos || 0) > maxGanhos) { maxGanhos = c.ganhos || 0; best = c; }
     }
     return best;
   }, [collaborators]);
 
   const precisaAtencao = useMemo(() => {
     let pior: Collaborator | null = null;
-    let minAss = Infinity;
+    let minGanhos = Infinity;
     for (const c of collaborators) {
-      if (c.assinados < minAss) { minAss = c.assinados; pior = c; }
+      if ((c.ganhos || 0) < minGanhos) { minGanhos = c.ganhos || 0; pior = c; }
     }
     return pior;
   }, [collaborators]);
 
-  // Dados para o gráfico de equipes
+  // Dados para o gráfico de equipes — agora por GANHOS
   const times = useMemo(() => Array.from(new Set(collaborators.map(c => c.equipeNome))), [collaborators]);
   const porTime = useMemo(() =>
     times.map(time => {
       const membros = collaborators.filter(c => c.equipeNome === time);
-      const ass = membros.reduce((s, c) => s + c.assinados, 0);
+      const gan = membros.reduce((s, c) => s + (c.ganhos || 0), 0);
       const prot = membros.reduce((s, c) => s + c.protocolados, 0);
-      return { time, pessoas: membros.length, assinados: ass, protocolados: prot, taxa: ass ? (prot / ass) * 100 : 0 };
-    }).sort((a, b) => b.assinados - a.assinados), [times, collaborators]);
+      return { time, pessoas: membros.length, ganhos: gan, protocolados: prot, taxa: gan ? (prot / gan) * 100 : 0 };
+    }).sort((a, b) => b.ganhos - a.ganhos), [times, collaborators]);
 
   const dadosEquipes = useMemo(
-    () => porTime.map(t => ({ nome: t.time.replace('Equipe ', ''), assinados: t.assinados })),
+    () => porTime.map(t => ({ nome: t.time.replace('Equipe ', ''), ganhos: t.ganhos })),
     [porTime]
   );
 
   const equipeSelecionada = filters.equipe !== "todas";
   const isIndividualFilter = filters.colaborador !== "todos";
 
-  const atingimentoMetaPeriodo = metaMensalDiscador > 0 ? (totalAssinadosDiscador / metaMensalDiscador) * 100 : 0;
+  // Atingimento agora sobre GANHOS
+  const atingimentoMetaPeriodo = metaGanhosMensalDiscador > 0
+    ? (totalGanhosDiscador / metaGanhosMensalDiscador) * 100
+    : 0;
 
-  // Funil com Leads e ordem correta
+  // Funil com Leads e ordem correta (mantém assinados e ganhos — ambos são dados brutos do funil)
   const funnelStages = useMemo(() => [
     { stage: "Leads", count: totalLeads, color: "#3b82f6", icon: Users },
     { stage: "Emitidos", count: rawMetrics.emitidos, color: "#09175b", icon: FileText },
@@ -424,22 +456,22 @@ export default function VisaoGeral() {
 
       {!loading && rawCollaborators.length > 0 && (
         <>
-          {/* Cards de resumo: Discador e Judit */}
+          {/* Cards de resumo: Discador e Judit — agora por Ganhos */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
             <ResumoMesCard
-              titulo="Discador · Assinados"
+              titulo="Discador · Ganhos"
               icon={FileSignature}
-              atual={totalAssinadosDiscador}
-              meta={metaMensalDiscador}
+              atual={totalGanhosDiscador}
+              meta={metaGanhosMensalDiscador}
               pace={paceDiscador}
               onClick={() => setModalAberto('discador')}
             />
             {collaboratorsJudit.length > 0 && (
               <ResumoMesCard
-                titulo="Judit · Assinados"
+                titulo="Judit · Ganhos"
                 icon={FileSignature}
-                atual={totalAssinadosJudit}
-                meta={metaMensalJudit}
+                atual={totalGanhosJudit}
+                meta={metaGanhosMensalJudit}
                 pace={paceJudit}
                 onClick={() => setModalAberto('judit')}
               />
@@ -449,17 +481,17 @@ export default function VisaoGeral() {
           {/* Modais */}
           {modalAberto === 'discador' && (
             <DetalheAssinadosModal
-              titulo="Discador · Assinados"
+              titulo="Discador · Ganhos"
               colaboradores={collaboratorsDiscador}
-              atual={totalAssinadosDiscador}
+              atual={totalGanhosDiscador}
               onFechar={() => setModalAberto(null)}
             />
           )}
           {modalAberto === 'judit' && (
             <DetalheAssinadosModal
-              titulo="Judit · Assinados"
+              titulo="Judit · Ganhos"
               colaboradores={collaboratorsJudit}
-              atual={totalAssinadosJudit}
+              atual={totalGanhosJudit}
               onFechar={() => setModalAberto(null)}
             />
           )}
@@ -473,15 +505,15 @@ export default function VisaoGeral() {
             <KpiCard titulo="Perdidos" valor={formatNumero(totalPerdidos)} icon={XCircle} accent="danger" />
           </div>
 
-          {/* Resumo textual adaptado para filtro individual */}
+          {/* Resumo textual — referências a ganhos */}
           <Card className="mb-6 p-4">
             <p className="text-sm font-semibold text-slate-900">
               {isIndividualFilter
-                ? `O colaborador selecionado assinou ${formatNumero(totalAssinadosDiscador)} e protocolou ${formatNumero(totalProtocolados)} no período.`
-                : `No período, a equipe Discador assinou ${formatNumero(totalAssinadosDiscador)} e protocolou ${formatNumero(totalProtocolados)}`}
+                ? `O colaborador selecionado ganhou ${formatNumero(totalGanhosDiscador)} e protocolou ${formatNumero(totalProtocolados)} no período.`
+                : `No período, a equipe Discador ganhou ${formatNumero(totalGanhosDiscador)} e protocolou ${formatNumero(totalProtocolados)}`}
             </p>
             <p className="mt-1 text-[13px] text-slate-600">
-              Isso representa {formatPct(atingimentoMetaPeriodo, 1)} da meta mensal de assinados.
+              Isso representa {formatPct(atingimentoMetaPeriodo, 1)} da meta mensal de ganhos.
             </p>
           </Card>
 
@@ -507,12 +539,12 @@ export default function VisaoGeral() {
             </Card>
           </div>
 
-          {/* Melhor, pior, produtividade */}
+          {/* Melhor, pior, produtividade — agora por ganhos */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
             <Card className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400"><Trophy size={18} /></div>
               <div className="min-w-0">
-                <p className="text-[11px] text-slate-500">Melhor colaborador</p>
+                <p className="text-[11px] text-slate-500">Melhor colaborador (ganhos)</p>
                 {melhor ? <Link to={`/colaboradores/${melhor.id}`} className="text-sm font-semibold text-slate-900 hover:underline truncate block">{melhor.name}</Link> : <p className="text-sm text-slate-500">—</p>}
               </div>
             </Card>
@@ -527,12 +559,12 @@ export default function VisaoGeral() {
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-500/10 text-blue-600"><Gauge size={18} /></div>
               <div className="min-w-0">
                 <p className="text-[11px] text-slate-500">Produtividade média</p>
-                <p className="text-sm font-semibold text-slate-900">{produtividadeMedia.toFixed(1)} assinados/dia por colaborador</p>
+                <p className="text-sm font-semibold text-slate-900">{produtividadeMedia.toFixed(1)} ganhos/dia por colaborador</p>
               </div>
             </Card>
           </div>
 
-          {/* Comparativo por time (oculto no filtro individual) */}
+          {/* Comparativo por time (oculto no filtro individual) — agora por ganhos */}
           {!isIndividualFilter && (
             <div className="mt-6">
               <Card className="xl:col-span-2">
@@ -541,7 +573,7 @@ export default function VisaoGeral() {
                   {porTime.map(t => (
                     <Link key={t.time} to={`/equipe/${encodeURIComponent(t.time)}`} className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 hover:bg-slate-100 transition-colors">
                       <span className="text-[13px] font-medium text-slate-700">{t.time} <span className="text-slate-400 font-normal">· {t.pessoas} pessoas</span></span>
-                      <span className="text-[13px] text-slate-400 text-center">{formatNumero(t.assinados)} assinados</span>
+                      <span className="text-[13px] text-slate-400 text-center">{formatNumero(t.ganhos)} ganhos</span>
                       <span className="text-[13px] font-semibold text-slate-900">{formatPct(t.taxa)}</span>
                     </Link>
                   ))}
