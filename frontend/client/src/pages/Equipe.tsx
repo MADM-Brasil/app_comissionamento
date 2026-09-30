@@ -19,6 +19,10 @@ import {
   FileCheck2,
   Award,
   AlertTriangle,
+  Medal,
+  Star,
+  Trophy,
+  type LucideIcon,
 } from "lucide-react";
 import {
   CartesianGrid,
@@ -59,31 +63,58 @@ function formatMoeda(valor: number): string {
   }).format(valor);
 }
 
-/**
- * Lê a meta mensal de ganhos do colaborador.
- *
- * A meta de assinados foi descontinuada. Os valores vêm dos campos
- * históricos do banco `peso_meta_ganho_mensal`, que chegam ao frontend
- * como `pesoMensalGanhos`. Fallback para `metaMensalGanhos` e, por
- * último, 60.
- */
-function getMetaGanhosMensal(colab: any): number {
-  const peso = Number(colab?.pesoMensalGanhos);
-  if (Number.isFinite(peso) && peso > 0) return peso;
-  const meta = Number(colab?.metaMensalGanhos);
-  if (Number.isFinite(meta) && meta > 0) return meta;
-  return 60;
+// ============================================================
+//  META DE GANHOS DO PERÍODO
+//
+// Lê os valores EXATAMENTE como registrados no banco pelos campos
+// históricos da view `vw_metricas_assessores`:
+//   - peso_meta_ganho_diario   → pesoDiarioGanhos
+//   - peso_meta_ganho_semanal  → pesoSemanalGanhos
+//   - peso_meta_ganho_mensal   → pesoMensalGanhos
+//
+// Prioriza o campo do banco (`peso*Ganhos`). Só cai para o alias
+// `meta*Ganhos` se o primeiro não existir. Últimos fallbacks numéricos
+// (3 / 15 / 60) servem apenas para evitar UI quebrada quando nenhum
+// campo estiver preenchido.
+// ============================================================
+function getMetaGanhosPeriodo(
+  colab: any,
+  period: string,
+  diasUteisPeriodo: number = 0
+): number {
+  const pesoDiario = pickNumber(colab?.pesoDiarioGanhos, colab?.metaDiarioGanhos, 3);
+  const pesoSemanal = pickNumber(colab?.pesoSemanalGanhos, colab?.metaSemanalGanhos, 15);
+  const pesoMensal = pickNumber(colab?.pesoMensalGanhos, colab?.metaMensalGanhos, 60);
+
+  if (period === "Hoje") return pesoDiario;
+  if (period === "Semana") return pesoSemanal;
+  if (period === "Mês") return pesoMensal;
+  // Custom: estima pelo número de dias úteis (mínimo 1 para evitar zero)
+  return pesoDiario * Math.max(1, diasUteisPeriodo);
 }
 
-// Medalhas – apenas para pódio, sem status
-import { Medal, Star, Trophy, type LucideIcon } from "lucide-react";
+/** Retorna o primeiro valor numérico > 0, senão o fallback. */
+function pickNumber(...values: Array<unknown>): number {
+  for (const v of values) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const fb = Number(values[values.length - 1]);
+  return Number.isFinite(fb) ? fb : 0;
+}
+
+// ============================================================
+//  MEDALHAS (pódio)
+// ============================================================
 type Medalha = "ouro" | "prata" | "bronze" | "destaque";
+
 const MEDALHA_ICON: Record<Medalha, LucideIcon> = {
   ouro: Trophy,
   prata: Medal,
   bronze: Medal,
   destaque: Star,
 };
+
 const MEDALHA_COR: Record<Medalha, string> = {
   ouro: "#f59e0b",
   prata: "#94a3b8",
@@ -137,11 +168,10 @@ const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo'
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo',
+  'Equipe Lucilene'
 ];
 
-// ✅ Assinatura ampliada para aceitar undefined/null — evita TS2345 em
-// chamadas como `normalize(c.cargo)` quando `cargo` é opcional.
 const normalize = (str: string | undefined | null): string =>
   (str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -249,15 +279,15 @@ interface PaceData {
 }
 function calcularPaceProjecao(
   realizado: number,
-  metaMensal: number,
+  metaPeriodo: number,
   diasUteisDecorridos: number,
-  diasUteisTotaisMes: number
+  diasUteisTotaisPeriodo: number
 ): PaceData | null {
-  if (metaMensal <= 0 || diasUteisTotaisMes === 0) return null;
+  if (metaPeriodo <= 0 || diasUteisTotaisPeriodo === 0) return null;
   const paceAtual = diasUteisDecorridos > 0 ? realizado / diasUteisDecorridos : 0;
-  const paceEsperado = metaMensal / diasUteisTotaisMes;
-  const projecao = paceAtual * diasUteisTotaisMes;
-  return { paceAtual, paceEsperado, projecao: Math.round(projecao), gap: Math.round(projecao - metaMensal) };
+  const paceEsperado = metaPeriodo / diasUteisTotaisPeriodo;
+  const projecao = paceAtual * diasUteisTotaisPeriodo;
+  return { paceAtual, paceEsperado, projecao: Math.round(projecao), gap: Math.round(projecao - metaPeriodo) };
 }
 
 // ============================================================
@@ -460,13 +490,33 @@ export default function Equipe() {
           period={period}
         />
       ) : supervisor ? (
-        <ColaboradoresDaEquipe equipe={supervisor} colaboradores={colaboradores} />
+        <ColaboradoresDaEquipe
+          equipe={supervisor}
+          colaboradores={colaboradores}
+          period={period}
+          currentStartDate={currentStartDate}
+          currentEndDate={currentEndDate}
+        />
       ) : colaboradorId ? (
-        <DetalhesColaborador colaboradorId={colaboradorId} colaboradores={colaboradores} />
+        <DetalhesColaborador
+          colaboradorId={colaboradorId}
+          colaboradores={colaboradores}
+          period={period}
+        />
       ) : isAssessor ? (
-        <DetalhesColaborador colaboradorId={colaboradores[0]?.id} colaboradores={colaboradores} />
+        <DetalhesColaborador
+          colaboradorId={colaboradores[0]?.id}
+          colaboradores={colaboradores}
+          period={period}
+        />
       ) : isSupervisor ? (
-        <ColaboradoresDaEquipe equipe={userTeam} colaboradores={colaboradores} />
+        <ColaboradoresDaEquipe
+          equipe={userTeam}
+          colaboradores={colaboradores}
+          period={period}
+          currentStartDate={currentStartDate}
+          currentEndDate={currentEndDate}
+        />
       ) : (
         <ListaEquipes
           colaboradores={colaboradores}
@@ -524,7 +574,6 @@ function ListaEquipes({
 
   // ============================================================
   // PERÍODO ATIVO — espelha exatamente o filtro selecionado
-  // (Hoje, Semana, Mês ou Custom), em vez dos últimos 30 dias.
   // ============================================================
   const { inicio: inicioPeriodo, fim: fimPeriodo } = useMemo(() => {
     if (currentStartDate && currentEndDate) {
@@ -546,7 +595,11 @@ function ListaEquipes({
     return dias;
   }, [inicioPeriodo, fimPeriodo]);
 
-  /** Rótulo amigável do período para o cabeçalho do mini-gráfico. */
+  const diasUteisPeriodo = useMemo(
+    () => diasPeriodo.filter((d) => isDiaUtil(new Date(d + "T00:00:00"))).length,
+    [diasPeriodo]
+  );
+
   const labelPeriodoGrafico = useMemo(() => {
     if (period === "Custom") return `${inicioPeriodo} → ${fimPeriodo}`;
     if (period === "Hoje") return "hoje";
@@ -555,9 +608,6 @@ function ListaEquipes({
     return "período selecionado";
   }, [period, inicioPeriodo, fimPeriodo]);
 
-  // ============================================================
-  // Carrega a série diária por time usando o MESMO período do filtro
-  // ============================================================
   const carregarDiario = useCallback(async () => {
     if (!inicioPeriodo || !fimPeriodo) return;
     setLoadingDiario(true);
@@ -599,34 +649,42 @@ function ListaEquipes({
   // ============================================================
   // AGREGAÇÃO POR TIME
   //
-  // Soma SOMENTE os colaboradores cujos valores não são hierárquicos.
-  // Supervisores e coordenadores recebem, via `applyHierarchyTotals`
-  // do dataStore, a soma dos seus subordinados — incluí-los aqui
-  // duplicaria a contagem e explicaria a divergência com o resto do
-  // sistema (`rawMetrics`).
+  // Soma SOMENTE os nós-folha (assessores). Supervisores e coordenadores
+  // carregam a soma dos subordinados via `applyHierarchyTotals` do
+  // dataStore — incluí-los duplicaria os valores.
+  //
+  // A meta do período é lida diretamente dos campos `peso_meta_ganho_*`
+  // do banco, por isso permanece consistente com qualquer período.
   // ============================================================
   const dadosPorTime = times.map((nome, indice) => {
     const membros = colaboradores.filter((c) => c.equipeNome === nome);
-    const membrosAgregaveis = membros.filter((c) => !isAggregatedRole(c.cargo));
+    const membrosFolha = membros.filter((c) => !isAggregatedRole(c.cargo));
 
-    const recebidos = membrosAgregaveis.reduce((s, c) => s + (c.emitidos || 0), 0);
-    const assinados = membrosAgregaveis.reduce((s, c) => s + (c.assinados || 0), 0);
-    const protocolados = membrosAgregaveis.reduce((s, c) => s + (c.protocolados || 0), 0);
-    const ganhos = membrosAgregaveis.reduce((s, c) => s + (c.ganhos || 0), 0);
-    // Meta de ganhos: lê de `pesoMensalGanhos` (campo histórico `peso_meta_ganho_mensal`)
-    const metaMensalGanhos = membrosAgregaveis.reduce((s, c) => s + getMetaGanhosMensal(c), 0);
-    const taxaConversao = ganhos ? (protocolados / ganhos) * 100 : 0;
+    const recebidos = membrosFolha.reduce((s, c) => s + (c.emitidos || 0), 0);
+    const assinados = membrosFolha.reduce((s, c) => s + (c.assinados || 0), 0);
+    const protocolados = membrosFolha.reduce((s, c) => s + (c.protocolados || 0), 0);
+    const ganhos = membrosFolha.reduce((s, c) => s + (c.ganhos || 0), 0);
+
+    // Meta de ganhos do período, somada por membro-folha
+    const metaGanhos = membrosFolha.reduce(
+      (s, c) => s + getMetaGanhosPeriodo(c, period, diasUteisPeriodo),
+      0
+    );
+
+    // ✅ Taxa de conversão coerente com o detalhe do colaborador e a Home:
+    // ganhos / recebidos (etapa emitidos → ganhos)
+    const taxaConversao = recebidos > 0 ? (ganhos / recebidos) * 100 : 0;
+
     const serieDiaria = diasPeriodo.map((dia) => diarioPorTime.get(nome)?.get(dia) ?? 0);
 
     return {
       nome,
-      // "pessoas" continua contando todos os membros visíveis (inclusive supervisores)
       pessoas: membros.length,
       recebidos,
       assinados,
       protocolados,
       ganhos,
-      metaMensalGanhos,
+      metaGanhos,
       taxaConversao,
       serieDiaria,
       cor: CORES_TIME[indice % CORES_TIME.length],
@@ -704,7 +762,15 @@ function ListaEquipes({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {resultadosBusca.map((c) => (
-              <ColaboradorCard key={c.id} c={c} />
+              <ColaboradorCard
+                key={c.id}
+                c={c}
+                period={period}
+                diasUteisPeriodo={diasUteisPeriodo}
+                teamMembersCount={
+                  colaboradores.filter((x) => x.equipeNome === c.equipeNome).length
+                }
+              />
             ))}
           </div>
         )
@@ -764,7 +830,7 @@ function ListaEquipes({
                       </div>
                       <div>
                         <p className="text-[11px] text-slate-500 text-center">Meta</p>
-                        <p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.metaMensalGanhos)}</p>
+                        <p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.metaGanhos)}</p>
                       </div>
                       <div>
                         <p className="text-[11px] text-slate-500">Protocolados</p>
@@ -773,7 +839,7 @@ function ListaEquipes({
                     </div>
                     <div className="mb-3">
                       <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1">
-                        <span>Taxa de conversão</span>
+                        <span>Tx. Ganhos/Recebidos</span>
                         <span className="font-semibold text-slate-700">{formatPct(t.taxaConversao, 1)}</span>
                       </div>
                       <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
@@ -816,7 +882,7 @@ function ListaEquipes({
                       <th className="py-2 pr-4 font-medium">Ganhos</th>
                       <th className="py-2 pr-4 font-medium">Meta</th>
                       <th className="py-2 pr-4 font-medium">Comissão</th>
-                      <th className="py-2 pr-4 font-medium">Taxa de conversão</th>
+                      <th className="py-2 pr-4 font-medium">Tx. Ganhos/Recebidos</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -829,7 +895,7 @@ function ListaEquipes({
                           </Link>
                         </td>
                         <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.ganhos)}</td>
-                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.metaMensalGanhos)}</td>
+                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.metaGanhos)}</td>
                         <td className="py-2.5 pr-4 text-slate-600">{formatMoeda(t.ganhos)}</td>
                         <td className="py-2.5 pr-4 text-slate-700 font-semibold">{formatPct(t.taxaConversao, 1)}</td>
                       </tr>
@@ -872,8 +938,8 @@ function ListaEquipes({
                 <RadarChart data={dadosRadar} outerRadius={75}>
                   <PolarGrid stroke="#e2e8f0" />
                   <PolarAngleAxis dataKey="time" tick={{ fill: "#94a3b8", fontSize: 11 }} />
-                  <Radar name="Taxa de conversão" dataKey="taxa" stroke="#6366f1" fill="#6366f1" fillOpacity={0.35} />
-                  <Tooltip formatter={(v) => [formatPct(Number(v), 1), "Taxa de conversão"]} />
+                  <Radar name="Tx. Ganhos/Recebidos" dataKey="taxa" stroke="#6366f1" fill="#6366f1" fillOpacity={0.35} />
+                  <Tooltip formatter={(v) => [formatPct(Number(v), 1), "Tx. Ganhos/Recebidos"]} />
                 </RadarChart>
               </ResponsiveContainer>
             </Card>
@@ -887,7 +953,17 @@ function ListaEquipes({
 // ============================================================
 //  COLABORADOR CARD
 // ============================================================
-function ColaboradorCard({ c }: { c: Collaborator }) {
+function ColaboradorCard({
+  c,
+  period,
+  diasUteisPeriodo,
+  teamMembersCount,
+}: {
+  c: Collaborator;
+  period: string;
+  diasUteisPeriodo: number;
+  teamMembersCount: number;
+}) {
   // Cargos agregados (supervisor, coordenador, administrativo) carregam
   // a soma da equipe em `ganhos`/`assinados`/etc. Sinalizamos isso ao
   // usuário para evitar confusão com o ganho individual.
@@ -897,8 +973,9 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
   const assinados = c.assinados || 0;
   const protocolados = c.protocolados || 0;
   const ganhos = c.ganhos || 0;
-  // Meta de ganhos lida do campo histórico `peso_meta_ganho_mensal` (exposto como `pesoMensalGanhos`)
-  const metaMensalGanhos = getMetaGanhosMensal(c);
+  // Meta do período (lida do banco em `peso_meta_ganho_*`)
+  const metaGanhos = getMetaGanhosPeriodo(c, period, diasUteisPeriodo);
+  // ✅ Taxa de conversão coerente: ganhos / recebidos
   const taxa = recebidos > 0 ? (ganhos / recebidos) * 100 : 0;
 
   return (
@@ -911,8 +988,12 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
               <p className="text-sm font-semibold text-slate-900">{c.name}</p>
               <p className="text-[12px] text-slate-500">
                 {c.cargo} · {c.equipeNome}
-                {agregado && <span className="ml-1 text-[10px] text-amber-600">(totais da equipe)</span>}
               </p>
+              {agregado && (
+                <p className="text-[10px] text-amber-600">
+                  Totais da equipe ({teamMembersCount} pessoa{teamMembersCount === 1 ? "" : "s"})
+                </p>
+              )}
             </div>
           </div>
           <ArrowRight size={16} className="text-slate-400 group-hover:text-blue-600 transition-colors shrink-0" />
@@ -920,11 +1001,14 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
         <div className="grid grid-cols-2 gap-x-4 gap-y-3 mb-4">
           <div><p className="text-[11px] text-slate-500">Recebidos</p><p className="text-sm font-semibold text-slate-700">{formatNumero(recebidos)}</p></div>
           <div><p className="text-[11px] text-slate-500">Assinados</p><p className="text-sm font-semibold text-slate-700">{formatNumero(assinados)}</p></div>
-          <div><p className="text-[11px] text-slate-500">Meta mensal (ganhos)</p><p className="text-sm font-semibold text-slate-700">{formatNumero(metaMensalGanhos)}</p></div>
+          <div><p className="text-[11px] text-slate-500">Meta do período</p><p className="text-sm font-semibold text-slate-700">{formatNumero(metaGanhos)}</p></div>
           <div><p className="text-[11px] text-slate-500">Ganhos</p><p className="text-sm font-semibold text-slate-700">{formatNumero(ganhos)}</p></div>
         </div>
         <div className="flex items-center justify-between">
-          <div><p className="text-[11px] text-slate-500">Taxa de Ganhos</p><p className="text-base font-semibold text-slate-900">{formatPct(taxa)}</p></div>
+          <div>
+            <p className="text-[11px] text-slate-500">Tx. Ganhos/Recebidos</p>
+            <p className="text-base font-semibold text-slate-900">{formatPct(taxa)}</p>
+          </div>
         </div>
       </Card>
     </Link>
@@ -934,11 +1018,29 @@ function ColaboradorCard({ c }: { c: Collaborator }) {
 // ============================================================
 //  COLABORADORES DA EQUIPE
 // ============================================================
-function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; colaboradores: Collaborator[] }) {
+function ColaboradoresDaEquipe({
+  equipe,
+  colaboradores,
+  period,
+  currentStartDate,
+  currentEndDate,
+}: {
+  equipe: string;
+  colaboradores: Collaborator[];
+  period: string;
+  currentStartDate: string;
+  currentEndDate: string;
+}) {
   const membros = useMemo(() => {
     if (!equipe) return [];
     return colaboradores.filter(c => normalize(c.equipeNome) === normalize(equipe));
   }, [colaboradores, equipe]);
+
+  // Dias úteis do período (usado para estimar meta em Custom)
+  const diasUteisPeriodo = useMemo(() => {
+    if (!currentStartDate || !currentEndDate) return 0;
+    return contarDiasUteis(new Date(currentStartDate), new Date(currentEndDate));
+  }, [currentStartDate, currentEndDate]);
 
   return (
     <div>
@@ -954,7 +1056,13 @@ function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; cola
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {membros.map((c) => (
-            <ColaboradorCard key={c.id} c={c} />
+            <ColaboradorCard
+              key={c.id}
+              c={c}
+              period={period}
+              diasUteisPeriodo={diasUteisPeriodo}
+              teamMembersCount={membros.length}
+            />
           ))}
         </div>
       )}
@@ -963,14 +1071,16 @@ function ColaboradoresDaEquipe({ equipe, colaboradores }: { equipe: string; cola
 }
 
 // ============================================================
-//  DETALHES DO COLABORADOR (sem qualquer classificação de status)
+//  DETALHES DO COLABORADOR
 // ============================================================
 function DetalhesColaborador({
   colaboradorId,
   colaboradores,
+  period,
 }: {
   colaboradorId?: string;
   colaboradores: Collaborator[];
+  period: string;
 }) {
   const colaborador = colaboradores.find((c) => c.id === colaboradorId);
   const { currentUser } = useAccessControl();
@@ -1073,22 +1183,30 @@ function DetalhesColaborador({
   const assinados = colaborador?.assinados || 0;
   const protocolados = colaborador?.protocolados || 0;
   const ganhos = colaborador?.ganhos || 0;
-  // Meta de ganhos lida do campo histórico `peso_meta_ganho_mensal` (exposto como `pesoMensalGanhos`)
-  const metaMensalGanhos = colaborador ? getMetaGanhosMensal(colaborador) : 0;
-
-  const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
-  const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
-
-  const corConversaoGeral = taxaConversaoGeral >= 60 ? "#22c55e" : taxaConversaoGeral >= 40 ? "#f59e0b" : "#ef4444";
-  const corConversaoProtocolados = taxaConversaoProtocolados >= 60 ? "#22c55e" : taxaConversaoProtocolados >= 40 ? "#f59e0b" : "#ef4444";
 
   const hoje = new Date();
   const inicioPeriodo = currentStartDate ? new Date(currentStartDate) : new Date();
   const fimPeriodo = currentEndDate ? new Date(currentEndDate) : new Date();
-  const diasUteisTotais = contarDiasUteis(inicioPeriodo, fimPeriodo);
+  const diasUteisTotaisPeriodo = contarDiasUteis(inicioPeriodo, fimPeriodo);
   const diasUteisDecorridos = contarDiasUteis(inicioPeriodo, hoje < fimPeriodo ? hoje : fimPeriodo);
-  // Pace agora calculado sobre ganhos realizados
-  const pace = calcularPaceProjecao(ganhos, metaMensalGanhos, diasUteisDecorridos, diasUteisTotais);
+
+  // ✅ Meta lida do banco (peso_meta_ganho_*) ajustada ao período
+  const metaGanhosPeriodo = colaborador
+    ? getMetaGanhosPeriodo(colaborador, period, diasUteisTotaisPeriodo)
+    : 0;
+
+  // Pace só faz sentido para o Mês
+  const pace = period === "Mês"
+    ? calcularPaceProjecao(ganhos, metaGanhosPeriodo, diasUteisDecorridos, diasUteisTotaisPeriodo)
+    : null;
+
+  const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
+  const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
+  // ✅ Taxa de ganhos (a que aparece em destaque em todo o sistema)
+  const taxaGanhos = recebidos > 0 ? (ganhos / recebidos) * 100 : 0;
+
+  const corConversaoGeral = taxaConversaoGeral >= 60 ? "#22c55e" : taxaConversaoGeral >= 40 ? "#f59e0b" : "#ef4444";
+  const corConversaoProtocolados = taxaConversaoProtocolados >= 60 ? "#22c55e" : taxaConversaoProtocolados >= 40 ? "#f59e0b" : "#ef4444";
 
   const equipe = colaboradores.filter((c) => c.equipeNome === colaborador?.equipeNome);
   const mediaEquipe = useMemo(() => {
@@ -1115,23 +1233,20 @@ function DetalhesColaborador({
     ];
   }, [recebidos, assinados, protocolados, ganhos, taxaConversaoGeral, mediaEquipe]);
 
-  // ============================================================
-  // RECOMENDAÇÕES — comparação baseada em GANHOS
-  // ============================================================
   const recomendacoes: string[] = [];
-  if (pace && metaMensalGanhos > 0) {
-    const gapRatio = pace.projecao / metaMensalGanhos;
+  if (metaGanhosPeriodo > 0 && ganhos < metaGanhosPeriodo * 0.7) {
+    recomendacoes.push("Ganhos abaixo de 70% da meta do período. Redefinir plano de recuperação com acompanhamento semanal.");
+  }
+  if (pace && pace.gap < 0) {
+    const gapRatio = pace.projecao / metaGanhosPeriodo;
     if (gapRatio < 0.75) {
-      recomendacoes.push(`Pace de ganhos muito abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — no ritmo atual não fecha o período.`);
+      recomendacoes.push(`Pace de ganhos muito abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — no ritmo atual não fecha o mês.`);
     } else if (gapRatio < 0.9) {
       recomendacoes.push(`Pace de ganhos abaixo do esperado (gap de ${formatNumero(pace.gap)} vs. meta) — acompanhar de perto.`);
     }
   }
   if (taxaConversaoProtocolados < 60) {
     recomendacoes.push("Revisar imediatamente a carteira de assinados sem protocolo.");
-  }
-  if (metaMensalGanhos > 0 && ganhos < metaMensalGanhos * 0.7) {
-    recomendacoes.push("Redefinir plano de recuperação da meta de ganhos com acompanhamento semanal.");
   }
   if (taxaConversaoGeral < 70) {
     recomendacoes.push("Reforçar técnicas de fechamento comercial (etapa emissão → assinatura).");
@@ -1156,6 +1271,12 @@ function DetalhesColaborador({
   if (acessoNegado) {
     return <p className="text-slate-500">Acesso não autorizado.</p>;
   }
+
+  const labelPeriodoMeta =
+    period === "Hoje" ? "meta diária"
+    : period === "Semana" ? "meta semanal"
+    : period === "Mês" ? "meta mensal"
+    : "meta do período";
 
   return (
     <div>
@@ -1183,28 +1304,28 @@ function DetalhesColaborador({
         <KpiCard titulo="Recebidos" valor={formatNumero(recebidos)} icon={FileStack} accent="info" />
         <KpiCard
           titulo="Ganhos"
-          valor={metaMensalGanhos > 0 ? `${formatNumero(ganhos)} / ${formatNumero(metaMensalGanhos)}` : formatNumero(ganhos)}
+          valor={metaGanhosPeriodo > 0 ? `${formatNumero(ganhos)} / ${formatNumero(metaGanhosPeriodo)}` : formatNumero(ganhos)}
           icon={FilePenLine}
           accent="brand"
-          subtitulo="Meta de ganhos do período"
+          subtitulo={`Meta ${labelPeriodoMeta}`}
         />
         <KpiCard titulo="Protocolados" valor={formatNumero(protocolados)} icon={FileCheck2} accent="success" />
         <KpiCard titulo="Assinados" valor={formatNumero(assinados)} icon={FilePenLine} accent="warning" />
         <KpiCard
-          titulo={metaMensalGanhos > 0 ? "Atingimento da Meta (ganhos)" : "Conversão Geral"}
-          valor={formatPct(metaMensalGanhos > 0 ? (ganhos / metaMensalGanhos) * 100 : taxaConversaoGeral, 0)}
+          titulo={metaGanhosPeriodo > 0 ? "Atingimento da Meta (ganhos)" : "Tx. Ganhos/Recebidos"}
+          valor={formatPct(metaGanhosPeriodo > 0 ? (ganhos / metaGanhosPeriodo) * 100 : taxaGanhos, 0)}
           icon={Target}
-          accent={metaMensalGanhos === 0 ? "info" : (ganhos / metaMensalGanhos) * 100 >= 90 ? "success" : "warning"}
-          subtitulo={metaMensalGanhos === 0 ? "Meta não cadastrada" : undefined}
+          accent={metaGanhosPeriodo === 0 ? "info" : (ganhos / metaGanhosPeriodo) * 100 >= 90 ? "success" : "warning"}
+          subtitulo={metaGanhosPeriodo === 0 ? "Meta não cadastrada" : undefined}
         />
       </div>
 
-      {metaMensalGanhos > 0 && pace && (
+      {period === "Mês" && metaGanhosPeriodo > 0 && pace && (
         <Card className="mb-6 border-l-4 border-l-blue-500">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-semibold text-slate-700">Pace do mês (ganhos)</h3>
             <span className="text-[11px] text-slate-500">
-              {diasUteisDecorridos} de {diasUteisTotais} dias úteis decorridos · meta: {formatNumero(metaMensalGanhos)}
+              {diasUteisDecorridos} de {diasUteisTotaisPeriodo} dias úteis decorridos · meta: {formatNumero(metaGanhosPeriodo)}
             </span>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1397,7 +1518,7 @@ function DetalhesColaborador({
       </div>
 
       <p className="mt-4 text-xs text-slate-400">
-        Período analisado: {currentStartDate} até {currentEndDate} · Meta de ganhos: {formatNumero(metaMensalGanhos)}
+        Período analisado: {currentStartDate} até {currentEndDate} · {labelPeriodoMeta}: {formatNumero(metaGanhosPeriodo)}
       </p>
     </div>
   );
