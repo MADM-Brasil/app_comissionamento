@@ -71,6 +71,25 @@ const isDesativado = (c: Collaborator) => {
   return cargo === 'desativado' || equipe.includes('desativado');
 };
 
+// ← AJUSTADO: helpers para detectar cargo supervisor e localizar
+// o colaborador selecionado (mesma lógica das demais páginas).
+const isSupervisorCargo = (cargo?: string | null): boolean =>
+  (cargo || '').toLowerCase().trim().startsWith('supervisor');
+
+function findSelectedCollaborator(
+  collaborators: any[],
+  filters: { colaboradorId?: string | number; colaborador?: string }
+): any | null {
+  if (filters.colaboradorId != null) {
+    const byId = collaborators.find(c => String(c.id) === String(filters.colaboradorId));
+    if (byId) return byId;
+  }
+  if (filters.colaborador && filters.colaborador !== "todos") {
+    return collaborators.find(c => c.name === filters.colaborador) ?? null;
+  }
+  return null;
+}
+
 const productToGroup: Record<string, string | string[] | undefined> = {
   "Todos": undefined,
   "Auxilio Acidente": "Elite",
@@ -131,13 +150,11 @@ const STAGE_GROUPING: (string | { label: string; stages: string[] })[] = [
 ];
 
 // ========== DEFINIÇÃO DAS COLUNAS PARA A TABELA DE DETALHAMENTO ==========
-// Cada coluna pode ser uma string (etapa solta) ou um objeto { label, stages } (grupo)
-// A ordem é a ordem de STAGE_GROUPING.
 type StageColumn = {
-  key: string;          // identificador único (pode ser o label ou a etapa)
-  label: string;        // nome exibido
-  isGroup: boolean;     // true se for um grupo (label)
-  stageKeys: string[];  // lista de etapas que compõem a coluna (para grupos)
+  key: string;
+  label: string;
+  isGroup: boolean;
+  stageKeys: string[];
 };
 
 function buildStageColumns(grouping: (string | { label: string; stages: string[] })[]): StageColumn[] {
@@ -287,6 +304,33 @@ export default function Funil() {
   const LEADS_CACHE_TTL = 60000;
 
   // ============================================================
+  // ← AJUSTADO: DETECÇÃO DO SUPERVISOR SELECIONADO
+  // ============================================================
+  const selectedCollaborator = useMemo(
+    () => findSelectedCollaborator(rawCollaborators, filters),
+    [rawCollaborators, filters.colaborador, filters.colaboradorId]
+  );
+  const isSupervisorSelected = !!selectedCollaborator && isSupervisorCargo(selectedCollaborator.cargo);
+  const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
+
+  // ← AJUSTADO: centraliza a montagem dos parâmetros de API aplicando
+  // a regra "supervisor selecionado => visão da equipe".
+  const getEffectiveFilterParams = useCallback(() => {
+    let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
+    let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
+    let colaboradorIdApi = filters.colaboradorId;
+
+    if (isSupervisorSelected && selectedCollaborator) {
+      equipeApi = selectedCollaborator.equipeNome || equipeApi;
+      colaboradorApi = undefined;
+      colaboradorIdApi = undefined;
+    }
+
+    const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
+    return { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi };
+  }, [filters, isSupervisorSelected, selectedCollaborator]);
+
+  // ============================================================
   // FUNÇÃO DE RECARGA PRINCIPAL
   // ============================================================
   const reloadData = useCallback(async (showRefreshing = false) => {
@@ -296,10 +340,8 @@ export default function Funil() {
     setError(null);
 
     try {
-      const equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
-      const colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
-      const colaboradorIdApi = filters.colaboradorId;
-      const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
+      // ← AJUSTADO: usa os parâmetros efetivos (supervisor → equipe)
+      const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
 
       await Promise.all([
         loadMetricsForPeriod({
@@ -321,13 +363,13 @@ export default function Funil() {
       const dateRange = getChartDateRange(period, currentStartDate, currentEndDate);
       const now = Date.now();
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
-      const filtersChanged = 
+      const filtersChanged =
         filters.equipe !== lastFiltersRef.current.equipe ||
         filters.colaborador !== lastFiltersRef.current.colaborador ||
         filters.produto !== lastFiltersRef.current.produto;
-      
-      const shouldFetchLeads = datesChanged || filtersChanged || 
-        (leadsStageData.length === 0) || 
+
+      const shouldFetchLeads = datesChanged || filtersChanged ||
+        (leadsStageData.length === 0) ||
         (now - lastFetchLeads.current) > LEADS_CACHE_TTL || showRefreshing;
 
       if (shouldFetchLeads) {
@@ -360,7 +402,7 @@ export default function Funil() {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, period, filters, loadMetricsForPeriod, loadRawMetrics, loadWeeklyPerformanceData, leadsStageData.length]);
+  }, [currentStartDate, currentEndDate, period, filters, getEffectiveFilterParams, loadMetricsForPeriod, loadRawMetrics, loadWeeklyPerformanceData, leadsStageData.length]);
 
   const handleFilterChange = useCallback((newFilters: typeof filters) => {
     setFilters(newFilters);
@@ -383,8 +425,15 @@ export default function Funil() {
     return leadsStageData.reduce((sum, item) => sum + item.total, 0);
   }, [leadsStageData]);
 
-  // Colaboradores filtrados (exibição)
+  // ============================================================
+  // ← AJUSTADO: COLABORADORES FILTRADOS (exibição)
+  // Se um supervisor está selecionado, base = equipe dele.
+  // ============================================================
   const filteredCollaborators = useMemo(() => {
+    if (isSupervisorSelected && supervisorSelectedTeam) {
+      return rawCollaborators.filter(c => c.equipeNome === supervisorSelectedTeam);
+    }
+
     let filtered = [...rawCollaborators];
     if (filters.equipe !== "todas") {
       filtered = filtered.filter(c => c.equipeNome === filters.equipe);
@@ -403,7 +452,7 @@ export default function Funil() {
       }
     }
     return filtered;
-  }, [rawCollaborators, filters]);
+  }, [rawCollaborators, filters, isSupervisorSelected, supervisorSelectedTeam]);
 
   const totalsForCards = rawMetrics;
 
@@ -460,12 +509,10 @@ export default function Funil() {
 
     for (const entry of STAGE_GROUPING) {
       if (typeof entry === 'string') {
-        // Etapa única
         const stageKey = normalize(entry);
         mappedStages.add(stageKey);
         result.push({ etapa_lead: entry, total: stageMap.get(stageKey) || 0 });
       } else {
-        // Grupo de etapas
         let sum = 0;
         for (const stageName of entry.stages) {
           const stageKey = normalize(stageName);
@@ -495,7 +542,6 @@ export default function Funil() {
   // DETALHAMENTO POR COLABORADOR (AGRUPADO POR COLUNAS DEFINIDAS)
   // ============================================================
   const collaboratorStageSummary = useMemo(() => {
-    // Mapa: colaborador -> Map<etapa, total>
     const collaboratorMap = new Map<string, Map<string, number>>();
     leadsStageData
       .filter(item => activeCollaboratorNames.includes(item.colaborador))
@@ -508,13 +554,11 @@ export default function Funil() {
         stageMap.set(etapa, (stageMap.get(etapa) || 0) + item.total);
       });
 
-    // Para cada colaborador, calcular o total de cada coluna definida em STAGE_COLUMNS
     const result = Array.from(collaboratorMap.entries()).map(([colaborador, stageTotals]) => {
       const row: any = {
         colaborador,
         totalLeads: Array.from(stageTotals.values()).reduce((a, b) => a + b, 0),
       };
-      // Para cada coluna, calcular o valor somando as etapas correspondentes
       for (const col of STAGE_COLUMNS) {
         let sum = 0;
         for (const stageKey of col.stageKeys) {
@@ -525,7 +569,6 @@ export default function Funil() {
       return row;
     });
 
-    // Ordenar por total de leads decrescente
     result.sort((a, b) => b.totalLeads - a.totalLeads);
     return result;
   }, [leadsStageData, activeCollaboratorNames]);
@@ -586,7 +629,12 @@ export default function Funil() {
               <span>
                 Mostrando dados para:
                 {filters.equipe !== "todas" && ` Equipe ${filters.equipe}`}
-                {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
+                {/* ← AJUSTADO: esconde o nome do supervisor e sinaliza
+                    que a visão virou agregação da equipe dele. */}
+                {filters.colaborador !== "todos" && !isSupervisorSelected && ` - ${filters.colaborador}`}
+                {isSupervisorSelected && supervisorSelectedTeam && (
+                  <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
+                )}
                 {filters.produto !== "Todos" && ` • Produto: ${filters.produto}`}
               </span>
             </div>
@@ -726,21 +774,18 @@ export default function Funil() {
                 <table className="min-w-full border-separate border-spacing-0">
                   <thead>
                     <tr className="border-b border-gray-100 bg-gray-50/50">
-                      {/* Coluna Colaborador - fixa com z-index elevado e fundo opaco */}
                       <th
                         className="sticky left-0 z-40 bg-gray-50 text-left px-5 py-3 text-xs font-semibold text-gray-500 border-r border-gray-200"
                         style={{ minWidth: '200px', maxWidth: '200px' }}
                       >
                         Colaborador
                       </th>
-                      {/* Coluna Total Leads - fixa com z-index elevado e fundo opaco */}
                       <th
                         className="sticky left-[200px] z-40 bg-gray-50 text-left px-5 py-3 text-xs font-semibold text-gray-500 border-r border-gray-200"
                         style={{ minWidth: '120px', maxWidth: '120px' }}
                       >
                         Total Leads
                       </th>
-                      {/* Colunas de etapas (roláveis) */}
                       {STAGE_COLUMNS.map(col => (
                         <th key={col.key} className="text-center px-2 py-3 text-xs font-semibold text-gray-500 whitespace-nowrap">
                           {col.label}
@@ -751,21 +796,18 @@ export default function Funil() {
                   <tbody>
                     {collaboratorStageSummary.map((row) => (
                       <tr key={row.colaborador} className="border-b border-gray-50 hover:bg-gray-50/50">
-                        {/* Colaborador fixo com z-index elevado */}
                         <td
                           className="sticky left-0 z-30 bg-white px-5 py-3 text-sm font-medium text-gray-800 border-r border-gray-200"
                           style={{ minWidth: '200px', maxWidth: '200px' }}
                         >
                           {row.colaborador}
                         </td>
-                        {/* Total Leads fixo com z-index elevado */}
                         <td
                           className="sticky left-[200px] z-30 bg-white px-5 py-3 text-sm font-bold text-[#09175b] border-r border-gray-200"
                           style={{ minWidth: '120px', maxWidth: '120px' }}
                         >
                           {formatInt(row.totalLeads)}
                         </td>
-                        {/* Etapas (roláveis) */}
                         {STAGE_COLUMNS.map(col => (
                           <td key={col.key} className="px-2 py-3 text-center text-sm text-gray-600 whitespace-nowrap">
                             {formatInt(row[col.key] || 0)}
