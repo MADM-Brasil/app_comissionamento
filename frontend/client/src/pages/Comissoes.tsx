@@ -8,6 +8,7 @@ import {
   DollarSign, Award, FileCheck, Target, Loader2, RefreshCw,
   FileText, Archive, XCircle, CalendarDays, TrendingUp, TrendingDown,
   Users, PhoneCall, CalendarClock, MessageCircle, ChevronDown, Search,
+  Megaphone, Info, AlertCircle, Clock,
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -26,8 +27,42 @@ import {
 } from "@/lib/api";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import {
+  getActiveRecommendationsFor,
+  subscribeRecommendations,
+  getRemainingTimeLabel,
+  type TemporaryRecommendation,
+  type RecommendationPriority,
+} from "@/lib/recommendations";
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
+
+// ============================================================
+//  HELPERS DE DATA
+// ============================================================
+
+/**
+ * Converte a data final EXCLUSIVA (currentEndDate, como devolvida por
+ * `getDateRangeFromPeriod`) em uma data final INCLUSIVA (o último dia
+ * efetivamente coberto pelo período).
+ *
+ * - `end` em "2026-07-01" (Mês de junho) → "2026-06-30"
+ * - `end` em "2026-06-15" (Hoje)          → "2026-06-14"
+ * - `end` em "2026-06-09" (Semana)        → "2026-06-08"
+ *
+ * Isso permite enviar tanto `end` (exclusivo) quanto `fim` (inclusivo)
+ * para o backend — cobrindo qualquer convenção do endpoint.
+ */
+function toInclusiveEnd(end: string): string {
+  if (!end) return end;
+  const d = new Date(end + 'T00:00:00');
+  if (isNaN(d.getTime())) return end;
+  d.setDate(d.getDate() - 1);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
 
 const EXCLUDED_TEAMS = [
   'Equipe SAC', 'Sales Ops', 'Equipe', 'Equipe Lucilene', 'Equipe SDR','Equipe Camila',
@@ -60,6 +95,18 @@ interface CommissionOverviewItem {
   isSupervisorSR: boolean;
   collaborator: Collaborator;
 }
+
+// ============================================================
+//  ESTILOS DE PRIORIDADE DAS RECOMENDAÇÕES TEMPORÁRIAS
+// ============================================================
+const PRIORITY_STYLES: Record<
+  RecommendationPriority,
+  { border: string; bg: string; text: string; Icon: React.ElementType }
+> = {
+  info: { border: "border-sky-200", bg: "bg-sky-50", text: "text-sky-700", Icon: Info },
+  warning: { border: "border-amber-200", bg: "bg-amber-50", text: "text-amber-700", Icon: AlertCircle },
+  danger: { border: "border-red-200", bg: "bg-red-50", text: "text-red-700", Icon: XCircle },
+};
 
 function getCommissionOverviewRole(colaborador: Collaborator): CommissionOverviewRole | null {
   const cargo = normalizeName(colaborador.cargo);
@@ -166,7 +213,7 @@ function getFaixaProductType(colab: any): string {
   if (cargoNormalizado === 'concomitante') return 'CONCOMITANTE';
 
   const equipeNormalizada = (colab?.equipeNome || '').toLowerCase().trim();
-  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiane')) {
+  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiana')) {
     return 'QUINQUENIO';
   }
   if (equipeNormalizada.includes('concomitante')) {
@@ -236,12 +283,7 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
             {sortedDates.length > 0 ? (
               sortedDates.map((dateKey, idx) => {
                 const day = dailyMetrics.find((d: any) => d.date.slice(0, 10) === dateKey) || {
-                  date: dateKey,
-                  assinados: 0,
-                  ganhos: 0,
-                  perdidos: 0,
-                  emitidos: 0,
-                  protocolados: 0,
+                  date: dateKey, assinados: 0, ganhos: 0, perdidos: 0, emitidos: 0, protocolados: 0,
                 };
                 const golsInfo = dailyGols.find((g: any) => (g.date || '').slice(0, 10) === dateKey);
                 const golsDoDia = golsInfo?.gols || 0;
@@ -327,7 +369,6 @@ export default function Comissoes() {
   const { currentUser, hasPermission, getAccessLevel, LEVELS } = useAccessControl();
   const canUseFilterBar = hasPermission("canViewTeam") || hasPermission("canAccessReports");
 
-  // A Visão Geral das Comissões é exclusiva para ADMINISTRATIVO e SUPER_ADMIN.
   const userLevel = getAccessLevel();
   const canViewCommissionOverview = userLevel === LEVELS.ADMINISTRATIVO || userLevel === LEVELS.SUPER_ADMIN;
 
@@ -361,6 +402,13 @@ export default function Comissoes() {
   const [showExtrato, setShowExtrato] = useState(false);
   const [filterBarKey, setFilterBarKey] = useState(0);
   const isLoadingRef = useRef(false);
+
+  // Recomendações temporárias do colaborador em foco
+  const [tempRecsForColab, setTempRecsForColab] = useState<TemporaryRecommendation[]>([]);
+
+  // Tabulações pré-carregadas para as recomendações
+  const [allTabulations, setAllTabulations] = useState<CallTabulation[]>([]);
+  const [loadingAllTabulations, setLoadingAllTabulations] = useState(false);
 
   const reloadData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate || !currentUser) return;
@@ -408,13 +456,23 @@ export default function Comissoes() {
         colaboradorIdApi = undefined;
       }
 
+      // ============================================================
+      //  LIGAÇÕES — envia start/end (exclusivo) E inicio/fim (inclusivo)
+      //  + colaboradorId e produto, para cobrir qualquer convenção do backend.
+      // ============================================================
+      const fimInclusivo = toInclusiveEnd(currentEndDate);
+
       const [calls] = await Promise.all([
         fetchLigacoes({
           start: currentStartDate,
           end: currentEndDate,
+          inicio: currentStartDate,
+          fim: fimInclusivo,
           equipe: equipeApi,
           colaborador: colaboradorApi,
-        }).catch(err => {
+          colaboradorId: colaboradorIdApi,
+          produto: produtoApi,
+        } as any).catch(err => {
           console.error('Erro ao carregar ligações:', err);
           return [] as CallMetrics[];
         }),
@@ -631,6 +689,81 @@ export default function Comissoes() {
     return filteredColabs.find(c => c.id === currentUser?.id);
   }, [filteredColabs, currentUser, filters, canUseFilterBar]);
 
+  // ============================================================
+  // RECOMENDAÇÕES TEMPORÁRIAS — carrega as ativas do colaborador em foco
+  // ============================================================
+  useEffect(() => {
+    if (!userColab) {
+      setTempRecsForColab([]);
+      return;
+    }
+    const refresh = () => setTempRecsForColab(getActiveRecommendationsFor(userColab.id));
+    refresh();
+    const unsub = subscribeRecommendations(refresh);
+    const timer = window.setInterval(refresh, 60_000);
+    return () => {
+      unsub();
+      window.clearInterval(timer);
+    };
+  }, [userColab?.id]);
+
+  // ============================================================
+  // PRÉ-CARREGAMENTO DAS TABULAÇÕES PARA AS RECOMENDAÇÕES
+  // ============================================================
+  useEffect(() => {
+    if (!currentStartDate || !currentEndDate) return;
+    if (!userColab) {
+      setAllTabulations([]);
+      return;
+    }
+
+    let cancelled = false;
+    const loadAll = async () => {
+      setLoadingAllTabulations(true);
+      try {
+        const isSupervisorFocus = (userColab.cargo || '').toLowerCase() === 'supervisor';
+
+        let equipe = canUseFilterBar
+          ? (filters.equipe !== 'todas' ? filters.equipe : undefined)
+          : userColab.equipeNome;
+        let colaborador = canUseFilterBar
+          ? (filters.colaborador !== 'todos' ? filters.colaborador : undefined)
+          : userColab.name;
+
+        if (isSupervisorFocus) {
+          equipe = userColab.equipeNome || equipe;
+          colaborador = undefined;
+        }
+
+        const fimInclusivo = toInclusiveEnd(currentEndDate);
+        const categorias: CallTabulationCategory[] = ['productive', 'appointments', 'occurrences', 'failures'];
+        const resultados = await Promise.all(
+          categorias.map(cat =>
+            fetchLigacoesTabulacoes({
+              start: currentStartDate,
+              end: currentEndDate,
+              inicio: currentStartDate,
+              fim: fimInclusivo,
+              equipe,
+              colaborador,
+              categoria: cat,
+            } as any).catch(() => [] as CallTabulation[])
+          )
+        );
+
+        if (cancelled) return;
+        setAllTabulations(resultados.flat());
+      } catch (err) {
+        if (!cancelled) setAllTabulations([]);
+      } finally {
+        if (!cancelled) setLoadingAllTabulations(false);
+      }
+    };
+
+    void loadAll();
+    return () => { cancelled = true; };
+  }, [currentStartDate, currentEndDate, filters.equipe, filters.colaborador, userColab?.id, canUseFilterBar]);
+
   const isSupervisorUser = (userColab?.cargo || '').toLowerCase() === 'supervisor';
   const isSpecialUser = userColab ? isSpecialGroupColaborador(userColab) : false;
 
@@ -807,18 +940,8 @@ export default function Comissoes() {
           .map(collaborator => normalizeName(collaborator.name)));
 
         const [assinadosRows, ganhosRows] = await Promise.all([
-          fetchAssinados({
-            start: currentStartDate,
-            end: currentEndDate,
-            equipe: item.team,
-            granularity: 'daily',
-          }),
-          fetchGanhos({
-            start: currentStartDate,
-            end: currentEndDate,
-            equipe: item.team,
-            granularity: 'daily',
-          }),
+          fetchAssinados({ start: currentStartDate, end: currentEndDate, equipe: item.team, granularity: 'daily' }),
+          fetchGanhos({ start: currentStartDate, end: currentEndDate, equipe: item.team, granularity: 'daily' }),
         ]);
 
         assinados = assinadosRows.reduce((total, row) =>
@@ -885,21 +1008,12 @@ export default function Comissoes() {
     return { comissao, ciclos };
   }, [commissionData]);
 
-  // ============================================================
-  // ATINGIMENTO DA META — APENAS GANHOS
-  //
-  // A meta de assinados foi descontinuada deste painel. Apenas a
-  // meta de GANHOS é utilizada agora, comparando `ganhos` do
-  // colaborador contra a meta armazenada nos campos históricos do
-  // banco `peso_meta_ganho_mensal` (exposta como `metaMensalGanhos`).
-  // ============================================================
   const avgProgress = useMemo(() => {
     if (!commissionData.length) return 0;
     const sum = commissionData.reduce((acc, i) => {
-      const pctGan = i.originalColab?.metaMensalGanhos
-        ? (i.ganhos / i.originalColab.metaMensalGanhos) * 100
-        : 100;
-      return acc + Math.min(pctGan, 100);
+      const pctAss = i.originalColab?.metaMensalAssinados ? (i.assinados / i.originalColab.metaMensalAssinados) * 100 : 0;
+      const pctProt = i.originalColab?.metaMensalGanhos ? (i.protocolados / i.originalColab.metaMensalGanhos) * 100 : 100;
+      return acc + Math.min(pctAss, pctProt);
     }, 0);
     return sum / commissionData.length;
   }, [commissionData]);
@@ -909,7 +1023,7 @@ export default function Comissoes() {
   const summaryCards = [
     { label: "Comissão Total Estimada", value: totals.comissao, icon: DollarSign, color: "#2F6FED", isCurrency: true },
     { label: "Gols", value: totals.ciclos, icon: Award, color: "#16A34A", isInteger: true },
-    { label: "Ganhos", value: rawMetrics.ganhos, icon: FileCheck, color: "#EA8C1D", isInteger: true },
+    { label: "Vendas Fechadas", value: rawMetrics.ganhos, icon: FileCheck, color: "#EA8C1D", isInteger: true },
     { label: "Atingimento da meta", value: avgProgress, icon: Target, color: "#8B5CF6", isPercent: true },
   ];
 
@@ -925,27 +1039,6 @@ export default function Comissoes() {
 
   const taxaConversaoGeral = recebidos > 0 ? (assinados / recebidos) * 100 : 0;
   const taxaConversaoProtocolados = assinados > 0 ? (protocolados / assinados) * 100 : 0;
-
-  // ============================================================
-  // RECOMENDAÇÕES — a referência à meta de assinados foi removida.
-  // Agora compara ganhos contra a meta de ganhos (`metaMensalGanhos`,
-  // proveniente do campo `peso_meta_ganho_mensal` do banco).
-  // ============================================================
-  const recomendacoes: string[] = [];
-  if (userData) {
-    if (userData.originalColab?.metaMensalGanhos && userData.ganhos < userData.originalColab.metaMensalGanhos * 0.7) {
-      recomendacoes.push("Você está abaixo de 70% da meta de ganhos. Reforce as atividades de fechamento.");
-    }
-    if (taxaConversaoGeral < 50) {
-      recomendacoes.push("Sua taxa de conversão (recebidos → assinados) está baixa. Revise sua abordagem de qualificação.");
-    }
-    if (taxaConversaoProtocolados < 50 && assinados > 0) {
-      recomendacoes.push("Menos da metade dos seus assinados foram protocolados. Acompanhe os processos pendentes.");
-    }
-    if (userData.totalCycles < 5 && userData.totalCycles > 0) {
-      recomendacoes.push("Seus gols totais estão baixos. Concentre-se em bater as metas diárias para acumular mais gols.");
-    }
-  }
 
   const calcPercent = (value: number, target: number) => target > 0 ? Math.min((value / target) * 100, 100) : 0;
 
@@ -969,11 +1062,86 @@ export default function Comissoes() {
 
   const callFunnelLayout = useMemo(() => {
     const widths = [100, 82, 64, 46, 28];
-    return callFunnelStages.map((stage, index) => ({
-      ...stage,
-      widthPct: widths[index],
-    }));
+    return callFunnelStages.map((stage, index) => ({ ...stage, widthPct: widths[index] }));
   }, [callFunnelStages]);
+
+  // ============================================================
+  // RECOMENDAÇÕES AUTOMÁTICAS
+  // ============================================================
+  const recomendacoes: string[] = [];
+
+  if (userData) {
+    if (userData.originalColab?.metaMensalAssinados && userData.assinados < userData.originalColab.metaMensalAssinados * 0.7) {
+      recomendacoes.push("Você está abaixo de 70% da meta de assinados. Reforce as atividades de fechamento.");
+    }
+    if (taxaConversaoGeral < 50) {
+      recomendacoes.push("Sua taxa de conversão (recebidos → assinados) está baixa. Revise sua abordagem de qualificação.");
+    }
+    if (taxaConversaoProtocolados < 50 && assinados > 0) {
+      recomendacoes.push("Menos da metade dos seus assinados foram protocolados. Acompanhe os processos pendentes.");
+    }
+    if (userData.totalCycles < 5 && userData.totalCycles > 0) {
+      recomendacoes.push("Seus gols totais estão baixos. Concentre-se em bater as metas diárias para acumular mais gols.");
+    }
+  }
+
+  const totalLigacoes = callFunnelStages.find(s => s.key === null)?.count ?? 0;
+  const ligacoesProdutivas = callFunnelStages.find(s => s.key === "productive")?.count ?? 0;
+
+  const sumTabulationsByName = (patterns: string[]): number => {
+    return allTabulations.reduce((sum, t) => {
+      const nome = normalizeName(t.tabulacao);
+      const matched = patterns.some(p => nome.includes(normalizeName(p)));
+      return matched ? sum + (Number(t.total) || 0) : sum;
+    }, 0);
+  };
+
+  if (totalLigacoes > 0) {
+    const taxaProdutivas = (ligacoesProdutivas / totalLigacoes) * 100;
+
+    if (taxaProdutivas > 50) {
+      recomendacoes.push(
+        `🎉 Parabéns! ${taxaProdutivas.toFixed(0)}% das suas ligações foram produtivas no período. Excelente trabalho — continue assim!`
+      );
+    } else if (taxaProdutivas < 40) {
+      recomendacoes.push(
+        `Apenas ${taxaProdutivas.toFixed(0)}% das suas ligações foram produtivas. Revise o script de abordagem e o horário dos contatos.`
+      );
+    }
+
+    const totalAgendamentos = sumTabulationsByName(['trabalhando', 'retornar liga']);
+    const taxaAgendamentos = (totalAgendamentos / totalLigacoes) * 100;
+    if (taxaAgendamentos > 5) {
+      recomendacoes.push(
+        `Você registrou ${taxaAgendamentos.toFixed(1)}% de agendamentos. Ótimo ritmo! Melhores horários para uma nova tentativa de contato: 8:10, 10:12 e 12:14.`
+      );
+    }
+
+    const totalNaoTabulada = sumTabulationsByName(['nao tabulada', 'não tabulada', 'tempo excedido']);
+    if (totalNaoTabulada > 3) {
+      recomendacoes.push(
+        `Foram registradas ${formatInt(totalNaoTabulada)} ocorrências de "Não Tabulada - Tempo Excedido" no período. Evite deixar atendimentos sem a devida tabulação.`
+      );
+    }
+
+    const totalQueda = sumTabulationsByName(['queda']);
+    const taxaQueda = (totalQueda / totalLigacoes) * 100;
+    if (taxaQueda > 10) {
+      recomendacoes.push(
+        `Você tem ${taxaQueda.toFixed(1)}% de quedas de ligação. Recomendamos acompanhar a estabilidade da rede e a conexão com a internet. \n`+
+        `OBS: a tabulação de "Queda" deve ser utilizada quando a ligação for encerrada antes da conclusão do atendimento.`
+      );
+    }
+
+    const totalMuda = sumTabulationsByName(['muda', 'mudo']);
+    const taxaMuda = (totalMuda / totalLigacoes) * 100;
+    if (taxaMuda > 10) {
+      recomendacoes.push(
+        `${taxaMuda.toFixed(1)}% das ligações foram tabuladas como "Mudas". Recomendamos que verifique o funcionamento dos equipamentos e separe os casos para serem avaliados por nossa equipe. \n`+
+        `OBS: A tabulção de Ligaçoes mudas deve ser utilizada quando não houver comunicação/áudio do cliente.`
+      );
+    }
+  }
 
   const toggleCallStage = async (category: CallTabulationCategory) => {
     if (expandedCallStage === category) {
@@ -1004,13 +1172,16 @@ export default function Comissoes() {
         colaborador = undefined;
       }
 
+      const fimInclusivo = toInclusiveEnd(currentEndDate);
       const data = await fetchLigacoesTabulacoes({
         start: currentStartDate,
         end: currentEndDate,
+        inicio: currentStartDate,
+        fim: fimInclusivo,
         equipe,
         colaborador,
         categoria: category,
-      });
+      } as any);
       if (requestId === callTabulationsRequest.current) setCallTabulations(data);
     } catch (err: any) {
       if (requestId === callTabulationsRequest.current) {
@@ -1104,9 +1275,7 @@ export default function Comissoes() {
       {canViewCommissionOverview && !loading && !isOverviewVisible && (
         <div className="mb-6 flex items-center gap-2 text-xs text-[#64748b] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg px-3 py-2">
           <Users className="w-3.5 h-3.5 text-[#2F6FED]" />
-          <span>
-            A Visão Geral das Comissões fica disponível quando nenhum filtro de equipe ou colaborador está aplicado.
-          </span>
+          <span>A Visão Geral das Comissões fica disponível quando nenhum filtro de equipe ou colaborador está aplicado.</span>
         </div>
       )}
 
@@ -1137,9 +1306,7 @@ export default function Comissoes() {
               <Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" />
             </div>
           ) : commissionOverviewError ? (
-            <div className="bg-red-50 text-red-700 p-3 rounded-lg text-xs">
-              {commissionOverviewError}
-            </div>
+            <div className="bg-red-50 text-red-700 p-3 rounded-lg text-xs">{commissionOverviewError}</div>
           ) : filteredCommissionOverview.length === 0 ? (
             <div className="text-center text-[#94a3b8] py-6 text-xs">
               {commissionOverviewSearch ? "Nenhum resultado encontrado." : "Nenhum dado disponível."}
@@ -1189,12 +1356,8 @@ export default function Comissoes() {
                           {item.isSupervisorSR && ' SR'}
                         </span>
                       </td>
-                      <td className="py-2 px-3 text-right text-[#475569]">
-                        {formatInt(item.assinados)}
-                      </td>
-                      <td className="py-2 px-3 text-right font-semibold text-[#0f172a]">
-                        {formatInt(item.ganhos)}
-                      </td>
+                      <td className="py-2 px-3 text-right text-[#475569]">{formatInt(item.assinados)}</td>
+                      <td className="py-2 px-3 text-right font-semibold text-[#0f172a]">{formatInt(item.ganhos)}</td>
                       <td className="py-2 px-3 text-right font-semibold text-[#2F6FED]">
                         {item.commission == null ? '—' : displayCurrency(item.commission)}
                       </td>
@@ -1203,11 +1366,7 @@ export default function Comissoes() {
                           onClick={() => handleSelectFromOverview(item)}
                           disabled={item.role === 'coordenador' || updatingCommissionId === item.id}
                           className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-medium text-[#2F6FED] hover:bg-[#eff6ff] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                          title={
-                            item.role === 'coordenador'
-                              ? 'Coordenadores não têm visualização individual'
-                              : 'Ver detalhes deste colaborador'
-                          }
+                          title={item.role === 'coordenador' ? 'Coordenadores não têm visualização individual' : 'Ver detalhes deste colaborador'}
                         >
                           <Target className="w-3 h-3" />
                           Ver detalhes
@@ -1359,22 +1518,12 @@ export default function Comissoes() {
                     <div className="space-y-5 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
                       {commissionData.map((item) => {
                         const colabOriginal = item.originalColab;
-
-                        // ============================================================
-                        // METAS DE GANHOS
-                        //
-                        // A meta de assinados foi descontinuada deste painel.
-                        // Os valores exibidos abaixo são lidos dos campos históricos
-                        // do banco `peso_meta_ganho_diario`, `peso_meta_ganho_semanal`
-                        // e `peso_meta_ganho_mensal`, que chegam ao frontend como
-                        // `peso*Ganhos`. A comparação usa a coluna `ganhos` do
-                        // colaborador.
-                        // ============================================================
-                        const metaDiarioGan = Number(colabOriginal?.pesoDiarioGanhos ?? colabOriginal?.metaDiarioGanhos ?? 3);
-                        const metaSemanalGan = Number(colabOriginal?.pesoSemanalGanhos ?? colabOriginal?.metaSemanalGanhos ?? 15);
-                        const metaMensalGan = Number(colabOriginal?.pesoMensalGanhos ?? colabOriginal?.metaMensalGanhos ?? 60);
-
-                        // Metas de gol (usadas no bloco "Gols (hoje)" — conceito separado).
+                        const metaDiarioAss = Number(colabOriginal?.pesoDiarioAssinados ?? colabOriginal?.metaDiarioAssinados ?? 3);
+                        const metaDiarioProt = Number(colabOriginal?.pesoDiarioGanhos ?? colabOriginal?.metaDiarioGanhos ?? 3);
+                        const metaSemanalAss = Number(colabOriginal?.pesoSemanalAssinados ?? colabOriginal?.metaSemanalAssinados ?? 15);
+                        const metaSemanalProt = Number(colabOriginal?.pesoSemanalGanhos ?? colabOriginal?.metaSemanalGanhos ?? 15);
+                        const metaMensalAss = Number(colabOriginal?.pesoMensalAssinados ?? colabOriginal?.metaMensalAssinados ?? 60);
+                        const metaMensalProt = Number(colabOriginal?.pesoMensalGanhos ?? colabOriginal?.metaMensalGanhos ?? 60);
                         const metaGolsAss = Number(colabOriginal?.metaGolsAssinados ?? 3);
                         const metaGolsGan = Number(colabOriginal?.metaGolsGanhos ?? 3);
 
@@ -1396,18 +1545,20 @@ export default function Comissoes() {
                         const dailyDataSemanal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= mondayStr && d.date.slice(0,10) <= sundayStr);
                         const dailyDataMensal = dailyMetrics.filter(d => d.date && d.date.slice(0,10) >= monthStartStr && d.date.slice(0,10) <= monthEndStr);
 
-                        // Realizado — ganhos (alvo das metas `peso*Ganhos`)
-                        const ganhosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-                        const ganhosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-                        const ganhosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
-
-                        // Assinados (usado apenas no bloco "Gols (hoje)")
                         const assinadosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                        const assinadosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                        const assinadosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+
+                        const protocoladosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
+                        const protocoladosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
+                        const protocoladosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
+
+                        const ganhosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.ganhos) || 0), 0);
 
                         const periodos = [
-                          { label: "Diário (hoje)", metaGan: metaDiarioGan, atualGan: ganhosDiario, colorGan: "#16A34A" },
-                          { label: "Semanal (semana atual)", metaGan: metaSemanalGan, atualGan: ganhosSemanal, colorGan: "#16A34A" },
-                          { label: "Mensal (mês atual)", metaGan: metaMensalGan, atualGan: ganhosMensal, colorGan: "#16A34A" },
+                          { label: "Diário (hoje)", metaAss: metaDiarioAss, metaProt: metaDiarioProt, atualAss: assinadosDiario, atualProt: protocoladosDiario, colorAss: "#2F6FED", colorProt: "#16A34A" },
+                          { label: "Semanal (semana atual)", metaAss: metaSemanalAss, metaProt: metaSemanalProt, atualAss: assinadosSemanal, atualProt: protocoladosSemanal, colorAss: "#EA8C1D", colorProt: "#16A34A" },
+                          { label: "Mensal (mês atual)", metaAss: metaMensalAss, metaProt: metaMensalProt, atualAss: assinadosMensal, atualProt: protocoladosMensal, colorAss: "#8B5CF6", colorProt: "#16A34A" },
                         ];
 
                         return (
@@ -1417,22 +1568,37 @@ export default function Comissoes() {
                               <div><span className="font-medium text-[#0f172a] text-sm">{item.name}</span></div>
                             </div>
 
-                            {/* Metas de ganhos (assinados removidos) */}
-                            {!item.isSpecial && periodos.map((p) => {
-                              const pctGan = p.metaGan > 0 ? calcPercent(p.atualGan, p.metaGan) : 0;
-                              const faltaGan = Math.max(0, p.metaGan - p.atualGan);
+                            {periodos.map((p) => {
+                              const pctAss = calcPercent(p.atualAss, p.metaAss);
+                              const pctProt = p.metaProt > 0 ? calcPercent(p.atualProt, p.metaProt) : 0;
+                              const faltaAss = Math.max(0, p.metaAss - p.atualAss);
+                              const faltaProt = Math.max(0, p.metaProt - p.atualProt);
+
                               return (
                                 <div key={p.label} className="mb-3 last:mb-0">
                                   <p className="text-xs font-semibold text-[#475569] mb-1">{p.label}</p>
                                   <div className="flex items-center gap-2 mb-1">
-                                    <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
+                                    <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
                                     <div className="flex-1 progress-bar h-2">
-                                      <div className="progress-fill" style={{ width: `${pctGan}%`, background: p.colorGan }} />
+                                      <div className="progress-fill" style={{ width: `${pctAss}%`, background: p.colorAss }} />
                                     </div>
-                                    <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualGan)}/{formatInt(p.metaGan)}</span>
-                                    <span className="text-[10px] font-medium" style={{ color: p.colorGan }}>{pctGan.toFixed(0)}%</span>
+                                    <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualAss)}/{formatInt(p.metaAss)}</span>
+                                    <span className="text-[10px] font-medium" style={{ color: p.colorAss }}>{pctAss.toFixed(0)}%</span>
                                   </div>
-                                  <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaGan > 0 ? `Faltam ${formatInt(faltaGan)}` : "Atingido"}</div>
+                                  <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaAss > 0 ? `Faltam ${formatInt(faltaAss)}` : "Atingido"}</div>
+                                  {!item.isSpecial && (
+                                    <>
+                                      <div className="flex items-center gap-2 mb-1">
+                                        <span className="text-[10px] text-[#64748b] w-12">Prot.</span>
+                                        <div className="flex-1 progress-bar h-2">
+                                          <div className="progress-fill" style={{ width: `${pctProt}%`, background: p.colorProt }} />
+                                        </div>
+                                        <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualProt)}/{formatInt(p.metaProt)}</span>
+                                        <span className="text-[10px] font-medium" style={{ color: p.colorProt }}>{pctProt.toFixed(0)}%</span>
+                                      </div>
+                                      <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaProt > 0 ? `Faltam ${formatInt(faltaProt)}` : "Atingido"}</div>
+                                    </>
+                                  )}
                                 </div>
                               );
                             })}
@@ -1474,9 +1640,7 @@ export default function Comissoes() {
                       {callFunnelLayout.map(stage => {
                         const Icon = stage.icon;
                         const isExpanded = stage.key != null && expandedCallStage === stage.key;
-                        const percentageOfTotal = callFunnelStages[0].count > 0
-                          ? (stage.count / callFunnelStages[0].count) * 100
-                          : 0;
+                        const percentageOfTotal = callFunnelStages[0].count > 0 ? (stage.count / callFunnelStages[0].count) * 100 : 0;
                         return (
                           <div key={stage.label} className="w-full flex flex-col items-center">
                             {stage.key ? (
@@ -1520,14 +1684,9 @@ export default function Comissoes() {
                                 <span className="text-sm font-black flex-shrink-0" style={{ color: stage.color }}>{formatInt(stage.count)}</span>
                               </div>
                             )}
-                            <p className="py-1 text-[10px] text-[#64748b]">
-                              {percentageOfTotal.toFixed(1)}% do total
-                            </p>
+                            <p className="py-1 text-[10px] text-[#64748b]">{percentageOfTotal.toFixed(1)}% do total</p>
                             {isExpanded && (
-                              <div
-                                id={`call-tabulations-${stage.key}`}
-                                className="mt-2 w-full p-3 rounded-lg border border-[#e2e8f0] bg-white"
-                              >
+                              <div id={`call-tabulations-${stage.key}`} className="mt-2 w-full p-3 rounded-lg border border-[#e2e8f0] bg-white">
                                 {loadingCallTabulations ? (
                                   <div className="flex justify-center py-3"><Loader2 className="w-4 h-4 animate-spin text-[#09175b]" /></div>
                                 ) : callTabulationsError ? (
@@ -1591,6 +1750,34 @@ export default function Comissoes() {
                 </div>
               </div>
 
+              {tempRecsForColab.length > 0 && (
+                <div className="card p-5 mb-6 animate-fade-in-up border-l-4 border-l-[#EA8C1D]">
+                  <div className="flex items-center gap-2 mb-4">
+                    <Megaphone className="w-4 h-4 text-[#EA8C1D]" />
+                    <h3 className="text-sm font-bold text-[#0f172a]">Orientações do Supervisor</h3>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#EA8C1D]/10 text-[#EA8C1D] font-medium">ativas por 24h</span>
+                  </div>
+                  <ul className="space-y-2">
+                    {tempRecsForColab.map((r) => {
+                      const style = PRIORITY_STYLES[r.priority];
+                      const PIcon = style.Icon;
+                      return (
+                        <li key={r.id} className={cn("flex gap-3 items-start p-3 rounded-lg border", style.border, style.bg)}>
+                          <PIcon size={15} className={cn("mt-0.5 shrink-0", style.text)} />
+                          <div className="flex-1 min-w-0">
+                            <p className={cn("text-[13px] whitespace-pre-wrap break-words", style.text)}>{r.text}</p>
+                            <p className="text-[10px] text-slate-500 mt-1 flex flex-wrap items-center gap-2">
+                              <span>{r.authorName} · {r.authorCargo}</span>
+                              <span className="inline-flex items-center gap-1"><Clock size={10} /> expira em {getRemainingTimeLabel(r.expiresAt)}</span>
+                            </p>
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+
               {!isSupervisorUser && !isSpecialUser && (
                 <div className="card p-5 mb-6">
                   <h3 className="text-sm font-bold mb-4">Evolução Diária</h3>
@@ -1615,10 +1802,20 @@ export default function Comissoes() {
 
               {recomendacoes.length > 0 && (
                 <div className="card p-5 mb-6">
-                  <h3 className="text-sm font-bold mb-3">Recomendações</h3>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-sm font-bold">Recomendações</h3>
+                    {loadingAllTabulations && (
+                      <span className="inline-flex items-center gap-1 text-[10px] text-slate-400">
+                        <Loader2 size={10} className="animate-spin" /> atualizando tabulações...
+                      </span>
+                    )}
+                  </div>
                   <ul className="space-y-2">
                     {recomendacoes.map((r, i) => (
-                      <li key={i} className="flex gap-2 text-[13px] text-[#475569] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg p-3"><span className="text-[#2F6FED]">→</span>{r}</li>
+                      <li key={i} className="flex gap-2 text-[13px] text-[#475569] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg p-3">
+                        <span className="text-[#2F6FED]">→</span>
+                        {r}
+                      </li>
                     ))}
                   </ul>
                 </div>

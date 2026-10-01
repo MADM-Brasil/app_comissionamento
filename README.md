@@ -243,3 +243,24 @@ erro	Vermelho	false	Erro na integração
 concluido	Verde	true	Card movido
 Esses são os retornos definidos ao longo das alterações. O frontend (Suporte.tsx) já possui os mapeamentos de ícones e cores correspondentes para exibição no histórico.
 
+# ========== RECOMENDAÇÕES ==========
+
+Caso a taxa de ligações produtivas seja +50% das ligações totais retorna a mensagem:
+        🎉 Parabéns! "tantos"% das suas ligações foram produtivas no período. Excelente trabalho — continue assim!
+
+Caso a taxa de ligações produtivas seja -40% das ligações totais retorna a mensagem:
+        Apenas "tantos"% das suas ligações foram produtivas. Revise o script de abordagem e o horário dos contatos.
+
+Caso a taxa de ligações produtivas seja +5% das ligações totais retorna a mensagem:
+        Você registrou "tantos"% de agendamentos. Ótimo ritmo! Melhores horários para uma nova tentativa de contato: 8:10, 10:12 e 12:14.
+
+Caso tenha + de 3 casos de "Não Tabulada - Tempo Excedido" retorna a mensagem:
+        Foram registradas "tantas" ocorrências de "Não Tabulada - Tempo Excedido" no período. Evite deixar atendimentos sem a devida tabulação.
+
+Caso a taxa de Quedas de ligações seja +10% das ligações totais retorna a mensagem:
+        Você tem tantas% de quedas de ligação. Recomendamos acompanhar a estabilidade da rede e a conexão com a internet. 
+        OBS: a tabulação de "Queda" deve ser utilizada quando a ligação for encerrada antes da conclusão do atendimento.
+
+Caso a taxa de ligações mudas seja +10% das ligações totais retorna a mensagem:
+        "tantos"% das ligações foram tabuladas como "Mudas". Recomendamos que verifique o funcionamento dos equipamentos e separe os casos para serem avaliados por nossa equipe.
+        OBS: A tabulção de Ligaçoes mudas deve ser utilizada quando não houver comunicação/áudio do cliente.
