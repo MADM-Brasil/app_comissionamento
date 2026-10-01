@@ -131,8 +131,7 @@ function KpiCard({ titulo, valor, icon: Icon, accent = "brand", subtitulo, varia
 //  CONSTANTES DE EXCLUSÃO
 // ============================================================
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-  'Equipe Ariana', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial',
   'Equipe Gabriela Toledo','Equipe Treinamento', 'Equipe lucilene'
