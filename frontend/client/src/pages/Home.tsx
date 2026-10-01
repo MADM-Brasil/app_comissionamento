@@ -12,7 +12,7 @@ import {
 } from "recharts";
 import {
   TrendingUp, Target, Zap, ArrowRight, Award,
-  DollarSign, FileCheck, BarChart2, Loader2,
+  DollarSign, FileCheck, BarChart2, Loader2, Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
@@ -76,7 +76,7 @@ function getFaixaProductType(colab: any): string {
   if (cargoNormalizado === 'concomitante') return 'CONCOMITANTE';
 
   const equipeNormalizada = (colab?.equipeNome || '').toLowerCase().trim();
-  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiane')) {
+  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiana')) {
     return 'QUINQUENIO';
   }
   if (equipeNormalizada.includes('concomitante')) {
@@ -96,15 +96,6 @@ const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', numb
   emitidos: 2,
 };
 
-/**
- * Metas globais usadas como fallback quando nenhum colaborador está
- * selecionado. Apenas a meta de GANHOS é utilizada — a meta de assinados
- * foi descontinuada deste painel.
- *
- * Os valores são lidos do banco nos campos históricos `peso_meta_ganho_*`
- * (`peso_meta_ganho_diario`, `peso_meta_ganho_semanal`, `peso_meta_ganho_mensal`),
- * que chegam ao frontend como `meta*Ganhos`.
- */
 const GLOBAL_META = {
   diario: { ganhos: 65 },
   semanal: { ganhos: 325 },
@@ -120,6 +111,27 @@ const isDesativado = (c: any) => {
   const equipe = normalize(c.equipeNome);
   return cargo === 'desativado' || equipe.includes('desativado');
 };
+
+// ← AJUSTADO: helper reutilizável para detectar cargo de supervisor de forma
+// consistente com a página Comissões (aceita "supervisor", "supervisor sr" etc).
+const isSupervisorCargo = (cargo?: string | null): boolean =>
+  (cargo || '').toLowerCase().trim().startsWith('supervisor');
+
+// ← AJUSTADO: localiza o colaborador selecionado — primeiro por id (comparando
+// como string para evitar mismatch number/string), depois por nome.
+function findSelectedCollaborator(
+  collaborators: any[],
+  filters: { colaboradorId?: string | number; colaborador?: string }
+): any | null {
+  if (filters.colaboradorId != null) {
+    const byId = collaborators.find(c => String(c.id) === String(filters.colaboradorId));
+    if (byId) return byId;
+  }
+  if (filters.colaborador && filters.colaborador !== "todos") {
+    return collaborators.find(c => c.name === filters.colaborador) ?? null;
+  }
+  return null;
+}
 
 function calculateWeightedScore(
   item: { ganhos: number; assinados: number; protocolados: number; emitidos: number }
@@ -192,19 +204,6 @@ function isWeekdayUTC(dateStr: string): boolean {
   if (isNaN(date.getTime())) return false;
   const day = date.getUTCDay();
   return day !== 0 && day !== 6;
-}
-
-function countWeekdaysUTC(startDate: string, endDate: string): number {
-  let start = parseUTCDate(startDate);
-  const end = parseUTCDate(endDate);
-  if (isNaN(start.getTime()) || isNaN(end.getTime())) return 0;
-  let count = 0;
-  while (start <= end) {
-    const day = start.getUTCDay();
-    if (day !== 0 && day !== 6) count++;
-    start.setUTCDate(start.getUTCDate() + 1);
-  }
-  return count;
 }
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
@@ -329,6 +328,11 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [dailyMetrics, setDailyMetrics] = useState<any[]>([]);
 
+  // ← AJUSTADO: movidos para cima do reloadData (antes ficavam declarados
+  // depois, o que funcionava mas era confuso).
+  const [totalLeads, setTotalLeads] = useState(0);
+  const [totalLigacoesProdutivas, setTotalLigacoesProdutivas] = useState(0);
+
   const {
     currentStartDate, currentEndDate, period,
     bonusData,
@@ -358,6 +362,39 @@ export default function Home() {
   const [dailyChartData, setDailyChartData] = useState<{ date: string; leads: number; assinados: number }[]>([]);
 
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
+
+  // ============================================================
+  // ← AJUSTADO: DETECÇÃO DE SUPERVISOR SELECIONADO
+  //
+  // Sempre que o filtro de colaborador aponta para um supervisor,
+  // devolvemos a equipe dele e limpamos o colaborador — mesma regra
+  // da página Comissões. Isso faz o backend agregar a equipe.
+  // ============================================================
+  const selectedCollaborator = useMemo(
+    () => findSelectedCollaborator(collaborators, filters),
+    [collaborators, filters.colaborador, filters.colaboradorId]
+  );
+  const isSupervisorSelected = !!selectedCollaborator && isSupervisorCargo(selectedCollaborator.cargo);
+  const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
+
+  // ============================================================
+  // PARÂMETROS DE FILTRO PARA OS GRÁFICOS E APIs
+  // ============================================================
+  const getChartFilterParams = useCallback(() => {
+    let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
+    let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
+    let colaboradorIdApi = filters.colaboradorId;
+
+    // ← AJUSTADO: se o colaborador selecionado for supervisor, a página
+    // passa a se comportar como "visão da equipe" — igual à Comissões.
+    if (isSupervisorSelected && selectedCollaborator) {
+      equipeApi = selectedCollaborator.equipeNome || equipeApi;
+      colaboradorApi = undefined;
+      colaboradorIdApi = undefined;
+    }
+
+    return { equipeApi, colaboradorApi, colaboradorIdApi };
+  }, [filters, isSupervisorSelected, selectedCollaborator]);
 
   // ============================================================
   // CARREGAMENTO DE DADOS PARA RANKING
@@ -420,7 +457,7 @@ export default function Home() {
         fetchLigacoesProdutivas(metricParams),
       ]);
       const totalLeadsRecebidos = (leadsData || []).reduce(
-       (acc, item) => acc + (Number(item.total) || 0),
+        (acc, item) => acc + (Number(item.total) || 0),
         0
       );
       setTotalLeads(totalLeadsRecebidos);
@@ -463,7 +500,7 @@ export default function Home() {
       setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, filters, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData, currentUser]);
+  }, [currentStartDate, currentEndDate, filters, getChartFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData, currentUser]);
 
   const handleFilterChange = useCallback((newFilters: typeof filters) => {
     setFilters(newFilters);
@@ -472,20 +509,6 @@ export default function Home() {
   const handleRefresh = useCallback(async () => {
     await reloadData(true);
   }, [reloadData]);
-
-  const getChartFilterParams = useCallback(() => {
-    let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
-    let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
-    let colaboradorIdApi = filters.colaboradorId;
-    const selectedColab = filters.colaboradorId ? collaborators.find(c => c.id === filters.colaboradorId) : null;
-    const isSupervisor = selectedColab?.cargo?.toLowerCase() === 'supervisor';
-    if (isSupervisor && selectedColab) {
-      equipeApi = selectedColab.equipeNome;
-      colaboradorApi = undefined;
-      colaboradorIdApi = undefined;
-    }
-    return { equipeApi, colaboradorApi, colaboradorIdApi };
-  }, [filters, collaborators]);
 
   // ============================================================
   // EFEITOS
@@ -543,11 +566,6 @@ export default function Home() {
   const currentIndex = useMemo(() => userRank === 0 ? -1 : globalRanking.findIndex(item => item.position === userRank), [globalRanking, userRank]);
   const aboveUser = currentIndex > 0 ? globalRanking[currentIndex - 1] : null;
   const belowUser = currentIndex < globalRanking.length - 1 ? globalRanking[currentIndex + 1] : null;
-  const userScore = useMemo(() => {
-    if (!currentUserData) return 0;
-    const found = globalRanking.find(item => item.id === currentUserData.id || item.name === currentUserData.name);
-    return found ? found.score : 0;
-  }, [globalRanking, currentUserData]);
   const diffScore = useMemo(() => {
     if (!aboveUser || currentIndex < 0) return 0;
     return aboveUser.score - (globalRanking[currentIndex]?.score || 0);
@@ -559,11 +577,27 @@ export default function Home() {
     return currentUserData ? isSpecialGroupColaborador(currentUserData) : false;
   }, [filters.produto, currentUserData]);
 
-  const filteredCollaborators = useMemo(() => collaborators.filter(c => {
-    if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
-    if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
-    return true;
-  }), [collaborators, filters.equipe, filters.colaborador]);
+  // ============================================================
+  // ← AJUSTADO: FILTRO DE COLABORADORES
+  //
+  // 1) Se um supervisor está selecionado no filtro de colaborador,
+  //    expandimos a lista para TODA a equipe dele. Isso é necessário
+  //    para que o cálculo de meta somada (totalTargetGanhos) reflita
+  //    a equipe, e não apenas o supervisor.
+  // 2) Caso contrário, mantemos o comportamento original (filtro por
+  //    equipe e/ou por nome do colaborador).
+  // ============================================================
+  const filteredCollaborators = useMemo(() => {
+    if (isSupervisorSelected && supervisorSelectedTeam) {
+      return collaborators.filter(c => c.equipeNome === supervisorSelectedTeam);
+    }
+
+    return collaborators.filter(c => {
+      if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
+      if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
+      return true;
+    });
+  }, [collaborators, filters.equipe, filters.colaborador, isSupervisorSelected, supervisorSelectedTeam]);
 
   const displayCollaborators = useMemo(() => filteredCollaborators.filter(c => {
     if (isDesativado(c)) return false;
@@ -572,10 +606,8 @@ export default function Home() {
   }), [filteredCollaborators]);
 
   const totals = rawMetrics;
-  const [totalLeads, setTotalLeads] = useState(0);
-  const [totalLigacoesProdutivas, setTotalLigacoesProdutivas] = useState(0);
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
-  const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos";
+  const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos" && !isSupervisorSelected;
 
   // ============================================================
   // CÁLCULO DA COMISSÃO DO USUÁRIO LOGADO
@@ -590,18 +622,15 @@ export default function Home() {
     const isEspecial = isSpecialGroupColaborador(currentUserData);
 
     if (isSupervisor) {
-      // currentUserData.assinados já é a soma da equipe (hierarquia)
       const totalAssEquipe = currentUserData.assinados || 0;
       return calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
     }
 
     if (isEspecial) {
-      // Quinquênio ou Concomitante
       const productType = getFaixaProductType(currentUserData);
       return calculator.calculateProductCommission(currentUserData.assinados || 0, productType, tabelaComissoes);
     }
 
-    // Assessor comum
     if (dailyMetrics.length > 0) {
       const metaGolsAss = currentUserData.metaGolsAssinados ?? 3;
       const metaGolsGan = currentUserData.metaGolsGanhos ?? 3;
@@ -623,28 +652,15 @@ export default function Home() {
 
   // ============================================================
   // METAS DE GANHOS
-  //
-  // A meta de assinados foi descontinuada deste painel. Apenas a meta
-  // de GANHOS é contabilizada agora.
-  //
-  // Os valores são lidos dos campos históricos do banco
-  // `peso_meta_ganho_diario`, `peso_meta_ganho_semanal` e
-  // `peso_meta_ganho_mensal`, que chegam ao frontend como
-  // `metaDiarioGanhos`, `metaSemanalGanhos` e `metaMensalGanhos`.
   // ============================================================
   const { totalTargetGanhos, totalMetasBatidas } = useMemo(() => {
     if (isGlobalView) {
-      // Visão global (sem filtro): usa a meta de ganhos por período.
       const meta = GLOBAL_META[periodKey as keyof typeof GLOBAL_META] || GLOBAL_META.mensal;
       const ganhos = rawMetrics.ganhos;
-      // Metas batidas = floor(ganhos realizados / meta de ganhos do período)
       const metasBatidas = Math.floor(ganhos / (meta.ganhos || 1));
       return { totalTargetGanhos: meta.ganhos, totalMetasBatidas: metasBatidas };
     }
 
-    // Visão por colaborador: soma as metas de ganhos individuais
-    // (lidas de `meta*Ganhos`) e conta quantas vezes cada colaborador
-    // atingiu a própria meta.
     let sumGan = 0;
     let metas = 0;
     displayCollaborators.forEach(c => {
@@ -652,8 +668,6 @@ export default function Home() {
       const pesoGan = Number(c[pesoGanKey]) || 0;
       sumGan += pesoGan;
 
-      // Para grupos especiais (Quinquênio/Concomitante), ganhos são zerados
-      // no dataStore, então a meta atingida também é 0.
       const ganhos = isSpecialGroup ? 0 : (c.ganhos || 0);
       if (pesoGan === 0) return;
       metas += Math.floor(ganhos / pesoGan);
@@ -662,7 +676,6 @@ export default function Home() {
     return { totalTargetGanhos: sumGan, totalMetasBatidas: metas };
   }, [isGlobalView, displayCollaborators, rawMetrics, isSpecialGroup, periodKey]);
 
-  // Progresso da meta: apenas ganhos.
   const goalProgress = useMemo(() => {
     if (totalTargetGanhos === 0) return 100;
     return Math.min((totals.ganhos / totalTargetGanhos) * 100, 100);
@@ -673,7 +686,7 @@ export default function Home() {
   // ============================================================
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
-    const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
+    const { equipeApi, colaboradorApi } = getChartFilterParams();
     const fetchWeeklyData = async () => {
       try {
         const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
@@ -700,7 +713,7 @@ export default function Home() {
 
   useEffect(() => {
     if (isSpecialGroup) return;
-    const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
+    const { equipeApi, colaboradorApi } = getChartFilterParams();
     const fetchWeeklyDetailed = async () => {
       try {
         const { start, end } = getCurrentWeekDatesUTC();
@@ -729,7 +742,7 @@ export default function Home() {
 
   useEffect(() => {
     if (isSpecialGroup) return;
-    const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
+    const { equipeApi, colaboradorApi } = getChartFilterParams();
     const fetchDailyData = async () => {
       try {
         const range = getDailyChartDateRangeUTC(period, currentStartDate, currentEndDate);
@@ -758,7 +771,8 @@ export default function Home() {
         }
         const chartData = allDates.map(dateStr => {
           const date = parseUTCDate(dateStr);
-          return { date: date.toLocaleDateString('pt-BR', { timeZone: 'UTC' }), leads: leadsMap.get(date.toLocaleDateString('pt-BR', { timeZone: 'UTC' })) || 0, assinados: assinadosMap.get(date.toLocaleDateString('pt-BR', { timeZone: 'UTC' })) || 0 };
+          const formatted = date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
+          return { date: formatted, leads: leadsMap.get(formatted) || 0, assinados: assinadosMap.get(formatted) || 0 };
         });
         setDailyChartData(chartData);
       } catch (err) { console.error('Erro ao carregar dados diários:', err); }
@@ -767,10 +781,7 @@ export default function Home() {
   }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
 
   // ============================================================
-  // STATS DA SEMANA — agora apenas ganhos
-  //
-  // A meta de assinados foi descontinuada. O "melhor dia" e os "dias
-  // com meta atingida" são calculados sobre GANHOS realizados.
+  // STATS DA SEMANA — apenas ganhos
   // ============================================================
   const stats = useMemo(() => {
     if (isSpecialGroup || weeklyDetailed.length === 0) {
@@ -788,7 +799,6 @@ export default function Home() {
     const performanceGanhos = totalTargetGanhos > 0 ? (totalGanhos / totalTargetGanhos) * 100 : 0;
     const avgGanhos = totalDays > 0 ? totalGanhos / totalDays : 0;
 
-    // Meta diária de ganhos (soma das metas de ganhos por colaborador)
     const dailyTarget = displayCollaborators.reduce((sum, c) => sum + (c.metaDiarioGanhos || 0), 0);
 
     let best = { day: '', value: 0 };
@@ -806,7 +816,6 @@ export default function Home() {
 
   const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
 
-  // Valor alvo para o card de comissão
   const comissaoTarget = useMemo(() => {
     if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) return 5000;
     const tipo = (currentUserData.cargo || '').toLowerCase() === 'supervisor' ? 'SUPERVISOR' : 'GOL';
@@ -816,8 +825,6 @@ export default function Home() {
     return maxFaixa.valor_comissao || 5000;
   }, [currentUserData, tabelaComissoes]);
 
-  // Cards KPI — "Vendas Fechadas" agora mostra ganhos realizados contra
-  // a meta de ganhos. A meta de assinados foi descontinuada.
   const kpiCards = [
     { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
     { label: "Ganhos", value: totals.ganhos, target: totalTargetGanhos, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
@@ -858,7 +865,12 @@ export default function Home() {
               <span>
                 Mostrando dados de:
                 {filters.equipe !== "todas" && ` ${filters.equipe}`}
-                {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
+                {filters.colaborador !== "todos" && !isSupervisorSelected && ` - ${filters.colaborador}`}
+                {/* ← AJUSTADO: quando um supervisor é selecionado, sinaliza
+                    que a visão virou agregação da equipe dele. */}
+                {isSupervisorSelected && supervisorSelectedTeam && (
+                  <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
+                )}
                 {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
               </span>
             </div>
@@ -892,7 +904,6 @@ export default function Home() {
               </div>
               {mounted && <GoalArc percent={goalProgress} label="progresso geral" />}
 
-              {/* Meta de ganhos (única meta ativa). A meta de assinados foi descontinuada. */}
               <div className="grid grid-cols-1 gap-4 w-full mt-6">
                 <div className="text-center">
                   <div className="eyebrow mb-1">🏆 Ganhos</div>

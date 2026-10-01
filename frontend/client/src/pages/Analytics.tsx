@@ -50,8 +50,26 @@ function isExcludedGroup(group: string): boolean {
   return EXCLUDED_GROUPS.some(g => g.toLowerCase() === normalized);
 }
 
+// ← AJUSTADO: helpers para detectar cargo supervisor e localizar o
+// colaborador selecionado no filtro (mesma lógica da página Comissões).
+const isSupervisorCargo = (cargo?: string | null): boolean =>
+  (cargo || '').toLowerCase().trim().startsWith('supervisor');
+
+function findSelectedCollaborator(
+  collaborators: any[],
+  filters: { colaboradorId?: string | number; colaborador?: string }
+): any | null {
+  if (filters.colaboradorId != null) {
+    const byId = collaborators.find(c => String(c.id) === String(filters.colaboradorId));
+    if (byId) return byId;
+  }
+  if (filters.colaborador && filters.colaborador !== "todos") {
+    return collaborators.find(c => c.name === filters.colaborador) ?? null;
+  }
+  return null;
+}
+
 // ========== Função local para obter meta do colaborador ==========
-// Substitui a antiga getCollaboratorMeta (obsoleta) importada de metricsHelper
 type PeriodoMeta = 'diario' | 'semanal' | 'mensal';
 function getMeta(c: any, periodo: PeriodoMeta, tipo: 'assinados' | 'ganhos' | 'protocolados'): number {
   const key = `meta${periodo.charAt(0).toUpperCase() + periodo.slice(1)}${tipo.charAt(0).toUpperCase() + tipo.slice(1)}`;
@@ -154,6 +172,35 @@ export default function Analytics() {
     setIsExcluded(isExcludedTeam(currentUserData.equipeNome) || isExcludedGroup(currentUserData.cargo));
   }, [currentUserData]);
 
+  // ============================================================
+  // ← AJUSTADO: DETECÇÃO DO SUPERVISOR SELECIONADO
+  // Sempre que o filtro de colaborador aponta para um supervisor,
+  // trocamos o escopo para a equipe dele — mesma regra da Comissões.
+  // ============================================================
+  const selectedCollaborator = useMemo(
+    () => findSelectedCollaborator(collaborators, filters),
+    [collaborators, filters.colaborador, filters.colaboradorId]
+  );
+  const isSupervisorSelected = !!selectedCollaborator && isSupervisorCargo(selectedCollaborator.cargo);
+  const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
+
+  // ← AJUSTADO: centraliza a montagem dos parâmetros de API, aplicando
+  // a regra "supervisor selecionado => visão da equipe".
+  const getEffectiveFilterParams = useCallback(() => {
+    let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
+    let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
+    let colaboradorIdApi = filters.colaboradorId;
+
+    if (isSupervisorSelected && selectedCollaborator) {
+      equipeApi = selectedCollaborator.equipeNome || equipeApi;
+      colaboradorApi = undefined;
+      colaboradorIdApi = undefined;
+    }
+
+    const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
+    return { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi };
+  }, [filters, isSupervisorSelected, selectedCollaborator]);
+
   // ========== FUNÇÃO DE RECARGA PRINCIPAL ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate) return;
@@ -162,13 +209,12 @@ export default function Analytics() {
     setError(null);
 
     try {
-      const equipeApi = equipe === "todas" ? undefined : equipe;
-      const colaboradorApi = colaborador === "todos" ? undefined : colaborador;
-      const produtoApi = produto === "Todos" ? undefined : produto;
+      // ← AJUSTADO: usa os parâmetros efetivos (que já consideram o supervisor)
+      const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
 
       await Promise.all([
-        loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorId, produtoApi),
-        loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId, produto: produtoApi }),
+        loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi),
+        loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi }),
         loadWeeklyPerformanceData(),
       ]);
 
@@ -183,7 +229,7 @@ export default function Analytics() {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, equipe, colaborador, colaboradorId, produto, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
+  }, [currentStartDate, currentEndDate, getEffectiveFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
 
   const handleFilterChange = useCallback((newFilters: typeof filters) => {
     setFilters(newFilters);
@@ -244,10 +290,9 @@ export default function Analytics() {
       const now = Date.now(); const shouldFetch = (now - lastFetchChartTime.current) > CHART_CACHE_TTL || dailyChartData.length === 0;
       if (!shouldFetch && dailyChartData.length > 0) { isFetchingRef.current = false; return; }
       try {
-        const equipeApi = equipe === "todas" ? undefined : equipe;
-        const colaboradorApi = colaborador === "todos" ? undefined : colaborador;
-        const produtoApi = produto === "Todos" ? undefined : produto;
-        const baseParams = { start: chartDateRange.start, end: chartDateRange.end, equipe: equipeApi, colaborador: colaboradorApi, colaboradorId, produto: produtoApi, granularity: 'daily' as const };
+        // ← AJUSTADO: usa os parâmetros efetivos (supervisor → equipe)
+        const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
+        const baseParams = { start: chartDateRange.start, end: chartDateRange.end, equipe: equipeApi, colaborador: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi, granularity: 'daily' as const };
         const [leadsData, assinadosData, ganhosData, protocoladosData, perdidosData, ligacoesProdutivas] = await Promise.all([
           fetchLeadsRecebidos(baseParams), fetchAssinados(baseParams), fetchGanhos(baseParams), fetchProtocolados(baseParams), fetchPerdidos(baseParams),
           fetchLigacoesProdutivas(baseParams),
@@ -287,15 +332,28 @@ export default function Analytics() {
     };
     fetchChartData();
     return () => { abortController.abort(); isFetchingRef.current = false; };
-  }, [chartDateRange, equipe, colaborador, colaboradorId, produto, period, dailyChartData.length]);
+  }, [chartDateRange, equipe, colaborador, colaboradorId, produto, period, dailyChartData.length, getEffectiveFilterParams]);
 
   // ========== DADOS PARA KPIS ==========
   const totals = rawMetrics;
   const isSpecialGroup = produto === 'Quinquenio' || produto === 'Concomitante';
-  const filteredCollaborators = useMemo(() => collaborators.filter(c => !isExcludedTeam(c.equipeNome) && (equipe==="todas"||c.equipeNome===equipe) && (colaborador==="todos"||c.name===colaborador)), [collaborators, equipe, colaborador]);
+
+  // ============================================================
+  // ← AJUSTADO: FILTRO DE COLABORADORES
+  // Se um supervisor está selecionado, a base vira a equipe dele.
+  // Isso é essencial para o cálculo de metas somadas abaixo.
+  // ============================================================
+  const filteredCollaborators = useMemo(() => {
+    if (isSupervisorSelected && supervisorSelectedTeam) {
+      return collaborators.filter(c => !isExcludedTeam(c.equipeNome) && c.equipeNome === supervisorSelectedTeam);
+    }
+    return collaborators.filter(c => !isExcludedTeam(c.equipeNome) && (equipe==="todas"||c.equipeNome===equipe) && (colaborador==="todos"||c.name===colaborador));
+  }, [collaborators, equipe, colaborador, isSupervisorSelected, supervisorSelectedTeam]);
+
   const baseCollaborators = useMemo(() => filteredCollaborators.filter(c => { const g = (c.grupo||'').trim().toLowerCase(); return g!=='supervisor' && g!=='coordenador' && g!=='administrativo' && g!=='desativado'; }), [filteredCollaborators]);
+
   const { targetAssinados, targetGanhos, targetProtocolados } = useMemo(() => {
-    if (equipe==="todas" && colaborador==="todos") {
+    if (equipe==="todas" && colaborador==="todos" && !isSupervisorSelected) {
       if (currentStartDate===currentEndDate) return { targetAssinados:100, targetGanhos:100, targetProtocolados:100 };
       if (new Date(currentEndDate).getTime()-new Date(currentStartDate).getTime() <= 7*86400000) return { targetAssinados:500, targetGanhos:500, targetProtocolados:500 };
       return { targetAssinados:2000, targetGanhos:2000, targetProtocolados:1300 };
@@ -306,7 +364,8 @@ export default function Analytics() {
       targetGanhos: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'ganhos'),0),
       targetProtocolados: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'protocolados'),0)
     };
-  }, [baseCollaborators, equipe, colaborador, currentStartDate, currentEndDate]);
+  }, [baseCollaborators, equipe, colaborador, currentStartDate, currentEndDate, isSupervisorSelected]);
+
   const percentAssinados = targetAssinados>0 ? (totals.assinados/targetAssinados)*100 : 0;
   const percentGanhos = targetGanhos>0 ? (totals.ganhos/targetGanhos)*100 : 100;
   const goalProgress = Math.min(percentAssinados, percentGanhos);
@@ -334,18 +393,18 @@ export default function Analytics() {
     { name:"Protocolados", value:totals.protocolados, color:"#8B5CF6" },
     { name:"Perdidos", value:totals.perdidos, color:"#DC2626" },
   ].filter(item=>item.value>0);
-const conversionByStage = useMemo(() => {
-  const leads = totalLeads;
-  const e=totals.emitidos,a=totals.assinados,p=totals.protocolados,g=totals.ganhos,pe=totals.perdidos;
-  return [
-    { stage:"Leads Recebidos → Emitidos", value: leads>0?+((e/leads)*100).toFixed(1):0 },
-    { stage:"Emitidos → Assinados", value: e>0?+((a/e)*100).toFixed(1):0 },
-    { stage:"Assinados → Protocolados", value: a>0?+((p/a)*100).toFixed(1):0 },
-    { stage:"Protocolados → Ganhos", value: p>0?+((g/p)*100).toFixed(1):0 },
-    { stage:"Assinados → Ganhos", value: a>0?+((g/a)*100).toFixed(1):0 },
-    { stage:"Assinados → Perdidos", value: a>0?+((pe/a)*100).toFixed(1):0 },  
-  ];
-}, [totals, totalLeads]);
+  const conversionByStage = useMemo(() => {
+    const leads = totalLeads;
+    const e=totals.emitidos,a=totals.assinados,p=totals.protocolados,g=totals.ganhos,pe=totals.perdidos;
+    return [
+      { stage:"Leads Recebidos → Emitidos", value: leads>0?+((e/leads)*100).toFixed(1):0 },
+      { stage:"Emitidos → Assinados", value: e>0?+((a/e)*100).toFixed(1):0 },
+      { stage:"Assinados → Protocolados", value: a>0?+((p/a)*100).toFixed(1):0 },
+      { stage:"Protocolados → Ganhos", value: p>0?+((g/p)*100).toFixed(1):0 },
+      { stage:"Assinados → Ganhos", value: a>0?+((g/a)*100).toFixed(1):0 },
+      { stage:"Assinados → Perdidos", value: a>0?+((pe/a)*100).toFixed(1):0 },
+    ];
+  }, [totals, totalLeads]);
   const hasActiveFilters = equipe!=="todas"||colaborador!=="todos"||produto!=="Todos";
 
   const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
@@ -395,10 +454,16 @@ const conversionByStage = useMemo(() => {
               <span>
                 Mostrando dados de:
                 {filters.equipe !== "todas" && ` ${filters.equipe}`}
-                {filters.colaborador !== "todos" && ` - ${filters.colaborador}`}
+                {/* ← AJUSTADO: esconde o nome do supervisor e sinaliza
+                    que a visão virou agregação da equipe dele. */}
+                {filters.colaborador !== "todos" && !isSupervisorSelected && ` - ${filters.colaborador}`}
+                {isSupervisorSelected && supervisorSelectedTeam && (
+                  <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
+                )}
                 {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
-              </span>            </div>
-          )} 
+              </span>
+            </div>
+          )}
 
           {/* KPI Cards */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -407,7 +472,7 @@ const conversionByStage = useMemo(() => {
             <KpiCard label="Protocolados" value={totals.protocolados} target={60} unit="" icon={BarChart2} color="#8B5CF6" hideValues={hideValues} />
             <KpiCard label="Progresso da Meta" value={goalProgress} target={100} unit="%" icon={Activity} color="#EA8C1D" hideValues={hideValues} />
           </div>
- 
+
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             <div className="card animate-fade-in-up">
               <div className="flex items-center justify-between mb-2"><span className="text-xs text-[#64748b]">Performance no Período</span>{percentAssinados>=100 ? <TrendingUp className="w-4 h-4 text-[#16A34A]" /> : <TrendingDown className="w-4 h-4 text-[#DC2626]" />}</div>
