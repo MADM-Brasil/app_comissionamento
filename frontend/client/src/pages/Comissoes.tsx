@@ -40,19 +40,6 @@ const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 // ============================================================
 //  HELPERS DE DATA
 // ============================================================
-
-/**
- * Converte a data final EXCLUSIVA (currentEndDate, como devolvida por
- * `getDateRangeFromPeriod`) em uma data final INCLUSIVA (o último dia
- * efetivamente coberto pelo período).
- *
- * - `end` em "2026-07-01" (Mês de junho) → "2026-06-30"
- * - `end` em "2026-06-15" (Hoje)          → "2026-06-14"
- * - `end` em "2026-06-09" (Semana)        → "2026-06-08"
- *
- * Isso permite enviar tanto `end` (exclusivo) quanto `fim` (inclusivo)
- * para o backend — cobrindo qualquer convenção do endpoint.
- */
 function toInclusiveEnd(end: string): string {
   if (!end) return end;
   const d = new Date(end + 'T00:00:00');
@@ -69,7 +56,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Erica', 'Equipe Lucas', 'Equipe Irene', 'Equipe Maria Eduarda', 'SalesOps',
   'Equipe Murilo Balsalobre', 'Comercial', 'Backoffice', 'CEO', 'Prontuário','BackOffice',
   'Equipe Leonardo Cardoso', 'Equipe Julia', 'Equipe Leticia', 'Dr. Felipe Marx','Administrativo',
-  'Equipe Thales','Financeiro', 'Equipe Reciclagem','','Equipe Leonardo','Equipe Treinamento', 'Equipe lucilene'
+  'Equipe Thales','Financeiro', 'Equipe Reciclagem','','Equipe Leonardo','Equipe Ariana'
 ];
 
 const EXCLUDED_CARGOS = [
@@ -91,6 +78,7 @@ interface CommissionOverviewItem {
   role: CommissionOverviewRole;
   assinados: number;
   ganhos: number;
+  gols: number; // ← AJUSTADO: quantidade de gols realizados no período
   commission: number | null;
   isSupervisorSR: boolean;
   collaborator: Collaborator;
@@ -159,6 +147,34 @@ function sumTeamGanhos(collaborators: any[], teamName: string): number {
     if (cargo.startsWith('supervisor') || cargo === 'coordenador' || cargo === 'administrativo') return total;
     return total + (Number(collaborator.ganhos) || 0);
   }, 0);
+}
+
+// ← AJUSTADO: soma os gols dos membros da equipe (mesma regra de
+// assinados/ganhos — exclui supervisor, coordenador e administrativo).
+function sumTeamGols(collaborators: any[], teamName: string): number {
+  return collaborators.reduce((total, collaborator) => {
+    if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
+    const cargo = normalizeText(collaborator.cargo);
+    if (cargo.startsWith('supervisor') || cargo === 'coordenador' || cargo === 'administrativo') return total;
+    return total + (Number(collaborator.gols) || 0);
+  }, 0);
+}
+
+// ← AJUSTADO: calcula gols individuais a partir das métricas diárias + campanhas.
+// Retorna 0 para grupos especiais (Quinquênio/Concomitante), que não acumulam gols.
+function calculateAssessorGols(
+  collaborator: Collaborator,
+  dailyMetrics: Array<{ date: string; assinados: number; ganhos: number }>,
+  campaigns: Campaign[],
+): number {
+  const isSpecial = isSpecialGroupColaborador(collaborator);
+  if (isSpecial || dailyMetrics.length === 0) return 0;
+
+  const metaAss = collaborator.metaGolsAssinados ?? 3;
+  const metaGan = collaborator.metaGolsGanhos ?? 3;
+  const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
+  const result = calculator.applyCampaignsToDailyGoals(dailyMetrics, metaAss, metaGan, activeCampaigns);
+  return result.totalGols || 0;
 }
 
 function calculateAssessorCommission(
@@ -403,10 +419,7 @@ export default function Comissoes() {
   const [filterBarKey, setFilterBarKey] = useState(0);
   const isLoadingRef = useRef(false);
 
-  // Recomendações temporárias do colaborador em foco
   const [tempRecsForColab, setTempRecsForColab] = useState<TemporaryRecommendation[]>([]);
-
-  // Tabulações pré-carregadas para as recomendações
   const [allTabulations, setAllTabulations] = useState<CallTabulation[]>([]);
   const [loadingAllTabulations, setLoadingAllTabulations] = useState(false);
 
@@ -456,10 +469,6 @@ export default function Comissoes() {
         colaboradorIdApi = undefined;
       }
 
-      // ============================================================
-      //  LIGAÇÕES — envia start/end (exclusivo) E inicio/fim (inclusivo)
-      //  + colaboradorId e produto, para cobrir qualquer convenção do backend.
-      // ============================================================
       const fimInclusivo = toInclusiveEnd(currentEndDate);
 
       const [calls] = await Promise.all([
@@ -689,9 +698,6 @@ export default function Comissoes() {
     return filteredColabs.find(c => c.id === currentUser?.id);
   }, [filteredColabs, currentUser, filters, canUseFilterBar]);
 
-  // ============================================================
-  // RECOMENDAÇÕES TEMPORÁRIAS — carrega as ativas do colaborador em foco
-  // ============================================================
   useEffect(() => {
     if (!userColab) {
       setTempRecsForColab([]);
@@ -707,9 +713,6 @@ export default function Comissoes() {
     };
   }, [userColab?.id]);
 
-  // ============================================================
-  // PRÉ-CARREGAMENTO DAS TABULAÇÕES PARA AS RECOMENDAÇÕES
-  // ============================================================
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     if (!userColab) {
@@ -859,15 +862,19 @@ export default function Comissoes() {
       if (requestId !== commissionOverviewRequest.current) return;
 
       const dailyByCollaborator = mapDailyMetricsByCollaborator(assinadosRows, ganhosRows);
+      const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
+
+      // ← AJUSTADO: pré-computa gols por colaborador junto com assinados/ganhos
       const collaboratorsWithMetrics = storeColabs.map(collaborator => {
         const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
+        const gols = calculateAssessorGols(collaborator, daily, activeCampaigns);
         return {
           ...collaborator,
           assinados: daily.reduce((total, day) => total + day.assinados, 0),
           ganhos: daily.reduce((total, day) => total + day.ganhos, 0),
+          gols,
         };
       });
-      const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
 
       const rows = storeColabs
         .filter(collaborator => !EXCLUDED_TEAMS_SET.has(normalizeName(collaborator.equipeNome)))
@@ -878,18 +885,22 @@ export default function Comissoes() {
           const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
           const individualSigned = daily.reduce((total, day) => total + day.assinados, 0);
           const individualGanhos = daily.reduce((total, day) => total + day.ganhos, 0);
+          const individualGols = calculateAssessorGols(collaborator, daily, activeCampaigns);
           const isSupervisorSR = Boolean(collaborator.isSupervisorSR) || calculator.isSupervisorSR(collaborator.email);
           let assinados = individualSigned;
           let ganhos = individualGanhos;
+          let gols = individualGols; // ← AJUSTADO
           let commission: number | null;
 
           if (role === 'supervisor') {
             assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
             ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
+            gols = sumTeamGols(collaboratorsWithMetrics, collaborator.equipeNome); // ← AJUSTADO
             commission = calculator.calculateSupervisorCommission(ganhos, isSupervisorSR, tabelaComissoes);
           } else if (role === 'coordenador') {
             assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
             ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
+            gols = sumTeamGols(collaboratorsWithMetrics, collaborator.equipeNome); // ← AJUSTADO
             commission = null;
           } else {
             commission = calculateAssessorCommission(collaborator, daily, tabelaComissoes, activeCampaigns);
@@ -902,6 +913,7 @@ export default function Comissoes() {
             role,
             assinados,
             ganhos,
+            gols, // ← AJUSTADO
             commission,
             isSupervisorSR,
             collaborator,
@@ -931,6 +943,7 @@ export default function Comissoes() {
     try {
       let assinados = item.assinados;
       let ganhos = item.ganhos;
+      let gols = item.gols; // ← AJUSTADO
       let commission: number;
 
       if (item.role === 'supervisor') {
@@ -949,6 +962,27 @@ export default function Comissoes() {
         ganhos = ganhosRows.reduce((total, row) =>
           assessorNames.has(normalizeName(row.colaborador)) ? total + (Number(row.total) || 0) : total, 0);
 
+        // ← AJUSTADO: recalcula gols da equipe a partir do daily por membro
+        const dailyByMember = new Map<string, Array<{ date: string; assinados: number; ganhos: number }>>();
+        const memberDailyResults = await Promise.all(
+          storeColabs
+            .filter(c => getCommissionOverviewRole(c) === 'assessor')
+            .filter(c => normalizeName(c.equipeNome) === normalizeName(item.team))
+            .map(async (member) => {
+              const daily = await fetchDailyMetrics({
+                start: currentStartDate,
+                end: currentEndDate,
+                colaborador: member.name,
+              }).catch(() => [] as any[]);
+              return [normalizeName(member.name), member, daily] as const;
+            })
+        );
+        const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
+        gols = memberDailyResults.reduce((sum, [key, member, daily]) => {
+          dailyByMember.set(key, daily);
+          return sum + calculateAssessorGols(member, daily as any, activeCampaigns);
+        }, 0);
+
         commission = calculator.calculateSupervisorCommission(ganhos, item.isSupervisorSR, tabelaComissoes);
       } else {
         const daily = await fetchDailyMetrics({
@@ -958,6 +992,12 @@ export default function Comissoes() {
         });
         assinados = daily.reduce((total, day) => total + (Number(day.assinados) || 0), 0);
         ganhos = daily.reduce((total, day) => total + (Number(day.ganhos) || 0), 0);
+        // ← AJUSTADO: recalcula gols individuais
+        gols = calculateAssessorGols(
+          item.collaborator,
+          daily as any,
+          campaigns.filter(campaign => campaign.validacao_financeiro),
+        );
         commission = calculateAssessorCommission(
           item.collaborator,
           daily,
@@ -967,7 +1007,7 @@ export default function Comissoes() {
       }
 
       setCommissionOverview(items => items.map(entry => entry.id === item.id
-        ? { ...entry, assinados, ganhos, commission }
+        ? { ...entry, assinados, ganhos, gols, commission } // ← AJUSTADO
         : entry));
     } catch (err: any) {
       setCommissionOverviewError(err.message || `Falha ao atualizar ${item.name}.`);
@@ -1065,9 +1105,6 @@ export default function Comissoes() {
     return callFunnelStages.map((stage, index) => ({ ...stage, widthPct: widths[index] }));
   }, [callFunnelStages]);
 
-  // ============================================================
-  // RECOMENDAÇÕES AUTOMÁTICAS
-  // ============================================================
   const recomendacoes: string[] = [];
 
   if (userData) {
@@ -1321,6 +1358,8 @@ export default function Comissoes() {
                     <th className="py-2 px-3 font-medium">Cargo</th>
                     <th className="py-2 px-3 font-medium text-right">Assinados</th>
                     <th className="py-2 px-3 font-medium text-right">Ganhos</th>
+                    {/* ← AJUSTADO: nova coluna Gols */}
+                    <th className="py-2 px-3 font-medium text-right">Gols</th>
                     <th className="py-2 px-3 font-medium text-right">Comissão</th>
                     <th className="py-2 px-3 font-medium text-center">Ação</th>
                   </tr>
@@ -1358,6 +1397,8 @@ export default function Comissoes() {
                       </td>
                       <td className="py-2 px-3 text-right text-[#475569]">{formatInt(item.assinados)}</td>
                       <td className="py-2 px-3 text-right font-semibold text-[#0f172a]">{formatInt(item.ganhos)}</td>
+                      {/* ← AJUSTADO: célula Gols */}
+                      <td className="py-2 px-3 text-right font-semibold text-[#16A34A]">{formatInt(item.gols)}</td>
                       <td className="py-2 px-3 text-right font-semibold text-[#2F6FED]">
                         {item.commission == null ? '—' : displayCurrency(item.commission)}
                       </td>
