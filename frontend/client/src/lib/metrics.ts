@@ -266,7 +266,9 @@ export function calcularTotalGols(dailyMetrics: DailyMetric[]): number {
 //   1. Base: regra fixa 3→1, 5→2, 7→3, 9→4, 11→5 ...
 //   2. GOLS: multiplica os gols do dia pelo maior multiplicador.
 //   3. ASSINADOS: adiciona floor(assinados / quantidadePorGol).
-//   4. PROGRESSIVA: se atingiu a meta, gols = assinados; senão 0.
+//   4. PROGRESSIVA:
+//        - Se atingiu a meta: substitui tudo por `assinados`.
+//        - Se NÃO atingiu: mantém os gols já acumulados (base + outras campanhas).
 // ============================================================
 
 /** Tipo estrutural para não criar dependência circular com o dataStore. */
@@ -296,9 +298,20 @@ function getCampanhasDoDia(campaigns: CampaignLike[], dateKey: string): Campaign
  * Calcula os gols de um único dia aplicando campanhas ativas sobre a
  * regra base de assinados.
  *
- * @param assinados Quantidade de assinados no dia.
- * @param dateKey   Data no formato YYYY-MM-DD.
- * @param campaigns Lista de campanhas (a função filtra as válidas e do dia).
+ * Regra de precedência (na ordem):
+ *   1. Base: regra fixa 3→1, 5→2, 7→3, 9→4, 11→5 (contínua: floor((n-1)/2))
+ *   2. GOLS: multiplica os gols do dia pelo maior multiplicador
+ *   3. ASSINADOS: +floor(assinados / quantidadePorGol) por campanha
+ *   4. PROGRESSIVA:
+ *        - Se `assinados >= meta`: substitui TUDO por `assinados` (gols = assinados).
+ *        - Se `assinados < meta`: MANTÉM os gols já acumulados (base + campanhas anteriores).
+ *          Ou seja, o colaborador não fica "zerado" — ele leva o que a regra base
+ *          (e outras campanhas) já davam naquele dia.
+ *
+ * Exemplo (meta progressiva = 4, base 3→1):
+ *   3 assinados → 1 gol (base)
+ *   4 assinados → 4 gols (progressiva atingida)
+ *   5 assinados → 5 gols
  */
 export function calcularGolsComCampanhas(
   assinados: number,
@@ -331,7 +344,9 @@ export function calcularGolsComCampanhas(
     }
   }
 
-  // 4) PROGRESSIVA: substitui o total (se atingir a meta, gols = assinados; senão 0)
+  // 4) PROGRESSIVA:
+  //    - Atingiu a meta → gols = assinados (substitui tudo)
+  //    - NÃO atingiu  → mantém os gols já acumulados (base + GOLS + ASSINADOS)
   const campanhasProgressivas = dayCamps.filter(c => (c.tipo || '').toUpperCase() === 'PROGRESSIVA');
   if (campanhasProgressivas.length > 0) {
     const metas = campanhasProgressivas
@@ -339,7 +354,10 @@ export function calcularGolsComCampanhas(
       .filter(m => m > 0);
     if (metas.length > 0) {
       const metaProgressiva = Math.min(...metas);
-      gols = n >= metaProgressiva ? n : 0;
+      if (n >= metaProgressiva) {
+        gols = n; // ← campanha progressiva atingida: substitui
+      }
+      // else: mantém `gols` como está (base + outras campanhas)
     }
   }
 

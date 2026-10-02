@@ -15,12 +15,13 @@ import {
   ResponsiveContainer, Cell, Legend,
 } from "recharts";
 import { calculator } from "@/lib/calculator";
-// ← AJUSTADO: novos helpers que consideram campanhas ativas
+// ← helpers que aplicam campanhas ativas sobre a regra base de gols
 import {
   fetchDailyMetrics,
   calcularGolsComCampanhas,
   calcularTotalGolsComCampanhas,
   calcularGolsDiariosComCampanhas,
+  calcularGolsPorAssinados,
   type CampaignLike,
 } from "@/lib/metrics";
 import {
@@ -171,12 +172,13 @@ function sumTeamGols(collaborators: any[], teamName: string): number {
 }
 
 // ============================================================
-// ← AJUSTADO: cálculo de gols agora considera CAMPANHAS ATIVAS
-//   sobre a regra base (assinados → gols).
-//   Campanhas do tipo:
-//     - GOLS: multiplica os gols do dia
-//     - ASSINADOS: +floor(assinados/quantidadePorGol)
-//     - PROGRESSIVA: substitui (assinados >= meta ? assinados : 0)
+//  CÁLCULO DE GOLS COM CAMPANHAS
+//  Base: 3→1, 5→2, 7→3, 9→4, 11→5 (contínua)
+//  GOLS: multiplica
+//  ASSINADOS: +floor(assinados / quantidadePorGol)
+//  PROGRESSIVA:
+//    - Atingiu a meta → gols = assinados (substitui)
+//    - NÃO atingiu  → mantém os gols acumulados (base + outras campanhas)
 // ============================================================
 function calculateAssessorGols(
   collaborator: Collaborator,
@@ -185,10 +187,7 @@ function calculateAssessorGols(
 ): number {
   if (isSpecialGroupColaborador(collaborator)) return 0;
   if (!dailyMetrics || dailyMetrics.length === 0) return 0;
-  return calcularTotalGolsComCampanhas(
-    dailyMetrics as any,
-    campaigns,
-  );
+  return calcularTotalGolsComCampanhas(dailyMetrics as any, campaigns);
 }
 
 function calculateAssessorCommission(
@@ -204,7 +203,6 @@ function calculateAssessorCommission(
   const commissionGanhos = calculator.calculateProductCommission(ganhos, productType, commissionBands);
   if (isSpecial || dailyMetrics.length === 0) return commissionGanhos;
 
-  // ← AJUSTADO: gols agora consideram campanhas ativas
   const activeCampaigns = getActiveCampaigns(campaigns);
   const totalGols = calculateAssessorGols(collaborator, dailyMetrics as any, activeCampaigns);
   const comissaoGols = calculator.calculateGoalCommission(totalGols, commissionBands);
@@ -280,6 +278,9 @@ const CustomTooltip = ({ active, payload, label, hideValues }: any) => {
   return null;
 };
 
+// ============================================================
+//  EXTRATO DIALOG
+// ============================================================
 const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, metaGolsGanhos, isSupervisor, onClose }: any) => {
   const allDates = new Set<string>();
   dailyMetrics.forEach((d: any) => allDates.add(d.date.slice(0, 10)));
@@ -311,7 +312,7 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                   date: dateKey, assinados: 0, ganhos: 0, perdidos: 0, emitidos: 0, protocolados: 0,
                 };
                 const golsInfo = dailyGols.find((g: any) => (g.date || '').slice(0, 10) === dateKey);
-                // ← AJUSTADO: fallback também considera campanhas
+                // fallback com campanhas (usa a mesma regra)
                 const golsDoDia = golsInfo?.gols ?? calcularGolsComCampanhas(
                   Number(day.assinados) || 0,
                   dateKey,
@@ -367,14 +368,28 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                             <span className="font-bold text-[#16A34A]">+{Math.floor((Number(day.assinados) || 0) / (Number(camp.multiplicador) || 3))}</span>
                           </div>
                         ))}
-                        {campanhasProgressivas.map((camp: any, cIdx: number) => (
-                          <div key={`p-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-purple-500" />Progressiva (mín. {camp.multiplicador} assinados)</span>
-                            <span className="font-bold text-purple-500">
-                              {(Number(day.assinados) || 0) >= Number(camp.multiplicador) ? `${day.assinados} gols` : '0 gols'}
-                            </span>
-                          </div>
-                        ))}
+                        {campanhasProgressivas.map((camp: any, cIdx: number) => {
+                          const metaProgressiva = Number(camp.multiplicador) || 0;
+                          const atingiuMeta = (Number(day.assinados) || 0) >= metaProgressiva;
+                          // ← AJUSTADO: quando NÃO atinge a meta, exibe os gols da
+                          // regra base em vez de 0 (reflete o novo comportamento).
+                          const golsExibidos = atingiuMeta
+                            ? (Number(day.assinados) || 0)
+                            : calcularGolsPorAssinados(Number(day.assinados) || 0);
+                          return (
+                            <div key={`p-${cIdx}`} className="flex justify-between text-xs mb-1">
+                              <span className="flex items-center gap-1">
+                                <TrendingUp className="w-3 h-3 text-purple-500" />
+                                Progressiva (mín. {metaProgressiva} assinados)
+                              </span>
+                              <span className={`font-bold ${atingiuMeta ? 'text-purple-500' : 'text-slate-500'}`}>
+                                {atingiuMeta
+                                  ? `${golsExibidos} gols (atingida)`
+                                  : `${golsExibidos} gol(s) pela base`}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -390,6 +405,9 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
   );
 };
 
+// ============================================================
+//  PÁGINA PRINCIPAL
+// ============================================================
 export default function Comissoes() {
   const {
     currentStartDate, currentEndDate,
@@ -572,7 +590,6 @@ export default function Comissoes() {
               });
               const dailyAgregado = Array.from(aggregated.values()).sort((a, b) => a.date.localeCompare(b.date));
               setDailyMetrics(dailyAgregado);
-              // ← AJUSTADO: gols com campanhas ativas
               setDailyGols(calcularGolsDiariosComCampanhas(dailyAgregado as any, activeCampaigns));
             }
           } catch (err) {
@@ -589,8 +606,6 @@ export default function Comissoes() {
               colaborador: targetColab.name,
             });
             setDailyMetrics(daily);
-
-            // ← AJUSTADO: gols com campanhas
             setDailyGols(calcularGolsDiariosComCampanhas(daily, activeCampaigns));
 
             const now = new Date();
@@ -613,7 +628,6 @@ export default function Comissoes() {
               colaborador: targetColab.name,
             });
             setWeeklyMetrics(weekly);
-            // ← AJUSTADO: gols semanais com campanhas
             setWeeklyGols(calcularGolsDiariosComCampanhas(weekly, activeCampaigns));
           } catch (err) {
             console.error('Erro ao carregar dados diários:', err);
@@ -826,7 +840,6 @@ export default function Comissoes() {
       comissaoAssinados = totalCommission;
     } else {
       if (dailyMetrics.length > 0) {
-        // ← AJUSTADO: total de gols agora considera campanhas ativas
         totalGols = calcularTotalGolsComCampanhas(dailyMetrics as any, activeCampaigns);
 
         const ganhos = userColab.ganhos || 0;
@@ -878,7 +891,6 @@ export default function Comissoes() {
 
       const collaboratorsWithMetrics = storeColabs.map(collaborator => {
         const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
-        // ← AJUSTADO: gols com campanhas ativas
         const gols = calculateAssessorGols(collaborator, daily as any, activeCampaigns);
         return {
           ...collaborator,
@@ -974,7 +986,6 @@ export default function Comissoes() {
         ganhos = ganhosRows.reduce((total, row) =>
           assessorNames.has(normalizeName(row.colaborador)) ? total + (Number(row.total) || 0) : total, 0);
 
-        // ← AJUSTADO: gols do supervisor com campanhas
         const memberDailyResults = await Promise.all(
           storeColabs
             .filter(c => getCommissionOverviewRole(c) === 'assessor')
@@ -1002,7 +1013,6 @@ export default function Comissoes() {
         });
         assinados = daily.reduce((total, day) => total + (Number(day.assinados) || 0), 0);
         ganhos = daily.reduce((total, day) => total + (Number(day.ganhos) || 0), 0);
-        // ← AJUSTADO: gols individuais com campanhas
         gols = calculateAssessorGols(item.collaborator, daily as any, activeCampaigns);
         commission = calculateAssessorCommission(item.collaborator, daily as any, tabelaComissoes, campaigns);
       }
@@ -1263,7 +1273,6 @@ export default function Comissoes() {
     return days.map(date => {
       const key = formatKey(date);
       const metricas = metricsMap.get(key) || {};
-      // ← AJUSTADO: fallback também aplica campanhas ativas
       const gols =
         golsMap.get(key) ??
         calcularGolsComCampanhas(
@@ -1874,7 +1883,7 @@ export default function Comissoes() {
                 <h3 className="text-sm font-bold mb-3">Como a comissão é calculada</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Regra base por assinados:</span> 3→1, 5→2, 7→3, 9→4, 11→5 (cada +2 assinados = +1 gol).</div>
-                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Campanhas ativas:</span> multiplicam, somam ou substituem os gols do dia (GOLS / ASSINADOS / PROGRESSIVA).</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Campanhas ativas:</span> multiplicam, somam ou substituem os gols do dia (GOLS / ASSINADOS / PROGRESSIVA). Se a progressiva não for atingida, o colaborador mantém os gols da regra base.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma da faixa de ganhos + faixa de gols.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Faixas por ganhos:</span> produtos (AUXILIO ACIDENTE, QUINQUENIO, CONCOMITANTE) e supervisores (SUPERVISOR, SUPERVISOR SR) usam <b>ganhos</b> como base.</div>
                 </div>
