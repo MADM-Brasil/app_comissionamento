@@ -4,8 +4,8 @@ import { API_BASE } from '@/lib/api';
 
 // ============================================================
 // MÉTRICAS DE DESEMPENHO (EMITIDOS, ASSINADOS, ETC.)
-// ============================================================ 
-  
+// ============================================================
+
 export async function fetchEmitidos(
   params: { periodo?: Period; start?: string; end?: string; colaborador?: string; equipe?: string; produto?: string; granularity?: string }
 ): Promise<{ colaborador: string; equipe: string; total: number }[]> {
@@ -121,19 +121,25 @@ export async function fetchWeeklyPerformance(
 }
 
 // ============================================================
-// NOVA FUNÇÃO: DADOS DIÁRIOS PARA CÁLCULO DE GOLS
+// DADOS DIÁRIOS
 // ============================================================
 
-export async function fetchDailyMetrics(
-  params: { start: string; end: string; colaborador?: string; equipe?: string; produto?: string }
-): Promise<Array<{
+export interface DailyMetric {
   date: string;
   emitidos: number;
   assinados: number;
   ganhos: number;
   perdidos: number;
   protocolados: number;
-}>> {
+}
+
+export interface DailyGols extends DailyMetric {
+  gols: number;
+}
+
+export async function fetchDailyMetrics(
+  params: { start: string; end: string; colaborador?: string; equipe?: string; produto?: string }
+): Promise<DailyMetric[]> {
   const baseParams = {
     start: params.start,
     end: params.end,
@@ -151,9 +157,9 @@ export async function fetchDailyMetrics(
     fetchProtocolados(baseParams),
   ]);
 
-  const dailyMap = new Map<string, any>();
+  const dailyMap = new Map<string, DailyMetric>();
 
-  const addToMap = (items: any[], metricKey: string) => {
+  const addToMap = (items: any[], metricKey: keyof Omit<DailyMetric, 'date'>) => {
     for (const item of items) {
       const date = item.periodo || item.data;
       if (!date) continue;
@@ -168,7 +174,7 @@ export async function fetchDailyMetrics(
           protocolados: 0,
         });
       }
-      const entry = dailyMap.get(date);
+      const entry = dailyMap.get(date)!;
       entry[metricKey] = (entry[metricKey] || 0) + (Number(item.total) || 0);
     }
   };
@@ -183,7 +189,7 @@ export async function fetchDailyMetrics(
 }
 
 // ============================================================
-// RECALCULAR PESOS HIERÁRQUICOS (usado em Configuration)
+// RECALCULAR PESOS HIERÁRQUICOS
 // ============================================================
 export async function recalculateHierarchyWeights(): Promise<{ message: string }> {
   const token = localStorage.getItem('csrfToken');
@@ -201,4 +207,173 @@ export async function recalculateHierarchyWeights(): Promise<{ message: string }
     throw new Error(data.error || 'Erro ao recalcular pesos hierárquicos');
   }
   return data;
+}
+
+// ============================================================
+// REGRA DE GOLS POR ASSINADOS
+//
+//   3  assinados = 1 gol
+//   5  assinados = 2 gols
+//   7  assinados = 3 gols
+//   9  assinados = 4 gols
+//   11 assinados = 5 gols
+//
+// Fórmula: Math.floor((assinados - 1) / 2)
+// ============================================================
+
+export const TABELA_GOLS_ASSINADOS: ReadonlyArray<{ assinados: number; gols: number }> = [
+  { assinados: 3,  gols: 1 },
+  { assinados: 5,  gols: 2 },
+  { assinados: 7,  gols: 3 },
+  { assinados: 9,  gols: 4 },
+  { assinados: 11, gols: 5 },
+];
+
+export const MAX_GOLS_TABELA = 5;
+
+export function calcularGolsPorAssinados(assinados: number): number {
+  const n = Number(assinados);
+  if (!Number.isFinite(n) || n < 3) return 0;
+  return Math.floor((n - 1) / 2);
+}
+
+export function calcularGolsDaTabela(assinados: number): number {
+  const n = Number(assinados);
+  if (!Number.isFinite(n)) return 0;
+  const linha = TABELA_GOLS_ASSINADOS.find(l => l.assinados === n);
+  return linha?.gols ?? 0;
+}
+
+export function calcularGolsPorAssinadosComCap(assinados: number): number {
+  return Math.min(calcularGolsPorAssinados(assinados), MAX_GOLS_TABELA);
+}
+
+export function calcularGolsDiarios(dailyMetrics: DailyMetric[]): DailyGols[] {
+  return dailyMetrics.map(day => ({
+    ...day,
+    gols: calcularGolsPorAssinados(day.assinados),
+  }));
+}
+
+export function calcularTotalGols(dailyMetrics: DailyMetric[]): number {
+  return dailyMetrics.reduce((sum, day) => sum + calcularGolsPorAssinados(day.assinados), 0);
+}
+
+// ============================================================
+// CAMPANHAS APLICADAS SOBRE A REGRA DE GOLS
+//
+// Compatível com o backend /api/campanhas/aplicar:
+//   1. Base: regra fixa 3→1, 5→2, 7→3, 9→4, 11→5 ...
+//   2. GOLS: multiplica os gols do dia pelo maior multiplicador.
+//   3. ASSINADOS: adiciona floor(assinados / quantidadePorGol).
+//   4. PROGRESSIVA: se atingiu a meta, gols = assinados; senão 0.
+// ============================================================
+
+/** Tipo estrutural para não criar dependência circular com o dataStore. */
+export interface CampaignLike {
+  tipo?: string;
+  multiplicador?: number | string;
+  data_publicacao?: string;
+  validacao_financeiro?: boolean;
+  produto?: string;
+  descricao?: string;
+  [key: string]: any;
+}
+
+/**
+ * Retorna as campanhas válidas (validadas financeiramente) que se aplicam
+ * a um determinado dia (data_publicacao == dateKey).
+ */
+function getCampanhasDoDia(campaigns: CampaignLike[], dateKey: string): CampaignLike[] {
+  return (campaigns || []).filter(c => {
+    if (!c || !c.validacao_financeiro) return false;
+    const d = String(c.data_publicacao || '').split('T')[0];
+    return d === dateKey;
+  });
+}
+
+/**
+ * Calcula os gols de um único dia aplicando campanhas ativas sobre a
+ * regra base de assinados.
+ *
+ * @param assinados Quantidade de assinados no dia.
+ * @param dateKey   Data no formato YYYY-MM-DD.
+ * @param campaigns Lista de campanhas (a função filtra as válidas e do dia).
+ */
+export function calcularGolsComCampanhas(
+  assinados: number,
+  dateKey: string,
+  campaigns: CampaignLike[],
+): number {
+  const n = Number(assinados) || 0;
+
+  // 1) Base: regra fixa por assinados
+  let gols = calcularGolsPorAssinados(n);
+
+  const dayCamps = getCampanhasDoDia(campaigns, dateKey);
+  if (dayCamps.length === 0) return gols;
+
+  // 2) GOLS: multiplicador (maior valor vence — igual ao backend)
+  const multiplicadores = dayCamps
+    .filter(c => (c.tipo || '').toUpperCase() === 'GOLS')
+    .map(c => Number(c.multiplicador) || 1)
+    .filter(m => m > 1);
+  if (multiplicadores.length > 0) {
+    gols = gols * Math.max(...multiplicadores);
+  }
+
+  // 3) ASSINADOS: + floor(assinados / quantidadePorGol)
+  const campanhasAssinados = dayCamps.filter(c => (c.tipo || '').toUpperCase() === 'ASSINADOS');
+  for (const camp of campanhasAssinados) {
+    const quantidadePorGol = Number(camp.multiplicador) || 3;
+    if (quantidadePorGol > 0) {
+      gols += Math.floor(n / quantidadePorGol);
+    }
+  }
+
+  // 4) PROGRESSIVA: substitui o total (se atingir a meta, gols = assinados; senão 0)
+  const campanhasProgressivas = dayCamps.filter(c => (c.tipo || '').toUpperCase() === 'PROGRESSIVA');
+  if (campanhasProgressivas.length > 0) {
+    const metas = campanhasProgressivas
+      .map(c => Number(c.multiplicador) || 0)
+      .filter(m => m > 0);
+    if (metas.length > 0) {
+      const metaProgressiva = Math.min(...metas);
+      gols = n >= metaProgressiva ? n : 0;
+    }
+  }
+
+  return gols;
+}
+
+/** Série diária com gols considerando campanhas. */
+export function calcularGolsDiariosComCampanhas(
+  dailyMetrics: DailyMetric[],
+  campaigns: CampaignLike[],
+): DailyGols[] {
+  return dailyMetrics.map(day => ({
+    ...day,
+    gols: calcularGolsComCampanhas(
+      Number(day.assinados) || 0,
+      String(day.date || '').slice(0, 10),
+      campaigns,
+    ),
+  }));
+}
+
+/** Total de gols do período considerando campanhas. */
+export function calcularTotalGolsComCampanhas(
+  dailyMetrics: DailyMetric[],
+  campaigns: CampaignLike[],
+): number {
+  return dailyMetrics.reduce(
+    (sum, day) =>
+      sum +
+      calcularGolsComCampanhas(
+        Number(day.assinados) || 0,
+        String(day.date || '').slice(0, 10),
+        campaigns,
+      ),
+    0
+  );
 }

@@ -15,7 +15,14 @@ import {
   ResponsiveContainer, Cell, Legend,
 } from "recharts";
 import { calculator } from "@/lib/calculator";
-import { fetchDailyMetrics } from "@/lib/metrics";
+// ← AJUSTADO: novos helpers que consideram campanhas ativas
+import {
+  fetchDailyMetrics,
+  calcularGolsComCampanhas,
+  calcularTotalGolsComCampanhas,
+  calcularGolsDiariosComCampanhas,
+  type CampaignLike,
+} from "@/lib/metrics";
 import {
   fetchAssinados,
   fetchGanhos,
@@ -69,6 +76,11 @@ const normalizeText = (text: string) => (text || '').trim().toLowerCase();
 const normalizeName = (text: string) => normalizeText(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 const EXCLUDED_TEAMS_SET = new Set(EXCLUDED_TEAMS.map(normalizeName));
 
+// Filtra apenas campanhas validadas financeiramente e devolve no formato do helper
+function getActiveCampaigns(campaigns: Campaign[]): CampaignLike[] {
+  return (campaigns || []).filter(c => c?.validacao_financeiro) as unknown as CampaignLike[];
+}
+
 type CommissionOverviewRole = 'assessor' | 'supervisor' | 'coordenador';
 
 interface CommissionOverviewItem {
@@ -78,7 +90,7 @@ interface CommissionOverviewItem {
   role: CommissionOverviewRole;
   assinados: number;
   ganhos: number;
-  gols: number; // ← AJUSTADO: quantidade de gols realizados no período
+  gols: number;
   commission: number | null;
   isSupervisorSR: boolean;
   collaborator: Collaborator;
@@ -149,8 +161,6 @@ function sumTeamGanhos(collaborators: any[], teamName: string): number {
   }, 0);
 }
 
-// ← AJUSTADO: soma os gols dos membros da equipe (mesma regra de
-// assinados/ganhos — exclui supervisor, coordenador e administrativo).
 function sumTeamGols(collaborators: any[], teamName: string): number {
   return collaborators.reduce((total, collaborator) => {
     if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
@@ -160,21 +170,25 @@ function sumTeamGols(collaborators: any[], teamName: string): number {
   }, 0);
 }
 
-// ← AJUSTADO: calcula gols individuais a partir das métricas diárias + campanhas.
-// Retorna 0 para grupos especiais (Quinquênio/Concomitante), que não acumulam gols.
+// ============================================================
+// ← AJUSTADO: cálculo de gols agora considera CAMPANHAS ATIVAS
+//   sobre a regra base (assinados → gols).
+//   Campanhas do tipo:
+//     - GOLS: multiplica os gols do dia
+//     - ASSINADOS: +floor(assinados/quantidadePorGol)
+//     - PROGRESSIVA: substitui (assinados >= meta ? assinados : 0)
+// ============================================================
 function calculateAssessorGols(
   collaborator: Collaborator,
-  dailyMetrics: Array<{ date: string; assinados: number; ganhos: number }>,
-  campaigns: Campaign[],
+  dailyMetrics: Array<{ date: string; assinados: number; ganhos?: number }>,
+  campaigns: CampaignLike[],
 ): number {
-  const isSpecial = isSpecialGroupColaborador(collaborator);
-  if (isSpecial || dailyMetrics.length === 0) return 0;
-
-  const metaAss = collaborator.metaGolsAssinados ?? 3;
-  const metaGan = collaborator.metaGolsGanhos ?? 3;
-  const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
-  const result = calculator.applyCampaignsToDailyGoals(dailyMetrics, metaAss, metaGan, activeCampaigns);
-  return result.totalGols || 0;
+  if (isSpecialGroupColaborador(collaborator)) return 0;
+  if (!dailyMetrics || dailyMetrics.length === 0) return 0;
+  return calcularTotalGolsComCampanhas(
+    dailyMetrics as any,
+    campaigns,
+  );
 }
 
 function calculateAssessorCommission(
@@ -190,16 +204,11 @@ function calculateAssessorCommission(
   const commissionGanhos = calculator.calculateProductCommission(ganhos, productType, commissionBands);
   if (isSpecial || dailyMetrics.length === 0) return commissionGanhos;
 
-  const result = calculator.calculateTotalCommission(
-    dailyMetrics,
-    collaborator.metaGolsAssinados ?? 3,
-    collaborator.metaGolsGanhos ?? 3,
-    ganhos,
-    productType,
-    commissionBands,
-    campaigns.filter(campaign => campaign.validacao_financeiro),
-  );
-  return result.totalCommission;
+  // ← AJUSTADO: gols agora consideram campanhas ativas
+  const activeCampaigns = getActiveCampaigns(campaigns);
+  const totalGols = calculateAssessorGols(collaborator, dailyMetrics as any, activeCampaigns);
+  const comissaoGols = calculator.calculateGoalCommission(totalGols, commissionBands);
+  return commissionGanhos + comissaoGols;
 }
 
 function isSpecialGroupColaborador(colaborador: any): boolean {
@@ -302,7 +311,12 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                   date: dateKey, assinados: 0, ganhos: 0, perdidos: 0, emitidos: 0, protocolados: 0,
                 };
                 const golsInfo = dailyGols.find((g: any) => (g.date || '').slice(0, 10) === dateKey);
-                const golsDoDia = golsInfo?.gols || 0;
+                // ← AJUSTADO: fallback também considera campanhas
+                const golsDoDia = golsInfo?.gols ?? calcularGolsComCampanhas(
+                  Number(day.assinados) || 0,
+                  dateKey,
+                  getActiveCampaigns(campaigns as Campaign[]),
+                );
 
                 const campanhasAprovadas = (campaigns || []).filter((c: any) => c.validacao_financeiro);
                 const campanhasGols = campanhasAprovadas.filter((c: any) =>
@@ -349,14 +363,16 @@ const ExtratoDialog = ({ dailyMetrics, dailyGols, campaigns, metaGolsAssinados, 
                         ))}
                         {campanhasAssinados.map((camp: any, cIdx: number) => (
                           <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />Ganhos valem Gols</span>
-                            <span className="font-bold text-[#16A34A]">1 gol/{camp.multiplicador || 3} ganhos</span>
+                            <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />+1 gol a cada {camp.multiplicador || 3} assinados</span>
+                            <span className="font-bold text-[#16A34A]">+{Math.floor((Number(day.assinados) || 0) / (Number(camp.multiplicador) || 3))}</span>
                           </div>
                         ))}
                         {campanhasProgressivas.map((camp: any, cIdx: number) => (
                           <div key={`p-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-purple-500" />Progressiva (mín. {camp.multiplicador} ganhos)</span>
-                            <span className="font-bold text-purple-500">1 gol por ganho</span>
+                            <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-purple-500" />Progressiva (mín. {camp.multiplicador} assinados)</span>
+                            <span className="font-bold text-purple-500">
+                              {(Number(day.assinados) || 0) >= Number(camp.multiplicador) ? `${day.assinados} gols` : '0 gols'}
+                            </span>
                           </div>
                         ))}
                       </div>
@@ -422,6 +438,8 @@ export default function Comissoes() {
   const [tempRecsForColab, setTempRecsForColab] = useState<TemporaryRecommendation[]>([]);
   const [allTabulations, setAllTabulations] = useState<CallTabulation[]>([]);
   const [loadingAllTabulations, setLoadingAllTabulations] = useState(false);
+
+  const activeCampaigns = useMemo(() => getActiveCampaigns(campaigns), [campaigns]);
 
   const reloadData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate || !currentUser) return;
@@ -554,7 +572,8 @@ export default function Comissoes() {
               });
               const dailyAgregado = Array.from(aggregated.values()).sort((a, b) => a.date.localeCompare(b.date));
               setDailyMetrics(dailyAgregado);
-              setDailyGols([]);
+              // ← AJUSTADO: gols com campanhas ativas
+              setDailyGols(calcularGolsDiariosComCampanhas(dailyAgregado as any, activeCampaigns));
             }
           } catch (err) {
             console.error('Erro ao carregar dados diários da equipe:', err);
@@ -570,13 +589,9 @@ export default function Comissoes() {
               colaborador: targetColab.name,
             });
             setDailyMetrics(daily);
-            const metaAss = targetColab.metaGolsAssinados ?? 3;
-            const metaGan = targetColab.metaGolsGanhos ?? 3;
 
-            const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
-
-            const golsResult = calculator.applyCampaignsToDailyGoals(daily, metaAss, metaGan, activeCampaigns);
-            setDailyGols(golsResult.dailyGols);
+            // ← AJUSTADO: gols com campanhas
+            setDailyGols(calcularGolsDiariosComCampanhas(daily, activeCampaigns));
 
             const now = new Date();
             const dayOfWeek = now.getDay();
@@ -598,8 +613,8 @@ export default function Comissoes() {
               colaborador: targetColab.name,
             });
             setWeeklyMetrics(weekly);
-            const weeklyGolsResult = calculator.applyCampaignsToDailyGoals(weekly, metaAss, metaGan, activeCampaigns);
-            setWeeklyGols(weeklyGolsResult.dailyGols);
+            // ← AJUSTADO: gols semanais com campanhas
+            setWeeklyGols(calcularGolsDiariosComCampanhas(weekly, activeCampaigns));
           } catch (err) {
             console.error('Erro ao carregar dados diários:', err);
           } finally {
@@ -615,7 +630,7 @@ export default function Comissoes() {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, filters, currentUser, canUseFilterBar, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, storeColabs, campaigns]);
+  }, [currentStartDate, currentEndDate, filters, currentUser, canUseFilterBar, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, storeColabs, campaigns, activeCampaigns]);
 
   const handleRefresh = useCallback(async () => { await reloadData(true); }, [reloadData]);
 
@@ -811,13 +826,11 @@ export default function Comissoes() {
       comissaoAssinados = totalCommission;
     } else {
       if (dailyMetrics.length > 0) {
-        const metaAss = userColab.metaGolsAssinados ?? 3;
-        const metaGan = userColab.metaGolsGanhos ?? 3;
+        // ← AJUSTADO: total de gols agora considera campanhas ativas
+        totalGols = calcularTotalGolsComCampanhas(dailyMetrics as any, activeCampaigns);
+
         const ganhos = userColab.ganhos || 0;
         const productType = getFaixaProductType(userColab);
-        const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
-        const golsResult = calculator.applyCampaignsToDailyGoals(dailyMetrics, metaAss, metaGan, activeCampaigns);
-        totalGols = golsResult.totalGols;
         comissaoGols = calculator.calculateGoalCommission(totalGols, tabelaComissoes);
         comissaoAssinados = calculator.calculateProductCommission(ganhos, productType, tabelaComissoes);
         totalCommission = comissaoGols + comissaoAssinados;
@@ -841,7 +854,7 @@ export default function Comissoes() {
       perdidos: userColab.perdidos || 0,
       originalColab: userColab,
     }];
-  }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics, userColab, campaigns]);
+  }, [filteredColabs, tabelaComissoes, currentUser, filters, storeColabs, dailyMetrics, userColab, campaigns, activeCampaigns]);
 
   const loadCommissionOverview = useCallback(async () => {
     const requestId = ++commissionOverviewRequest.current;
@@ -862,12 +875,11 @@ export default function Comissoes() {
       if (requestId !== commissionOverviewRequest.current) return;
 
       const dailyByCollaborator = mapDailyMetricsByCollaborator(assinadosRows, ganhosRows);
-      const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
 
-      // ← AJUSTADO: pré-computa gols por colaborador junto com assinados/ganhos
       const collaboratorsWithMetrics = storeColabs.map(collaborator => {
         const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
-        const gols = calculateAssessorGols(collaborator, daily, activeCampaigns);
+        // ← AJUSTADO: gols com campanhas ativas
+        const gols = calculateAssessorGols(collaborator, daily as any, activeCampaigns);
         return {
           ...collaborator,
           assinados: daily.reduce((total, day) => total + day.assinados, 0),
@@ -885,25 +897,25 @@ export default function Comissoes() {
           const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
           const individualSigned = daily.reduce((total, day) => total + day.assinados, 0);
           const individualGanhos = daily.reduce((total, day) => total + day.ganhos, 0);
-          const individualGols = calculateAssessorGols(collaborator, daily, activeCampaigns);
+          const individualGols = calculateAssessorGols(collaborator, daily as any, activeCampaigns);
           const isSupervisorSR = Boolean(collaborator.isSupervisorSR) || calculator.isSupervisorSR(collaborator.email);
           let assinados = individualSigned;
           let ganhos = individualGanhos;
-          let gols = individualGols; // ← AJUSTADO
+          let gols = individualGols;
           let commission: number | null;
 
           if (role === 'supervisor') {
             assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
             ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
-            gols = sumTeamGols(collaboratorsWithMetrics, collaborator.equipeNome); // ← AJUSTADO
+            gols = sumTeamGols(collaboratorsWithMetrics, collaborator.equipeNome);
             commission = calculator.calculateSupervisorCommission(ganhos, isSupervisorSR, tabelaComissoes);
           } else if (role === 'coordenador') {
             assinados = sumTeamAssinados(collaboratorsWithMetrics, collaborator.equipeNome);
             ganhos = sumTeamGanhos(collaboratorsWithMetrics, collaborator.equipeNome);
-            gols = sumTeamGols(collaboratorsWithMetrics, collaborator.equipeNome); // ← AJUSTADO
+            gols = sumTeamGols(collaboratorsWithMetrics, collaborator.equipeNome);
             commission = null;
           } else {
-            commission = calculateAssessorCommission(collaborator, daily, tabelaComissoes, activeCampaigns);
+            commission = calculateAssessorCommission(collaborator, daily as any, tabelaComissoes, campaigns);
           }
 
           return [{
@@ -913,7 +925,7 @@ export default function Comissoes() {
             role,
             assinados,
             ganhos,
-            gols, // ← AJUSTADO
+            gols,
             commission,
             isSupervisorSR,
             collaborator,
@@ -929,7 +941,7 @@ export default function Comissoes() {
     } finally {
       if (requestId === commissionOverviewRequest.current) setCommissionOverviewLoading(false);
     }
-  }, [canViewCommissionOverview, currentStartDate, currentEndDate, storeColabs, campaigns, tabelaComissoes]);
+  }, [canViewCommissionOverview, currentStartDate, currentEndDate, storeColabs, campaigns, tabelaComissoes, activeCampaigns]);
 
   useEffect(() => {
     void loadCommissionOverview();
@@ -943,7 +955,7 @@ export default function Comissoes() {
     try {
       let assinados = item.assinados;
       let ganhos = item.ganhos;
-      let gols = item.gols; // ← AJUSTADO
+      let gols = item.gols;
       let commission: number;
 
       if (item.role === 'supervisor') {
@@ -962,8 +974,7 @@ export default function Comissoes() {
         ganhos = ganhosRows.reduce((total, row) =>
           assessorNames.has(normalizeName(row.colaborador)) ? total + (Number(row.total) || 0) : total, 0);
 
-        // ← AJUSTADO: recalcula gols da equipe a partir do daily por membro
-        const dailyByMember = new Map<string, Array<{ date: string; assinados: number; ganhos: number }>>();
+        // ← AJUSTADO: gols do supervisor com campanhas
         const memberDailyResults = await Promise.all(
           storeColabs
             .filter(c => getCommissionOverviewRole(c) === 'assessor')
@@ -974,14 +985,13 @@ export default function Comissoes() {
                 end: currentEndDate,
                 colaborador: member.name,
               }).catch(() => [] as any[]);
-              return [normalizeName(member.name), member, daily] as const;
+              return [member, daily] as const;
             })
         );
-        const activeCampaigns = campaigns.filter(campaign => campaign.validacao_financeiro);
-        gols = memberDailyResults.reduce((sum, [key, member, daily]) => {
-          dailyByMember.set(key, daily);
-          return sum + calculateAssessorGols(member, daily as any, activeCampaigns);
-        }, 0);
+        gols = memberDailyResults.reduce(
+          (sum, [member, daily]) => sum + calculateAssessorGols(member, daily as any, activeCampaigns),
+          0
+        );
 
         commission = calculator.calculateSupervisorCommission(ganhos, item.isSupervisorSR, tabelaComissoes);
       } else {
@@ -992,22 +1002,13 @@ export default function Comissoes() {
         });
         assinados = daily.reduce((total, day) => total + (Number(day.assinados) || 0), 0);
         ganhos = daily.reduce((total, day) => total + (Number(day.ganhos) || 0), 0);
-        // ← AJUSTADO: recalcula gols individuais
-        gols = calculateAssessorGols(
-          item.collaborator,
-          daily as any,
-          campaigns.filter(campaign => campaign.validacao_financeiro),
-        );
-        commission = calculateAssessorCommission(
-          item.collaborator,
-          daily,
-          tabelaComissoes,
-          campaigns.filter(campaign => campaign.validacao_financeiro),
-        );
+        // ← AJUSTADO: gols individuais com campanhas
+        gols = calculateAssessorGols(item.collaborator, daily as any, activeCampaigns);
+        commission = calculateAssessorCommission(item.collaborator, daily as any, tabelaComissoes, campaigns);
       }
 
       setCommissionOverview(items => items.map(entry => entry.id === item.id
-        ? { ...entry, assinados, ganhos, gols, commission } // ← AJUSTADO
+        ? { ...entry, assinados, ganhos, gols, commission }
         : entry));
     } catch (err: any) {
       setCommissionOverviewError(err.message || `Falha ao atualizar ${item.name}.`);
@@ -1262,14 +1263,23 @@ export default function Comissoes() {
     return days.map(date => {
       const key = formatKey(date);
       const metricas = metricsMap.get(key) || {};
+      // ← AJUSTADO: fallback também aplica campanhas ativas
+      const gols =
+        golsMap.get(key) ??
+        calcularGolsComCampanhas(
+          Number((metricas as any).assinados) || 0,
+          key,
+          activeCampaigns,
+        );
+
       return {
         label: formatLabel(date),
-        assinados: metricas.assinados || 0,
-        ganhos: metricas.ganhos || 0,
-        gols: golsMap.get(key) || 0,
+        assinados: (metricas as any).assinados || 0,
+        ganhos: (metricas as any).ganhos || 0,
+        gols,
       };
     });
-  }, [weeklyMetrics, weeklyGols]);
+  }, [weeklyMetrics, weeklyGols, activeCampaigns]);
 
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Suas comissões, calculadas pela soma de Gols diários, semanais e mensais">
@@ -1358,7 +1368,6 @@ export default function Comissoes() {
                     <th className="py-2 px-3 font-medium">Cargo</th>
                     <th className="py-2 px-3 font-medium text-right">Assinados</th>
                     <th className="py-2 px-3 font-medium text-right">Ganhos</th>
-                    {/* ← AJUSTADO: nova coluna Gols */}
                     <th className="py-2 px-3 font-medium text-right">Gols</th>
                     <th className="py-2 px-3 font-medium text-right">Comissão</th>
                     <th className="py-2 px-3 font-medium text-center">Ação</th>
@@ -1397,7 +1406,6 @@ export default function Comissoes() {
                       </td>
                       <td className="py-2 px-3 text-right text-[#475569]">{formatInt(item.assinados)}</td>
                       <td className="py-2 px-3 text-right font-semibold text-[#0f172a]">{formatInt(item.ganhos)}</td>
-                      {/* ← AJUSTADO: célula Gols */}
                       <td className="py-2 px-3 text-right font-semibold text-[#16A34A]">{formatInt(item.gols)}</td>
                       <td className="py-2 px-3 text-right font-semibold text-[#2F6FED]">
                         {item.commission == null ? '—' : displayCurrency(item.commission)}
@@ -1865,8 +1873,8 @@ export default function Comissoes() {
               <div className="card p-5 mb-6">
                 <h3 className="text-sm font-bold mb-3">Como a comissão é calculada</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
-                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Três períodos de apuração:</span> Diário, semanal e mensal.</div>
-                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Gols por período:</span> mínimo entre assinados e ganhos.</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">1. Regra base por assinados:</span> 3→1, 5→2, 7→3, 9→4, 11→5 (cada +2 assinados = +1 gol).</div>
+                  <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">2. Campanhas ativas:</span> multiplicam, somam ou substituem os gols do dia (GOLS / ASSINADOS / PROGRESSIVA).</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">3. Comissão total:</span> soma da faixa de ganhos + faixa de gols.</div>
                   <div className="bg-[#f8fafc] rounded-lg p-3"><span className="font-bold text-[#0f172a]">4. Faixas por ganhos:</span> produtos (AUXILIO ACIDENTE, QUINQUENIO, CONCOMITANTE) e supervisores (SUPERVISOR, SUPERVISOR SR) usam <b>ganhos</b> como base.</div>
                 </div>
