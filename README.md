@@ -159,6 +159,7 @@ EMAIL_PASS=senha-de-app
 # ========== INTEGRAÇÕES ==========
 KOMMO_API_TOKEN=seu-token
 CHV_Hubspot=seu-token-hubspot
+HUBSPOT_PORTAL_ID=id-do-portal-da-conta-hubspot
 WEBHOOK_CASOS_DISCADORA=sua-url-webhook
 # ... (todas as outras)
 

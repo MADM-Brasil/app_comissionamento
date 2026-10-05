@@ -34,6 +34,7 @@ services:
       KOMMO_API_TOKEN: ${KOMMO_API_TOKEN}
       POWERAUTOMATE_WEBHOOK_URL: ${POWERAUTOMATE_WEBHOOK_URL}
       CHV_Hubspot: ${CHV_Hubspot}
+      HUBSPOT_PORTAL_ID: ${HUBSPOT_PORTAL_ID}
 
     volumes:
       - uploads:/app/uploads

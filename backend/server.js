@@ -1,5 +1,9 @@
 // backend/server.js
 import 'dotenv/config';
+console.log('[boot] cwd =', process.cwd());
+console.log('[boot] HUBSPOT_PORTAL_ID =', JSON.stringify(process.env.HUBSPOT_PORTAL_ID));
+console.log('[boot] CHV_Hubspot definido?', Boolean(process.env.CHV_Hubspot));
+console.log('[boot] SESSION_SECRET definido?', Boolean(process.env.SESSION_SECRET));
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -24,6 +28,7 @@ import campanhasRoutes from './routes/campanhas.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 import { startNotificationEngine } from './services/notificationEngine.js';
 import { startTicketQueue } from './services/ticketQueue.js';
+import { startLinkHubBatchQueue } from './services/linkHubBatchQueue.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -462,6 +467,7 @@ app.use((err, req, res, next) => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
       startNotificationEngine();
       startTicketQueue();
+      startLinkHubBatchQueue();
     });
   } catch (error) {
     console.error('❌ Erro ao conectar ao banco:', error);

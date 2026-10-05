@@ -1,5 +1,6 @@
 // client/src/pages/Suporte.tsx
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Redirect } from "wouter";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
   Send,
@@ -22,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { API_BASE } from "@/lib/api";
+import { getAccessLevel as resolveAccessLevel, LEVELS } from "@/lib/accessControl";
 
 // ---------------------- Tipos ----------------------
 interface MovementItem {
@@ -149,6 +151,13 @@ const formatCPF = (cpf: string): string => {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
+function getSupportAccessLevel(cargo?: string, status?: string): number {
+  const level = resolveAccessLevel(cargo, status);
+  return level === LEVELS.NONE && normalize(cargo || '').startsWith('supervisor')
+    ? LEVELS.SUPERVISAO
+    : level;
+}
+
 const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string): boolean => {
   if (!startDate && !endDate) return true;
   const dateStr = new Date(dateISO).toISOString().slice(0, 10);
@@ -212,12 +221,15 @@ function getCsrfHeaders() {
 
 export default function Suporte() {
   const [activeTab, setActiveTab] = useState<"movimentacao" | "reportar" | "salesops">("reportar");
-  const { getAccessLevel, LEVELS } = useAccessControl();
+  const { currentUser: accessUser } = useAccessControl();
+  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  const canAccessPage = accessLevel >= LEVELS.SUPERVISAO;
 
   const isAdmin = useMemo(() => {
-    const level = getAccessLevel();
-    return level === LEVELS.ADMINISTRATIVO || level === LEVELS.SUPER_ADMIN;
-  }, [getAccessLevel, LEVELS]);
+    return accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
+  }, [accessLevel]);
+
+  if (!canAccessPage) return <Redirect to="/" />;
 
   return (
     <DashboardLayout title="Suporte Operacional" subtitle="Movimentação de leads e reporte de problemas">
@@ -257,8 +269,13 @@ function MovimentacaoTab() {
     collaborators,
     loadCollaborators,
   } = useAppStore();
+  const { currentUser: accessUser } = useAccessControl();
+  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  const canSelectAllTeams = accessLevel >= LEVELS.COORDENADOR;
+  const isSupervisor = accessLevel === LEVELS.SUPERVISAO;
 
   const [firstName, setFirstName] = useState("");
+  const [hubLink, setHubLink] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [telefone, setTelefone] = useState("");
@@ -266,6 +283,7 @@ function MovimentacaoTab() {
   const [origem, setOrigem] = useState("");
   const [equipe, setEquipe] = useState("");
   const [assessorId, setAssessorId] = useState("");
+  const [movimentacaoEmMassa, setMovimentacaoEmMassa] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [movements, setMovements] = useState<MovementItem[]>([]);
@@ -275,12 +293,21 @@ function MovimentacaoTab() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const isSubmitting = useRef(false);
 
+  const currentCollaborator = useMemo(() => collaborators.find(colaborador =>
+    colaborador.email === currentUser?.email || String(colaborador.id) === String(currentUser?.id)
+  ), [collaborators, currentUser?.email, currentUser?.id]);
+  const supervisorTeam = currentCollaborator?.equipeNome || currentUser?.equipe || "";
+
   const equipesDisponiveis = useMemo(() => {
-    if (!equipeConfigs || equipeConfigs.length === 0) return [];
+    if (isSupervisor) return supervisorTeam && !isExcludedTeam(supervisorTeam) ? [supervisorTeam] : [];
+    if (!canSelectAllTeams || !equipeConfigs || equipeConfigs.length === 0) return [];
     return equipeConfigs.map(eq => eq.nome).filter(nome => !isExcludedTeam(nome));
-  }, [equipeConfigs]);
+  }, [canSelectAllTeams, equipeConfigs, isSupervisor, supervisorTeam]);
 
   useEffect(() => { if (equipeConfigs.length === 0) loadEquipeConfigs(); }, [equipeConfigs, loadEquipeConfigs]);
+  useEffect(() => {
+    if (isSupervisor && supervisorTeam && equipe !== supervisorTeam) setEquipe(supervisorTeam);
+  }, [isSupervisor, supervisorTeam, equipe]);
 
   const [loadingColaboradores, setLoadingColaboradores] = useState(true);
   useEffect(() => {
@@ -295,7 +322,10 @@ function MovimentacaoTab() {
 
   const assessoresDisponiveis = useMemo(() => {
     if (!collaborators.length) return [];
-    let filtered = collaborators.filter(c => !isExcludedTeam(c.equipeNome));
+    let filtered = collaborators.filter(c =>
+      resolveAccessLevel(c.cargo, c.status) === LEVELS.ASSESSOR && !isExcludedTeam(c.equipeNome)
+    );
+    if (isSupervisor) filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(supervisorTeam));
     if (equipe) filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(equipe));
     return filtered.map(c => ({
       id: c.id.toString(),
@@ -303,7 +333,7 @@ function MovimentacaoTab() {
       email: c.email
     }))
     .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-  }, [collaborators, equipe]);
+  }, [collaborators, equipe, isSupervisor, supervisorTeam]);
 
   useEffect(() => {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
@@ -336,7 +366,9 @@ function MovimentacaoTab() {
           return {
             id: `db_${ticket.id_ticket_movimentacao}`,
             timestamp: ticket.criado_em,
-            cliente: `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`,
+            cliente: ticket.crm_origem === 'HUBSPOT_LINK'
+              ? hubspotData?.dealName || `Deal ${ticket.crm_lead_id || ''}`.trim()
+              : `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`,
             email: ticket.email_cliente_informado,
             telefone: ticket.telefone_cliente_informado || "Não informado",
             cpf: ticket.cpf_cliente_informado || "Não informado",
@@ -380,13 +412,23 @@ function MovimentacaoTab() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting.current) return;
-    if (!firstName.trim()) { setMessage({ text: "Nome é obrigatório", type: "error" }); return; }
-    if (!lastName.trim()) { setMessage({ text: "Sobrenome é obrigatório", type: "error" }); return; }
-    if (!telefone.trim()) { setMessage({ text: "Telefone é obrigatório", type: "error" }); return; }
-
-    if (!isValidBrazilianPhone(telefone)) {
-      setMessage({ text: "Telefone inválido. Informe DDD + número (ex.: 11 00000-1234).", type: "error" });
+    const hubLinks = [...new Set(hubLink.split(/[\r\n\s,;]+/).map(link => link.trim()).filter(Boolean))];
+    if (movimentacaoEmMassa && hubLinks.length === 0) {
+      setMessage({ text: "Informe ao menos um link HubSpot", type: "error" });
       return;
+    }
+    if (movimentacaoEmMassa && hubLinks.length > 50) {
+      setMessage({ text: "O limite é de 50 links por lote", type: "error" });
+      return;
+    }
+    if (!movimentacaoEmMassa) {
+      if (!firstName.trim()) { setMessage({ text: "Nome é obrigatório", type: "error" }); return; }
+      if (!lastName.trim()) { setMessage({ text: "Sobrenome é obrigatório", type: "error" }); return; }
+      if (!telefone.trim()) { setMessage({ text: "Telefone é obrigatório", type: "error" }); return; }
+      if (!isValidBrazilianPhone(telefone)) {
+        setMessage({ text: "Telefone inválido. Informe DDD + número (ex.: 11 00000-1234).", type: "error" });
+        return;
+      }
     }
 
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
@@ -398,6 +440,45 @@ function MovimentacaoTab() {
     const assessorSelecionado = assessoresDisponiveis.find(a => a.id === assessorId);
     const assessorNome = assessorSelecionado?.nome || assessorId;
     const assessorEmail = assessorSelecionado?.email || '';
+
+    if (movimentacaoEmMassa) {
+      try {
+        const idempotencyKey = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0;
+          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
+        const response = await fetch(`${API_BASE}/suporte/movimentacoes-linkhub/lotes`, {
+          method: 'POST',
+          headers: getCsrfHeaders(),
+          credentials: 'include',
+          body: JSON.stringify({
+            links: hubLinks,
+            equipe_destino_nome: equipe,
+            colaborador_destino_nome: assessorNome,
+            colaborador_destino_email: assessorEmail,
+            idempotency_key: idempotencyKey,
+          }),
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || `Erro HTTP ${response.status}`);
+        }
+
+        await loadUserHistory();
+        setMessage({
+          text: `Lote ${result.id_lote} enfileirado com ${result.total_itens} cards.${result.duplicados_removidos ? ` ${result.duplicados_removidos} duplicado(s) removido(s).` : ''}`,
+          type: 'success',
+        });
+        setHubLink('');
+      } catch (error: any) {
+        setMessage({ text: error.message || 'Erro ao enfileirar lote Link Hub.', type: 'error' });
+      } finally {
+        setLoading(false);
+        setTimeout(() => { isSubmitting.current = false; }, 500);
+      }
+      return;
+    }
 
     const idempotencyKey = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
       const r = Math.random() * 16 | 0;
@@ -445,8 +526,9 @@ function MovimentacaoTab() {
       setMessage({ text: result.message || "Solicitação registrada e enfileirada.", type: result.success ? "success" : "error" });
       await loadUserHistory();
       if (result.success) {
-        setFirstName(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
-        setEquipe(""); setAssessorId("");
+        setFirstName(""); setHubLink(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
+        if (!isSupervisor) setEquipe("");
+        setAssessorId(""); setMovimentacaoEmMassa(false);
       }
     } catch (err: any) {
       setMessage({ text: err.message || "Erro na movimentação", type: "error" });
@@ -507,65 +589,207 @@ function MovimentacaoTab() {
       <div className="card p-5">
         <h2 className="text-lg font-bold text-[#0f172a] mb-4">Movimentação de Leads</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
+          {/* ------- Seletor de modo ------- */}
+          <div className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] p-3">
+            <label className="flex items-center gap-2 text-sm font-semibold text-[#0f172a]">
+              <input
+                type="checkbox"
+                checked={movimentacaoEmMassa}
+                onChange={e => {
+                  const checked = e.target.checked;
+                  setMovimentacaoEmMassa(checked);
+                  setMessage(null);
+                  if (checked) {
+                    // Limpa dados do cliente: não são usados no modo link
+                    setFirstName("");
+                    setLastName("");
+                    setEmail("");
+                    setTelefone("");
+                    setCpf("");
+                    setOrigem("");
+                  } else {
+                    setHubLink("");
+                  }
+                }}
+                className="h-4 w-4 rounded border-[#cbd5e1] text-[#2F6FED] focus:ring-[#2F6FED]"
+              />
+              Movimentação por link da HubSpot (em massa)
+            </label>
+          </div>
+          <p className="mt-1 text-xs text-[#64748b]">
+              {movimentacaoEmMassa
+                ? "Modo movimentação por link hub: Os links serão lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado"
+                : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso não o localize vai cadastra-lo(Caso todos os dados necessários estejam preenchidos)."}
+            </p>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Nome</label><input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome</label><input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required /></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"  /></div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label><select value={origem} onChange={e => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"><option value="">Selecionar origem</option><option value="discadora">Discadora</option><option value="cat">CAT</option><option value="indicacao">Indicação</option><option value="trafego_pago">Marketing</option></select></div>
-            <div>
-              <label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone</label>
-              <div className="flex items-center">
-                <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">
-                  +55
-                </span>
-                <input
-                  type="tel"
-                  value={telefone}
-                  onChange={e => setTelefone(formatPhoneInput(e.target.value))}
-                  onBlur={() => {
-                    if (telefone) {
-                      setTelefone(formatPhoneInput(telefone));
-                    }
-                  }}
-                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
-                  placeholder="(00) 00000-0000"
-                  required
+            {/* ------- Modo link / em massa ------- */}
+            {movimentacaoEmMassa && (
+              <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-[#0f172a] mb-1">
+                  Links HubSpot *
+                </label>
+                <textarea
+                  value={hubLink}
+                  onChange={e => setHubLink(e.target.value)}
+                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg resize-y"
+                  rows={4}
+                  placeholder="Cole um link HubSpot por linha (máx. 50)"
+                  required={movimentacaoEmMassa}
                 />
+                <p
+                  className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800"
+                  role="note"
+                >
+                  Certifique-se de que os links informados estão corretos antes da movimentação
+                  em massa para o colaborador{" "}
+                  {assessoresDisponiveis.find(assessor => assessor.id === assessorId)?.nome ||
+                    "[Selecione um colaborador]"}.
+                </p>
               </div>
-            </div>
-            <div><label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label><input type="text" value={cpf} onChange={e => setCpf(e.target.value)} onBlur={() => cpf && setCpf(formatCPF(cpf))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" /></div>
+            )}
+
+            {/* ------- Modo individual: dados do cliente ------- */}
+            {!movimentacaoEmMassa && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Nome *</label>
+                  <input
+                    type="text"
+                    value={firstName}
+                    onChange={e => setFirstName(e.target.value)}
+                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome *</label>
+                  <input
+                    type="text"
+                    value={lastName}
+                    onChange={e => setLastName(e.target.value)}
+                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={e => setEmail(e.target.value)}
+                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label>
+                  <select
+                    value={origem}
+                    onChange={e => setOrigem(e.target.value)}
+                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                  >
+                    <option value="">Selecionar origem</option>
+                    <option value="discadora">Discadora</option>
+                    <option value="cat">CAT</option>
+                    <option value="indicacao">Indicação</option>
+                    <option value="trafego_pago">Marketing</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone *</label>
+                  <div className="flex items-center">
+                    <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">
+                      +55
+                    </span>
+                    <input
+                      type="tel"
+                      value={telefone}
+                      onChange={e => setTelefone(formatPhoneInput(e.target.value))}
+                      onBlur={() => telefone && setTelefone(formatPhoneInput(telefone))}
+                      className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
+                      placeholder="(00) 00000-0000"
+                      required
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label>
+                  <input
+                    type="text"
+                    value={cpf}
+                    onChange={e => setCpf(e.target.value)}
+                    onBlur={() => cpf && setCpf(formatCPF(cpf))}
+                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                  />
+                </div>
+              </>
+            )}
+
+            {/* ------- Destino: obrigatório em ambos os modos ------- */}
             <div>
               <label className="block text-sm font-medium text-[#0f172a] mb-1">Equipe Destino *</label>
-              <select 
-                value={equipe} 
-                onChange={e => setEquipe(e.target.value)} 
-                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" 
+              <select
+                value={equipe}
+                onChange={e => setEquipe(e.target.value)}
+                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
                 required
               >
                 <option value="" disabled>Selecione equipe</option>
-                {equipesDisponiveis.map(nome => <option key={nome} value={nome}>{nome}</option>)}
+                {equipesDisponiveis.map(nome => (
+                  <option key={nome} value={nome}>{nome}</option>
+                ))}
               </select>
             </div>
             <div>
               <label className="block text-sm font-medium text-[#0f172a] mb-1">Assessor Destino *</label>
-              <select 
-                value={assessorId} 
-                onChange={e => setAssessorId(e.target.value)} 
-                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" 
+              <select
+                value={assessorId}
+                onChange={e => setAssessorId(e.target.value)}
+                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
                 required
               >
                 <option value="" disabled>Selecione colaborador</option>
-                {loadingColaboradores ? 
-                  <option disabled>Carregando...</option> : 
-                  assessoresDisponiveis.length === 0 ? 
-                    <option disabled>Nenhum disponível</option> : 
-                    assessoresDisponiveis.map(a => <option key={a.id} value={a.id}>{a.nome}</option>)
-                }
+                {loadingColaboradores ? (
+                  <option disabled>Carregando...</option>
+                ) : assessoresDisponiveis.length === 0 ? (
+                  <option disabled>Nenhum disponível</option>
+                ) : (
+                  assessoresDisponiveis.map(a => (
+                    <option key={a.id} value={a.id}>{a.nome}</option>
+                  ))
+                )}
               </select>
             </div>
           </div>
-          {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">{message.text}</div>}
-          <div className="flex justify-end"><button type="submit" disabled={loading || loadingColaboradores} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">{loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}{loading ? "Enviando..." : "Registrar Movimentação"}</button></div>
+
+          {message && (
+            <div
+              className={cn(
+                "p-3 rounded-lg text-sm",
+                message.type === "success"
+                  ? "bg-green-50 text-green-700"
+                  : "bg-red-50 text-red-700"
+              )}
+              role="status"
+            >
+              {message.text}
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={loading || loadingColaboradores}
+              className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              {loading
+                ? "Enviando..."
+                : movimentacaoEmMassa
+                  ? "Registrar movimentações em massa"
+                  : "Registrar Movimentação"}
+            </button>
+          </div>
         </form>
       </div>
 
@@ -574,8 +798,16 @@ function MovimentacaoTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
           <div className="flex flex-wrap items-center gap-2">
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
-              {statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}</option>)}
+            <select
+              value={filterStatus}
+              onChange={e => setFilterStatus(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+            >
+              {statusOptions.map(s => (
+                <option key={s} value={s}>
+                  {s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}
+                </option>
+              ))}
             </select>
             <input
               type="date"
@@ -592,42 +824,82 @@ function MovimentacaoTab() {
               className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
               title="Data final"
             />
-            <button onClick={exportHistory} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"><Download className="w-3 h-3" /> Exportar</button>
-            <button onClick={clearHistory} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"><X className="w-3 h-3" /> Limpar</button>
+            <button
+              onClick={exportHistory}
+              className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"
+            >
+              <Download className="w-3 h-3" /> Exportar
+            </button>
+            <button
+              onClick={clearHistory}
+              className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"
+            >
+              <X className="w-3 h-3" /> Limpar
+            </button>
           </div>
         </div>
-        {loadingHistory ? <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div> :
-          filteredMovements.length === 0 ? <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada no período</div> :
+        {loadingHistory ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
+          </div>
+        ) : filteredMovements.length === 0 ? (
+          <div className="text-center py-8 text-[#64748b]">
+            Nenhuma movimentação registrada no período
+          </div>
+        ) : (
           <div className="overflow-x-auto">
             <table className="simple-table">
-              <thead><tr><th>Data/Hora</th><th>Cliente</th><th>Contato</th><th>Equipe/Assessor</th><th>Status</th><th>Obs. SalesOps</th><th>Resultado</th></tr></thead>
-              <tbody>{filteredMovements.map(m => {
-                const statusParaExibir = m.status;
-                const info = getStatusInfo(statusParaExibir);
-                return (
-                  <tr key={m.id}>
-                    <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
-                    <td>{m.cliente}</td>
-                    <td>
-                      <div>{m.telefone}</div>
-                      <div className="text-[#64748b]">{m.email}</div>
-                      <small className="text-[#94a3b8]">{m.cpf}</small>
-                    </td>
-                    <td><div>{m.equipe}</div><small>{m.assessor}</small></td>
-                    <td>
-                      <span className={cn("badge", info.className)} title={m.hubspot?.mensagem || info.label}>
-                        {info.icon} {info.label}
-                      </span>
-                    </td>
-                    <td className="max-w-[200px] whitespace-pre-wrap break-words" title={m.observacao_sales_ops || ''}>
-                      {m.observacao_sales_ops || '—'}
-                    </td>
-                    <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
-                  </tr>
-                );
-              })}</tbody>
+              <thead>
+                <tr>
+                  <th>Data/Hora</th>
+                  <th>Cliente</th>
+                  <th>Contato</th>
+                  <th>Equipe/Assessor</th>
+                  <th>Status</th>
+                  <th>Obs. SalesOps</th>
+                  <th>Resultado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredMovements.map(m => {
+                  const info = getStatusInfo(m.status);
+                  return (
+                    <tr key={m.id}>
+                      <td className="whitespace-nowrap">
+                        {new Date(m.timestamp).toLocaleString("pt-BR")}
+                      </td>
+                      <td>{m.cliente}</td>
+                      <td>
+                        <div>{m.telefone}</div>
+                        <div className="text-[#64748b]">{m.email}</div>
+                        <small className="text-[#94a3b8]">{m.cpf}</small>
+                      </td>
+                      <td>
+                        <div>{m.equipe}</div>
+                        <small>{m.assessor}</small>
+                      </td>
+                      <td>
+                        <span
+                          className={cn("badge", info.className)}
+                          title={m.hubspot?.mensagem || info.label}
+                        >
+                          {info.icon} {info.label}
+                        </span>
+                      </td>
+                      <td
+                        className="max-w-[200px] whitespace-pre-wrap break-words"
+                        title={m.observacao_sales_ops || ''}
+                      >
+                        {m.observacao_sales_ops || '—'}
+                      </td>
+                      <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
             </table>
-          </div>}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -880,7 +1152,7 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
             <span className="block text-sm font-medium text-[#0f172a] mb-1">
               Anexos <span className="text-red-500">*</span> <span className="text-xs text-[#64748b]">(obrigatório pelo menos 1 print)</span>
             </span>
-            
+
             <div
               onDrop={handleDrop}
               onDragOver={handleDragOver}
@@ -1051,7 +1323,7 @@ function SalesOpsTab() {
       <div className="flex gap-2 border-b border-[#e2e8f0] pb-2">
         {[
           { id: "reportes", label: "Reportes" },
-          { id: "movimentacoes", label: "Movimentações" },         
+          { id: "movimentacoes", label: "Movimentações" },
         ].map(tab => (
           <button
             key={tab.id}
