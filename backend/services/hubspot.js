@@ -1,420 +1,549 @@
-// services/hubspot.js
-import { Client } from '@hubspot/api-client';
+// services/hubspot.js — serviço completo revisado (ES modules, Node.js 18+).
+// Todas as exportações originais foram mantidas. Erros técnicos são lançados,
+// nunca convertidos em "não encontrado"; buscas ambíguas são bloqueadas.
+// Mudanças de contrato:
+// - reassignDealAndContactsOwner exige expectedCurrentContext (fluxo normal);
+// - reassignDealForLinkHubMovement: nova regra do Link Hub:
+//     * Base de Leads → move para Closer (Em Contato), limpa motivo_da_perda;
+//     * Closer → apenas troca o proprietário, preserva pipeline/etapa;
+// - validação final sem ID explícito só aceita um único card candidato;
+// - falhas parciais exigem reconciliação no worker, não repetição automática;
+// - nenhum POST/PATCH é repetido automaticamente;
+// - mutexes abaixo protegem somente ESTE processo. O worker precisa de locks
+//   distribuídos por conta/card/contato (por exemplo no PostgreSQL) e reserva exclusiva.
+// - autorização de usuário/equipe continua a cargo de supportAccess e do worker.
+// Configurar CHV_Hubspot, HUBSPOT_PORTAL_ID e IDs reais de pipeline/etapa.
 
-const hubspotClient = new Client({
-  accessToken: process.env.CHV_Hubspot,
-});
+const API_ORIGIN = 'https://api.hubapi.com';
+const setting = (name, fallback = '') => String(process.env[name] || fallback).trim();
 
-// ==================== IDs internos do HubSpot ====================
-const PIPELINE_BASE_LEADS_ID = process.env.HUBSPOT_PIPELINE_BASE_LEADS_ID || '905901447';
-const PIPELINE_CLOSER_ID = process.env.HUBSPOT_PIPELINE_CLOSER_ID || '904458124';
-
-const STAGE_EM_CONTATO_ID = process.env.HUBSPOT_STAGE_EM_CONTATO_ID || '1368997801';
-const STAGE_DESQUALIFICADO_ID = process.env.HUBSPOT_STAGE_DESQUALIFICADO_ID || '1368997806';
-
-// ⚠️ OBRIGATÓRIO preencher via env para a regra temporal funcionar:
-//    HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID
-//    HUBSPOT_STAGE_ENTRADA_ID
-const STAGE_COLETA_DOCUMENTACAO_ID =
-  process.env.HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID || 'COLOCAR_ID_AQUI';
-const STAGE_ENTRADA_ID =
-  process.env.HUBSPOT_STAGE_ENTRADA_ID || 'COLOCAR_ID_AQUI';
+const PIPELINE_BASE_LEADS_ID = setting('HUBSPOT_PIPELINE_BASE_LEADS_ID', '905901447');
+const PIPELINE_CLOSER_ID = setting('HUBSPOT_PIPELINE_CLOSER_ID', '904458124');
+const PIPELINE_JURIDICO_AUDITORIA_ID = setting('HUBSPOT_PIPELINE_JURIDICO_AUDITORIA_ID', '905179189');
+const HUBSPOT_PORTAL_ID = setting('HUBSPOT_PORTAL_ID');
+const STAGE_EM_CONTATO_ID = setting('HUBSPOT_STAGE_EM_CONTATO_ID', '1368997801');
+const STAGE_DESQUALIFICADO_ID = setting('HUBSPOT_STAGE_DESQUALIFICADO_ID', '1368997806');
+const STAGE_COLETA_DOCUMENTACAO_ID = setting('HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID');
+const STAGE_ENTRADA_ID = setting('HUBSPOT_STAGE_ENTRADA_ID');
 
 export const HUBSPOT_PIPELINE_BASE_LEADS_ID = PIPELINE_BASE_LEADS_ID;
 export const HUBSPOT_PIPELINE_CLOSER_ID = PIPELINE_CLOSER_ID;
+export const HUBSPOT_PIPELINE_JURIDICO_AUDITORIA_ID = PIPELINE_JURIDICO_AUDITORIA_ID;
+export const HUBSPOT_PORTAL_ID_CONFIGURED = HUBSPOT_PORTAL_ID;
 export const HUBSPOT_STAGE_EM_CONTATO_ID = STAGE_EM_CONTATO_ID;
 export const HUBSPOT_STAGE_DESQUALIFICADO_ID = STAGE_DESQUALIFICADO_ID;
 export const HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID = STAGE_COLETA_DOCUMENTACAO_ID;
 export const HUBSPOT_STAGE_ENTRADA_ID = STAGE_ENTRADA_ID;
 
-// Propriedades padrão do contato
 const CONTACT_PROPERTIES = [
-  'email',
-  'firstname',
-  'lastname',
-  'phone',
-  'hs_whatsapp_phone_number',
-  'contact_cpf',
-  'contact_fonte',
-  'hubspot_owner_id',
+  'email', 'firstname', 'lastname', 'phone', 'hs_whatsapp_phone_number',
+  'contact_cpf', 'contact_fonte', 'hubspot_owner_id',
 ];
-
-// Propriedades padrão do deal
 const DEAL_PROPERTIES = [
-  'dealname',
-  'pipeline',
-  'dealstage',
-  'hubspot_owner_id',
-  'notes_last_updated',
-  'motivo_da_perda',
-  'hs_lastmodifieddate',
+  'dealname', 'pipeline', 'dealstage', 'hubspot_owner_id',
+  'notes_last_updated', 'motivo_da_perda', 'hs_lastmodifieddate',
 ];
 
-// Nomes legíveis
 const PIPELINE_NAMES = {
   [PIPELINE_BASE_LEADS_ID]: 'Base de Leads',
   [PIPELINE_CLOSER_ID]: 'Closer',
-  '905179189': 'Jurídico Auditoria de Ganho',
+  [PIPELINE_JURIDICO_AUDITORIA_ID]: 'Jurídico Auditoria de Ganho',
   '905179471': 'PRO',
   '926561825': 'Fator K',
   '925690734': 'Quinquenio/concomitante',
 };
-
 const STAGE_NAMES = {
   [STAGE_EM_CONTATO_ID]: 'Em Contato',
   [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
-  [STAGE_COLETA_DOCUMENTACAO_ID]: 'Coleta de documentação',
-  [STAGE_ENTRADA_ID]: 'Entrada',
+  ...(STAGE_COLETA_DOCUMENTACAO_ID ? { [STAGE_COLETA_DOCUMENTACAO_ID]: 'Coleta de documentação' } : {}),
+  ...(STAGE_ENTRADA_ID ? { [STAGE_ENTRADA_ID]: 'Entrada' } : {}),
 };
 
-// Regras de tempo (em horas) por etapa
-const REQUIRED_HOURS_BY_STAGE = {
-  [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
-  [STAGE_ENTRADA_ID]: 24,
-  [STAGE_EM_CONTATO_ID]: 24,
-};
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-// ==================== Helpers de telefone ====================
-
-function normalizePhone(phone) {
-  return (phone || '').replace(/\D/g, '');
+function hubError(message, details = {}) {
+  return Object.assign(new Error(message), {
+    code: 'HUBSPOT_ERROR',
+    retryable: false,
+    blocked: false,
+    ...details,
+  });
 }
 
-function phonesMatch(contactPhone, inputPhone) {
-  const a = normalizePhone(contactPhone);
-  const b = normalizePhone(inputPhone);
-  if (!a || !b) return false;
-  if (a === b) return true;
-  const aSem55 = a.startsWith('55') && a.length > 11 ? a.slice(2) : a;
-  const bSem55 = b.startsWith('55') && b.length > 11 ? b.slice(2) : b;
-  if (aSem55 === bSem55) return true;
-  const aTail = aSem55.slice(-8);
-  const bTail = bSem55.slice(-8);
-  return aTail.length === 8 && aTail === bTail;
+function id(value, label = 'Identificador') {
+  const result = String(value ?? '').trim();
+  if (!/^\d+$/.test(result)) {
+    throw hubError(`${label} inválido.`, { blocked: true, code: 'INVALID_ID' });
+  }
+  return result;
 }
 
-function buildPhoneVariants(phoneRaw, phoneDigits) {
-  const variants = new Set();
-  if (phoneRaw && String(phoneRaw).trim()) variants.add(String(phoneRaw).trim());
+function optionalText(value) {
+  return value == null ? '' : String(value).trim();
+}
 
-  const digits = normalizePhone(phoneDigits);
-  if (digits) {
-    variants.add(digits);
-    const semPais = digits.startsWith('55') && digits.length > 11 ? digits.slice(2) : digits;
-    if (semPais) {
-      variants.add(semPais);
-      variants.add(`55${semPais}`);
-      variants.add(`+55${semPais}`);
-      if (semPais.length > 11) variants.add(semPais.slice(-11));
-      if (semPais.length > 10) variants.add(semPais.slice(-10));
-      if (semPais.length > 9) variants.add(semPais.slice(-9));
-      if (semPais.length > 8) variants.add(semPais.slice(-8));
+function cleanEmail(value) {
+  const result = optionalText(value).toLowerCase();
+  if (result && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result)) {
+    throw hubError('E-mail inválido.', { blocked: true });
+  }
+  return result;
+}
+
+function token() {
+  const result = setting('CHV_Hubspot');
+  if (!result) throw hubError('CHV_Hubspot não está configurado.', { code: 'CONFIGURATION_ERROR' });
+  return result;
+}
+
+function timeoutMs() {
+  const value = Number(process.env.HUBSPOT_HTTP_TIMEOUT_MS || 20000);
+  return Number.isFinite(value) && value >= 1000 && value <= 120000 ? value : 20000;
+}
+
+function retryDelay(response, attempt) {
+  const raw = response?.headers.get('retry-after');
+  const numeric = raw ? Number(raw) : NaN;
+  const dated = raw ? Date.parse(raw) - Date.now() : NaN;
+  const delay = Number.isFinite(numeric)
+    ? numeric * 1000
+    : Number.isFinite(dated)
+      ? dated
+      : 500 * (2 ** attempt);
+  return Math.min(30000, Math.max(250, delay)) + Math.floor(Math.random() * 200);
+}
+
+async function request(endpoint, { method = 'GET', body, readOnly = false, attempts = 3 } = {}) {
+  const safe = method === 'GET' || readOnly;
+  const totalAttempts = safe ? attempts : 1;
+  for (let attempt = 0; attempt < totalAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs());
+    try {
+      const response = await fetch(new URL(endpoint, API_ORIGIN), {
+        method,
+        headers: {
+          Authorization: `Bearer ${token()}`,
+          'Content-Type': 'application/json',
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal,
+      });
+      const raw = await response.text();
+      let data;
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        throw hubError('Resposta não JSON recebida do HubSpot.', {
+          httpStatus: response.status,
+          retryable: safe,
+          outcomeUnknown: !safe,
+        });
+      }
+      if (!response.ok) {
+        const retryable = response.status === 429 || response.status >= 500;
+        const error = hubError(`HubSpot retornou HTTP ${response.status}.`, {
+          httpStatus: response.status,
+          retryable,
+          blocked: response.status === 404,
+          correlationId: data.correlationId || null,
+          category: data.category || null,
+          retryAfter: response.headers.get('retry-after'),
+          outcomeUnknown: !safe && response.status >= 500,
+        });
+        if (safe && retryable && attempt + 1 < totalAttempts) {
+          clearTimeout(timer);
+          await sleep(retryDelay(response, attempt));
+          continue;
+        }
+        throw error;
+      }
+      return data;
+    } catch (error) {
+      if (error.code) throw error;
+      const wrapped = hubError('Falha de rede ou timeout ao acessar o HubSpot.', {
+        retryable: true,
+        outcomeUnknown: !safe,
+        code: 'NETWORK_ERROR',
+      });
+      if (safe && attempt + 1 < totalAttempts) {
+        clearTimeout(timer);
+        await sleep(500 * (2 ** attempt));
+        continue;
+      }
+      throw wrapped;
+    } finally {
+      clearTimeout(timer);
     }
   }
-  return [...variants].filter(Boolean);
+  throw hubError('Consulta ao HubSpot não concluída.');
 }
 
-// ==================== Helpers de tempo ====================
+let verifiedAccount = null;
+let portalVerification = null;
 
-/**
- * Retorna quantas horas se passaram desde uma data.
- * Retorna null se a data for ausente/inválida.
- */
-function getHoursSince(dateValue) {
-  if (!dateValue) return null;
-  const timestamp = new Date(dateValue).getTime();
-  if (Number.isNaN(timestamp)) return null;
-  return (Date.now() - timestamp) / (1000 * 60 * 60);
+export async function verifyHubSpotPortalConfiguration() {
+  id(HUBSPOT_PORTAL_ID, 'HUBSPOT_PORTAL_ID');
+  const currentToken = token();
+  if (verifiedAccount?.token === currentToken && verifiedAccount.expiresAt > Date.now()) {
+    return verifiedAccount.portalId;
+  }
+  if (!portalVerification || portalVerification.token !== currentToken) {
+    const promise = (async () => {
+      const account = await request('/integrations/v1/me');
+      const portalId = String(account.portalId ?? '');
+      if (portalId !== HUBSPOT_PORTAL_ID) {
+        throw hubError('A conta do token não corresponde ao HUBSPOT_PORTAL_ID.', {
+          blocked: true,
+          code: 'ACCOUNT_MISMATCH',
+        });
+      }
+      verifiedAccount = {
+        token: currentToken,
+        portalId,
+        expiresAt: Date.now() + 300000,
+      };
+      return portalId;
+    })();
+    portalVerification = { token: currentToken, promise };
+    promise
+      .finally(() => {
+        if (portalVerification?.promise === promise) portalVerification = null;
+      })
+      .catch(() => {});
+  }
+  return portalVerification.promise;
 }
 
-/**
- * Decide se um deal pode ser movimentado com base em hs_lastmodifieddate
- * e na etapa atual:
- *   - Coleta de documentação → > 72h
- *   - Entrada               → > 24h
- *   - Em Contato            → > 24h
- *   - outras etapas         → bloqueado
- *
- * Se hs_lastmodifieddate estiver ausente/inválido → bloqueia.
- */
-function canMoveByLastModifiedDate(deal) {
-  const stage = String(deal?.stage || '');
-  const hoursSinceModification = getHoursSince(deal?.lastModifiedDate);
+async function accountReady() {
+  await verifyHubSpotPortalConfiguration();
+}
 
-  if (hoursSinceModification === null) {
-    return {
-      allowed: false,
-      reason: 'hs_lastmodifieddate ausente ou inválido',
-      hoursSinceNote: null,
-      requiredHours: null,
-      lastUpdated: deal?.lastModifiedDate || null,
-    };
+const mutexes = new Map();
+
+async function withLocks(keys, action) {
+  const unique = [...new Set(keys)].sort();
+  const releases = [];
+  try {
+    for (const key of unique) {
+      const previous = mutexes.get(key) || Promise.resolve();
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      const tail = previous.then(() => gate);
+      mutexes.set(key, tail);
+      await previous;
+      releases.push(() => {
+        release();
+        if (mutexes.get(key) === tail) mutexes.delete(key);
+      });
+    }
+    return await action();
+  } finally {
+    releases.reverse().forEach((release) => release());
   }
+}
 
-  const requiredHours = REQUIRED_HOURS_BY_STAGE[stage];
-
-  if (requiredHours === undefined) {
-    return {
-      allowed: false,
-      reason: 'Etapa não elegível para movimentação por tempo',
-      hoursSinceNote: hoursSinceModification,
-      requiredHours: null,
-      lastUpdated: deal.lastModifiedDate,
-    };
-  }
-
-  const allowed = hoursSinceModification > requiredHours;
-  const stageLabel = STAGE_NAMES[stage] || stage;
-
+function mapDeal(deal) {
+  const properties = deal.properties || {};
   return {
-    allowed,
-    reason: allowed
-      ? `Card em ${stageLabel} há mais de ${requiredHours}h`
-      : `Card em ${stageLabel} há menos de ${requiredHours}h`,
-    hoursSinceNote: hoursSinceModification,
-    requiredHours,
-    lastUpdated: deal.lastModifiedDate,
+    id: String(deal.id),
+    dealName: properties.dealname || null,
+    pipeline: properties.pipeline || null,
+    stage: properties.dealstage || null,
+    ownerId: properties.hubspot_owner_id || null,
+    notesLastUpdated: properties.notes_last_updated || null,
+    motivoDaPerda: properties.motivo_da_perda || null,
+    lastModifiedDate: properties.hs_lastmodifieddate || null,
   };
 }
 
-// ==================== Busca de contatos ====================
-
-/**
- * Busca contatos por um campo. Suporta operador IN.
- */
-async function searchContactByField(propertyName, value, operator = 'EQ', limit = 1) {
-  const filter = operator === 'IN'
-    ? [{ propertyName, operator, values: Array.isArray(value) ? value : [value] }]
-    : [{ propertyName, operator, value }];
-
-  try {
-    const response = await hubspotClient.crm.contacts.searchApi.doSearch({
-      filterGroups: [{ filters: filter }],
-      properties: CONTACT_PROPERTIES,
-      limit,
-    });
-    return response.results || [];
-  } catch (error) {
-    console.error(`❌ Erro ao buscar por ${propertyName} (${operator}):`, error.message);
-    return [];
-  }
+async function getContact(contactId, properties = CONTACT_PROPERTIES) {
+  return request(
+    `/crm/v3/objects/contacts/${id(contactId)}?properties=${encodeURIComponent(properties.join(','))}`
+  );
 }
 
-async function searchContactByPhone(phoneRaw, phoneDigits) {
-  const variants = buildPhoneVariants(phoneRaw, phoneDigits);
+async function getDeal(dealId) {
+  return request(
+    `/crm/v3/objects/deals/${id(dealId)}?properties=${encodeURIComponent(DEAL_PROPERTIES.join(','))}`
+  );
+}
 
-  for (const value of variants) {
-    const byPhone = await searchContactByField('phone', value, 'EQ', 5);
-    const matchPhone = byPhone.find(contact => {
-      const props = contact.properties || {};
-      return phonesMatch(props.phone, phoneDigits) ||
-             phonesMatch(props.hs_whatsapp_phone_number, phoneDigits);
-    });
-    if (matchPhone) {
-      console.log(`✅ Contato encontrado via phone EQ "${value}" (id=${matchPhone.id})`);
-      return matchPhone;
+async function associationIds(fromType, fromId, toType) {
+  const ids = new Set();
+  const cursors = new Set();
+  let after;
+  do {
+    const query = new URLSearchParams({ limit: '500' });
+    if (after !== undefined) query.set('after', String(after));
+    const data = await request(
+      `/crm/v4/objects/${fromType}/${id(fromId)}/associations/${toType}?${query}`
+    );
+    for (const association of data.results || []) {
+      ids.add(id(association.toObjectId, 'Registro associado'));
     }
+    const next = data.paging?.next?.after;
+    after = next === undefined || next === null ? undefined : String(next);
+    if (after !== undefined) {
+      if (cursors.has(after)) throw hubError('Cursor de associações repetido; leitura interrompida.');
+      cursors.add(after);
+    }
+  } while (after !== undefined);
+  return [...ids];
+}
 
-    const byWhats = await searchContactByField('hs_whatsapp_phone_number', value, 'EQ', 5);
-    const matchWhats = byWhats.find(contact => {
-      const props = contact.properties || {};
-      return phonesMatch(props.phone, phoneDigits) ||
-             phonesMatch(props.hs_whatsapp_phone_number, phoneDigits);
-    });
-    if (matchWhats) {
-      console.log(`✅ Contato encontrado via hs_whatsapp_phone_number EQ "${value}" (id=${matchWhats.id})`);
-      return matchWhats;
-    }
+async function getDealsByIds(dealIds = []) {
+  const results = [];
+  for (const dealId of [...new Set(dealIds.map((value) => id(value)))]) {
+    results.push(mapDeal(await getDeal(dealId)));
   }
+  return results;
+}
 
-  console.warn('⚠️ Busca por propriedade falhou. Tentando busca textual como fallback...');
-  for (const query of variants) {
-    try {
-      const response = await hubspotClient.crm.contacts.searchApi.doSearch({
-        query,
+export async function getContactDeals(contactId) {
+  await accountReady();
+  return getDealsByIds(await associationIds('contacts', contactId, 'deals'));
+}
+
+function normalizePhone(value) {
+  return optionalText(value).replace(/\D/g, '');
+}
+
+function nationalPhone(value) {
+  const digits = normalizePhone(value);
+  return digits.startsWith('55') && digits.length > 11 ? digits.slice(2) : digits;
+}
+
+function phonesMatch(a, b) {
+  const left = nationalPhone(a);
+  const right = nationalPhone(b);
+  return left.length >= 10 && left === right;
+}
+
+function buildPhoneVariants(phone) {
+  const raw = optionalText(phone);
+  const digits = normalizePhone(raw);
+  const national = nationalPhone(raw);
+  return [
+    ...new Set(
+      [
+        raw,
+        digits,
+        national,
+        national ? `55${national}` : '',
+        national ? `+55${national}` : '',
+      ].filter(Boolean)
+    ),
+  ];
+}
+
+async function searchContacts(payload) {
+  const results = [];
+  const cursors = new Set();
+  let after;
+  do {
+    const data = await request('/crm/v3/objects/contacts/search', {
+      method: 'POST',
+      readOnly: true,
+      body: {
+        ...payload,
         properties: CONTACT_PROPERTIES,
-        limit: 10,
-      });
-      if (response.results?.length) {
-        const match = response.results.find(contact => {
-          const props = contact.properties || {};
-          const phoneValues = [props.phone, props.hs_whatsapp_phone_number].filter(Boolean);
-          return phoneValues.some(contactPhone => phonesMatch(contactPhone, phoneDigits));
-        });
-        if (match) {
-          console.log(`✅ Contato encontrado via query textual "${query}" (id=${match.id})`);
-          return match;
-        }
+        limit: 100,
+        ...(after === undefined ? {} : { after }),
+      },
+    });
+    results.push(...(data.results || []));
+    const next = data.paging?.next?.after;
+    after = next === undefined || next === null ? undefined : String(next);
+    if (after !== undefined) {
+      if (cursors.has(after)) throw hubError('Cursor de pesquisa repetido.');
+      cursors.add(after);
+    }
+  } while (after !== undefined);
+  return results;
+}
+
+async function searchContactByField(propertyName, value) {
+  return searchContacts({
+    filterGroups: [{ filters: [{ propertyName, operator: 'EQ', value }] }],
+  });
+}
+
+function chooseUnique(results) {
+  const unique = [...new Map(results.map((contact) => [String(contact.id), contact])).values()];
+  if (unique.length > 1) {
+    throw hubError(
+      'Mais de um contato corresponde à busca. Selecione o registro antes de movimentar.',
+      {
+        blocked: true,
+        code: 'AMBIGUOUS_CONTACT',
+        candidateIds: unique.map((contact) => String(contact.id)),
       }
-    } catch (error) {
-      console.error(`❌ Erro na busca textual por telefone "${query}":`, error.message);
-    }
+    );
   }
-
-  console.warn('⚠️ Nenhum contato encontrado pelo telefone (nem por propriedade nem textual).');
-  return null;
+  return unique[0] || null;
 }
 
-/**
- * Escolhe o melhor contato entre vários resultados com base em score:
- *  - +3 se telefone bate
- *  - +2 se e-mail bate
- *  - +2 se CPF bate
- *  - +1 se tem owner atribuído
- *
- * Retorna o de maior score, ou o primeiro se todos empatarem em 0.
- */
-function pickBestContact(results, { emailClean, phoneClean, cpfClean }) {
-  if (!Array.isArray(results) || results.length === 0) return null;
-  if (results.length === 1) return results[0];
-
-  let best = null;
-  let bestScore = -1;
-
-  for (const contact of results) {
-    const props = contact.properties || {};
-    let score = 0;
-
-    if (phoneClean) {
-      const phoneValues = [props.phone, props.hs_whatsapp_phone_number].filter(Boolean);
-      if (phoneValues.some(p => phonesMatch(p, phoneClean))) score += 3;
-    }
-
-    if (emailClean) {
-      const contactEmail = (props.email || '').trim().toLowerCase();
-      if (contactEmail && contactEmail === emailClean) score += 2;
-    }
-
-    if (cpfClean) {
-      const contactCpf = normalizePhone(props.contact_cpf || '');
-      if (contactCpf && contactCpf === cpfClean) score += 2;
-    }
-
-    if (props.hubspot_owner_id) score += 1;
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = contact;
+async function searchContactByPhone(phone) {
+  const results = [];
+  for (const variant of buildPhoneVariants(phone)) {
+    for (const property of ['phone', 'hs_whatsapp_phone_number']) {
+      const contacts = await searchContactByField(property, variant);
+      results.push(
+        ...contacts.filter((contact) =>
+          [contact.properties?.phone, contact.properties?.hs_whatsapp_phone_number].some((value) =>
+            phonesMatch(value, phone)
+          )
+        )
+      );
     }
   }
-
-  console.log(`🎯 [pickBestContact] ${results.length} candidatos, escolhido id=${best?.id} com score=${bestScore}`);
-  return best || results[0];
+  if (!results.length) {
+    const contacts = await searchContacts({ query: normalizePhone(phone) });
+    results.push(
+      ...contacts.filter((contact) =>
+        [contact.properties?.phone, contact.properties?.hs_whatsapp_phone_number].some((value) =>
+          phonesMatch(value, phone)
+        )
+      )
+    );
+  }
+  return chooseUnique(results);
 }
 
-function validateContact(contact, { emailClean, phoneClean, cpfClean, matchedBy }) {
+function validateContact(contact, input) {
   const props = contact.properties || {};
-  const divergencias = [];
-
-  if (emailClean) {
-    const contactEmail = (props.email || '').trim().toLowerCase();
-    if (contactEmail && contactEmail !== emailClean) divergencias.push('e-mail');
+  const divergences = [];
+  if (input.email && props.email && cleanEmail(props.email) !== input.email) {
+    divergences.push('e-mail');
   }
-
-  if (phoneClean && matchedBy !== 'phone') {
-    const phoneValues = [props.phone, props.hs_whatsapp_phone_number].filter(Boolean);
-    const matchesPhone = phoneValues.some(contactPhone => phonesMatch(contactPhone, phoneClean));
-    if (phoneValues.length > 0 && !matchesPhone) divergencias.push('telefone');
+  const phones = [props.phone, props.hs_whatsapp_phone_number].filter(Boolean);
+  if (input.phone && phones.length && !phones.some((phone) => phonesMatch(phone, input.phone))) {
+    divergences.push('telefone');
   }
-
-  if (cpfClean) {
-    const contactCpf = normalizePhone(props.contact_cpf || '');
-    if (contactCpf && contactCpf !== cpfClean) divergencias.push('CPF');
+  if (input.cpf && props.contact_cpf && normalizePhone(props.contact_cpf) !== input.cpf) {
+    divergences.push('CPF');
   }
-
-  if (divergencias.length > 0) {
-    return {
-      found: true,
-      divergente: true,
-      contact,
-      motivo: `Dados divergentes do cadastro: ${divergencias.join(', ')}`,
-    };
-  }
-
-  return { found: true, divergente: false, contact };
+  return {
+    found: true,
+    divergente: divergences.length > 0,
+    contact,
+    ...(divergences.length
+      ? { motivo: `Dados divergentes do cadastro: ${divergences.join(', ')}` }
+      : {}),
+  };
 }
 
-export async function findContactAndValidate({ email, phone, cpf }) {
-  const emailClean = (email || '').trim().toLowerCase();
-  const phoneRaw = (phone || '').trim();
-  const phoneClean = normalizePhone(phone);
-  const cpfClean = normalizePhone(cpf);
-
-  if (phoneClean.length >= 10) {
-    const contact = await searchContactByPhone(phoneRaw, phoneClean);
-    if (contact) {
-      return validateContact(contact, { emailClean, phoneClean, cpfClean, matchedBy: 'phone' });
-    }
+export async function findContactAndValidate({ email, phone, cpf } = {}) {
+  await accountReady();
+  const input = {
+    email: cleanEmail(email),
+    phone: normalizePhone(phone),
+    cpf: normalizePhone(cpf),
+  };
+  if (optionalText(cpf) && input.cpf.length !== 11) {
+    throw hubError('CPF deve conter 11 dígitos.', { blocked: true });
   }
-
-  if (emailClean) {
-    const results = await searchContactByField('email', emailClean, 'EQ', 5);
-    if (results.length > 0) {
-      const best = pickBestContact(results, { emailClean, phoneClean, cpfClean });
-      return validateContact(best, { emailClean, phoneClean, cpfClean, matchedBy: 'email' });
-    }
+  let contact = null;
+  if (nationalPhone(phone).length >= 10) contact = await searchContactByPhone(phone);
+  if (!contact && input.email) {
+    contact = chooseUnique(await searchContactByField('email', input.email));
   }
-
-  if (cpfClean.length === 11) {
-    const results = await searchContactByField('contact_cpf', cpfClean, 'EQ', 5);
-    if (results.length > 0) {
-      const best = pickBestContact(results, { emailClean, phoneClean, cpfClean });
-      return validateContact(best, { emailClean, phoneClean, cpfClean, matchedBy: 'cpf' });
-    }
+  if (!contact && input.cpf) {
+    contact = chooseUnique(await searchContactByField('contact_cpf', input.cpf));
   }
-
-  return { found: false, divergente: false, contact: null };
+  return contact
+    ? validateContact(contact, input)
+    : { found: false, divergente: false, contact: null };
 }
 
-export async function searchContact({ email, phone, cpf }) {
-  const emailClean = (email || '').trim().toLowerCase();
-  const phoneRaw = (phone || '').trim();
-  const phoneClean = normalizePhone(phone);
-  const cpfClean = normalizePhone(cpf);
-
-  if (phoneClean.length >= 10) {
-    const contact = await searchContactByPhone(phoneRaw, phoneClean);
-    if (contact) return contact;
+export async function searchContact(input = {}) {
+  const result = await findContactAndValidate(input);
+  if (result.divergente) {
+    throw hubError(result.motivo, { blocked: true, code: 'CONTACT_DATA_MISMATCH' });
   }
-  if (emailClean) {
-    const results = await searchContactByField('email', emailClean, 'EQ', 5);
-    if (results.length > 0) return pickBestContact(results, { emailClean, phoneClean, cpfClean });
-  }
-  if (cpfClean.length === 11) {
-    const results = await searchContactByField('contact_cpf', cpfClean, 'EQ', 5);
-    if (results.length > 0) return pickBestContact(results, { emailClean, phoneClean, cpfClean });
-  }
-  return null;
+  return result.contact;
 }
 
-// ==================== Contatos: criar / atualizar ====================
-
-export async function createContact({ firstName, lastName, email, phone, cpf, origem, ownerId }) {
-  const properties = { firstname: firstName, lastname: lastName };
-
-  if (email && email.trim()) properties.email = email.trim().toLowerCase();
-  if (phone && phone.trim()) {
-    properties.phone = phone.trim();
-    properties.hs_whatsapp_phone_number = phone.trim();
+export async function findOwnerIdByEmailStrict(email) {
+  const normalized = cleanEmail(email);
+  if (!normalized) return null;
+  await accountReady();
+  const data = await request(
+    `/crm/v3/owners?email=${encodeURIComponent(normalized)}&archived=false`
+  );
+  const matches = (data.results || []).filter(
+    (owner) => !owner.archived && cleanEmail(owner.email) === normalized
+  );
+  if (data.paging?.next || matches.length > 1) {
+    throw hubError('Consulta de proprietário inconclusiva ou ambígua.', { blocked: true });
   }
-  if (cpf) properties.contact_cpf = normalizePhone(cpf);
-  if (origem) properties.contact_fonte = origem;
-  if (ownerId) properties.hubspot_owner_id = ownerId;
+  return matches.length ? id(matches[0].id, 'Proprietário') : null;
+}
 
-  console.log('✍️ [createContact] properties:', JSON.stringify(properties));
+export async function findOwnerIdByEmail(email) {
+  return findOwnerIdByEmailStrict(email);
+}
 
+async function activeOwner(ownerId) {
+  const owner = await request(`/crm/v3/owners/${id(ownerId, 'Proprietário')}`);
+  if (owner.archived || !owner.email || String(owner.id) !== String(ownerId)) {
+    throw hubError('Proprietário destino inválido ou arquivado.', { blocked: true });
+  }
+  return owner;
+}
+
+export async function getHubSpotOwnerEmail(ownerId) {
+  if (!ownerId) return null;
+  await accountReady();
+  const owner = await request(`/crm/v3/owners/${id(ownerId, 'Proprietário')}`);
+  return cleanEmail(owner.email) || null;
+}
+
+export async function createContact({ firstName, lastName, email, phone, cpf, origem, ownerId } = {}) {
+  await accountReady();
+  const properties = {
+    firstname: optionalText(firstName),
+    lastname: optionalText(lastName),
+  };
+  const normalizedEmail = cleanEmail(email);
+  if (normalizedEmail) properties.email = normalizedEmail;
+  if (optionalText(phone)) {
+    properties.phone = optionalText(phone);
+    properties.hs_whatsapp_phone_number = optionalText(phone);
+  }
+  if (optionalText(cpf)) {
+    const cleaned = normalizePhone(cpf);
+    if (cleaned.length !== 11) {
+      throw hubError('CPF deve conter 11 dígitos.', { blocked: true });
+    }
+    properties.contact_cpf = cleaned;
+  }
+  if (origem) properties.contact_fonte = optionalText(origem);
+  if (ownerId) {
+    await activeOwner(ownerId);
+    properties.hubspot_owner_id = id(ownerId);
+  }
   try {
-    return await hubspotClient.crm.contacts.basicApi.create({ properties, associations: [] });
+    return await request('/crm/v3/objects/contacts', {
+      method: 'POST',
+      body: { properties, associations: [] },
+    });
   } catch (error) {
-    if (error.code === 409) {
-      console.warn('⚠️ [createContact] Contato já existe. Buscando ID existente...');
-      const match = error.message?.match(/Existing ID: (\d+)/);
-      if (match) {
-        try {
-          return await hubspotClient.crm.contacts.basicApi.getById(match[1], CONTACT_PROPERTIES);
-        } catch (getErr) {
-          console.error('❌ Erro ao buscar contato existente:', getErr.message);
+    if (error.httpStatus === 409 && normalizedEmail) {
+      const existing = chooseUnique(await searchContactByField('email', normalizedEmail));
+      if (existing) {
+        const validated = validateContact(existing, {
+          email: normalizedEmail,
+          phone: normalizePhone(phone),
+          cpf: normalizePhone(cpf),
+        });
+        if (validated.divergente) {
+          throw hubError(validated.motivo, { blocked: true });
         }
+        return existing;
       }
     }
     throw error;
@@ -422,524 +551,650 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
 }
 
 export async function updateContactOwner(contactId, ownerId) {
-  if (!contactId || !ownerId) return null;
-  try {
-    return await hubspotClient.crm.contacts.basicApi.update(contactId, {
-      properties: { hubspot_owner_id: ownerId },
-    });
-  } catch (error) {
-    console.error('❌ [updateContactOwner] Erro:', error.message);
-    throw error;
-  }
-}
-
-export async function findOwnerIdByEmail(email) {
-  if (!email) return null;
-  try {
-    const url = `https://api.hubapi.com/crm/v3/owners?email=${encodeURIComponent(email)}`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
-        'Content-Type': 'application/json',
-      },
-    });
-    if (!response.ok) throw new Error(`Owners search error ${response.status}`);
-    const data = await response.json();
-    const owner = data.results?.[0];
-    return owner ? owner.id : null;
-  } catch (error) {
-    console.error('❌ [findOwnerIdByEmail] Erro:', error.message);
-    return null;
-  }
-}
-
-// ==================== Deals: leitura ====================
-
-async function getDealsByIds(dealIds = []) {
-  if (!dealIds.length) return [];
-
-  try {
-    const dealSearchUrl = 'https://api.hubapi.com/crm/v3/objects/deals/search';
-    const dealResponse = await fetch(dealSearchUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        filterGroups: [{
-          filters: [{ propertyName: 'hs_object_id', operator: 'IN', values: dealIds }],
-        }],
-        properties: DEAL_PROPERTIES,
-        limit: 100,
-      }),
-    });
-
-    if (!dealResponse.ok) {
-      throw new Error(`Deal search error ${dealResponse.status}: ${await dealResponse.text()}`);
-    }
-
-    const dealData = await dealResponse.json();
-    return (dealData.results || []).map(deal => ({
-      id: deal.id,
-      dealName: deal.properties?.dealname || null,
-      pipeline: deal.properties?.pipeline || null,
-      stage: deal.properties?.dealstage || null,
-      ownerId: deal.properties?.hubspot_owner_id || null,
-      notesLastUpdated: deal.properties?.notes_last_updated || null,
-      motivoDaPerda: deal.properties?.motivo_da_perda || null,
-      lastModifiedDate: deal.properties?.hs_lastmodifieddate || null,
-    }));
-  } catch (error) {
-    console.error('❌ [getDealsByIds] Erro:', error.message);
-    throw error;
-  }
-}
-
-export async function getContactDeals(contactId) {
-  try {
-    const assocUrl = `https://api.hubapi.com/crm/v3/associations/contacts/deals/batch/read`;
-    const assocResponse = await fetch(assocUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ inputs: [{ id: contactId }] }),
-    });
-    if (!assocResponse.ok) throw new Error(`Associação error ${assocResponse.status}`);
-
-    const assocData = await assocResponse.json();
-    const dealIds = assocData.results?.[0]?.to?.map(item => item.id) || [];
-    if (dealIds.length === 0) return [];
-
-    return await getDealsByIds(dealIds);
-  } catch (error) {
-    console.error('❌ [getContactDeals] Erro:', error.message);
-    throw error;
-  }
+  await accountReady();
+  id(contactId, 'Contato');
+  await activeOwner(ownerId);
+  return request(`/crm/v3/objects/contacts/${id(contactId)}`, {
+    method: 'PATCH',
+    body: { properties: { hubspot_owner_id: id(ownerId) } },
+  });
 }
 
 export async function getFirstStageId(pipelineId) {
-  try {
-    const url = `https://api.hubapi.com/crm/v3/pipelines/deals/${pipelineId}/stages`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
-        'Content-Type': 'application/json',
-      },
+  await accountReady();
+  const data = await request(`/crm/v3/pipelines/deals/${id(pipelineId)}/stages`);
+  const stages = (data.results || [])
+    .filter((stage) => !stage.archived)
+    .sort((a, b) => Number(a.displayOrder) - Number(b.displayOrder));
+  return stages[0]?.id ? String(stages[0].id) : null;
+}
+
+async function validateStage(pipelineId, stageId) {
+  const data = await request(`/crm/v3/pipelines/deals/${id(pipelineId)}/stages`);
+  if (!(data.results || []).some(
+    (stage) => String(stage.id) === String(stageId) && !stage.archived
+  )) {
+    throw hubError('Etapa não pertence ao pipeline configurado.', {
+      blocked: true,
+      code: 'INVALID_STAGE',
     });
-    if (!response.ok) throw new Error(`Get stages error ${response.status}`);
-    const data = await response.json();
-    const stages = data.results || [];
-    return stages.length > 0 ? stages[0].id : null;
-  } catch (error) {
-    console.error('❌ [getFirstStageId] Erro:', error.message);
-    return null;
   }
 }
 
-// ==================== Deals: escrita ====================
+async function dealContactAssociationType() {
+  const data = await request('/crm/v4/associations/deals/contacts/labels');
+  const types = (data.results || []).filter(
+    (type) => type.category === 'HUBSPOT_DEFINED' && type.label === null
+  );
+  if (types.length !== 1) {
+    throw hubError('Não foi possível resolver a associação padrão de negócio para contato.');
+  }
+  return Number(id(types[0].typeId, 'Tipo de associação'));
+}
 
 export async function createDealForContact(contactId, dealName, pipelineId, stageId = null, ownerId = null) {
-  try {
-    let finalStageId = stageId;
-    if (!finalStageId) {
-      finalStageId = await getFirstStageId(pipelineId);
-      if (!finalStageId) throw new Error('Não foi possível obter um estágio válido.');
-    }
-
-    const properties = {
-      dealname: dealName,
-      pipeline: pipelineId,
-      dealstage: finalStageId,
-      motivo_da_perda: '',
-    };
-    if (ownerId) properties.hubspot_owner_id = ownerId;
-
-    const createDealUrl = 'https://api.hubapi.com/crm/v3/objects/deals';
-    const createDealResponse = await fetch(createDealUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
-        'Content-Type': 'application/json',
+  await accountReady();
+  id(contactId, 'Contato');
+  id(pipelineId, 'Pipeline');
+  const finalStage = stageId || (await getFirstStageId(pipelineId));
+  id(finalStage, 'Etapa');
+  await validateStage(pipelineId, finalStage);
+  if (ownerId) await activeOwner(ownerId);
+  const associationTypeId = await dealContactAssociationType();
+  return request('/crm/v3/objects/deals', {
+    method: 'POST',
+    body: {
+      properties: {
+        dealname: optionalText(dealName),
+        pipeline: String(pipelineId),
+        dealstage: String(finalStage),
+        motivo_da_perda: '',
+        ...(ownerId ? { hubspot_owner_id: id(ownerId) } : {}),
       },
-      body: JSON.stringify({
-        properties,
-        associations: [{
-          to: { id: contactId },
-          types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }],
-        }],
-      }),
-    });
-    if (!createDealResponse.ok) {
-      throw new Error(`Create deal error ${createDealResponse.status}: ${await createDealResponse.text()}`);
-    }
-    const dealData = await createDealResponse.json();
-    console.log('✅ [createDealForContact] Negócio criado:', dealData.id);
-    return dealData;
-  } catch (error) {
-    console.error('❌ [createDealForContact] Erro:', error.message);
-    throw error;
-  }
+      associations: [
+        {
+          to: { id: String(contactId) },
+          types: [
+            { associationCategory: 'HUBSPOT_DEFINED', associationTypeId },
+          ],
+        },
+      ],
+    },
+  });
 }
 
-/**
- * Move um negócio para o pipeline Closer, fase Em Contato.
- *
- * - Limpa `motivo_da_perda`.
- * - Não mexe em `notes_last_updated` (essa propriedade reflete notas/engajamentos,
- *   não updates de propriedade).
- *
- * Retorna { deal, lastUpdatedAt }, onde `lastUpdatedAt` é `hs_lastmodifieddate`
- * retornado pelo HubSpot após o PATCH — ou o horário local como fallback.
- */
 export async function moveDealToCloserEmContato(dealId, ownerId = null) {
-  try {
-    const properties = {
-      pipeline: PIPELINE_CLOSER_ID,
-      dealstage: STAGE_EM_CONTATO_ID,
-      motivo_da_perda: '',
-    };
-    if (ownerId) properties.hubspot_owner_id = ownerId;
-
-    const updateUrl = `https://api.hubapi.com/crm/v3/objects/deals/${dealId}?properties=hs_lastmodifieddate,notes_last_updated`;
-    const updateResponse = await fetch(updateUrl, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${process.env.CHV_Hubspot}`,
-        'Content-Type': 'application/json',
+  await accountReady();
+  await validateStage(PIPELINE_CLOSER_ID, STAGE_EM_CONTATO_ID);
+  if (ownerId) await activeOwner(ownerId);
+  const deal = await request(`/crm/v3/objects/deals/${id(dealId)}`, {
+    method: 'PATCH',
+    body: {
+      properties: {
+        pipeline: PIPELINE_CLOSER_ID,
+        dealstage: STAGE_EM_CONTATO_ID,
+        motivo_da_perda: '',
+        ...(ownerId ? { hubspot_owner_id: id(ownerId) } : {}),
       },
-      body: JSON.stringify({ properties }),
-    });
-
-    if (!updateResponse.ok) {
-      throw new Error(`Update deal error ${updateResponse.status}: ${await updateResponse.text()}`);
-    }
-
-    const updated = await updateResponse.json();
-    const lastUpdatedAt =
-      updated?.properties?.hs_lastmodifieddate || new Date().toISOString();
-
-    console.log('✅ [moveDealToCloserEmContato] Negócio movido:', dealId, '| lastModifiedDate:', lastUpdatedAt);
-
-    return { deal: updated, lastUpdatedAt };
-  } catch (error) {
-    console.error('❌ [moveDealToCloserEmContato] Erro:', error.message);
-    throw error;
-  }
+    },
+  });
+  return { deal, lastUpdatedAt: deal.properties?.hs_lastmodifieddate || null };
 }
 
-// ==================== Regra principal ====================
+function hoursSince(value) {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp) || timestamp > Date.now()) return null;
+  return (Date.now() - timestamp) / 3600000;
+}
 
-/**
- * Garante o lead no pipeline Closer.
- *
- * Regra 6 (deal no Closer com outro owner): em vez de bloquear sempre,
- * avalia notes_last_updated. Se a janela expirou (72h em Coleta de documentação,
- * 24h em Entrada/Em Contato), reatribui. Caso contrário, bloqueia.
- *
- * Todas as respostas incluem `lastUpdatedAt` (data/hora da última atualização
- * do card) para devolver ao usuário.
- */
-export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
-  if (!ownerId) {
-    return {
-      blocked: true,
-      message: 'Movimentação bloqueada: responsável de destino não informado',
-      pipeline: null,
-      stage: null,
-      pipelineNome: null,
-      stageNome: null,
-      dealId: null,
-      ruleApplied: 'owner_missing',
-      lastUpdatedAt: null,
-    };
-  }
-
-  const deals = await getContactDeals(contactId);
-
-  // 1. Sem negócio
-  if (deals.length === 0) {
-    const newDeal = await createDealForContact(contactId, dealName, PIPELINE_BASE_LEADS_ID, null, ownerId);
-    const { lastUpdatedAt } = await moveDealToCloserEmContato(newDeal.id, ownerId);
-    await updateContactOwner(contactId, ownerId);
-
-    return {
-      blocked: false,
-      dealId: newDeal.id,
-      pipeline: PIPELINE_CLOSER_ID,
-      stage: STAGE_EM_CONTATO_ID,
-      pipelineNome: 'Closer',
-      stageNome: 'Em Contato',
-      ruleApplied: 'created_and_moved',
-      lastUpdatedAt,
-    };
-  }
-
-  // 2. Negócio no Base de Leads
-  const dealBase = deals.find(d => String(d.pipeline) === String(PIPELINE_BASE_LEADS_ID));
-  if (dealBase) {
-    const { lastUpdatedAt } = await moveDealToCloserEmContato(dealBase.id, ownerId);
-    await updateContactOwner(contactId, ownerId);
-
-    return {
-      blocked: false,
-      dealId: dealBase.id,
-      pipeline: PIPELINE_CLOSER_ID,
-      stage: STAGE_EM_CONTATO_ID,
-      pipelineNome: 'Closer',
-      stageNome: 'Em Contato',
-      ruleApplied: 'base_to_closer',
-      lastUpdatedAt,
-    };
-  }
-
-  // 3. Negócio no Closer, fase Desqualificado
-  const dealDesqualificado = deals.find(
-    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) &&
-         String(d.stage) === String(STAGE_DESQUALIFICADO_ID)
-  );
-  if (dealDesqualificado) {
-    const { lastUpdatedAt } = await moveDealToCloserEmContato(dealDesqualificado.id, ownerId);
-    await updateContactOwner(contactId, ownerId);
-
-    return {
-      blocked: false,
-      dealId: dealDesqualificado.id,
-      pipeline: PIPELINE_CLOSER_ID,
-      stage: STAGE_EM_CONTATO_ID,
-      pipelineNome: 'Closer',
-      stageNome: 'Em Contato',
-      ruleApplied: 'desqualificado_to_em_contato',
-      lastUpdatedAt,
-    };
-  }
-
-  // 4. Negócio no Closer, sem owner
-  const dealCloserSemOwner = deals.find(
-    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) && !d.ownerId
-  );
-  if (dealCloserSemOwner) {
-    const { lastUpdatedAt } = await moveDealToCloserEmContato(dealCloserSemOwner.id, ownerId);
-    await updateContactOwner(contactId, ownerId);
-
-    return {
-      blocked: false,
-      dealId: dealCloserSemOwner.id,
-      pipeline: PIPELINE_CLOSER_ID,
-      stage: STAGE_EM_CONTATO_ID,
-      pipelineNome: 'Closer',
-      stageNome: 'Em Contato',
-      ruleApplied: 'closer_without_owner',
-      lastUpdatedAt,
-    };
-  }
-
-  // 5. Negócio no Closer com o mesmo owner (idempotente)
-  const dealMesmoOwner = deals.find(
-    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) &&
-         String(d.ownerId || '') === String(ownerId || '')
-  );
-  if (dealMesmoOwner) {
-    await updateContactOwner(contactId, ownerId);
-
-    return {
-      blocked: false,
-      alreadyAssigned: true,
-      dealId: dealMesmoOwner.id,
-      message: `Card já está com o colaborador '${collaboratorName}'`,
-      pipeline: dealMesmoOwner.pipeline,
-      stage: dealMesmoOwner.stage,
-      pipelineNome: PIPELINE_NAMES[dealMesmoOwner.pipeline] || dealMesmoOwner.pipeline,
-      stageNome: STAGE_NAMES[dealMesmoOwner.stage] || dealMesmoOwner.stage,
-      ruleApplied: 'already_assigned',
-      lastUpdatedAt: dealMesmoOwner.lastModifiedDate || dealMesmoOwner.notesLastUpdated || null,
-    };
-  }
-
-  // 6. Negócio no Closer com outro owner → regra temporal
-  const dealCloserOutroOwner = deals.find(
-    d => String(d.pipeline) === String(PIPELINE_CLOSER_ID) &&
-         d.ownerId &&
-         String(d.ownerId) !== String(ownerId || '')
-  );
-  if (dealCloserOutroOwner) {
-    const movementCheck = canMoveByLastModifiedDate(dealCloserOutroOwner);
-
-    if (movementCheck.allowed) {
-      const { lastUpdatedAt } = await moveDealToCloserEmContato(dealCloserOutroOwner.id, ownerId);
-      await updateContactOwner(contactId, ownerId);
-
-      return {
-        blocked: false,
-        dealId: dealCloserOutroOwner.id,
-        pipeline: PIPELINE_CLOSER_ID,
-        stage: STAGE_EM_CONTATO_ID,
-        pipelineNome: 'Closer',
-        stageNome: 'Em Contato',
-        ruleApplied: 'reassigned_by_notes_last_updated',
-        message: movementCheck.reason,
-        notesLastUpdated: movementCheck.lastUpdated,
-        hoursSinceNote: movementCheck.hoursSinceNote,
-        requiredHours: movementCheck.requiredHours,
-        lastUpdatedAt,
-      };
-    }
-
-    return {
-      blocked: true,
-      dealId: dealCloserOutroOwner.id,
-      message: `Movimentação bloqueada: ${movementCheck.reason}`,
-      pipeline: dealCloserOutroOwner.pipeline,
-      stage: dealCloserOutroOwner.stage,
-      pipelineNome: PIPELINE_NAMES[dealCloserOutroOwner.pipeline] || dealCloserOutroOwner.pipeline,
-      stageNome: STAGE_NAMES[dealCloserOutroOwner.stage] || dealCloserOutroOwner.stage,
-      ruleApplied: 'owned_by_another_recent_activity',
-      notesLastUpdated: movementCheck.lastUpdated,
-      hoursSinceNote: movementCheck.hoursSinceNote,
-      requiredHours: movementCheck.requiredHours,
-      lastUpdatedAt: movementCheck.lastUpdated,
-    };
-  }
-
-  // 7. Fallback
-  const primeiro = deals[0];
+function temporalCheck(deal) {
+  id(STAGE_COLETA_DOCUMENTACAO_ID, 'HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID');
+  id(STAGE_ENTRADA_ID, 'HUBSPOT_STAGE_ENTRADA_ID');
+  const required = {
+    [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
+    [STAGE_ENTRADA_ID]: 24,
+    [STAGE_EM_CONTATO_ID]: 24,
+  };
+  const hours = hoursSince(deal.lastModifiedDate);
+  const requiredHours = required[String(deal.stage)];
+  const allowed = hours !== null && requiredHours !== undefined && hours > requiredHours;
+  const reason =
+    hours === null
+      ? 'Data da última modificação ausente, inválida ou futura'
+      : requiredHours === undefined
+        ? 'Etapa não elegível para movimentação por tempo'
+        : allowed
+          ? `Última modificação há mais de ${requiredHours}h`
+          : `Prazo de mais de ${requiredHours}h desde a última modificação ainda não atingido`;
   return {
-    blocked: true,
-    dealId: primeiro?.id || null,
-    message: `Movimentação bloqueada: Card em pipeline '${PIPELINE_NAMES[primeiro?.pipeline] || primeiro?.pipeline}'`,
-    pipeline: primeiro?.pipeline || null,
-    stage: primeiro?.stage || null,
-    pipelineNome: PIPELINE_NAMES[primeiro?.pipeline] || primeiro?.pipeline || null,
-    stageNome: STAGE_NAMES[primeiro?.stage] || primeiro?.stage || null,
-    ruleApplied: 'fallback_block',
-    lastUpdatedAt: primeiro?.lastModifiedDate || primeiro?.notesLastUpdated || null,
+    allowed,
+    reason,
+    requiredHours: requiredHours ?? null,
+    hoursSinceNote: hours,
+    lastUpdated: deal.lastModifiedDate || null,
   };
 }
 
-// ==================== Compatibilidade ====================
+function assignmentResult(deal, extras = {}) {
+  return {
+    blocked: false,
+    dealId: deal?.id || null,
+    pipeline: deal?.pipeline || null,
+    stage: deal?.stage || null,
+    pipelineNome: PIPELINE_NAMES[deal?.pipeline] || deal?.pipeline || null,
+    stageNome: STAGE_NAMES[deal?.stage] || deal?.stage || null,
+    lastUpdatedAt: deal?.lastModifiedDate || null,
+    ...extras,
+  };
+}
+
+export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
+  if (!ownerId) {
+    return assignmentResult(null, {
+      blocked: true,
+      message: 'Responsável destino não informado.',
+      ruleApplied: 'owner_missing',
+    });
+  }
+  await accountReady();
+  await activeOwner(ownerId);
+  return withLocks([`contact:${id(contactId)}`], async () => {
+    const deals = await getContactDeals(contactId);
+    if (deals.length > 1) {
+      return assignmentResult(null, {
+        blocked: true,
+        message: 'Contato associado a vários cards. Use o link do card correto.',
+        ruleApplied: 'ambiguous_deals',
+      });
+    }
+    let deal = deals[0];
+    let rule;
+    if (!deal) rule = 'created_and_moved';
+    else if (String(deal.pipeline) === PIPELINE_BASE_LEADS_ID) rule = 'base_to_closer';
+    else if (String(deal.pipeline) !== PIPELINE_CLOSER_ID) {
+      return assignmentResult(deal, {
+        blocked: true,
+        message: 'Card fora dos pipelines permitidos.',
+        ruleApplied: 'fallback_block',
+      });
+    } else if (String(deal.stage) === STAGE_DESQUALIFICADO_ID) {
+      rule = 'desqualificado_to_em_contato';
+    } else if (!deal.ownerId) {
+      rule = 'closer_without_owner';
+    } else if (String(deal.ownerId) === String(ownerId)) {
+      await updateContactOwner(contactId, ownerId);
+      return assignmentResult(deal, {
+        alreadyAssigned: true,
+        ruleApplied: 'already_assigned',
+        message: `Card já está com o colaborador '${optionalText(collaboratorName)}'.`,
+      });
+    } else {
+      const check = temporalCheck(deal);
+      if (!check.allowed) {
+        return assignmentResult(deal, {
+          blocked: true,
+          message: check.reason,
+          ruleApplied: 'owned_by_another_recent_activity',
+          requiredHours: check.requiredHours,
+          hoursSinceNote: check.hoursSinceNote,
+          notesLastUpdated: check.lastUpdated,
+        });
+      }
+      rule = 'reassigned_by_last_modified_date';
+    }
+    const previousContact = await getContact(contactId, ['hubspot_owner_id']);
+    let writeAttempted = false;
+    let createdDealId = null;
+    try {
+      if (deal) {
+        const fresh = mapDeal(await getDeal(deal.id));
+        if (
+          ['pipeline', 'stage', 'ownerId', 'lastModifiedDate'].some(
+            (key) => String(fresh[key] || '') !== String(deal[key] || '')
+          )
+        ) {
+          throw hubError('Card mudou durante a validação.', {
+            blocked: true,
+            code: 'CONTEXT_CHANGED',
+          });
+        }
+      } else {
+        writeAttempted = true;
+        const created = await createDealForContact(
+          contactId,
+          dealName,
+          PIPELINE_BASE_LEADS_ID,
+          null,
+          ownerId
+        );
+        createdDealId = String(created.id);
+        deal = mapDeal(created);
+      }
+      writeAttempted = true;
+      await moveDealToCloserEmContato(deal.id, ownerId);
+      await updateContactOwner(contactId, ownerId);
+      const confirmedDeal = mapDeal(await getDeal(deal.id));
+      const confirmedContact = await getContact(contactId, ['hubspot_owner_id']);
+      if (
+        String(confirmedDeal.ownerId) !== String(ownerId) ||
+        confirmedDeal.pipeline !== PIPELINE_CLOSER_ID ||
+        confirmedDeal.stage !== STAGE_EM_CONTATO_ID ||
+        String(confirmedContact.properties?.hubspot_owner_id) !== String(ownerId)
+      ) {
+        throw hubError('Atribuição final não confirmada.', { code: 'CONFIRMATION_FAILED' });
+      }
+      return assignmentResult(confirmedDeal, { ruleApplied: rule });
+    } catch (error) {
+      if (writeAttempted) {
+        error.partialResult = {
+          dealId: deal?.id || null,
+          createdDealId,
+          contactId: String(contactId),
+          previousContactOwnerId: previousContact.properties?.hubspot_owner_id || '',
+          writeAttempted: true,
+        };
+        error.requiresReconciliation = true;
+        error.retryable = false;
+      }
+      throw error;
+    }
+  });
+}
 
 export async function verificarPipelineBaseELevio(contactId) {
   const deal = await findDealInBaseLeads(contactId);
-  if (!deal) return { noPipelineBase: false, noFaseEnvio: false, pipeline: null, stage: null };
   return {
-    noPipelineBase: String(deal.pipeline) === String(PIPELINE_BASE_LEADS_ID),
+    noPipelineBase: Boolean(deal),
     noFaseEnvio: false,
-    pipeline: deal.pipeline,
-    stage: deal.stage,
+    pipeline: deal?.pipeline || null,
+    stage: deal?.stage || null,
   };
 }
 
 export async function isContactInPipeline(contactId, pipelineId) {
-  const deals = await getContactDeals(contactId);
-  return deals.some(deal => String(deal.pipeline) === String(pipelineId));
+  return (await getContactDeals(contactId)).some(
+    (deal) => String(deal.pipeline) === String(pipelineId)
+  );
 }
 
 export async function findDealInBaseLeads(contactId) {
-  const deals = await getContactDeals(contactId);
-  return deals.find(deal => String(deal.pipeline) === String(PIPELINE_BASE_LEADS_ID)) || null;
+  const matches = (await getContactDeals(contactId)).filter(
+    (deal) => String(deal.pipeline) === PIPELINE_BASE_LEADS_ID
+  );
+  if (matches.length > 1) {
+    throw hubError('Mais de um card na Base de Leads.', { blocked: true });
+  }
+  return matches[0] || null;
 }
 
-// ==================== Validação final ====================
-
-export async function validateFinalAssignment(contactId, expectedOwnerId, expectedDealId = null) {
+export async function validateFinalAssignment(contactId, expectedOwnerId, expectedDealId = null, options = {}) {
+  await accountReady();
+  id(expectedOwnerId, 'Proprietário esperado');
   const deals = await getContactDeals(contactId);
-
-  console.log('[validateFinalAssignment] contactId=', contactId,
-    'expectedOwnerId=', expectedOwnerId,
-    'expectedDealId=', expectedDealId);
-  console.log('[validateFinalAssignment] deals associados:', deals.map(d => ({
-    id: d.id,
-    pipeline: d.pipeline,
-    stage: d.stage,
-    ownerId: d.ownerId,
-    notesLastUpdated: d.notesLastUpdated,
-  })));
-
-  let targetDeal = null;
-  let resolvedBy = null;
-
+  let target;
   if (expectedDealId) {
-    targetDeal = deals.find(d => String(d.id) === String(expectedDealId)) || null;
-    if (targetDeal) resolvedBy = 'expected_deal_id';
-    else console.warn(`⚠️ [validateFinalAssignment] expectedDealId=${expectedDealId} não está entre os deals. Tentando fallback...`);
+    target = deals.find((deal) => deal.id === String(expectedDealId));
+  } else if (deals.length === 1) {
+    target = deals[0];
   }
-
-  if (!targetDeal) {
-    targetDeal = deals.find(d => String(d.pipeline) === String(PIPELINE_CLOSER_ID)) || null;
-    if (targetDeal) resolvedBy = 'fallback_pipeline_closer';
-  }
-
-  if (!targetDeal && expectedOwnerId) {
-    targetDeal = deals.find(d => String(d.ownerId || '') === String(expectedOwnerId)) || null;
-    if (targetDeal) resolvedBy = 'fallback_owner_match';
-  }
-
-  if (!targetDeal) {
-    console.warn(`⚠️ [validateFinalAssignment] Nenhum deal válido encontrado para contactId=${contactId}`);
+  if (!target) {
     return {
       ok: false,
-      error: 'Deal não encontrado',
+      error: expectedDealId
+        ? 'Card esperado não associado ao contato.'
+        : 'Card ausente ou ambíguo.',
       resolvedBy: null,
-      details: {
-        dealPipeline: null,
-        dealStage: null,
-        dealOwnerId: null,
-        contactOwnerId: null,
-        associatedDeals: deals,
-      },
     };
   }
-
-  try {
-    const contact = await hubspotClient.crm.contacts.basicApi.getById(contactId, [
-      'hubspot_owner_id',
-      'email',
-      'firstname',
-      'lastname',
-    ]);
-    const contactOwnerId = contact.properties?.hubspot_owner_id || null;
-
-    const dealPipeline = String(targetDeal.pipeline || '');
-    const dealStage = String(targetDeal.stage || '');
-    const dealOwnerId = String(targetDeal.ownerId || '');
-    const expectedOwner = String(expectedOwnerId || '');
-    const expectedPipeline = String(PIPELINE_CLOSER_ID);
-    const expectedStage = String(STAGE_EM_CONTATO_ID);
-
-    const okDeal = dealPipeline === expectedPipeline &&
-                   dealStage === expectedStage &&
-                   dealOwnerId === expectedOwner;
-
-    const okContact = String(contactOwnerId || '') === expectedOwner;
-
-    const ok = okDeal && okContact;
-
-    console.log(
-      `🔍 [validateFinalAssignment] resolvedBy=${resolvedBy} ` +
-      `dealId=${targetDeal.id} dealOwner=${dealOwnerId} contactOwner=${contactOwnerId} ` +
-      `okDeal=${okDeal} okContact=${okContact} ok=${ok}`
-    );
-
-    return {
-      ok,
-      resolvedBy,
+  const contact = await getContact(contactId, ['hubspot_owner_id']);
+  const contactOwnerId = contact.properties?.hubspot_owner_id || '';
+  const expectedPipeline = String(options.expectedPipeline || PIPELINE_CLOSER_ID);
+  const expectedStage =
+    options.expectedStage === null
+      ? null
+      : String(options.expectedStage || STAGE_EM_CONTATO_ID);
+  const ok =
+    String(target.ownerId) === String(expectedOwnerId) &&
+    String(contactOwnerId) === String(expectedOwnerId) &&
+    String(target.pipeline) === expectedPipeline &&
+    (expectedStage === null || String(target.stage) === expectedStage);
+  return {
+    ok,
+    resolvedBy: expectedDealId ? 'expected_deal_id' : 'unique_associated_deal',
+    contactOwnerId,
+    deal: target,
+    lastUpdatedAt: target.lastModifiedDate,
+    details: {
+      dealPipeline: target.pipeline,
+      dealStage: target.stage,
+      dealOwnerId: target.ownerId,
       contactOwnerId,
-      deal: targetDeal,
-      lastUpdatedAt: targetDeal.lastModifiedDate || targetDeal.notesLastUpdated || null,
-      details: {
-        dealPipeline: targetDeal.pipeline,
-        dealStage: targetDeal.stage,
-        dealOwnerId: targetDeal.ownerId,
-        contactOwnerId,
-        associatedDeals: deals,
-      },
-    };
-  } catch (error) {
-    console.error('❌ [validateFinalAssignment] Erro:', error.message);
-    return { ok: false, error: error.message, resolvedBy };
+      associatedDeals: deals,
+    },
+  };
+}
+
+export async function getDealMovementContext(dealId, portalId) {
+  id(dealId, 'Card');
+  if (String(portalId) !== id(HUBSPOT_PORTAL_ID, 'HUBSPOT_PORTAL_ID')) {
+    throw hubError('Link pertence a outra conta.', { blocked: true });
   }
+  await accountReady();
+  const deal = mapDeal(await getDeal(dealId));
+  if (![PIPELINE_BASE_LEADS_ID, PIPELINE_CLOSER_ID].includes(String(deal.pipeline))) {
+    throw hubError('Link Hub permitido somente na Base de Leads e no Closer.', {
+      blocked: true,
+      code: 'PIPELINE_NOT_ALLOWED',
+    });
+  }
+  return {
+    dealId: deal.id,
+    dealName: deal.dealName || '',
+    pipeline: String(deal.pipeline),
+    stage: String(deal.stage || ''),
+    ownerId: String(deal.ownerId || ''),
+    lastModifiedDate: deal.lastModifiedDate,
+  };
+}
+
+function assertContext(expected, actual) {
+  if (
+    !expected ||
+    ['ownerId', 'pipeline', 'stage'].some(
+      (key) => !Object.prototype.hasOwnProperty.call(expected, key)
+    )
+  ) {
+    throw hubError('Contexto validado de origem é obrigatório.', {
+      blocked: true,
+      code: 'EXPECTED_CONTEXT_REQUIRED',
+    });
+  }
+  if (
+    (expected.dealId !== undefined && String(expected.dealId) !== actual.dealId) ||
+    ['ownerId', 'pipeline', 'stage'].some(
+      (key) => String(expected[key] || '') !== String(actual[key] || '')
+    ) ||
+    (expected.lastModifiedDate !== undefined &&
+      String(expected.lastModifiedDate || '') !== String(actual.lastModifiedDate || ''))
+  ) {
+    throw hubError('Card mudou após a validação. Revalide a autorização antes de executar.', {
+      blocked: true,
+      code: 'CONTEXT_CHANGED',
+    });
+  }
+}
+
+// =====================================================================
+// FLUXO LINK HUB
+// Regra:
+//   - Card na Base de Leads → mover para o pipeline Closer, etapa Em Contato,
+//     limpar motivo_da_perda, trocar proprietário do card e do contato.
+//   - Card já no Closer → apenas trocar o proprietário; preservar pipeline/etapa.
+// =====================================================================
+export async function reassignDealForLinkHubMovement(dealId, ownerId, portalId, expectedCurrentContext) {
+  id(dealId, 'Card');
+  id(ownerId, 'Proprietário destino');
+  return withLocks([`deal:${dealId}`], async () => {
+    const initial = await getDealMovementContext(dealId, portalId);
+    assertContext(expectedCurrentContext, initial);
+    await activeOwner(ownerId);
+
+    const contactIds = await associationIds('deals', dealId, 'contacts');
+    if (contactIds.length !== 1) {
+      throw hubError(
+        contactIds.length
+          ? 'Card associado a múltiplos contatos; defina o contato principal antes de reatribuir.'
+          : 'Card sem contato associado.',
+        { blocked: true, code: 'CONTACT_ASSOCIATION_NOT_UNIQUE' }
+      );
+    }
+    const contactId = contactIds[0];
+
+    return withLocks([`contact:${contactId}`], async () => {
+      const linkedDeals = await associationIds('contacts', contactId, 'deals');
+      if (linkedDeals.length !== 1 || linkedDeals[0] !== String(dealId)) {
+        throw hubError('Contato compartilhado com outros cards. Movimentação requer revisão.', {
+          blocked: true,
+          code: 'SHARED_CONTACT',
+        });
+      }
+
+      const previousContact = await getContact(contactId, ['hubspot_owner_id']);
+      const previousContactOwners = [
+        {
+          contactId,
+          ownerId: String(previousContact.properties?.hubspot_owner_id || ''),
+        },
+      ];
+
+      const context = await getDealMovementContext(dealId, portalId);
+      assertContext(expectedCurrentContext, context);
+      assertContext(initial, context);
+
+      const isBaseLeads = context.pipeline === PIPELINE_BASE_LEADS_ID;
+      const isCloser = context.pipeline === PIPELINE_CLOSER_ID;
+      if (!isBaseLeads && !isCloser) {
+        throw hubError('Link Hub permitido somente na Base de Leads e no Closer.', {
+          blocked: true,
+          code: 'PIPELINE_NOT_ALLOWED',
+        });
+      }
+
+      if (isBaseLeads) {
+        await validateStage(PIPELINE_CLOSER_ID, STAGE_EM_CONTATO_ID);
+      }
+
+      const attemptedContactIds = [];
+      const completedContactIds = [];
+      let dealWriteAttempted = false;
+      let dealUpdated = false;
+
+      try {
+        dealWriteAttempted = true;
+
+        if (isBaseLeads) {
+          await request(`/crm/v3/objects/deals/${dealId}`, {
+            method: 'PATCH',
+            body: {
+              properties: {
+                pipeline: PIPELINE_CLOSER_ID,
+                dealstage: STAGE_EM_CONTATO_ID,
+                motivo_da_perda: '',
+                hubspot_owner_id: String(ownerId),
+              },
+            },
+          });
+        } else {
+          await request(`/crm/v3/objects/deals/${dealId}`, {
+            method: 'PATCH',
+            body: {
+              properties: {
+                hubspot_owner_id: String(ownerId),
+              },
+            },
+          });
+        }
+        dealUpdated = true;
+
+        attemptedContactIds.push(contactId);
+        await updateContactOwner(contactId, ownerId);
+        const contact = await getContact(contactId, ['hubspot_owner_id']);
+        if (String(contact.properties?.hubspot_owner_id || '') !== String(ownerId)) {
+          throw hubError('Proprietário do contato não confirmado.');
+        }
+        completedContactIds.push(contactId);
+
+        const finalContext = await getDealMovementContext(dealId, portalId);
+        if (finalContext.ownerId !== String(ownerId)) {
+          throw hubError('Proprietário final divergente.', { code: 'CONFIRMATION_FAILED' });
+        }
+        if (isBaseLeads) {
+          if (
+            finalContext.pipeline !== PIPELINE_CLOSER_ID ||
+            finalContext.stage !== STAGE_EM_CONTATO_ID
+          ) {
+            throw hubError('Pipeline/etapa final divergente após movimentação.', {
+              code: 'CONFIRMATION_FAILED',
+            });
+          }
+        } else {
+          if (
+            finalContext.pipeline !== context.pipeline ||
+            finalContext.stage !== context.stage
+          ) {
+            throw hubError('Pipeline/etapa alterados indevidamente.', {
+              code: 'CONFIRMATION_FAILED',
+            });
+          }
+        }
+
+        const finalContacts = await associationIds('deals', dealId, 'contacts');
+        if (finalContacts.length !== 1 || finalContacts[0] !== contactId) {
+          throw hubError('Associação final divergente.');
+        }
+
+        return {
+          dealId: String(dealId),
+          dealName: finalContext.dealName,
+          pipeline: finalContext.pipeline,
+          stage: finalContext.stage,
+          previousDealOwnerId: context.ownerId,
+          previousPipeline: context.pipeline,
+          previousStage: context.stage,
+          movedFromBaseLeads: isBaseLeads,
+          previousContactOwners,
+          contactIds,
+          lastUpdatedAt: finalContext.lastModifiedDate,
+        };
+      } catch (error) {
+        error.partialResult = {
+          dealId: String(dealId),
+          dealWriteAttempted,
+          dealUpdated,
+          dealOutcomeUnknown: Boolean(error.outcomeUnknown && !dealUpdated),
+          attemptedContactIds,
+          completedContactIds,
+          unconfirmedContactIds: contactIds.filter((value) => !completedContactIds.includes(value)),
+          notAttemptedContactIds: contactIds.filter((value) => !attemptedContactIds.includes(value)),
+          previousDealOwnerId: context.ownerId,
+          previousContactOwners,
+          expectedDestinationOwnerId: String(ownerId),
+          previousPipeline: context.pipeline,
+          previousStage: context.stage,
+        };
+        error.requiresReconciliation = dealWriteAttempted;
+        error.retryable = false;
+        throw error;
+      }
+    });
+  });
+}
+
+// =====================================================================
+// FLUXO NORMAL (CRM) — apenas troca de proprietário, sem tocar pipeline/etapa.
+// =====================================================================
+export async function reassignDealAndContactsOwner(dealId, ownerId, portalId, expectedCurrentContext) {
+  id(dealId, 'Card');
+  id(ownerId, 'Proprietário destino');
+  return withLocks([`deal:${dealId}`], async () => {
+    const initial = await getDealMovementContext(dealId, portalId);
+    assertContext(expectedCurrentContext, initial);
+    await activeOwner(ownerId);
+    const contactIds = await associationIds('deals', dealId, 'contacts');
+    if (contactIds.length !== 1) {
+      throw hubError(
+        contactIds.length
+          ? 'Card associado a múltiplos contatos; defina o contato principal antes de reatribuir.'
+          : 'Card sem contato associado.',
+        { blocked: true, code: 'CONTACT_ASSOCIATION_NOT_UNIQUE' }
+      );
+    }
+    const contactId = contactIds[0];
+    return withLocks([`contact:${contactId}`], async () => {
+      const linkedDeals = await associationIds('contacts', contactId, 'deals');
+      if (linkedDeals.length !== 1 || linkedDeals[0] !== String(dealId)) {
+        throw hubError('Contato compartilhado com outros cards. Movimentação requer revisão.', {
+          blocked: true,
+          code: 'SHARED_CONTACT',
+        });
+      }
+      const previousContact = await getContact(contactId, ['hubspot_owner_id']);
+      const previousContactOwners = [
+        {
+          contactId,
+          ownerId: String(previousContact.properties?.hubspot_owner_id || ''),
+        },
+      ];
+      const context = await getDealMovementContext(dealId, portalId);
+      assertContext(expectedCurrentContext, context);
+      assertContext(initial, context);
+      const latestAssociations = await associationIds('deals', dealId, 'contacts');
+      if (latestAssociations.length !== 1 || latestAssociations[0] !== contactId) {
+        throw hubError('Associação mudou durante a validação.', { blocked: true });
+      }
+      const attemptedContactIds = [];
+      const completedContactIds = [];
+      let dealWriteAttempted = false;
+      let dealUpdated = false;
+      try {
+        dealWriteAttempted = true;
+        await request(`/crm/v3/objects/deals/${dealId}`, {
+          method: 'PATCH',
+          body: { properties: { hubspot_owner_id: String(ownerId) } },
+        });
+        dealUpdated = true;
+        attemptedContactIds.push(contactId);
+        await updateContactOwner(contactId, ownerId);
+        const contact = await getContact(contactId, ['hubspot_owner_id']);
+        if (String(contact.properties?.hubspot_owner_id || '') !== String(ownerId)) {
+          throw hubError('Proprietário do contato não confirmado.');
+        }
+        completedContactIds.push(contactId);
+        const finalContext = await getDealMovementContext(dealId, portalId);
+        if (
+          finalContext.ownerId !== String(ownerId) ||
+          finalContext.pipeline !== context.pipeline ||
+          finalContext.stage !== context.stage
+        ) {
+          throw hubError('Proprietário, pipeline ou etapa final divergente.', {
+            code: 'CONFIRMATION_FAILED',
+          });
+        }
+        const finalContacts = await associationIds('deals', dealId, 'contacts');
+        if (finalContacts.length !== 1 || finalContacts[0] !== contactId) {
+          throw hubError('Associação final divergente.');
+        }
+        return {
+          dealId: String(dealId),
+          dealName: finalContext.dealName,
+          pipeline: finalContext.pipeline,
+          stage: finalContext.stage,
+          previousDealOwnerId: context.ownerId,
+          previousContactOwners,
+          contactIds,
+          lastUpdatedAt: finalContext.lastModifiedDate,
+        };
+      } catch (error) {
+        error.partialResult = {
+          dealId: String(dealId),
+          dealWriteAttempted,
+          dealUpdated,
+          dealOutcomeUnknown: Boolean(error.outcomeUnknown && !dealUpdated),
+          attemptedContactIds,
+          completedContactIds,
+          unconfirmedContactIds: contactIds.filter((value) => !completedContactIds.includes(value)),
+          notAttemptedContactIds: contactIds.filter((value) => !attemptedContactIds.includes(value)),
+          previousDealOwnerId: context.ownerId,
+          previousContactOwners,
+          expectedDestinationOwnerId: String(ownerId),
+          previousPipeline: context.pipeline,
+          previousStage: context.stage,
+        };
+        error.requiresReconciliation = dealWriteAttempted;
+        error.retryable = false;
+        throw error;
+      }
+    });
+  });
 }

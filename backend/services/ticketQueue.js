@@ -1,4 +1,7 @@
 // backend/services/ticketQueue.js
+// Worker do fluxo de movimentação normal (CRM).
+// IMPORTANTE: filtra por crm_origem = 'CRM' para não concorrer com o
+// linkHubBatchQueue.js, que processa apenas crm_origem = 'HUBSPOT_LINK'.
 import { pool } from './db.js';
 import {
   findContactAndValidate,
@@ -9,7 +12,7 @@ import {
   updateContactOwner,
   validateFinalAssignment,
   HUBSPOT_PIPELINE_CLOSER_ID,
-  HUBSPOT_STAGE_EM_CONTATO_ID
+  HUBSPOT_STAGE_EM_CONTATO_ID,
 } from './hubspot.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 
@@ -17,37 +20,33 @@ let isProcessing = false;
 const LOCK_KEY = 854729;
 
 /**
- * Processa a fila de tickets de movimentação.
+ * Processa a fila de tickets de movimentação normal (CRM).
  * Usa advisory lock global para evitar concorrência entre instâncias.
+ * Filtra apenas crm_origem = 'CRM' — o fluxo Link Hub tem worker próprio.
  */
 async function processTicketQueue() {
   if (isProcessing) return;
 
-  const lockClient = await pool.connect();
+  const client = await pool.connect();
   let hasLock = false;
   try {
-    const lockResult = await lockClient.query(`SELECT pg_try_advisory_lock($1)`, [LOCK_KEY]);
+    const lockResult = await client.query(`SELECT pg_try_advisory_lock($1)`, [LOCK_KEY]);
     hasLock = lockResult.rows[0].pg_try_advisory_lock === true;
-  } finally {
-    lockClient.release();
-  }
+    if (!hasLock) {
+      console.log('⏭️ Outra instância está processando a fila. Aguardando...');
+      return;
+    }
 
-  if (!hasLock) {
-    console.log('⏭️ Outra instância está processando a fila. Aguardando...');
-    return;
-  }
-
-  isProcessing = true;
-  const client = await pool.connect();
-  try {
+    isProcessing = true;
     while (true) {
       const result = await client.query(
         `SELECT tml.*, ts.metadados
          FROM app_comissionamento.tickets_movimentacao_lead tml
          JOIN app_comissionamento.tickets_suporte ts ON tml.ticket_id = ts.id_ticket
-         WHERE tml.status_mapeamento IS NULL
-            OR tml.status_mapeamento = ''
-            OR tml.status_mapeamento = 'pendente'
+         WHERE tml.crm_origem = 'CRM'
+           AND (tml.status_mapeamento IS NULL
+                OR tml.status_mapeamento = ''
+                OR tml.status_mapeamento = 'pendente')
          ORDER BY tml.id_ticket_movimentacao
          LIMIT 1
          FOR UPDATE SKIP LOCKED`
@@ -63,6 +62,7 @@ async function processTicketQueue() {
         const obs = JSON.stringify({
           erro: err.message,
           timestamp: new Date().toISOString(),
+          ...(err.partialResult ? { resultadoParcial: err.partialResult } : {}),
         });
         await client.query(
           `UPDATE app_comissionamento.tickets_movimentacao_lead
@@ -72,82 +72,95 @@ async function processTicketQueue() {
            WHERE id_ticket_movimentacao = $2`,
           [obs, ticket.id_ticket_movimentacao]
         );
+        await client.query(
+          `UPDATE app_comissionamento.tickets_suporte
+           SET status = 'ERRO', atualizado_em = NOW()
+           WHERE id_ticket = $1`,
+          [ticket.ticket_id]
+        );
       }
     }
   } catch (err) {
     console.error('Erro no processador de tickets:', err);
   } finally {
-    client.release();
-    isProcessing = false;
-
-    const unlockClient = await pool.connect();
-    try {
-      await unlockClient.query(`SELECT pg_advisory_unlock($1)`, [LOCK_KEY]);
-    } catch (unlockErr) {
-      console.error('Erro ao liberar advisory lock:', unlockErr);
-    } finally {
-      unlockClient.release();
+    if (hasLock) {
+      try {
+        await client.query(`SELECT pg_advisory_unlock($1)`, [LOCK_KEY]);
+      } catch (unlockErr) {
+        console.error('Erro ao liberar advisory lock:', unlockErr);
+      }
     }
+    isProcessing = false;
+    client.release();
   }
 }
 
 /**
  * Processa um ticket individualmente.
- * Busca o ownerId pelo nome do colaborador destino (via e‑mail obtido do banco).
+ * Busca o ownerId pelo nome do colaborador destino (via e-mail obtido do banco).
  */
 async function handleTicket(ticket, client) {
-  // Verifica idempotência
+  // 1) Idempotência — não reprocessa o que já foi concluído.
   let observacaoAtual = {};
   if (ticket.observacao_sales_ops) {
     try {
       observacaoAtual = JSON.parse(ticket.observacao_sales_ops);
-    } catch (e) {
+    } catch {
       observacaoAtual = {};
     }
   }
-
   if (observacaoAtual.processado === true) {
     console.log(`⚠️ Ticket ${ticket.id_ticket_movimentacao} já processado. Pulando...`);
     return;
   }
 
-  // 1. Obter e‑mail do colaborador destino a partir do nome
-  let colaboradorEmail = null;
-  if (ticket.colaborador_destino_nome) {
-    try {
-      const result = await client.query(
+  const nomeCompleto = `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim();
+
+  const hubspotData = {
+    contactId: null,
+    existe: false,
+    criadoAgora: false,
+    status: null,
+    mensagem: '',
+    pipeline: null,
+    stage: null,
+    pipelineNome: null,
+    stageNome: null,
+  };
+
+  let contactId = null;
+  let dealId = null;
+  let resultado = null;
+
+  try {
+    // 2) Obter e-mail do colaborador destino: primeiro dos metadados, senão pelo nome.
+    let colaboradorEmail = ticket.metadados?.colaborador_destino_email || null;
+    if (!colaboradorEmail && ticket.colaborador_destino_nome) {
+      const lookup = await client.query(
         `SELECT email
          FROM core.view_app_colaboradores
          WHERE LOWER(TRIM(nome)) = LOWER(TRIM($1))
          LIMIT 1`,
         [ticket.colaborador_destino_nome]
       );
-      if (result.rows.length > 0) {
-        colaboradorEmail = result.rows[0].email;
-      } else {
-        console.warn(`⚠️ Colaborador não encontrado no banco: ${ticket.colaborador_destino_nome}`);
+      if (lookup.rows.length > 0) {
+        colaboradorEmail = lookup.rows[0].email;
       }
-    } catch (err) {
-      console.error(`❌ Erro ao buscar e‑mail do colaborador ${ticket.colaborador_destino_nome}:`, err);
     }
-  }
 
-  // 2. Resolver ownerId no HubSpot
-  let ownerId = null;
-  if (colaboradorEmail) {
-    ownerId = await findOwnerIdByEmail(colaboradorEmail);
+    if (!colaboradorEmail) {
+      throw new Error(
+        `Não foi possível determinar o e-mail do colaborador destino "${ticket.colaborador_destino_nome}".`
+      );
+    }
+
+    // 3) Resolver ownerId no HubSpot pelo e-mail.
+    const ownerId = await findOwnerIdByEmail(colaboradorEmail);
     if (!ownerId) {
-      console.warn(`⚠️ Owner não encontrado no HubSpot para: ${colaboradorEmail}`);
+      throw new Error(`Owner do HubSpot não encontrado para o e-mail "${colaboradorEmail}".`);
     }
-  }
 
-  const nomeCompleto = `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`;
-  let hubspotData = {};
-  let resultado = null;
-  let dealId = null;
-  let contactId = null;
-
-  try {
+    // 4) Buscar/criar contato no HubSpot.
     const busca = await findContactAndValidate({
       email: ticket.email_cliente_informado,
       phone: ticket.telefone_cliente_informado,
@@ -155,13 +168,11 @@ async function handleTicket(ticket, client) {
     });
 
     if (!busca.found) {
-      // Contato não encontrado – tentamos criar
       if (!ticket.email_cliente_informado) {
         hubspotData.status = 'aviso';
-        hubspotData.mensagem = 'Campos pendentes: preencha e‑mail para tentar novamente.';
+        hubspotData.mensagem = 'Campos pendentes: preencha e-mail para tentar novamente.';
         resultado = { blocked: false, message: hubspotData.mensagem };
       } else {
-        // Tenta criar o contato com tratamento específico para e‑mail inválido
         try {
           const novoContato = await createContact({
             firstName: ticket.nome_cliente_informado,
@@ -172,8 +183,6 @@ async function handleTicket(ticket, client) {
             origem: ticket.origem_cliente_informada,
             ownerId,
           });
-
-          // Sucesso na criação
           contactId = novoContato.id;
           hubspotData.contactId = contactId;
           hubspotData.existe = true;
@@ -185,41 +194,35 @@ async function handleTicket(ticket, client) {
             ownerId,
             ticket.colaborador_destino_nome
           );
-
           if (resultado && !resultado.blocked && resultado.dealId) {
             dealId = resultado.dealId;
           }
         } catch (createError) {
-          // Verifica se é erro de e‑mail inválido
-          const isInvalidEmail = createError.code === 400 &&
+          const isInvalidEmail =
+            createError.code === 400 &&
             createError.body?.errors?.some(e => e.error === 'INVALID_EMAIL');
 
           if (isInvalidEmail) {
-            // Trata como aviso – não bloqueia, mas não prossegue
             hubspotData.status = 'aviso';
             hubspotData.mensagem = `E-mail inválido: "${ticket.email_cliente_informado}". Corrija e reenvie.`;
             resultado = { blocked: false, message: hubspotData.mensagem };
-            // Não define contactId, pois não foi criado
           } else {
-            // Outro erro – repassa para o catch externo
             throw createError;
           }
         }
       }
     } else if (busca.divergente) {
-      // Contato existe com divergências
       contactId = busca.contact.id;
-      hubspotData.status = 'suporte';
-      hubspotData.mensagem = busca.motivo || 'Dados divergentes do cadastro. Aguardando suporte.';
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
+      hubspotData.status = 'suporte';
+      hubspotData.mensagem = busca.motivo || 'Dados divergentes do cadastro. Aguardando suporte.';
 
       if (ownerId) {
         await updateContactOwner(contactId, ownerId);
       }
       resultado = { blocked: false, message: hubspotData.mensagem };
     } else {
-      // Contato encontrado sem divergências
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
@@ -234,13 +237,12 @@ async function handleTicket(ticket, client) {
         ownerId,
         ticket.colaborador_destino_nome
       );
-
       if (resultado && !resultado.blocked && resultado.dealId) {
         dealId = resultado.dealId;
       }
     }
 
-    // Se o contato foi criado ou já existia e não houve bloqueio, faz a validação final
+    // 5) Validação final (aguarda associação propagar no HubSpot).
     if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
       let finalCheck = null;
       let attempts = 0;
@@ -265,7 +267,7 @@ async function handleTicket(ticket, client) {
       }
     }
 
-    // Determina status final
+    // 6) Determinar status final.
     let statusFinal = 'pendente';
     if (resultado?.blocked) {
       statusFinal = 'bloqueado';
@@ -277,7 +279,10 @@ async function handleTicket(ticket, client) {
       hubspotData.stageNome = resultado.stageNome || resultado.stage;
     } else if (hubspotData.status === 'suporte' || hubspotData.status === 'aviso') {
       statusFinal = hubspotData.status;
-    } else if (resultado?.pipeline === HUBSPOT_PIPELINE_CLOSER_ID && resultado?.stage === HUBSPOT_STAGE_EM_CONTATO_ID) {
+    } else if (
+      resultado?.pipeline === HUBSPOT_PIPELINE_CLOSER_ID &&
+      resultado?.stage === HUBSPOT_STAGE_EM_CONTATO_ID
+    ) {
       statusFinal = 'concluido';
       hubspotData.status = 'concluido';
       hubspotData.pipeline = resultado.pipeline;
@@ -289,7 +294,7 @@ async function handleTicket(ticket, client) {
       hubspotData.status = 'fora_pipeline';
     }
 
-    // Atualiza observação e status
+    // 7) Persistir observação + status no ticket de movimentação.
     const novoObservacao = {
       ...observacaoAtual,
       processado: true,
@@ -312,45 +317,30 @@ async function handleTicket(ticket, client) {
       [JSON.stringify(novoObservacao), statusFinal, ticket.id_ticket_movimentacao]
     );
 
-    // Atualiza tickets_suporte com status correspondente
+    // 8) Atualizar o ticket base em tickets_suporte.
+    let suporteStatus = 'EM ANDAMENTO';
+    if (statusFinal === 'concluido') suporteStatus = 'CONCLUÍDO';
+    else if (statusFinal === 'bloqueado') suporteStatus = 'BLOQUEADO';
+    else if (statusFinal === 'erro') suporteStatus = 'ERRO';
+    else if (statusFinal === 'aviso') suporteStatus = 'AVISO';
+
     if (statusFinal === 'concluido') {
       await client.query(
         `UPDATE app_comissionamento.tickets_suporte
-         SET status = 'CONCLUÍDO', concluido_em = NOW(), atualizado_em = NOW()
-         WHERE id_ticket = $1`,
-        [ticket.ticket_id]
-      );
-    } else if (statusFinal === 'bloqueado') {
-      await client.query(
-        `UPDATE app_comissionamento.tickets_suporte
-         SET status = 'BLOQUEADO', atualizado_em = NOW()
-         WHERE id_ticket = $1`,
-        [ticket.ticket_id]
-      );
-    } else if (statusFinal === 'erro') {
-      await client.query(
-        `UPDATE app_comissionamento.tickets_suporte
-         SET status = 'ERRO', atualizado_em = NOW()
-         WHERE id_ticket = $1`,
-        [ticket.ticket_id]
-      );
-    } else if (statusFinal === 'aviso') {
-      await client.query(
-        `UPDATE app_comissionamento.tickets_suporte
-         SET status = 'AVISO', atualizado_em = NOW()
-         WHERE id_ticket = $1`,
-        [ticket.ticket_id]
+         SET status = $1, concluido_em = NOW(), atualizado_em = NOW()
+         WHERE id_ticket = $2`,
+        [suporteStatus, ticket.ticket_id]
       );
     } else {
       await client.query(
         `UPDATE app_comissionamento.tickets_suporte
-         SET status = 'EM ANDAMENTO', atualizado_em = NOW()
-         WHERE id_ticket = $1`,
-        [ticket.ticket_id]
+         SET status = $1, atualizado_em = NOW()
+         WHERE id_ticket = $2`,
+        [suporteStatus, ticket.ticket_id]
       );
     }
 
-    // Notificação Teams para casos não concluídos ou com aviso
+    // 9) Notificação Teams apenas para casos não concluídos.
     if (statusFinal !== 'concluido') {
       try {
         await teamsNotificador.enviar({
@@ -376,7 +366,8 @@ async function handleTicket(ticket, client) {
   } catch (error) {
     console.error(`Erro na integração HubSpot (ticket ${ticket.id_ticket_movimentacao}):`, error);
     const obsErro = JSON.stringify({
-      hubspot: { erro: true, status: 'erro', mensagem: error.message },
+      ...observacaoAtual,
+      hubspot: { ...hubspotData, erro: true, status: 'erro', mensagem: error.message },
       motivoOriginal: ticket.motivo_solicitacao || '',
       processado: true,
     });

@@ -7,16 +7,14 @@ import {
   FileText, CheckCircle, Award, Users, User, Package, Briefcase, Loader2, RefreshCw, TrendingUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { 
-  fetchCollaborators, 
-  fetchEmitidos, 
-  fetchAssinados, 
-  fetchProtocolados, 
-  fetchGanhos, 
-  fetchPerdidos 
+import {
+  fetchCollaborators,
+  fetchEmitidos,
+  fetchAssinados,
+  fetchProtocolados,
+  fetchGanhos,
+  fetchPerdidos
 } from "@/lib/api";
-import { fetchDailyMetrics } from "@/lib/metrics";
-import { calculator } from "@/lib/calculator";
 import madm_dashboard_growth from "@/components/img/madm-dashboard-growth.png";
 
 const RANKING_BG = madm_dashboard_growth;
@@ -64,7 +62,6 @@ interface RankingItem {
   isCurrentUser?: boolean;
   equipe?: string;
   id?: string;
-  gols?: number;
 }
 
 interface TeamRankingItem {
@@ -164,7 +161,6 @@ export default function Ranking() {
     currentEndDate,
     equipeConfigs,
     currentUser,
-    campaigns, 
   } = useAppStore();
 
   const [allCollaborators, setAllCollaborators] = useState<any[]>([]);
@@ -177,7 +173,6 @@ export default function Ranking() {
   ]);
   const [selectedProduct, setSelectedProduct] = useState<string>("Todos");
   const [selectedTeam, setSelectedTeam] = useState<string>("todas");
-  const [golsDict, setGolsDict] = useState<Record<string, number>>({}); 
 
   const initialLoadDone = useRef(false);
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
@@ -202,7 +197,7 @@ export default function Ranking() {
     if (showRefreshing) setRefreshing(true);
     try {
       const now = Date.now();
-      const shouldFetch = (now - lastFetchTime.current) > CACHE_TTL || 
+      const shouldFetch = (now - lastFetchTime.current) > CACHE_TTL ||
                           datesChanged || filtersChanged || allCollaborators.length === 0 || showRefreshing;
 
       if (shouldFetch) {
@@ -435,56 +430,6 @@ export default function Ranking() {
   const myAssinados = metricsData[currentUserData?.name]?.assinados || 0;
   const myProtocolados = metricsData[currentUserData?.name]?.protocolados || 0;
   const myGanhos = metricsData[currentUserData?.name]?.ganhos || 0;
-
-  // ========== EFEITO PARA CARREGAR GOLS DOS COLABORADORES EXIBIDOS ==========
-  // Agora considera as campanhas aprovadas
-  useEffect(() => {
-    if (rankingType !== "colaborador") return;
-    const fetchGols = async () => {
-      const namesToFetch = displayRanking
-        .filter(item => !(item.name in golsDict))
-        .map(item => item.name);
-
-      if (namesToFetch.length === 0) return;
-
-      const newDict = { ...golsDict };
-      const activeCampaigns = campaigns.filter(c => c.validacao_financeiro);
-
-      await Promise.all(
-        namesToFetch.map(async (name) => {
-          try {
-            const colab = allCollaborators.find(c => c.name === name);
-            if (!colab) return;
-            const daily = await fetchDailyMetrics({
-              start: currentStartDate,
-              end: currentEndDate,
-              colaborador: name,
-            });
-            const metaAss = colab.metaGolsAssinados ?? 3;
-            const metaGan = colab.metaGolsGanhos ?? 3;
-            // ✅ usa applyCampaignsToDailyGoals para aplicar campanhas
-            const result = calculator.applyCampaignsToDailyGoals(daily, metaAss, metaGan, activeCampaigns);
-            newDict[name] = result.totalGols;
-          } catch (err) {
-            console.error(`Erro ao buscar gols de ${name}:`, err);
-            newDict[name] = 0;
-          }
-        })
-      );
-      setGolsDict(newDict);
-    };
-
-    fetchGols();
-  }, [displayRanking, rankingType, currentStartDate, currentEndDate, allCollaborators, campaigns, golsDict]);
-
-  // Adiciona gols aos itens do ranking individual para exibição
-  const displayRankingWithGols = useMemo(() => {
-    if (rankingType !== "colaborador") return displayRanking;
-    return displayRanking.map(item => ({
-      ...item,
-      gols: golsDict[item.name] ?? 0,
-    }));
-  }, [displayRanking, golsDict, rankingType]);
 
   const getAvatar = (item: any) =>
     rankingType === "colaborador" ? item.avatar || item.name.charAt(0) : item.avatar;
@@ -732,16 +677,17 @@ export default function Ranking() {
       <div className="card animate-fade-in-up">
         <div className="p-5 border-b border-[#e2e8f0]">
           <h3 className="text-sm font-bold text-[#0f172a]">
-            Top {Math.min(displayRankingWithGols.length, MAX_DISPLAY_ITEMS)} — {rankingType === "colaborador" ? "Melhores Colaboradores" : "Melhores Equipes"}
+            Top {Math.min(displayRanking.length, MAX_DISPLAY_ITEMS)} — {rankingType === "colaborador" ? "Melhores Colaboradores" : "Melhores Equipes"}
           </h3>
           <p className="text-xs text-[#64748b] mt-1">
-            {displayRankingWithGols.length} {rankingType === "colaborador" ? "consultores" : "equipes"} exibidos (de {fullRanking.length} no total)
+            {displayRanking.length} {rankingType === "colaborador" ? "consultores" : "equipes"} exibidos (de {fullRanking.length} no total)
             <span className="ml-2 text-[#2F6FED] font-medium">• Ordenado por Pontuação Ponderada</span>
           </p>
         </div>
 
         <div className="overflow-x-auto">
-          <div className="px-5 py-2 border-b border-[#e2e8f0] hidden md:grid" style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 60px 90px", gap: "0.75rem" }}>
+          {/* Colunas ajustadas: sem a coluna Gols */}
+          <div className="px-5 py-2 border-b border-[#e2e8f0] hidden md:grid" style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 90px", gap: "0.75rem" }}>
             <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Pos</div>
             <div></div>
             <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider">Nome</div>
@@ -749,12 +695,11 @@ export default function Ranking() {
             <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Assinados</div>
             <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Protocolados</div>
             <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Ganhos</div>
-            <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Gols</div>
             <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Score</div>
           </div>
 
           <div className="divide-y divide-[#f1f5f9]">
-            {displayRankingWithGols.map((person) => {
+            {displayRanking.map((person) => {
               const isTop3 = person.position <= 3;
               const isMe = rankingType === "colaborador" && (person as RankingItem).isCurrentUser;
               const isCurrentUserTeam = rankingType === "equipe" && currentUser && person.name === currentUser.equipe;
@@ -763,7 +708,7 @@ export default function Ranking() {
                 <div
                   key={person.position}
                   className={cn("flex flex-col md:grid items-center px-5 py-4 transition-colors", highlight ? "bg-[#eff6ff]" : "hover:bg-[#f8fafc]")}
-                  style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 60px 90px", gap: "0.75rem", ...(highlight ? { borderLeft: "3px solid #2F6FED" } : {}) }}
+                  style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 90px", gap: "0.75rem", ...(highlight ? { borderLeft: "3px solid #2F6FED" } : {}) }}
                 >
                   <div><RankBadge position={person.position} /></div>
                   <div className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0" style={isTop3 ? getPodiumStyle(person.position) : highlight ? { background: "#2F6FED", color: "white" } : { background: "#f1f5f9", color: "#64748b" }}>{getAvatar(person)}</div>
@@ -780,10 +725,6 @@ export default function Ranking() {
                   <div className="text-center text-sm font-bold text-[#16A34A] whitespace-nowrap">{person.assinados}</div>
                   <div className="text-center text-sm font-bold text-[#8B5CF6] whitespace-nowrap">{person.protocolados}</div>
                   <div className="text-center text-sm font-bold text-[#EA8C1D] whitespace-nowrap">{Math.round(person.ganhos)}</div>
-                  {/* Coluna de gols (apenas ranking individual) */}
-                  <div className="text-center text-sm font-bold text-[#0f172a] whitespace-nowrap">
-                    {rankingType === "colaborador" ? ((person as RankingItem).gols ?? 0) : "—"}
-                  </div>
                   <div className="text-center text-sm font-bold text-[#2F6FED] whitespace-nowrap">{person.score.toFixed(1)}</div>
                 </div>
               );
