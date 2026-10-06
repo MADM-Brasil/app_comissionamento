@@ -9,12 +9,6 @@
 //
 // O estado de tentativas/lease é mantido dentro do JSON observacao_sales_ops
 // na chave "_worker", para não exigir novas colunas na tabela.
-//
-// Ajustes para paridade com ticketQueue.js:
-// - Mensagens descritivas centralizadas em RULE_LABELS;
-// - Notificação Teams em falhas e bloqueios (com prazos, pipeline e regra);
-// - `observacao` final composta com detalhes do bloqueio quando aplicável;
-// - `_worker` enriquecido com timestamps de sucesso/falha por etapa.
 import { pool } from './db.js';
 import {
   findOwnerIdByEmailStrict,
@@ -30,8 +24,6 @@ const MAX_ATTEMPTS = 3;
 const PROCESSING_LEASE_MINUTES = 15;
 let isProcessing = false;
 
-// Rótulos amigáveis para as regras aplicadas no fluxo Link Hub.
-// Usados em `hubspot.mensagem` e `observacao` no histórico e nas notificações Teams.
 const RULE_LABELS = Object.freeze({
   moved_from_base_leads:
     'Card movido da Base de Leads para o Closer (Em Contato), motivo da perda limpo.',
@@ -39,7 +31,6 @@ const RULE_LABELS = Object.freeze({
     'Responsável alterado no Closer, pipeline e etapa preservados.',
 });
 
-// Estados finais que geram notificação Teams (não notificamos retries 'pendente').
 const NOTIFY_STATUSES = new Set(['erro', 'bloqueado']);
 
 function isRetryableError(error) {
@@ -71,8 +62,6 @@ function safeParse(value) {
   }
 }
 
-// Compõe uma mensagem descritiva de falha, combinando mensagem original,
-// pipeline/etapa de origem, tentativas e detalhes parciais quando existirem.
 function describeFailure(error, attempts) {
   const parts = [];
   parts.push(error.message || 'Falha na movimentação Link Hub.');
@@ -92,12 +81,6 @@ function describeFailure(error, attempts) {
   return parts.filter(Boolean).join(' ');
 }
 
-/**
- * Recupera tickets presos em 'processando' cujo lease expirou.
- * Se ainda houver tentativas disponíveis, volta para 'pendente';
- * caso contrário, marca como 'erro'.
- * Executado no início de cada ciclo, antes de reivindicar novos tickets.
- */
 async function reclaimStaleLeases(client) {
   await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
@@ -132,13 +115,6 @@ async function reclaimStaleLeases(client) {
   );
 }
 
-/**
- * Reivindica o próximo ticket da fila de forma atômica.
- * - Marca como 'processando'
- * - Incrementa _worker.tentativas
- * - Grava _worker.processando_desde
- * Retorna a linha completa com metadados, ou null se a fila estiver vazia.
- */
 async function claimNextTicket(client) {
   const claimed = await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
@@ -185,12 +161,6 @@ async function claimNextTicket(client) {
   return full.rows[0];
 }
 
-/**
- * Persiste o sucesso da movimentação, diferenciando o caso Base → Closer
- * do caso apenas troca de proprietário no Closer.
- * Devolve o payload para notificação opcional (não é notificado aqui porque
- * o fluxo Link Hub só notifica em erro/bloqueio, mantendo paridade com o worker CRM).
- */
 async function markSuccess(client, ticket, resultData) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const movedFromBase = Boolean(resultData.movedFromBaseLeads);
@@ -247,10 +217,6 @@ async function markSuccess(client, ticket, resultData) {
   );
 }
 
-/**
- * Persiste a falha, decidindo entre retry ('pendente') ou encerramento ('erro' / 'bloqueado').
- * Envia notificação Teams quando o estado final é 'erro' ou 'bloqueado'.
- */
 async function markFailure(client, ticket, error) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const tentativas = Number(observacao._worker?.tentativas || 0);
@@ -258,7 +224,6 @@ async function markFailure(client, ticket, error) {
   const statusFinal = error.blocked ? 'bloqueado' : retryable ? 'pendente' : 'erro';
   const agora = new Date().toISOString();
 
-  // Texto descritivo composto para a observação final.
   const observacaoTexto = describeFailure(error, tentativas);
 
   const nova = {
@@ -283,11 +248,14 @@ async function markFailure(client, ticket, error) {
     },
   };
 
+  // Correção do erro 42P08: $2 era usado em dois contextos com tipos diferentes
+  // (coluna varchar e comparação com literais text). Forçamos cast explícito
+  // em ambas as ocorrências para unificar a inferência como text.
   await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
-     SET observacao_sales_ops = $1,
-         status_mapeamento = $2,
-         analisado_em = CASE WHEN $2 IN ('erro','bloqueado') THEN NOW() ELSE analisado_em END,
+     SET observacao_sales_ops = $1::text,
+         status_mapeamento = $2::text,
+         analisado_em = CASE WHEN $2::text IN ('erro','bloqueado') THEN NOW() ELSE analisado_em END,
          atualizado_em = NOW()
      WHERE id_ticket_movimentacao = $3`,
     [JSON.stringify(nova), statusFinal, ticket.id_ticket_movimentacao]
@@ -300,12 +268,11 @@ async function markFailure(client, ticket, error) {
 
   await client.query(
     `UPDATE app_comissionamento.tickets_suporte
-     SET status = $1, atualizado_em = NOW()
+     SET status = $1::text, atualizado_em = NOW()
      WHERE id_ticket = $2`,
     [supportStatus, ticket.ticket_id]
   );
 
-  // Notificação Teams apenas para estados finais (não em retries).
   if (NOTIFY_STATUSES.has(statusFinal)) {
     try {
       const meta = ticket.metadados || {};
@@ -336,11 +303,6 @@ async function markFailure(client, ticket, error) {
   }
 }
 
-/**
- * Executa a movimentação em si para um ticket já reivindicado.
- * Revalida contexto, acesso, e chama reassignDealForLinkHubMovement,
- * que decide entre "Base → Closer" e "troca de owner no Closer".
- */
 async function handleLinkHubTicket(ticket, client) {
   const dealId = String(ticket.crm_lead_id || '').trim();
   if (!/^\d+$/.test(dealId)) {
@@ -373,10 +335,8 @@ async function handleLinkHubTicket(ticket, client) {
   ).trim();
   const destinationTeam = String(meta.destino_equipe || '').trim();
 
-  // Revalida o contexto atual do card antes de qualquer escrita.
   const context = await getDealMovementContext(dealId, portalId);
 
-  // Descobre a equipe de origem a partir do owner atual do card.
   const sourceOwnerEmail = context.ownerId ? await getHubSpotOwnerEmail(context.ownerId) : null;
   const sourceOwner = sourceOwnerEmail ? await getActiveSupportUser(sourceOwnerEmail) : null;
 
@@ -428,7 +388,6 @@ async function processLinkHubQueue() {
     if (!hasLock) return;
     isProcessing = true;
 
-    // Recupera leases expirados antes de começar o loop principal.
     await reclaimStaleLeases(client);
 
     while (true) {
