@@ -35,30 +35,19 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 // ---------- Configuração de cookies ----------
 // COOKIE_SECURE:
-//   - true  → cookies só são emitidos/enviados via HTTPS (recomendado em prod
-//             QUANDO o proxy encaminha X-Forwarded-Proto: https).
-//   - false → cookies sem flag Secure. Necessário se o proxy não encaminha
+//   - true  → cookies só são emitidos/enviados via HTTPS. Requer que o proxy
+//             encaminhe X-Forwarded-Proto: https (Traefik/Dokploy com TLS).
+//   - false → cookies sem flag Secure. Necessário quando o proxy não encaminha
 //             X-Forwarded-Proto, pois caso contrário o express-session
-//             simplesmente NÃO emite o cookie de sessão e o login quebra em
+//             simplesmente NÃO emite o cookie de sessão e o login quebra com
 //             "Sessão inválida" na etapa de 2FA.
-//
-// Default: false. Se você confirmar que o Traefik/Dokploy está configurado para
-// encaminhar X-Forwarded-Proto: https, defina COOKIE_SECURE=true no .env.
+// Default: false (compatível com qualquer configuração de proxy).
 const cookieSecure = process.env.COOKIE_SECURE === 'true';
 console.log(`[boot] cookieSecure = ${cookieSecure} (COOKIE_SECURE=${process.env.COOKIE_SECURE || 'unset'})`);
 
 // ---------- Trust proxy ----------
-// Necessário para que req.secure / req.protocol reflitam X-Forwarded-Proto
-// quando atrás do Traefik/Dokploy.
+// Necessário para que req.secure / req.protocol reflitam X-Forwarded-Proto.
 app.set('trust proxy', 1);
-
-// ---------- Detecção de HTTPS por requisição ----------
-// Usado apenas para o cookie CSRF, que pode ser dinâmico.
-function requestIsHttps(req) {
-  if (req.secure) return true;
-  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-  return proto === 'https';
-}
 
 // ---------- CORS ----------
 const allowedOrigins = process.env.ALLOWED_ORIGINS
@@ -111,10 +100,6 @@ app.use((req, res, next) => {
 });
 
 // ---------- CSRF Double Submit Cookie ----------
-// `secure` também segue COOKIE_SECURE para ficar consistente com a sessão.
-// Se COOKIE_SECURE=false, o browser aceita o cookie via HTTP (não-Secure) e
-// envia de volta — sem quebrar o fluxo mesmo se o proxy não encaminhar
-// X-Forwarded-Proto.
 app.use((req, res, next) => {
   if (!req.cookies?.['csrf-token']) {
     const token = crypto.randomBytes(32).toString('hex');
@@ -156,8 +141,6 @@ app.use(session({
   rolling: true,
   proxy: true,
   cookie: {
-    // Controlado por COOKIE_SECURE. Default false para máxima compatibilidade
-    // com proxies que não encaminham X-Forwarded-Proto.
     secure: cookieSecure,
     httpOnly: true,
     sameSite: 'lax',
@@ -165,6 +148,29 @@ app.use(session({
     path: '/',
   },
 }));
+
+// ---------- Log de diagnóstico de autenticação ----------
+// Mostra para cada requisição protegida se a sessão chegou e se está autenticada.
+// Útil para investigar tela branca e erros de "Sessão inválida".
+app.use((req, res, next) => {
+  const path = req.path || '';
+  const skip = path === '/api/health' || path === '/api/ping' || path === '/api/csrf-token';
+  if (path.startsWith('/api/') && !skip) {
+    const sid = req.sessionID ? `${req.sessionID.slice(0, 8)}…` : 'none';
+    const authed = Boolean(req.session?.isAuthenticated);
+    const cookieNames = Object.keys(req.cookies || {}).join(',') || 'none';
+    console.log(`[auth] ${req.method} ${path} | sid=${sid} | autenticado=${authed} | cookies=${cookieNames}`);
+  }
+  next();
+});
+
+// ========== FUNÇÃO AUXILIAR – período atual ==========
+function getCurrentPeriod() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
 
 // ========== ROTAS PÚBLICAS (sem CSRF) ==========
 app.get('/api/auth/ping', (req, res) => {
@@ -404,6 +410,7 @@ app.use((req, res, next) => {
 });
 
 // ========== ARQUIVOS ESTÁTICOS (uploads) ==========
+// Exige sessão autenticada, conforme middleware acima.
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // ========== ROTAS PROTEGIDAS ==========

@@ -9,7 +9,6 @@ import {
   createContact,
   garantirLeadNoCloser,
   findOwnerIdByEmail,
-  getContactDeals,
   updateContactOwner,
   validateFinalAssignment,
   HUBSPOT_PIPELINE_CLOSER_ID,
@@ -20,12 +19,30 @@ import teamsNotificador from '../suporte/teams_notificacoes.js';
 let isProcessing = false;
 const LOCK_KEY = 854729;
 
-// Rótulos amigáveis para o campo ruleApplied devolvido pelo hubspot.js.
-// Usados quando a função não devolve `message` (casos de sucesso).
+const ACCEPTED_CLOSER_STAGES = new Set(
+  (
+    process.env.HUBSPOT_CLOSER_ACCEPTED_STAGES ||
+    `${HUBSPOT_STAGE_EM_CONTATO_ID},1368997800`
+  )
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
+// Flag legado: se true, exige a etapa exata Em Contato (comportamento antigo).
+// Default false — aceita qualquer etapa em ACCEPTED_CLOSER_STAGES.
+const ENFORCE_EXACT_STAGE =
+  String(process.env.MOVIMENTACAO_CRM_EXIGE_ETAPA || 'false').toLowerCase() === 'true';
+
+console.log(
+  `[ticketQueue] etapas do Closer aceitas: ${[...ACCEPTED_CLOSER_STAGES].join(', ')}` +
+    ` (ENFORCE_EXACT_STAGE=${ENFORCE_EXACT_STAGE})`
+);
+
 const RULE_LABELS = Object.freeze({
-  created_and_moved: 'Card criado na Base de Leads e movido para o Closer (Em Contato).',
-  base_to_closer: 'Card movido da Base de Leads para o Closer (Em Contato).',
-  desqualificado_to_em_contato: 'Card desqualificado reativado no Closer (Em Contato).',
+  created_and_moved: 'Card criado na Base de Leads e movido para o Closer.',
+  base_to_closer: 'Card movido da Base de Leads para o Closer.',
+  desqualificado_to_em_contato: 'Card desqualificado reativado no Closer.',
   closer_without_owner: 'Card estava no Closer sem responsável; atribuído agora.',
   reassigned_by_last_modified_date: 'Card reatribuído com base na última modificação.',
   already_assigned: 'Card já estava com o responsável informado; contato alinhado.',
@@ -38,12 +55,9 @@ const RULE_LABELS = Object.freeze({
   contact_data_mismatch: 'Dados divergentes do cadastro. Aguardando suporte.',
 });
 
-// Compõe uma mensagem descritiva quando o ticket é bloqueado.
-// Junta a mensagem original, prazos temporais, pipeline/etapa e última modificação.
 function describeBlockedReason(hubspotData) {
   const parts = [];
   if (hubspotData.mensagem) parts.push(hubspotData.mensagem);
-
   if (Number.isFinite(hubspotData.requiredHours)) {
     parts.push(`Prazo mínimo: ${hubspotData.requiredHours}h desde a última modificação.`);
   }
@@ -59,11 +73,6 @@ function describeBlockedReason(hubspotData) {
   return parts.filter(Boolean).join(' ');
 }
 
-/**
- * Processa a fila de tickets de movimentação normal (CRM).
- * Usa advisory lock global para evitar concorrência entre instâncias.
- * Filtra apenas crm_origem = 'CRM' — o fluxo Link Hub tem worker próprio.
- */
 async function processTicketQueue() {
   if (isProcessing) return;
 
@@ -135,12 +144,7 @@ async function processTicketQueue() {
   }
 }
 
-/**
- * Processa um ticket individualmente.
- * Busca o ownerId pelo nome do colaborador destino (via e-mail obtido do banco).
- */
 async function handleTicket(ticket, client) {
-  // 1) Idempotência — não reprocessa o que já foi concluído.
   let observacaoAtual = {};
   if (ticket.observacao_sales_ops) {
     try {
@@ -156,8 +160,6 @@ async function handleTicket(ticket, client) {
 
   const nomeCompleto = `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim();
 
-  // Estrutura enriquecida: inclui campos usados para reportar bloqueios,
-  // regra aplicada e histórico temporal.
   const hubspotData = {
     contactId: null,
     existe: false,
@@ -180,7 +182,6 @@ async function handleTicket(ticket, client) {
   let resultado = null;
 
   try {
-    // 2) Obter e-mail do colaborador destino: primeiro dos metadados, senão pelo nome.
     let colaboradorEmail = ticket.metadados?.colaborador_destino_email || null;
     if (!colaboradorEmail && ticket.colaborador_destino_nome) {
       const lookup = await client.query(
@@ -201,13 +202,11 @@ async function handleTicket(ticket, client) {
       );
     }
 
-    // 3) Resolver ownerId no HubSpot pelo e-mail.
     const ownerId = await findOwnerIdByEmail(colaboradorEmail);
     if (!ownerId) {
       throw new Error(`Owner do HubSpot não encontrado para o e-mail "${colaboradorEmail}".`);
     }
 
-    // 4) Buscar/criar contato no HubSpot.
     const busca = await findContactAndValidate({
       email: ticket.email_cliente_informado,
       phone: ticket.telefone_cliente_informado,
@@ -292,8 +291,15 @@ async function handleTicket(ticket, client) {
       }
     }
 
-    // 5) Validação final (aguarda associação propagar no HubSpot).
+    // 5) Validação final.
+    //    Se ENFORCE_EXACT_STAGE = true, exige a etapa exata Em Contato.
+    //    Caso contrário, aceita qualquer etapa em ACCEPTED_CLOSER_STAGES.
     if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
+      const validateOptions = {
+        expectedPipeline: HUBSPOT_PIPELINE_CLOSER_ID,
+        expectedStage: ENFORCE_EXACT_STAGE ? HUBSPOT_STAGE_EM_CONTATO_ID : null,
+      };
+
       let finalCheck = null;
       let attempts = 0;
       const maxAttempts = 8;
@@ -301,7 +307,7 @@ async function handleTicket(ticket, client) {
 
       while (attempts < maxAttempts) {
         attempts++;
-        finalCheck = await validateFinalAssignment(contactId, ownerId, dealId);
+        finalCheck = await validateFinalAssignment(contactId, ownerId, dealId, validateOptions);
         if (finalCheck.ok) {
           console.log(`✅ Validação final OK (tentativa ${attempts})`);
           break;
@@ -311,14 +317,32 @@ async function handleTicket(ticket, client) {
       }
 
       if (!finalCheck || !finalCheck.ok) {
-        throw new Error(
-          `Validação final falhou após ${maxAttempts} tentativas: ${JSON.stringify(finalCheck?.details || finalCheck)}`
-        );
+        // Checagem estrutural: owner do card, owner do contato e pipeline.
+        // A etapa é aceita se estiver em ACCEPTED_CLOSER_STAGES (a menos que
+        // ENFORCE_EXACT_STAGE exija Em Contato).
+        const d = finalCheck?.details || {};
+        const ownerOk = String(d.dealOwnerId) === String(ownerId)
+          && String(d.contactOwnerId) === String(ownerId);
+        const pipelineOk = String(d.dealPipeline) === HUBSPOT_PIPELINE_CLOSER_ID;
+        const stageOk = ENFORCE_EXACT_STAGE
+          ? String(d.dealStage) === HUBSPOT_STAGE_EM_CONTATO_ID
+          : ACCEPTED_CLOSER_STAGES.has(String(d.dealStage));
+
+        if (ownerOk && pipelineOk && stageOk) {
+          console.log(
+            `ℹ️ Validação estrita retornou não-ok, mas owner/pipeline/etapa válidos. ` +
+            `Etapa atual: ${d.dealStage}. Aceitando como sucesso.`
+          );
+        } else {
+          throw new Error(
+            `Validação final falhou após ${maxAttempts} tentativas: ${JSON.stringify(finalCheck?.details || finalCheck)}`
+          );
+        }
       }
     }
 
-    // 6) Determinar status final, propagando todos os campos relevantes
-    //    (regra aplicada, motivo de bloqueio, prazos temporais, etc).
+    // 6) Determinar status final.
+    //    Aceita qualquer etapa do Closer presente em ACCEPTED_CLOSER_STAGES.
     let statusFinal = 'pendente';
     if (resultado?.blocked) {
       statusFinal = 'bloqueado';
@@ -344,8 +368,9 @@ async function handleTicket(ticket, client) {
       hubspotData.ruleApplied = resultado?.ruleApplied || hubspotData.ruleApplied || null;
     } else if (
       resultado?.pipeline === HUBSPOT_PIPELINE_CLOSER_ID &&
-      resultado?.stage === HUBSPOT_STAGE_EM_CONTATO_ID
+      ACCEPTED_CLOSER_STAGES.has(String(resultado.stage))
     ) {
+      // ✅ Aceita qualquer etapa do Closer em ACCEPTED_CLOSER_STAGES.
       statusFinal = 'concluido';
       hubspotData.status = 'concluido';
       hubspotData.pipeline = resultado.pipeline;
@@ -354,13 +379,13 @@ async function handleTicket(ticket, client) {
       hubspotData.stageNome = resultado.stageNome || resultado.stage;
       hubspotData.ruleApplied = resultado.ruleApplied || null;
       hubspotData.lastUpdatedAt = resultado.lastUpdatedAt || null;
-      // Mensagem amigável: usa a mensagem devolvida pelo hubspot.js ou o rótulo da regra.
       hubspotData.mensagem =
         resultado.message ||
         RULE_LABELS[resultado.ruleApplied] ||
         'Movimentação concluída com sucesso.';
     } else if (resultado && resultado.dealId) {
-      // Card foi atribuído, mas caiu fora do esperado (não está em Closer/Em Contato).
+      // Card foi atribuído mas está no Closer em uma etapa não aceita,
+      // ou está em outro pipeline. Reporta como fora do fluxo esperado.
       statusFinal = 'fora_pipeline';
       hubspotData.status = 'fora_pipeline';
       hubspotData.pipeline = resultado.pipeline || null;
@@ -373,17 +398,14 @@ async function handleTicket(ticket, client) {
       hubspotData.lastUpdatedAt = resultado.lastUpdatedAt || null;
       hubspotData.mensagem =
         `Card foi atribuído mas está no pipeline "${hubspotData.pipelineNome}" ` +
-        `na etapa "${hubspotData.stageNome}", fora do fluxo esperado ` +
-        `(Closer / Em Contato). Verifique manualmente.`;
+        `na etapa "${hubspotData.stageNome}", fora das etapas aceitas do Closer ` +
+        `(${[...ACCEPTED_CLOSER_STAGES].join(', ')}). Verifique manualmente.`;
     } else {
-      // Nenhum contato resolvido e nenhum deal atribuído — mantém pendente.
       statusFinal = 'pendente';
       hubspotData.status = 'pendente';
       hubspotData.mensagem = 'Movimentação não pôde ser concluída. Revise os dados do cliente.';
     }
 
-    // 7) Persistir observação + status no ticket de movimentação.
-    //    A observação textual prioriza: bloqueio com motivo completo > mensagem simples > rótulo da regra.
     const observacaoTexto =
       hubspotData.status === 'bloqueado'
         ? describeBlockedReason(hubspotData)
@@ -412,7 +434,6 @@ async function handleTicket(ticket, client) {
       [JSON.stringify(novoObservacao), statusFinal, ticket.id_ticket_movimentacao]
     );
 
-    // 8) Atualizar o ticket base em tickets_suporte.
     let suporteStatus = 'EM ANDAMENTO';
     if (statusFinal === 'concluido') suporteStatus = 'CONCLUÍDO';
     else if (statusFinal === 'bloqueado') suporteStatus = 'BLOQUEADO';
@@ -436,8 +457,6 @@ async function handleTicket(ticket, client) {
       );
     }
 
-    // 9) Notificação Teams para todos os casos não concluídos.
-    //    Inclui tipo de bloqueio, prazos temporais, pipelines e regra aplicada.
     if (statusFinal !== 'concluido') {
       try {
         await teamsNotificador.enviar({

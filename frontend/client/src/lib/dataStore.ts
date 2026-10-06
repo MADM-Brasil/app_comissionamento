@@ -60,8 +60,13 @@ export interface Collaborator {
   pesoMensalAssinados: number;
   pesoMensalGanhos: number;
   totalGols?: number;
-  classificacaoOperacional: string; 
-  canal: string;                    
+  classificacaoOperacional: string;
+  canal: string;
+  // Campos de unidade:
+  // unidadeId é o id bruto (1=Osasco, 2=Ribeirão Preto, 3=Curitiba, 4=HO).
+  // unidadeNome é o rótulo legível; null quando não há mapeamento (ex.: HO=4).
+  unidadeId?: number | null;
+  unidadeNome?: string | null;
 }
 export interface GlobalConfig {
   pesoMetaAssinados: number; pesoMetaGanhos: number; pesoMetaequipeAssinados: number; pesoMetaequipeGanhos: number;
@@ -96,6 +101,8 @@ export interface User {
   role?: string;
   rank?: number;
   totalRanking?: number;
+  // Adicionado: preservado do backend para filtros de unidade no frontend.
+  unidade_id?: number | null;
 }
 export interface RankingItem { position: number; name: string; emitidos: number; assinados: number; ganhos: number; avatar: string; trend: 'up' | 'down' | 'same'; isCurrentUser?: boolean; }
 export interface CommissionItem { id: number; colaboradorId: string; cliente: string; produto: string; valor: number; status: 'pago' | 'pendente' | 'processando'; data: string; comissao: number; }
@@ -116,7 +123,7 @@ export interface TabelaComissaoItem {
   faixa_max: number;
   data_atualizacao: string;
 }
-// NOVO: Interface para campanhas
+// Interface para campanhas
 export interface Campaign {
   tipo: string;
   multiplicador: number;
@@ -273,7 +280,7 @@ interface AppStore {
   loadTabelaComissoes: () => Promise<void>;
   campaigns: Campaign[];
   loadCampaigns: (mes?: string) => Promise<void>;
-  // Novo estado para o colaborador selecionado (e-mail) – usado para ocultar/bloquear no DashboardLayout
+  // Estado para o colaborador selecionado (e-mail) – usado para ocultar/bloquear no DashboardLayout
   selectedCollaboratorEmail: string | null;
   setSelectedCollaboratorEmail: (email: string | null) => void;
 
@@ -358,7 +365,6 @@ export const useAppStore = create<AppStore>()(
       toggleHideValues: () => set((state) => ({ hideValues: !state.hideValues })),
       tabelaComissoes: initialTabelaComissoes,
       campaigns: initialCampaigns,
-      // Novo estado e setter
       selectedCollaboratorEmail: null,
       setSelectedCollaboratorEmail: (email) => set({ selectedCollaboratorEmail: email }),
 
@@ -429,26 +435,45 @@ export const useAppStore = create<AppStore>()(
       setRanking: (data) => set({ ranking: data }),
       setDailyData: (data) => set({ dailyData: data }),
 
+      // ============================================================
+      // CORREÇÃO CRÍTICA:
+      // O backend retorna `nome_equipe`, NÃO `equipe`.
+      // Antes, essa função lia só `user.equipe`, o que fazia `equipe`
+      // ficar sempre vazia no frontend e, para supervisores, zerava
+      // o dropdown de "Equipe Destino" na página de Suporte.
+      // Agora aceitamos ambos os nomes e preservamos `unidade_id`.
+      // ============================================================
       setCurrentUser: (user) => {
         if (!user) {
           set({ currentUser: null });
           return;
         }
+        const rawEquipe =
+          (user as any).nome_equipe ??
+          (user as any).equipe ??
+          '';
         const normalized: User = {
           id: user.id || user.email || '',
           e_mail: user.e_mail || '',
           nome: user.nome || '',
           email: user.email || user.e_mail || '',
-          equipe: user.equipe || '',
-          cargo: user.cargo || user.cargo || '',
+          equipe: rawEquipe,
+          cargo: user.cargo || '',
           status: user.status || '',
           periodo: user.periodo || '',
           avatar: user.avatar,
           role: user.role || user.cargo,
           rank: user.rank,
           totalRanking: user.totalRanking,
+          ...(user.unidade_id !== undefined ? { unidade_id: user.unidade_id } : {}),
         };
         set({ currentUser: normalized });
+        console.log('[dataStore] setCurrentUser →', {
+          nome: normalized.nome,
+          equipe: normalized.equipe,
+          cargo: normalized.cargo,
+          unidade_id: normalized.unidade_id,
+        });
       },
 
       setEquipeConfigs: (data) => set({ equipeConfigs: data }),
@@ -603,7 +628,8 @@ export const useAppStore = create<AppStore>()(
             name: c.name,
             email: c.email,
             equipeId: c.equipeId ?? '',
-            equipeNome: c.equipeNome || '',
+            // Compatibilidade: aceita equipeNome (padrão novo) e nome_equipe (retorno do backend)
+            equipeNome: c.equipeNome || c.nome_equipe || '',
             avatar: c.avatar || (c.name || '?').charAt(0).toUpperCase(),
             emitidos: 0,
             assinados: 0,
@@ -637,6 +663,9 @@ export const useAppStore = create<AppStore>()(
             pesoMensalGanhos: c.pesoMensalGanhos ?? 60,
             classificacaoOperacional: c.classificacaoOperacional || c.classificacao_operacional || '',
             canal: c.canal || (c.classificacaoOperacional || c.classificacao_operacional || '').toLowerCase() === 'judit' ? 'Judit' : 'Discadora',
+            // Campos de unidade (1=Osasco, 2=Ribeirão Preto, 3=Curitiba, 4=HO → nome null)
+            unidadeId: c.unidadeId ?? null,
+            unidadeNome: c.unidadeNome ?? null,
           }));
 
           console.log('✅ [loadCollaborators] Mapeados:', baseCollaborators.length);

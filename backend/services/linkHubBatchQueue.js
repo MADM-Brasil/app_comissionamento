@@ -16,7 +16,7 @@ import {
   getHubSpotOwnerEmail,
   reassignDealForLinkHubMovement,
 } from './hubspot.js';
-import { getActiveSupportUser, validateHubSpotMovementAccess } from './supportAccess.js';
+import { getActiveSupportUser, validateHubSpotMovementAccess } from './access-control.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 
 const LOCK_KEY = 854730;

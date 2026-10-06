@@ -1,4 +1,8 @@
 // backend/routes/suporte.js
+// Fluxo unificado: movimentações normais (CRM) e por Link Hub (HUBSPOT_LINK)
+// compartilham a mesma tabela app_comissionamento.tickets_movimentacao_lead.
+// Nenhuma tabela adicional é necessária.
+// Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
 
 import express from 'express';
 import { createHash, randomUUID } from 'crypto';
@@ -16,7 +20,7 @@ import {
   isSupportSupervisor,
   normalizeAccessValue,
   validateHubSpotMovementAccess,
-} from '../services/supportAccess.js';
+} from '../services/access-control.js';
 
 const router = express.Router();
 const PLACEHOLDER_UUID = '00000000-0000-0000-0000-000000000000';
@@ -27,6 +31,15 @@ const STATUS_MAP = Object.freeze({
   bloqueado: 'Bloqueado', fora_pipeline: 'Fora do Pipeline', no_pipeline: 'No Pipeline',
 });
 const SUPPORT_STATUSES = new Set(Object.values(STATUS_MAP));
+
+// Mapeamento de unidade_id para nome legível.
+// 4 (HO) é tratado como "vê todas as unidades".
+const UNIDADES_MAP = Object.freeze({
+  1: 'Osasco',
+  2: 'Ribeirão Preto',
+  3: 'Curitiba',
+});
+const HO_UNIDADE_ID = 4;
 
 function fail(status, message) {
   const error = new Error(message);
@@ -112,7 +125,6 @@ function extractHubSpotDealId(link) {
   } catch { return null; }
 }
 
-// Validação de telefone (DDD + 8/9 dígitos, tolera +55).
 function validatePhone(rawPhone) {
   const digits = String(rawPhone || '').replace(/\D/g, '');
   const national = digits.startsWith('55') && digits.length >= 12
@@ -213,16 +225,231 @@ function notify(payload) {
   } catch (error) { console.error('Falha na notificação:', error.message); }
 }
 
+// ============================================================
+// GET /escopo/debug
+// Diagnóstico temporário. Mostra exatamente o que o servidor vê.
+// Pode ser removido após a validação do filtro por unidade.
+// ============================================================
+router.get('/escopo/debug', asyncRoute(async (req, res) => {
+  const actor = req.supportActor;
+  const isAdmin = isSupportAdmin(actor.cargo);
+  const unidadeId = actor.unidade_id != null ? Number(actor.unidade_id) : null;
+  const ehHO = unidadeId === HO_UNIDADE_ID;
+  const aplicarFiltroUnidade = !isAdmin && !ehHO && unidadeId != null;
+
+  const mesParam = text(req.query.mes, 'Mês');
+  let dataMetrica;
+  if (mesParam) {
+    dataMetrica = /^\d{4}-\d{2}$/.test(mesParam) ? `${mesParam}-01` : mesParam;
+  } else {
+    const now = new Date();
+    dataMetrica = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  }
+
+  const params = [dataMetrica];
+  let filtroUnidadeSql = '';
+  if (aplicarFiltroUnidade) {
+    params.push(unidadeId);
+    filtroUnidadeSql = ` AND TRIM(COALESCE(c.unidade_id::text, '')) = $${params.length}::text`;
+  }
+
+  const sql = `SELECT
+       COALESCE(c.email, m.email) AS email,
+       COALESCE(c.nome, m.email) AS nome,
+       c.nome_equipe,
+       c.cargo,
+       c.status,
+       c.unidade_id
+     FROM app_comissionamento.view_app_metricas_assessores m
+     LEFT JOIN core.view_app_colaboradores c
+       ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
+     WHERE m.data_metrica::date = $1::date
+       AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
+       AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
+       AND (c.cargo IS NULL OR LOWER(TRIM(c.cargo)) != 'desativado')
+       AND (m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != '')
+       ${filtroUnidadeSql}
+     ORDER BY c.nome_equipe, c.nome`;
+
+  let queryError = null;
+  let queryResult = [];
+  try {
+    const r = await pool.query(sql, params);
+    queryResult = r.rows;
+  } catch (err) {
+    queryError = err.message;
+  }
+
+  let distribuicao = [];
+  try {
+    const r = await pool.query(
+      `SELECT
+         COALESCE(c.unidade_id::text, 'null') AS unidade,
+         COUNT(*) AS total
+       FROM app_comissionamento.view_app_metricas_assessores m
+       LEFT JOIN core.view_app_colaboradores c
+         ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
+       WHERE m.data_metrica::date = $1::date
+         AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
+         AND (c.cargo IS NULL OR LOWER(TRIM(c.cargo)) != 'desativado')
+         AND m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != ''
+       GROUP BY c.unidade_id
+       ORDER BY c.unidade_id NULLS LAST`,
+      [dataMetrica]
+    );
+    distribuicao = r.rows;
+  } catch (err) {
+    distribuicao = [{ erro: err.message }];
+  }
+
+  const equipesUnicas = [...new Set(queryResult.map(r => r.nome_equipe).filter(Boolean))];
+
+  res.json({
+    success: true,
+    debug: {
+      supportActorCompleto: actor,
+      calculo: {
+        isAdmin,
+        ehHO,
+        HO_UNIDADE_ID,
+        unidadeId,
+        aplicarFiltroUnidade,
+      },
+      dataMetrica,
+      sqlExecutada: sql,
+      paramsEnviados: params,
+      queryError,
+      resultado: {
+        totalLinhas: queryResult.length,
+        equipesUnicas,
+        primeiraLinha: queryResult[0] || null,
+      },
+      distribuicaoPorUnidade: distribuicao,
+    },
+  });
+}));
+
+// ============================================================
+// GET /escopo
+// Retorna equipes e assessores disponíveis para o usuário logado.
+//
+// Regra de unidade:
+//   - Admin → sem filtro.
+//   - HO (unidade_id = 4) → sem filtro (HO vê todas as unidades).
+//   - Coordenador / Supervisor com unidade_id (1, 2, 3) → apenas da própria unidade.
+//   - Sem unidade_id → fallback sem filtro (com aviso no log).
+//
+// Fonte: view_app_metricas_assessores (mês corrente) JOIN view_app_colaboradores.
+//  - m.data_metrica do mês corrente garante apenas colaboradores do mês.
+//  - m.classificacao_operacional preenchida filtra os desativados/duplicados.
+//  - c.unidade_id aplica o filtro de unidade.
+// ============================================================
+router.get('/escopo', asyncRoute(async (req, res) => {
+  const actor = req.supportActor;
+  const isAdmin = isSupportAdmin(actor.cargo);
+  const unidadeId = actor.unidade_id != null ? Number(actor.unidade_id) : null;
+
+  const ehHO = unidadeId === HO_UNIDADE_ID;
+  const aplicarFiltroUnidade = !isAdmin && !ehHO && unidadeId != null;
+
+  if (!isAdmin && unidadeId == null) {
+    console.warn(
+      `[suporte/escopo] Usuário ${actor.email} (${actor.cargo}) sem unidade_id definida; ` +
+      `exibindo equipes e assessores de todas as unidades.`
+    );
+  }
+  if (ehHO) {
+    console.info(
+      `[suporte/escopo] Usuário ${actor.email} pertence a HO; exibindo todas as unidades.`
+    );
+  }
+
+  const mesParam = text(req.query.mes, 'Mês');
+  let dataMetrica;
+  if (mesParam) {
+    dataMetrica = /^\d{4}-\d{2}$/.test(mesParam) ? `${mesParam}-01` : mesParam;
+  } else {
+    const now = new Date();
+    dataMetrica = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  }
+
+  const params = [dataMetrica];
+  let filtroUnidadeSql = '';
+  if (aplicarFiltroUnidade) {
+    params.push(unidadeId);
+    filtroUnidadeSql = ` AND TRIM(COALESCE(c.unidade_id::text, '')) = $${params.length}::text`;
+  }
+
+  const result = await pool.query(
+    `SELECT
+       COALESCE(c.email, m.email) AS email,
+       COALESCE(c.nome, m.email) AS nome,
+       c.nome_equipe,
+       c.cargo,
+       c.status,
+       c.unidade_id
+     FROM app_comissionamento.view_app_metricas_assessores m
+     LEFT JOIN core.view_app_colaboradores c
+       ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
+     WHERE m.data_metrica::date = $1::date
+       AND (c.nome_equipe IS NULL OR TRIM(c.nome_equipe) != '')
+       AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
+       AND (c.cargo IS NULL OR LOWER(TRIM(c.cargo)) != 'desativado')
+       AND (m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != '')
+       ${filtroUnidadeSql}
+     ORDER BY c.nome_equipe, c.nome`,
+    params
+  );
+
+  const equipesSet = new Set();
+  const assessores = [];
+
+  for (const row of result.rows) {
+    const equipeNome = (row.nome_equipe || '').trim();
+    if (!equipeNome) continue;
+    equipesSet.add(equipeNome);
+    assessores.push({
+      id: row.email,
+      nome: row.nome || row.email,
+      email: row.email,
+      cargo: row.cargo || '',
+      status: row.status || 'ativo',
+      equipeNome,
+      unidadeId: row.unidade_id != null ? Number(row.unidade_id) : null,
+    });
+  }
+
+  console.log(
+    `[suporte/escopo] user=${actor.email} cargo=${actor.cargo} ` +
+    `unidade_id=${unidadeId} ehHO=${ehHO} isAdmin=${isAdmin} aplicarFiltro=${aplicarFiltroUnidade} ` +
+    `mes=${dataMetrica} equipes=${equipesSet.size} assessores=${assessores.length}`
+  );
+
+  res.json({
+    success: true,
+    data: {
+      usuario: {
+        cargo: actor.cargo || '',
+        equipe: actor.nome_equipe || '',
+        unidadeId,
+        unidadeNome: unidadeId != null ? (UNIDADES_MAP[unidadeId] || null) : null,
+        isAdmin,
+        aplicarFiltroUnidade,
+      },
+      equipes: [...equipesSet].sort((a, b) => a.localeCompare(b, 'pt-BR')),
+      assessores,
+    },
+  });
+}));
+
 // ---------------------- Movimentação normal (CRM) ----------------------
 router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
   const body = req.body;
 
-  // Bloqueio do fluxo Link Hub por esta rota.
   if (body.crm_origem === HUBSPOT_LINK_MOVEMENT || body.tipo_solicitacao === 'Movimentação Link Hub') {
     throw fail(410, 'Use a rota de lote dedicada para movimentações por Link Hub.');
   }
 
-  // 1) Validação prévia de campos obrigatórios — nada vai ao banco antes disso.
   const REQUIRED_FIELDS = [
     { key: 'nome_cliente_informado',      label: 'Nome' },
     { key: 'sobrenome_cliente_informado', label: 'Sobrenome' },
@@ -244,7 +471,6 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
     });
   }
 
-  // 2) Validação de formato do telefone antes de qualquer acesso ao banco.
   if (!validatePhone(body.telefone_cliente_informado)) {
     return res.status(400).json({
       success: false,
@@ -254,14 +480,12 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
     });
   }
 
-  // 3) Normalização dos campos (a partir daqui pode haver acesso ao banco).
   const key = idempotencyKey(body.idempotency_key);
   const firstName = text(body.nome_cliente_informado, 'Nome', { required: true });
   const lastName = text(body.sobrenome_cliente_informado, 'Sobrenome', { required: true });
   const phone = text(body.telefone_cliente_informado, 'Telefone', { required: true, max: 50 });
   const customerEmail = email(body.email_cliente_informado, 'E-mail do cliente');
 
-  // CPF: se informado, exige 11 dígitos após limpeza.
   const rawCpf = text(body.cpf_cliente_informado, 'CPF', { max: 30 });
   const cpf = rawCpf.replace(/\D/g, '');
   if (rawCpf && cpf.length !== 11) throw fail(400, 'CPF deve conter 11 dígitos.');
@@ -323,7 +547,6 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
     return { id: movement.rows[0].id_ticket_movimentacao, repeated: false };
   });
 
-  // Resposta enriquecida com o resumo do que foi validado e do que é opcional.
   const camposValidados = ['Nome', 'Sobrenome', 'Telefone'];
   const camposOpcionais = [];
   if (!customerEmail) camposOpcionais.push('E-mail do cliente');
@@ -353,8 +576,6 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
-// Cada link vira um ticket independente (tickets_suporte + tickets_movimentacao_lead),
-// agrupados pelo mesmo idempotency_key nos metadados do ticket_suporte.
 router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
   const { links } = req.body;
   if (!Array.isArray(links) || links.length < 1 || links.length > 50) {
