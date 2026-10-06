@@ -2,11 +2,19 @@
 // Worker do fluxo de Movimentação por Link Hub.
 // Opera sobre a MESMA tabela app_comissionamento.tickets_movimentacao_lead,
 // filtrando por crm_origem = 'HUBSPOT_LINK'.
+//
 // Regra aplicada no HubSpot (via reassignDealForLinkHubMovement):
 //   - Base de Leads → move para Closer (Em Contato), limpa motivo_da_perda;
 //   - Closer → apenas troca o proprietário, preserva pipeline/etapa.
+//
 // O estado de tentativas/lease é mantido dentro do JSON observacao_sales_ops
 // na chave "_worker", para não exigir novas colunas na tabela.
+//
+// Ajustes para paridade com ticketQueue.js:
+// - Mensagens descritivas centralizadas em RULE_LABELS;
+// - Notificação Teams em falhas e bloqueios (com prazos, pipeline e regra);
+// - `observacao` final composta com detalhes do bloqueio quando aplicável;
+// - `_worker` enriquecido com timestamps de sucesso/falha por etapa.
 import { pool } from './db.js';
 import {
   findOwnerIdByEmailStrict,
@@ -15,15 +23,24 @@ import {
   reassignDealForLinkHubMovement,
 } from './hubspot.js';
 import { getActiveSupportUser, validateHubSpotMovementAccess } from './supportAccess.js';
+import teamsNotificador from '../suporte/teams_notificacoes.js';
 
 const LOCK_KEY = 854730;
 const MAX_ATTEMPTS = 3;
 const PROCESSING_LEASE_MINUTES = 15;
 let isProcessing = false;
 
-function getRetryDelayMinutes(attempt) {
-  return Math.min(15, 2 ** Math.max(1, attempt));
-}
+// Rótulos amigáveis para as regras aplicadas no fluxo Link Hub.
+// Usados em `hubspot.mensagem` e `observacao` no histórico e nas notificações Teams.
+const RULE_LABELS = Object.freeze({
+  moved_from_base_leads:
+    'Card movido da Base de Leads para o Closer (Em Contato), motivo da perda limpo.',
+  reassigned_in_closer:
+    'Responsável alterado no Closer, pipeline e etapa preservados.',
+});
+
+// Estados finais que geram notificação Teams (não notificamos retries 'pendente').
+const NOTIFY_STATUSES = new Set(['erro', 'bloqueado']);
 
 function isRetryableError(error) {
   if (error.retryable === false) return false;
@@ -52,6 +69,27 @@ function safeParse(value) {
   } catch {
     return {};
   }
+}
+
+// Compõe uma mensagem descritiva de falha, combinando mensagem original,
+// pipeline/etapa de origem, tentativas e detalhes parciais quando existirem.
+function describeFailure(error, attempts) {
+  const parts = [];
+  parts.push(error.message || 'Falha na movimentação Link Hub.');
+  if (Number.isFinite(attempts) && attempts > 0) {
+    parts.push(`Tentativas: ${attempts}/${MAX_ATTEMPTS}.`);
+  }
+  const partial = error.partialResult;
+  if (partial?.previousPipeline) {
+    parts.push(`Pipeline de origem: ${partial.previousPipeline}.`);
+  }
+  if (partial?.previousStage) {
+    parts.push(`Etapa de origem: ${partial.previousStage}.`);
+  }
+  if (error.blocked) {
+    parts.push('Bloqueio definitivo — requer revisão manual.');
+  }
+  return parts.filter(Boolean).join(' ');
 }
 
 /**
@@ -150,15 +188,21 @@ async function claimNextTicket(client) {
 /**
  * Persiste o sucesso da movimentação, diferenciando o caso Base → Closer
  * do caso apenas troca de proprietário no Closer.
+ * Devolve o payload para notificação opcional (não é notificado aqui porque
+ * o fluxo Link Hub só notifica em erro/bloqueio, mantendo paridade com o worker CRM).
  */
 async function markSuccess(client, ticket, resultData) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const movedFromBase = Boolean(resultData.movedFromBaseLeads);
+  const regra = movedFromBase ? 'moved_from_base_leads' : 'reassigned_in_closer';
+  const mensagem = RULE_LABELS[regra];
+  const agora = new Date().toISOString();
 
   const nova = {
     ...observacao,
     processado: true,
     dealId: resultData.dealId,
+    regra,
     hubspot: {
       status: 'concluido',
       dealId: resultData.dealId,
@@ -172,20 +216,17 @@ async function markSuccess(client, ticket, resultData) {
       contactIds: resultData.contactIds || [],
       lastUpdatedAt: resultData.lastUpdatedAt || null,
       ownerDestinoId: resultData.ownerDestinoId || null,
-      mensagem: movedFromBase
-        ? 'Movimentação Link Hub concluída (Base de Leads → Closer).'
-        : 'Movimentação Link Hub concluída (troca de responsável no Closer).',
+      ruleApplied: regra,
+      mensagem,
     },
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
-    observacao: movedFromBase
-      ? 'Card movido da Base de Leads para o Closer com motivo da perda limpo.'
-      : 'Responsável alterado no Closer, etapa preservada.',
+    observacao: mensagem,
     colaboradorDestinoNome: ticket.colaborador_destino_nome,
     validacaoFinal: true,
     _worker: {
       ...(observacao._worker || {}),
       processando_desde: null,
-      concluido_em: new Date().toISOString(),
+      concluido_em: agora,
     },
   };
 
@@ -208,12 +249,17 @@ async function markSuccess(client, ticket, resultData) {
 
 /**
  * Persiste a falha, decidindo entre retry ('pendente') ou encerramento ('erro' / 'bloqueado').
+ * Envia notificação Teams quando o estado final é 'erro' ou 'bloqueado'.
  */
 async function markFailure(client, ticket, error) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const tentativas = Number(observacao._worker?.tentativas || 0);
   const retryable = isRetryableError(error) && tentativas < MAX_ATTEMPTS;
   const statusFinal = error.blocked ? 'bloqueado' : retryable ? 'pendente' : 'erro';
+  const agora = new Date().toISOString();
+
+  // Texto descritivo composto para a observação final.
+  const observacaoTexto = describeFailure(error, tentativas);
 
   const nova = {
     ...observacao,
@@ -222,16 +268,17 @@ async function markFailure(client, ticket, error) {
       ...(observacao.hubspot || {}),
       erro: true,
       status: statusFinal,
-      mensagem: error.message || 'Falha na movimentação Link Hub.',
+      ruleApplied: null,
+      mensagem: observacaoTexto,
       ...(error.partialResult ? { resultadoParcial: error.partialResult } : {}),
     },
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
-    observacao: error.message || 'Falha na movimentação Link Hub.',
+    observacao: observacaoTexto,
     _worker: {
       ...(observacao._worker || {}),
       tentativas,
       processando_desde: null,
-      ultima_falha_em: new Date().toISOString(),
+      ultima_falha_em: agora,
       ...(retryable ? {} : { encerrado: true }),
     },
   };
@@ -257,6 +304,36 @@ async function markFailure(client, ticket, error) {
      WHERE id_ticket = $2`,
     [supportStatus, ticket.ticket_id]
   );
+
+  // Notificação Teams apenas para estados finais (não em retries).
+  if (NOTIFY_STATUSES.has(statusFinal)) {
+    try {
+      const meta = ticket.metadados || {};
+      const partial = error.partialResult || {};
+      await teamsNotificador.enviar({
+        titulo: 'Movimentação Link Hub — Falha',
+        assunto: 'MovimentacaoLinkHub',
+        descricao:
+          `Falha ao movimentar card ${ticket.crm_lead_id || 'N/A'} | ` +
+          `Status: ${statusFinal} | ` +
+          `Tentativas: ${tentativas}/${MAX_ATTEMPTS}`,
+        solicitante: meta.solicitante_nome || meta.solicitante_email || 'N/A',
+        equipe: meta.origem_equipe || 'N/A',
+        anexosMarkdown: 'Nenhum anexo',
+        cliente: `Deal ${ticket.crm_lead_id || 'N/A'}`,
+        equipeDestino: meta.destino_equipe || 'N/A',
+        assessorDestino: ticket.colaborador_destino_nome || 'N/A',
+        status: statusFinal,
+        mensagem: observacaoTexto,
+        pipeline: partial.previousPipeline || null,
+        stage: partial.previousStage || null,
+        dealId: ticket.crm_lead_id || null,
+        link: meta.link_hub || null,
+      });
+    } catch (notifErr) {
+      console.error('Erro ao enviar notificação Teams (Link Hub):', notifErr);
+    }
+  }
 }
 
 /**
@@ -325,7 +402,7 @@ async function handleLinkHubTicket(ticket, client) {
     error.blocked = true;
     throw error;
   }
-  
+
   const assignment = await reassignDealForLinkHubMovement(
     dealId,
     ownerId,

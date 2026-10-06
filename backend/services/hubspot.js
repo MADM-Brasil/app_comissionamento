@@ -6,6 +6,9 @@
 // - reassignDealForLinkHubMovement: nova regra do Link Hub:
 //     * Base de Leads → move para Closer (Em Contato), limpa motivo_da_perda;
 //     * Closer → apenas troca o proprietário, preserva pipeline/etapa;
+// - garantirLeadNoCloser devolve "message" descritiva em todas as decisões
+//   (inclusive sucesso), para que o worker CRM propague no histórico;
+// - bloqueios temporais incluem requiredHours, hoursSinceNote, notesLastUpdated;
 // - validação final sem ID explícito só aceita um único card candidato;
 // - falhas parciais exigem reconciliação no worker, não repetição automática;
 // - nenhum POST/PATCH é repetido automaticamente;
@@ -58,6 +61,21 @@ const STAGE_NAMES = {
   ...(STAGE_COLETA_DOCUMENTACAO_ID ? { [STAGE_COLETA_DOCUMENTACAO_ID]: 'Coleta de documentação' } : {}),
   ...(STAGE_ENTRADA_ID ? { [STAGE_ENTRADA_ID]: 'Entrada' } : {}),
 };
+
+// Mensagens amigáveis devolvidas em `message` para cada regra aplicada.
+// O worker CRM propaga esses textos no histórico e nas notificações Teams.
+const RULE_MESSAGES = Object.freeze({
+  created_and_moved: 'Card criado na Base de Leads e movido para o Closer (Em Contato).',
+  base_to_closer: 'Card movido da Base de Leads para o Closer (Em Contato).',
+  desqualificado_to_em_contato: 'Card desqualificado reativado no Closer (Em Contato).',
+  closer_without_owner: 'Card estava no Closer sem responsável; atribuído agora.',
+  reassigned_by_last_modified_date: 'Card reatribuído com base na última modificação.',
+  already_assigned: 'Card já está com o responsável informado; contato alinhado.',
+  ambiguous_deals: 'Contato associado a vários cards. Use o link do card correto.',
+  fallback_block: 'Card fora dos pipelines permitidos.',
+  owned_by_another_recent_activity: 'Card pertence a outro responsável e a última modificação está dentro do prazo mínimo.',
+  owner_missing: 'Responsável destino não informado.',
+});
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -693,8 +711,8 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
   if (!ownerId) {
     return assignmentResult(null, {
       blocked: true,
-      message: 'Responsável destino não informado.',
       ruleApplied: 'owner_missing',
+      message: RULE_MESSAGES.owner_missing,
     });
   }
   await accountReady();
@@ -704,8 +722,8 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     if (deals.length > 1) {
       return assignmentResult(null, {
         blocked: true,
-        message: 'Contato associado a vários cards. Use o link do card correto.',
         ruleApplied: 'ambiguous_deals',
+        message: RULE_MESSAGES.ambiguous_deals,
       });
     }
     let deal = deals[0];
@@ -715,8 +733,8 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     else if (String(deal.pipeline) !== PIPELINE_CLOSER_ID) {
       return assignmentResult(deal, {
         blocked: true,
-        message: 'Card fora dos pipelines permitidos.',
         ruleApplied: 'fallback_block',
+        message: RULE_MESSAGES.fallback_block,
       });
     } else if (String(deal.stage) === STAGE_DESQUALIFICADO_ID) {
       rule = 'desqualificado_to_em_contato';
@@ -727,15 +745,15 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
       return assignmentResult(deal, {
         alreadyAssigned: true,
         ruleApplied: 'already_assigned',
-        message: `Card já está com o colaborador '${optionalText(collaboratorName)}'.`,
+        message: RULE_MESSAGES.already_assigned,
       });
     } else {
       const check = temporalCheck(deal);
       if (!check.allowed) {
         return assignmentResult(deal, {
           blocked: true,
-          message: check.reason,
           ruleApplied: 'owned_by_another_recent_activity',
+          message: `${RULE_MESSAGES.owned_by_another_recent_activity} ${check.reason}.`,
           requiredHours: check.requiredHours,
           hoursSinceNote: check.hoursSinceNote,
           notesLastUpdated: check.lastUpdated,
@@ -784,7 +802,10 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
       ) {
         throw hubError('Atribuição final não confirmada.', { code: 'CONFIRMATION_FAILED' });
       }
-      return assignmentResult(confirmedDeal, { ruleApplied: rule });
+      return assignmentResult(confirmedDeal, {
+        ruleApplied: rule,
+        message: RULE_MESSAGES[rule] || 'Movimentação concluída com sucesso.',
+      });
     } catch (error) {
       if (writeAttempted) {
         error.partialResult = {

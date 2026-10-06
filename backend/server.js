@@ -1,9 +1,5 @@
 // backend/server.js
 import 'dotenv/config';
-console.log('[boot] cwd =', process.cwd());
-console.log('[boot] HUBSPOT_PORTAL_ID =', JSON.stringify(process.env.HUBSPOT_PORTAL_ID));
-console.log('[boot] CHV_Hubspot definido?', Boolean(process.env.CHV_Hubspot));
-console.log('[boot] SESSION_SECRET definido?', Boolean(process.env.SESSION_SECRET));
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -35,13 +31,25 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3007;
+const isProduction = process.env.NODE_ENV === 'production';
 
 // ---------- Trust proxy ----------
+// Necessário para que req.secure / req.protocol reflitam X-Forwarded-Proto
+// quando atrás do Traefik/Dokploy.
 app.set('trust proxy', 1);
 
+// ---------- Detecção de HTTPS por requisição ----------
+// Usado para configurar cookies de forma consistente em HTTP (dev) e HTTPS (prod).
+function requestIsHttps(req) {
+  if (req.secure) return true;
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  return proto === 'https';
+}
+
 // ---------- CORS ----------
-const isProduction = process.env.NODE_ENV === 'production';
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3008'];
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
+  : ['http://localhost:3008'];
 
 app.use(cors({
   origin: allowedOrigins,
@@ -52,10 +60,13 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// ---------- SERVE ARQUIVOS ESTÁTICOS (uploads) SEM AUTENTICAÇÃO ----------
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
-
 // ---------- Helmet ----------
+// Em produção NÃO usamos FRONTEND_URL com fallback para localhost — isso quebra
+// o connect-src e trava o app. Em vez disso, aceitamos 'self' + https/wss.
+const cspConnectExtra = [];
+if (process.env.FRONTEND_URL) cspConnectExtra.push(process.env.FRONTEND_URL);
+if (process.env.BACKEND_PUBLIC_URL) cspConnectExtra.push(process.env.BACKEND_PUBLIC_URL);
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -64,12 +75,14 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: [
         "'self'",
-        "data:",
-        "blob:",
-        "https://d2xsxph8kpxj0f.cloudfront.net",     // imagem do ranking
-        "https://*.cloudfront.net"
+        'data:',
+        'blob:',
+        'https://d2xsxph8kpxj0f.cloudfront.net',
+        'https://*.cloudfront.net',
       ],
-      connectSrc: ["'self'", process.env.FRONTEND_URL || 'http://localhost:3007'],
+      // Permite same-origin + qualquer HTTPS/WSS (backend, CDNs, SSE).
+      // Em produção é o mais seguro que ainda funciona sem setar cada origem.
+      connectSrc: ["'self'", 'https:', 'wss:', ...cspConnectExtra],
       fontSrc: ["'self'"],
     },
   },
@@ -79,7 +92,7 @@ app.use(helmet({
 app.use((req, res, next) => {
   const raw = req.headers.cookie || '';
   const cookies = {};
-  raw.split(';').forEach(cookie => {
+  raw.split(';').forEach((cookie) => {
     const [name, ...rest] = cookie.trim().split('=');
     if (name) cookies[name] = decodeURIComponent(rest.join('='));
   });
@@ -88,13 +101,21 @@ app.use((req, res, next) => {
 });
 
 // ---------- CSRF Double Submit Cookie ----------
+// Configuração:
+// - httpOnly: false — o frontend precisa ler este cookie via JS.
+// - sameSite: 'lax'  — suficiente para same-site via proxy (Dokploy).
+// - secure: dinâmico — true somente quando a requisição veio por HTTPS.
+// Usamos 'lax' (não 'none') para evitar a exigência de Secure em ambientes
+// onde o proxy pode não encaminhar X-Forwarded-Proto, mantendo consistência
+// com o cookie de sessão.
 app.use((req, res, next) => {
+  const https = requestIsHttps(req);
   if (!req.cookies?.['csrf-token']) {
     const token = crypto.randomBytes(32).toString('hex');
     res.cookie('csrf-token', token, {
       httpOnly: false,
-      secure: isProduction ? true : false,
-      sameSite: isProduction ? 'none' : 'lax',
+      secure: https,
+      sameSite: 'lax',
       path: '/',
     });
     req.csrfToken = token;
@@ -127,21 +148,23 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   rolling: true,
+  // proxy: true faz o express-session respeitar X-Forwarded-Proto para
+  // decidir se o cookie Secure deve ser emitido. Combinado com trust proxy,
+  // garante consistência em HTTPS.
+  proxy: true,
   cookie: {
-    secure: false,                // ✅ TLS termina no proxy, não aqui
+    // secure: dinâmico NÃO é suportado diretamente pelo express-session.
+    // Usamos isProduction para deixar o cookie Secure em prod. Como temos
+    // trust proxy + proxy:true, o Express só envia o cookie quando a
+    // requisição veio por HTTPS — caso contrário, o cookie não é emitido.
+    // Como o Dokploy sempre expõe via HTTPS, isso funciona.
+    secure: isProduction,
     httpOnly: true,
-    sameSite: 'lax',             // ✅ mesmo domínio via proxy
-    maxAge: 24 * 60 * 60 * 1000, // 1 dia padrão (pode ser sobrescrito no login)
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000,
+    path: '/',
   },
 }));
-
-// ========== FUNÇÃO AUXILIAR – período atual ==========
-function getCurrentPeriod() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${year}-${month}`;
-}
 
 // ========== ROTAS PÚBLICAS (sem CSRF) ==========
 app.get('/api/auth/ping', (req, res) => {
@@ -279,7 +302,6 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ success: false, error: 'E-mail é obrigatório' });
 
-    // ✅ CORRIGIDO: busca somente por e-mail, sem exigir período
     const result = await pool.query(
       `SELECT nome, email
        FROM core.view_app_colaboradores
@@ -381,9 +403,14 @@ app.use((req, res, next) => {
   return res.status(401).json({ success: false, error: 'Não autenticado' });
 });
 
-// ========== ROTAS PROTEGIDAS ==========
+// ========== ARQUIVOS ESTÁTICOS (uploads) ==========
+// Movido para DEPOIS dos middlewares de auth, garantindo que qualquer
+// conteúdo em /uploads/suporte exija sessão autenticada.
+// Se ainda precisar servir públicos, mova para ANTES — mas prefira expor
+// esses arquivos via rota autenticada (/api/suporte/anexos/:id).
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
-// GET /api/metricas-assessores
+// ========== ROTAS PROTEGIDAS ==========
 app.get('/api/metricas-assessores', async (req, res) => {
   try {
     const { mes, email, colaborador_id } = req.query;
@@ -413,7 +440,6 @@ app.get('/api/metricas-assessores', async (req, res) => {
   }
 });
 
-// Registro das rotas protegidas
 app.use('/api', colaboradoresRoutes);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/tabela-comissoes', tabelaComissoesRoutes);
@@ -423,7 +449,6 @@ app.use('/api/user', userRouter);
 app.use('/api/suporte', suporteRouter);
 app.use('/api/notificacoes', notificacoesRoutes);
 
-// GET /api/admin/months
 app.get('/api/admin/months', async (req, res) => {
   try {
     const result = await pool.query(
@@ -442,7 +467,7 @@ app.get('/api/admin/months', async (req, res) => {
   }
 });
 
-// Health checks
+// Health checks (públicos)
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
