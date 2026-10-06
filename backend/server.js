@@ -33,13 +33,27 @@ const app = express();
 const PORT = process.env.PORT || 3007;
 const isProduction = process.env.NODE_ENV === 'production';
 
+// ---------- Configuração de cookies ----------
+// COOKIE_SECURE:
+//   - true  → cookies só são emitidos/enviados via HTTPS (recomendado em prod
+//             QUANDO o proxy encaminha X-Forwarded-Proto: https).
+//   - false → cookies sem flag Secure. Necessário se o proxy não encaminha
+//             X-Forwarded-Proto, pois caso contrário o express-session
+//             simplesmente NÃO emite o cookie de sessão e o login quebra em
+//             "Sessão inválida" na etapa de 2FA.
+//
+// Default: false. Se você confirmar que o Traefik/Dokploy está configurado para
+// encaminhar X-Forwarded-Proto: https, defina COOKIE_SECURE=true no .env.
+const cookieSecure = process.env.COOKIE_SECURE === 'true';
+console.log(`[boot] cookieSecure = ${cookieSecure} (COOKIE_SECURE=${process.env.COOKIE_SECURE || 'unset'})`);
+
 // ---------- Trust proxy ----------
 // Necessário para que req.secure / req.protocol reflitam X-Forwarded-Proto
 // quando atrás do Traefik/Dokploy.
 app.set('trust proxy', 1);
 
 // ---------- Detecção de HTTPS por requisição ----------
-// Usado para configurar cookies de forma consistente em HTTP (dev) e HTTPS (prod).
+// Usado apenas para o cookie CSRF, que pode ser dinâmico.
 function requestIsHttps(req) {
   if (req.secure) return true;
   const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
@@ -61,8 +75,6 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // ---------- Helmet ----------
-// Em produção NÃO usamos FRONTEND_URL com fallback para localhost — isso quebra
-// o connect-src e trava o app. Em vez disso, aceitamos 'self' + https/wss.
 const cspConnectExtra = [];
 if (process.env.FRONTEND_URL) cspConnectExtra.push(process.env.FRONTEND_URL);
 if (process.env.BACKEND_PUBLIC_URL) cspConnectExtra.push(process.env.BACKEND_PUBLIC_URL);
@@ -80,8 +92,6 @@ app.use(helmet({
         'https://d2xsxph8kpxj0f.cloudfront.net',
         'https://*.cloudfront.net',
       ],
-      // Permite same-origin + qualquer HTTPS/WSS (backend, CDNs, SSE).
-      // Em produção é o mais seguro que ainda funciona sem setar cada origem.
       connectSrc: ["'self'", 'https:', 'wss:', ...cspConnectExtra],
       fontSrc: ["'self'"],
     },
@@ -101,20 +111,16 @@ app.use((req, res, next) => {
 });
 
 // ---------- CSRF Double Submit Cookie ----------
-// Configuração:
-// - httpOnly: false — o frontend precisa ler este cookie via JS.
-// - sameSite: 'lax'  — suficiente para same-site via proxy (Dokploy).
-// - secure: dinâmico — true somente quando a requisição veio por HTTPS.
-// Usamos 'lax' (não 'none') para evitar a exigência de Secure em ambientes
-// onde o proxy pode não encaminhar X-Forwarded-Proto, mantendo consistência
-// com o cookie de sessão.
+// `secure` também segue COOKIE_SECURE para ficar consistente com a sessão.
+// Se COOKIE_SECURE=false, o browser aceita o cookie via HTTP (não-Secure) e
+// envia de volta — sem quebrar o fluxo mesmo se o proxy não encaminhar
+// X-Forwarded-Proto.
 app.use((req, res, next) => {
-  const https = requestIsHttps(req);
   if (!req.cookies?.['csrf-token']) {
     const token = crypto.randomBytes(32).toString('hex');
     res.cookie('csrf-token', token, {
       httpOnly: false,
-      secure: https,
+      secure: cookieSecure,
       sameSite: 'lax',
       path: '/',
     });
@@ -148,17 +154,11 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   rolling: true,
-  // proxy: true faz o express-session respeitar X-Forwarded-Proto para
-  // decidir se o cookie Secure deve ser emitido. Combinado com trust proxy,
-  // garante consistência em HTTPS.
   proxy: true,
   cookie: {
-    // secure: dinâmico NÃO é suportado diretamente pelo express-session.
-    // Usamos isProduction para deixar o cookie Secure em prod. Como temos
-    // trust proxy + proxy:true, o Express só envia o cookie quando a
-    // requisição veio por HTTPS — caso contrário, o cookie não é emitido.
-    // Como o Dokploy sempre expõe via HTTPS, isso funciona.
-    secure: isProduction,
+    // Controlado por COOKIE_SECURE. Default false para máxima compatibilidade
+    // com proxies que não encaminham X-Forwarded-Proto.
+    secure: cookieSecure,
     httpOnly: true,
     sameSite: 'lax',
     maxAge: 24 * 60 * 60 * 1000,
@@ -404,10 +404,6 @@ app.use((req, res, next) => {
 });
 
 // ========== ARQUIVOS ESTÁTICOS (uploads) ==========
-// Movido para DEPOIS dos middlewares de auth, garantindo que qualquer
-// conteúdo em /uploads/suporte exija sessão autenticada.
-// Se ainda precisar servir públicos, mova para ANTES — mas prefira expor
-// esses arquivos via rota autenticada (/api/suporte/anexos/:id).
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // ========== ROTAS PROTEGIDAS ==========
