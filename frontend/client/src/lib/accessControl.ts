@@ -1,12 +1,14 @@
 // src/lib/accessControl.ts
+// Alinhado com backend/services/access-control.js.
+// Se alterar CARGO_LEVELS aqui, replique no backend.
 
 export const LEVELS = {
-  NONE: 0,                // sem acesso
-  ASSESSOR: 1,            //Acesso nivel 1
-  SUPERVISAO: 2,          //Acesso nivel 2
-  COORDENADOR: 3,         //Acesso nivel 3
-  ADMINISTRATIVO: 4,      //Acesso nivel 4
-  SUPER_ADMIN: 5,         //Acesso nivel 5
+  NONE: 0,
+  ASSESSOR: 1,
+  SUPERVISAO: 2,
+  COORDENADOR: 3,
+  ADMINISTRATIVO: 4,
+  SUPER_ADMIN: 5,
 } as const;
 
 type Level = typeof LEVELS[keyof typeof LEVELS];
@@ -16,14 +18,14 @@ interface User {
   nome_equipe?: string;
   email?: string;
   nome?: string;
-  status?: string;        
+  status?: string;
   [key: string]: any;
 }
 
 export interface Permissions {
-  canAccessDashboard: boolean;   // Home 
-  canAccessComissoes: boolean;   // Página Comissões
-  canAccessRanking: boolean;     // Ranking
+  canAccessDashboard: boolean;
+  canAccessComissoes: boolean;
+  canAccessRanking: boolean;
   canAccessReports: boolean;
   canAccessConfiguration: boolean;
   canViewTeam: boolean;
@@ -40,11 +42,7 @@ interface FullPermissions extends Permissions {
   description: string;
 }
 
-interface MenuItem {
-  id: string;
-  label: string;
-  link: string;
-}
+interface MenuItem { id: string; label: string; link: string; }
 
 interface FilterRestrictions {
   lockTeam: boolean;
@@ -67,42 +65,75 @@ interface UIConfig extends FullPermissions {
   showExportButton: boolean;
 }
 
-// ========== NOVA TABELA DE CARGOS ==========
-const GROUP_MAPPING: Record<string, Level> = {
-  // Nenhum acesso (Desc)
-  'desativado': LEVELS.NONE,
-  'assistente': LEVELS.NONE,
-  'analista juridico': LEVELS.NONE,
-  'gestor de projetos': LEVELS.NONE,
-  'analista': LEVELS.NONE,
+// ─────────────────────────────────────────────────────────────
+// FONTE ÚNICA DE VERDADE: cargo (normalizado) → nível
+// Mantenha IDÊNTICO ao backend/services/access-control.js.
+// ─────────────────────────────────────────────────────────────
+const CARGO_LEVELS: Record<string, Level> = {
+  // Nenhum acesso
+  'desativado':              LEVELS.NONE,
+  'assistente':              LEVELS.NONE,
+  'analista juridico':       LEVELS.NONE,
+  'gestor de projetos':      LEVELS.NONE,
+  'analista':                LEVELS.NONE,
 
   // Assessor
-  'assessor': LEVELS.ASSESSOR,
-  'analista de pastas': LEVELS.ASSESSOR,
+  'assessor':                LEVELS.ASSESSOR,
+  'analista de pastas':      LEVELS.ASSESSOR,
 
   // Supervisão
-  'supervisor': LEVELS.SUPERVISAO,
+  'supervisor':              LEVELS.SUPERVISAO,
 
   // Coordenador
-  'coordenador': LEVELS.COORDENADOR,
+  'coordenador':             LEVELS.COORDENADOR,
 
   // Administrativo
-  'salesops': LEVELS.ADMINISTRATIVO,
-  'analista de crm': LEVELS.ADMINISTRATIVO,
-  'analista de dados': LEVELS.ADMINISTRATIVO,
-  'desenvolvedor make': LEVELS.ADMINISTRATIVO,
-  'analista de discadora': LEVELS.ADMINISTRATIVO,
-  'supervisor sales ops': LEVELS.ADMINISTRATIVO,
+  'salesops':                LEVELS.ADMINISTRATIVO,
+  'analista de crm':         LEVELS.ADMINISTRATIVO,
+  'analista de dados':       LEVELS.ADMINISTRATIVO,
+  'analista de discadora':   LEVELS.ADMINISTRATIVO,
+  'desenvolvedor make':      LEVELS.ADMINISTRATIVO,
+  'supervisor sales ops':    LEVELS.ADMINISTRATIVO,
+  'administrativo':          LEVELS.ADMINISTRATIVO,
+  'administrador':           LEVELS.ADMINISTRATIVO,
 
-  // Super Admin
-
-  'desenvolvedor': LEVELS.SUPER_ADMIN,
-  'diretora': LEVELS.SUPER_ADMIN,
-  'ceo': LEVELS.SUPER_ADMIN,
-  'coordenador sales ops': LEVELS.SUPER_ADMIN,
-  'Coordenador Sales Ops': LEVELS.SUPER_ADMIN,
+  // Super Admin / visão liberada
+  'desenvolvedor':           LEVELS.SUPER_ADMIN, 
+  'diretora':                LEVELS.SUPER_ADMIN,
+  'ceo':                     LEVELS.SUPER_ADMIN,
+  'coordenador sales ops':   LEVELS.SUPER_ADMIN,
 };
 
+// Cópia mutável em runtime (permite setCargoLevel no client se precisar)
+let cargoLevels: Record<string, Level> = { ...CARGO_LEVELS };
+
+// ─────────────────────────────────────────────────────────────
+// Override individual de cargo (mesma API do backend)
+// ─────────────────────────────────────────────────────────────
+export function setCargoLevel(cargo: string, level: Level) {
+  const key = normalize(cargo);
+  cargoLevels[key] = level;
+  console.log(`[accessControl] setCargoLevel("${cargo}") → ${level}`);
+}
+
+export function getCargoLevel(cargo: string): Level | undefined {
+  return cargoLevels[normalize(cargo)];
+}
+
+export function resetCargoLevel(cargo: string) {
+  const key = normalize(cargo);
+  const def = CARGO_LEVELS[key];
+  if (def === undefined) delete cargoLevels[key];
+  else cargoLevels[key] = def;
+}
+
+export function listCargoLevels(): Record<string, Level> {
+  return { ...cargoLevels };
+}
+
+// ─────────────────────────────────────────────────────────────
+// Permissões por nível (idênticas ao backend)
+// ─────────────────────────────────────────────────────────────
 const PERMISSIONS: Record<Level, FullPermissions> = {
   [LEVELS.NONE]: {
     canAccessDashboard: false,
@@ -121,9 +152,9 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Sem acesso',
   },
   [LEVELS.ASSESSOR]: {
-    canAccessDashboard: true,      
-    canAccessComissoes: true,      
-    canAccessRanking: true,       
+    canAccessDashboard: true,
+    canAccessComissoes: true,
+    canAccessRanking: true,
     canAccessReports: false,
     canAccessConfiguration: false,
     canViewTeam: false,
@@ -134,14 +165,14 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     filterLocked: true,
     lockedTeam: true,
     lockedCollaborator: true,
-    description: 'Visualiza seus próprios dados, Home, Comissões e Ranking',
+    description: 'Visualiza seus próprios dados',
   },
   [LEVELS.SUPERVISAO]: {
-    canAccessDashboard: false, //true
-    canAccessComissoes: false, //true
-    canAccessRanking: false,   //true
-    canAccessReports: false,   //true
-    canAccessConfiguration: false, //true
+    canAccessDashboard: false,
+    canAccessComissoes: false,
+    canAccessRanking: false,
+    canAccessReports: false,
+    canAccessConfiguration: false,
     canViewTeam: true,
     canEditConfiguration: false,
     canEditBonus: false,
@@ -153,13 +184,13 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Visualiza dados da equipe; vê configurações sem editar',
   },
   [LEVELS.COORDENADOR]: {
-    canAccessDashboard: false, //true
-    canAccessComissoes: false, //true
-    canAccessRanking: false,   //true
-    canAccessReports: false,   //true
-    canAccessConfiguration: false, //true
-    canViewTeam: false, //true
-    canEditConfiguration: false, //true
+    canAccessDashboard: false,
+    canAccessComissoes: false,
+    canAccessRanking: false,
+    canAccessReports: false,
+    canAccessConfiguration: false,
+    canViewTeam: false,
+    canEditConfiguration: false,
     canEditBonus: false,
     canGenerateNextMonth: false,
     canExportData: true,
@@ -199,25 +230,24 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     lockedTeam: false,
     lockedCollaborator: false,
     description: 'Acesso total',
-  }
+  },
 };
-
-export function getAccessLevel(cargo: string | undefined, status?: string): Level {
-  // 1. Se status for "desativado", sem acesso
-  if (status && normalize(status) === 'desativado') return LEVELS.NONE;
-
-  // 2. Mapeia o cargo
-  if (!cargo) return LEVELS.NONE;
-  const normalized = normalize(cargo);
-  if (GROUP_MAPPING[normalized] !== undefined) {
-    return GROUP_MAPPING[normalized];
-  }
-  console.warn(`Cargo não mapeado: "${cargo}", assumindo sem acesso`);
-  return LEVELS.NONE;
-}
 
 function normalize(str: string): string {
   return (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+// ─────────────────────────────────────────────────────────────
+// API pública
+// ─────────────────────────────────────────────────────────────
+export function getAccessLevel(cargo: string | undefined, status?: string): Level {
+  if (status && normalize(status) === 'desativado') return LEVELS.NONE;
+  if (!cargo) return LEVELS.NONE;
+  const key = normalize(cargo);
+  const level = cargoLevels[key];
+  if (level !== undefined) return level;
+  console.warn(`Cargo não mapeado: "${cargo}", assumindo NONE`);
+  return LEVELS.NONE;
 }
 
 export function hasPermission(user: User, permission: keyof Permissions): boolean {
@@ -229,12 +259,11 @@ export function hasPermission(user: User, permission: keyof Permissions): boolea
 export function getUserPermissions(user?: User) {
   const level = getAccessLevel(user?.cargo, user?.status);
   const perms = PERMISSIONS[level];
-
   return {
     level,
     levelName: getLevelName(level),
     cargo: user?.cargo,
-    grupo: user?.cargo,    
+    grupo: user?.cargo,
     nome_equipe: user?.nome_equipe,
     canAccessDashboard: perms.canAccessDashboard,
     canAccessComissoes: perms.canAccessComissoes,
@@ -275,7 +304,7 @@ export function filterTeamData(teamMembers: User[], currentUser?: User): User[] 
   if (userLevel === LEVELS.ASSESSOR) {
     return teamMembers.filter(m => m.email === currentUser.email);
   }
-  return []; 
+  return [];
 }
 
 export function getFilterRestrictions(user?: User): FilterRestrictions {
@@ -284,20 +313,10 @@ export function getFilterRestrictions(user?: User): FilterRestrictions {
   }
   const level = getAccessLevel(user.cargo, user.status);
   if (level === LEVELS.ASSESSOR) {
-    return {
-      lockTeam: true,
-      teamName: user.nome_equipe ?? null,
-      lockCollaborator: true,
-      collaboratorName: user.nome ?? null,
-    };
+    return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: true, collaboratorName: user.nome ?? null };
   }
   if (level === LEVELS.SUPERVISAO) {
-    return {
-      lockTeam: true,
-      teamName: user.nome_equipe ?? null,
-      lockCollaborator: false,
-      collaboratorName: null,
-    };
+    return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: false, collaboratorName: null };
   }
   return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
 }
@@ -344,30 +363,27 @@ function getMenuItems(permissions: {
   canAccessConfiguration: boolean;
 }): MenuItem[] {
   const items: MenuItem[] = [];
-  if (permissions.canAccessDashboard) {
-    items.push({ id: 'dashboard', label: 'Home', link: '/' });
-  }
-  if (permissions.canAccessComissoes) {
-    items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
-  }
-  // Agrupa "Dashboard" (Funil, Visão Geral, Equipe, etc.) se tiver acesso a qualquer subitem
+  if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });
+  if (permissions.canAccessComissoes) items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
   if (permissions.canViewTeam || permissions.canAccessReports) {
     items.push({ id: 'dashboard-group', label: 'Dashboard', link: '' });
   }
-  if (permissions.canAccessRanking) {
-    items.push({ id: 'ranking', label: 'Ranking', link: '/ranking' });
-  }
-  if (permissions.canAccessConfiguration) {
-    items.push({ id: 'configuration', label: 'Configurações', link: '/configuration' });
-  }
+  if (permissions.canAccessRanking) items.push({ id: 'ranking', label: 'Ranking', link: '/ranking' });
+  if (permissions.canAccessConfiguration) items.push({ id: 'configuration', label: 'Configurações', link: '/configuration' });
   return items;
 }
 
 export const accessControl = {
+  LEVELS,
   getAccessLevel,
   hasPermission,
   getUserPermissions,
   filterTeamData,
   getFilterRestrictions,
   getUIConfig,
+  // Override por cargo:
+  setCargoLevel,
+  getCargoLevel,
+  resetCargoLevel,
+  listCargoLevels,
 };

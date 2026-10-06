@@ -1,9 +1,10 @@
 // services/hubspot.js — serviço completo revisado (ES modules, Node.js 18+).
 // Todas as exportações originais foram mantidas. Erros técnicos são lançados,
 // nunca convertidos em "não encontrado"; buscas ambíguas são bloqueadas.
-// Mudanças de contrato:
+//
+// Contratos relevantes:
 // - reassignDealAndContactsOwner exige expectedCurrentContext (fluxo normal);
-// - reassignDealForLinkHubMovement: nova regra do Link Hub:
+// - reassignDealForLinkHubMovement: regra do Link Hub:
 //     * Base de Leads → move para Closer (Em Contato), limpa motivo_da_perda;
 //     * Closer → apenas troca o proprietário, preserva pipeline/etapa;
 // - garantirLeadNoCloser devolve "message" descritiva em todas as decisões
@@ -13,8 +14,8 @@
 // - falhas parciais exigem reconciliação no worker, não repetição automática;
 // - nenhum POST/PATCH é repetido automaticamente;
 // - mutexes abaixo protegem somente ESTE processo. O worker precisa de locks
-//   distribuídos por conta/card/contato (por exemplo no PostgreSQL) e reserva exclusiva.
-// - autorização de usuário/equipe continua a cargo de supportAccess e do worker.
+//   distribuídos por conta/card/contato (por exemplo no PostgreSQL) e reserva exclusiva;
+// - autorização de usuário/equipe continua a cargo de access-control.js e do worker.
 // Configurar CHV_Hubspot, HUBSPOT_PORTAL_ID e IDs reais de pipeline/etapa.
 
 const API_ORIGIN = 'https://api.hubapi.com';
@@ -237,6 +238,7 @@ async function accountReady() {
   await verifyHubSpotPortalConfiguration();
 }
 
+// Mutex local — protege apenas este processo. Não é transação distribuída.
 const mutexes = new Map();
 
 async function withLocks(keys, action) {
@@ -501,6 +503,7 @@ export async function findOwnerIdByEmailStrict(email) {
   return matches.length ? id(matches[0].id, 'Proprietário') : null;
 }
 
+// Compatibilidade de assinatura, mas sem ocultar falhas técnicas.
 export async function findOwnerIdByEmail(email) {
   return findOwnerIdByEmailStrict(email);
 }

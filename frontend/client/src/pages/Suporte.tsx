@@ -98,20 +98,37 @@ interface TicketSuporte {
   criado_em: string;
 }
 
+interface EscopoSuporte {
+  usuario: {
+    cargo: string;
+    equipe: string;
+    unidadeId: number | null;
+    unidadeNome: string | null;
+    isAdmin: boolean;
+    aplicarFiltroUnidade: boolean;
+  };
+  equipes: string[];
+  assessores: Array<{
+    id: string;
+    nome: string;
+    email: string;
+    cargo: string;
+    status: string;
+    equipeNome: string;
+    unidadeId: number | null;
+  }>;
+}
+
 // ---------------------- Helpers ----------------------
-// Formata DDD+número (sem código do país)
 const formatPhoneInput = (phone: string): string => {
   let numbers = phone.replace(/\D/g, "");
 
-  // Se colar com código do país (55) remove para manter apenas DDD+número
   if (numbers.startsWith("55") && numbers.length >= 12) {
     numbers = numbers.slice(2);
   }
 
-  // Limita a 11 dígitos (DDD + 9 dígitos)
   numbers = numbers.slice(0, 11);
 
-  // Aplica máscara: (DD) NNNNN-NNNN ou (DD) NNNN-NNNN
   if (numbers.length <= 2) {
     return numbers;
   } else if (numbers.length <= 6) {
@@ -123,7 +140,6 @@ const formatPhoneInput = (phone: string): string => {
   }
 };
 
-// Valida se o telefone (DDD+número) é válido
 const isValidBrazilianPhone = (phone: string): boolean => {
   const digits = phone.replace(/\D/g, '');
   if (digits.length !== 10 && digits.length !== 11) return false;
@@ -132,10 +148,7 @@ const isValidBrazilianPhone = (phone: string): boolean => {
   const number = digits.slice(2);
   const dddNum = parseInt(ddd, 10);
 
-  // DDD não pode ser 55 nem estar fora da faixa 11-99
   if (isNaN(dddNum) || dddNum < 11 || dddNum > 99) return false;
-
-  // Número deve ter 8 ou 9 dígitos
   if (number.length !== 8 && number.length !== 9) return false;
 
   return true;
@@ -262,16 +275,9 @@ export default function Suporte() {
 }
 
 function MovimentacaoTab() {
-  const {
-    currentUser,
-    equipeConfigs,
-    loadEquipeConfigs,
-    collaborators,
-    loadCollaborators,
-  } = useAppStore();
+  const { currentUser, setCurrentUser } = useAppStore();
   const { currentUser: accessUser } = useAccessControl();
   const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
-  const canSelectAllTeams = accessLevel >= LEVELS.COORDENADOR;
   const isSupervisor = accessLevel === LEVELS.SUPERVISAO;
 
   const [firstName, setFirstName] = useState("");
@@ -293,47 +299,108 @@ function MovimentacaoTab() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const isSubmitting = useRef(false);
 
-  const currentCollaborator = useMemo(() => collaborators.find(colaborador =>
-    colaborador.email === currentUser?.email || String(colaborador.id) === String(currentUser?.id)
-  ), [collaborators, currentUser?.email, currentUser?.id]);
-  const supervisorTeam = currentCollaborator?.equipeNome || currentUser?.equipe || "";
+  const [escopo, setEscopo] = useState<EscopoSuporte | null>(null);
+  const [loadingEscopo, setLoadingEscopo] = useState(true);
+  const [escopoError, setEscopoError] = useState<string | null>(null);
 
-  const equipesDisponiveis = useMemo(() => {
-    if (isSupervisor) return supervisorTeam && !isExcludedTeam(supervisorTeam) ? [supervisorTeam] : [];
-    if (!canSelectAllTeams || !equipeConfigs || equipeConfigs.length === 0) return [];
-    return equipeConfigs.map(eq => eq.nome).filter(nome => !isExcludedTeam(nome));
-  }, [canSelectAllTeams, equipeConfigs, isSupervisor, supervisorTeam]);
-
-  useEffect(() => { if (equipeConfigs.length === 0) loadEquipeConfigs(); }, [equipeConfigs, loadEquipeConfigs]);
+  // ---------- Refresh da sessão ao entrar na página ----------
   useEffect(() => {
-    if (isSupervisor && supervisorTeam && equipe !== supervisorTeam) setEquipe(supervisorTeam);
-  }, [isSupervisor, supervisorTeam, equipe]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled || !data?.success || !data.user) return;
+        setCurrentUser(data.user);
+        console.log('[MovimentacaoTab] Sessão atualizada via /auth/me:', {
+          cargo: data.user.cargo,
+          nome_equipe: data.user.nome_equipe,
+          unidade_id: data.user.unidade_id,
+        });
+      } catch (err) {
+        console.warn('[MovimentacaoTab] Falha ao atualizar sessão:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [setCurrentUser]);
 
-  const [loadingColaboradores, setLoadingColaboradores] = useState(true);
+  // ---------- Carrega o escopo filtrado por unidade ----------
   useEffect(() => {
-    let isMounted = true;
-    const carregar = async () => {
-      if (collaborators.length === 0) { try { await loadCollaborators(); } catch (error) { console.error("Falha ao carregar colaboradores:", error); } }
-      if (isMounted) setLoadingColaboradores(false);
+    let cancelled = false;
+    const carregarEscopo = async () => {
+      setLoadingEscopo(true);
+      setEscopoError(null);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: 'include' });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+
+        console.log('[MovimentacaoTab] /suporte/escopo →', {
+          status: res.status,
+          ok: res.ok,
+          success: data?.success,
+          usuario: data?.data?.usuario,
+          equipesCount: Array.isArray(data?.data?.equipes) ? data.data.equipes.length : 0,
+          assessoresCount: Array.isArray(data?.data?.assessores) ? data.data.assessores.length : 0,
+        });
+
+        if (!res.ok || !data.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        setEscopo(data.data as EscopoSuporte);
+      } catch (err: any) {
+        if (cancelled) return;
+        console.error('[MovimentacaoTab] Erro ao carregar escopo:', err);
+        setEscopoError(err.message || 'Falha ao carregar equipes e assessores disponíveis.');
+      } finally {
+        if (!cancelled) setLoadingEscopo(false);
+      }
     };
-    carregar();
-    return () => { isMounted = false; };
+    carregarEscopo();
+    return () => { cancelled = true; };
   }, []);
 
+  // Equipe do próprio supervisor — usada apenas para pré-seleção inicial.
+  const supervisorTeam =
+    (accessUser as any)?.equipe
+    || (accessUser as any)?.nome_equipe
+    || currentUser?.equipe
+    || "";
+
+  console.log('[MovimentacaoTab] estado atual', {
+    accessLevel,
+    isSupervisor,
+    supervisorTeam,
+    escopoUsuario: escopo?.usuario,
+  });
+
+  // Equipes disponíveis: sempre do escopo (backend já filtrou por unidade).
+  // Supervisor começa selecionado com a própria equipe, mas pode trocar.
+  const equipesDisponiveis = useMemo(() => {
+    if (!escopo) return [];
+    return escopo.equipes.filter(nome => !isExcludedTeam(nome));
+  }, [escopo]);
+
+  // Pré-seleciona a equipe do supervisor apenas na primeira renderização.
+  useEffect(() => {
+    if (isSupervisor && supervisorTeam && !equipe) {
+      setEquipe(supervisorTeam);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isSupervisor, supervisorTeam]);
+
+  // Assessores filtrados apenas pela equipe selecionada.
   const assessoresDisponiveis = useMemo(() => {
-    if (!collaborators.length) return [];
-    let filtered = collaborators.filter(c =>
-      resolveAccessLevel(c.cargo, c.status) === LEVELS.ASSESSOR && !isExcludedTeam(c.equipeNome)
-    );
-    if (isSupervisor) filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(supervisorTeam));
-    if (equipe) filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(equipe));
-    return filtered.map(c => ({
-      id: c.id.toString(),
-      nome: c.name,
-      email: c.email
-    }))
-    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-  }, [collaborators, equipe, isSupervisor, supervisorTeam]);
+    if (!escopo?.assessores?.length) return [];
+    let filtered = escopo.assessores.filter(a => !isExcludedTeam(a.equipeNome));
+    if (equipe) {
+      filtered = filtered.filter(a => normalize(a.equipeNome) === normalize(equipe));
+    }
+    return filtered
+      .map(a => ({ id: a.id, nome: a.nome, email: a.email }))
+      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  }, [escopo, equipe]);
 
   useEffect(() => {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
@@ -394,18 +461,12 @@ function MovimentacaoTab() {
 
   useEffect(() => { loadUserHistory(); }, [currentUser?.nome]);
 
-  // Polling automático a cada 10 segundos enquanto houver tickets pendentes/processando
   useEffect(() => {
     const hasPending = movements.some(
       (m) => m.status === "pendente" || m.status === "processando"
     );
-
     if (!hasPending) return;
-
-    const intervalId = setInterval(() => {
-      loadUserHistory();
-    }, 10000);
-
+    const intervalId = setInterval(() => { loadUserHistory(); }, 10000);
     return () => clearInterval(intervalId);
   }, [movements]);
 
@@ -461,10 +522,7 @@ function MovimentacaoTab() {
           }),
         });
         const result = await response.json();
-        if (!response.ok) {
-          throw new Error(result.error || `Erro HTTP ${response.status}`);
-        }
-
+        if (!response.ok) throw new Error(result.error || `Erro HTTP ${response.status}`);
         await loadUserHistory();
         setMessage({
           text: `Lote ${result.id_lote} enfileirado com ${result.total_itens} cards.${result.duplicados_removidos ? ` ${result.duplicados_removidos} duplicado(s) removido(s).` : ''}`,
@@ -587,9 +645,10 @@ function MovimentacaoTab() {
   return (
     <div className="space-y-6 animate-fade-in-up">
       <div className="card p-5">
-        <h2 className="text-lg font-bold text-[#0f172a] mb-4">Movimentação de Leads</h2>
+        <h2 className="text-lg font-bold text-[#0f172a] mb-4">
+          {movimentacaoEmMassa ? "Alterar responsável" : "Movimentação de Leads"}
+        </h2>
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* ------- Seletor de modo ------- */}
           <div className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] p-3">
             <label className="flex items-center gap-2 text-sm font-semibold text-[#0f172a]">
               <input
@@ -600,7 +659,6 @@ function MovimentacaoTab() {
                   setMovimentacaoEmMassa(checked);
                   setMessage(null);
                   if (checked) {
-                    // Limpa dados do cliente: não são usados no modo link
                     setFirstName("");
                     setLastName("");
                     setEmail("");
@@ -613,17 +671,16 @@ function MovimentacaoTab() {
                 }}
                 className="h-4 w-4 rounded border-[#cbd5e1] text-[#2F6FED] focus:ring-[#2F6FED]"
               />
-              Movimentação por link da HubSpot (em massa)
+              Alterar responsável por link da HubSpot
             </label>
           </div>
           <p className="mt-1 text-xs text-[#64748b]">
               {movimentacaoEmMassa
-                ? "Modo movimentação por link hub: Os links serão lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado"
+                ? "Modo de alteração por link hub: Os links são lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado. Pode ser feito o ajuste "
                 : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso não o localize vai cadastra-lo(Caso todos os dados necessários estejam preenchidos)."}
             </p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* ------- Modo link / em massa ------- */}
             {movimentacaoEmMassa && (
               <div className="md:col-span-2">
                 <label className="block text-sm font-medium text-[#0f172a] mb-1">
@@ -637,57 +694,31 @@ function MovimentacaoTab() {
                   placeholder="Cole um link HubSpot por linha (máx. 50)"
                   required={movimentacaoEmMassa}
                 />
-                <p
-                  className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800"
-                  role="note"
-                >
-                  Certifique-se de que os links informados estão corretos antes da movimentação
-                  em massa para o colaborador{" "}
+                <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
+                  Certifique-se de que os links informados estão corretos antes da alteração do responsável para o colaborador{" "}
                   {assessoresDisponiveis.find(assessor => assessor.id === assessorId)?.nome ||
                     "[Selecione um colaborador]"}.
                 </p>
               </div>
             )}
 
-            {/* ------- Modo individual: dados do cliente ------- */}
             {!movimentacaoEmMassa && (
               <>
                 <div>
                   <label className="block text-sm font-medium text-[#0f172a] mb-1">Nome *</label>
-                  <input
-                    type="text"
-                    value={firstName}
-                    onChange={e => setFirstName(e.target.value)}
-                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                    required
-                  />
+                  <input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome *</label>
-                  <input
-                    type="text"
-                    value={lastName}
-                    onChange={e => setLastName(e.target.value)}
-                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                    required
-                  />
+                  <input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={e => setEmail(e.target.value)}
-                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                  />
+                  <input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label>
-                  <select
-                    value={origem}
-                    onChange={e => setOrigem(e.target.value)}
-                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                  >
+                  <select value={origem} onChange={e => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg">
                     <option value="">Selecionar origem</option>
                     <option value="discadora">Discadora</option>
                     <option value="cat">CAT</option>
@@ -698,9 +729,7 @@ function MovimentacaoTab() {
                 <div>
                   <label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone *</label>
                   <div className="flex items-center">
-                    <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">
-                      +55
-                    </span>
+                    <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">+55</span>
                     <input
                       type="tel"
                       value={telefone}
@@ -725,7 +754,6 @@ function MovimentacaoTab() {
               </>
             )}
 
-            {/* ------- Destino: obrigatório em ambos os modos ------- */}
             <div>
               <label className="block text-sm font-medium text-[#0f172a] mb-1">Equipe Destino *</label>
               <select
@@ -733,8 +761,15 @@ function MovimentacaoTab() {
                 onChange={e => setEquipe(e.target.value)}
                 className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
                 required
+                disabled={loadingEscopo}
               >
-                <option value="" disabled>Selecione equipe</option>
+                <option value="" disabled>
+                  {loadingEscopo
+                    ? "Carregando..."
+                    : equipesDisponiveis.length === 0
+                      ? "Nenhuma equipe disponível"
+                      : "Selecione equipe"}
+                </option>
                 {equipesDisponiveis.map(nome => (
                   <option key={nome} value={nome}>{nome}</option>
                 ))}
@@ -747,31 +782,30 @@ function MovimentacaoTab() {
                 onChange={e => setAssessorId(e.target.value)}
                 className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
                 required
+                disabled={loadingEscopo}
               >
-                <option value="" disabled>Selecione colaborador</option>
-                {loadingColaboradores ? (
-                  <option disabled>Carregando...</option>
-                ) : assessoresDisponiveis.length === 0 ? (
-                  <option disabled>Nenhum disponível</option>
-                ) : (
-                  assessoresDisponiveis.map(a => (
-                    <option key={a.id} value={a.id}>{a.nome}</option>
-                  ))
-                )}
+                <option value="" disabled>
+                  {loadingEscopo
+                    ? "Carregando..."
+                    : assessoresDisponiveis.length === 0
+                      ? "Nenhum assessor disponível"
+                      : "Selecione colaborador"}
+                </option>
+                {assessoresDisponiveis.map(a => (
+                  <option key={a.id} value={a.id}>{a.nome}</option>
+                ))}
               </select>
             </div>
           </div>
 
+          {escopoError && (
+            <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">
+              Erro ao carregar escopo: {escopoError}
+            </div>
+          )}
+
           {message && (
-            <div
-              className={cn(
-                "p-3 rounded-lg text-sm",
-                message.type === "success"
-                  ? "bg-green-50 text-green-700"
-                  : "bg-red-50 text-red-700"
-              )}
-              role="status"
-            >
+            <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">
               {message.text}
             </div>
           )}
@@ -779,73 +813,46 @@ function MovimentacaoTab() {
           <div className="flex justify-end">
             <button
               type="submit"
-              disabled={loading || loadingColaboradores}
+              disabled={loading || loadingEscopo}
               className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50"
             >
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               {loading
                 ? "Enviando..."
                 : movimentacaoEmMassa
-                  ? "Registrar movimentações em massa"
+                  ? "Registrar mudança de responsável"
                   : "Registrar Movimentação"}
             </button>
           </div>
         </form>
       </div>
 
-      {/* Histórico */}
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={filterStatus}
-              onChange={e => setFilterStatus(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-            >
+            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
               {statusOptions.map(s => (
                 <option key={s} value={s}>
                   {s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}
                 </option>
               ))}
             </select>
-            <input
-              type="date"
-              value={filterDataInicio}
-              onChange={e => setFilterDataInicio(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data inicial"
-            />
+            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input
-              type="date"
-              value={filterDataFim}
-              onChange={e => setFilterDataFim(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data final"
-            />
-            <button
-              onClick={exportHistory}
-              className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]"
-            >
+            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
+            <button onClick={exportHistory} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]">
               <Download className="w-3 h-3" /> Exportar
             </button>
-            <button
-              onClick={clearHistory}
-              className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100"
-            >
+            <button onClick={clearHistory} className="text-sm bg-red-50 text-red-700 px-3 py-1 rounded flex items-center gap-1 hover:bg-red-100">
               <X className="w-3 h-3" /> Limpar
             </button>
           </div>
         </div>
         {loadingHistory ? (
-          <div className="flex justify-center py-8">
-            <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
-          </div>
+          <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>
         ) : filteredMovements.length === 0 ? (
-          <div className="text-center py-8 text-[#64748b]">
-            Nenhuma movimentação registrada no período
-          </div>
+          <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada no período</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="simple-table">
@@ -865,9 +872,7 @@ function MovimentacaoTab() {
                   const info = getStatusInfo(m.status);
                   return (
                     <tr key={m.id}>
-                      <td className="whitespace-nowrap">
-                        {new Date(m.timestamp).toLocaleString("pt-BR")}
-                      </td>
+                      <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
                       <td>{m.cliente}</td>
                       <td>
                         <div>{m.telefone}</div>
@@ -879,17 +884,11 @@ function MovimentacaoTab() {
                         <small>{m.assessor}</small>
                       </td>
                       <td>
-                        <span
-                          className={cn("badge", info.className)}
-                          title={m.hubspot?.mensagem || info.label}
-                        >
+                        <span className={cn("badge", info.className)} title={m.hubspot?.mensagem || info.label}>
                           {info.icon} {info.label}
                         </span>
                       </td>
-                      <td
-                        className="max-w-[200px] whitespace-pre-wrap break-words"
-                        title={m.observacao_sales_ops || ''}
-                      >
+                      <td className="max-w-[200px] whitespace-pre-wrap break-words" title={m.observacao_sales_ops || ''}>
                         {m.observacao_sales_ops || '—'}
                       </td>
                       <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
@@ -1229,21 +1228,9 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
               {statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}
             </select>
-            <input
-              type="date"
-              value={filterDataInicio}
-              onChange={e => setFilterDataInicio(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data inicial"
-            />
+            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input
-              type="date"
-              value={filterDataFim}
-              onChange={e => setFilterDataFim(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data final"
-            />
+            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
             <button type="button" onClick={exportReports} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]">
               <Download className="w-3 h-3" /> Exportar
             </button>
@@ -1537,21 +1524,9 @@ function MovimentacoesSuporteTab() {
               <option value="erro">Erro</option>
             </select>
 
-            <input
-              type="date"
-              value={filterDataInicio}
-              onChange={e => setFilterDataInicio(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data inicial"
-            />
+            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input
-              type="date"
-              value={filterDataFim}
-              onChange={e => setFilterDataFim(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data final"
-            />
+            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
           </div>
         </div>
 
@@ -1778,21 +1753,9 @@ function ReportesSuporteTab() {
               <option value="CANCELADO">Cancelado</option>
             </select>
 
-            <input
-              type="date"
-              value={filterDataInicio}
-              onChange={e => setFilterDataInicio(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data inicial"
-            />
+            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input
-              type="date"
-              value={filterDataFim}
-              onChange={e => setFilterDataFim(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Data final"
-            />
+            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
           </div>
         </div>
 

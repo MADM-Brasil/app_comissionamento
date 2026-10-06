@@ -45,6 +45,21 @@ function mapGrupoToProduto(cargo, classificacaoOperacional) {
   return mapping[cargo] || '';
 }
 
+// Mapeamento de unidade_id para o nome da unidade.
+// 4 (HO) não é mapeado intencionalmente — tratado como "não aplicável" (null).
+const UNIDADES_MAP = Object.freeze({
+  1: 'Osasco',
+  2: 'Ribeirão Preto',
+  3: 'Curitiba',
+});
+
+function mapUnidadeId(unidadeId) {
+  if (unidadeId === null || unidadeId === undefined || unidadeId === '') return null;
+  const id = Number(unidadeId);
+  if (!Number.isFinite(id)) return null;
+  return UNIDADES_MAP[id] || null;
+}
+
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
@@ -72,6 +87,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         c.nome_equipe,
         c.cargo,
         c.status,
+        c.unidade_id,
         m.classificacao_operacional,
         m.data_metrica
       FROM app_comissionamento.view_app_metricas_assessores m
@@ -122,6 +138,11 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       // Verifica se o e‑mail está na lista de Supervisores SR
       const isSupervisorSR = SUPERVISORES_SR_EMAILS.some(email => normalize(email) === emailNormalizado);
 
+      // Converte unidade_id para número e nome legível.
+      // unidadeId é devolvido cru; unidadeNome é null quando não há mapeamento (ex.: HO=4).
+      const unidadeId = colab.unidade_id != null ? Number(colab.unidade_id) : null;
+      const unidadeNome = mapUnidadeId(colab.unidade_id);
+
       return {
         id: colab.email,
         name: colab.nome || colab.email,
@@ -156,6 +177,8 @@ router.get('/collaborators', requireAuth, async (req, res) => {
         classificacaoOperacional: colab.classificacao_operacional || '',
         canal,
         isSupervisorSR,
+        unidadeId,
+        unidadeNome,
       };
     });
 
