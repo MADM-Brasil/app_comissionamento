@@ -1,8 +1,4 @@
 // backend/routes/suporte.js
-// Fluxo unificado: movimentações normais (CRM) e por Link Hub (HUBSPOT_LINK)
-// compartilham a mesma tabela app_comissionamento.tickets_movimentacao_lead.
-// Nenhuma tabela adicional é necessária.
-// Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
 
 import express from 'express';
 import { createHash, randomUUID } from 'crypto';
@@ -116,6 +112,15 @@ function extractHubSpotDealId(link) {
   } catch { return null; }
 }
 
+// Validação de telefone (DDD + 8/9 dígitos, tolera +55).
+function validatePhone(rawPhone) {
+  const digits = String(rawPhone || '').replace(/\D/g, '');
+  const national = digits.startsWith('55') && digits.length >= 12
+    ? digits.slice(2)
+    : digits;
+  return national.length === 10 || national.length === 11;
+}
+
 async function transaction(callback) {
   const client = await pool.connect();
   let started = false;
@@ -212,10 +217,12 @@ function notify(payload) {
 router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
   const body = req.body;
 
+  // Bloqueio do fluxo Link Hub por esta rota.
   if (body.crm_origem === HUBSPOT_LINK_MOVEMENT || body.tipo_solicitacao === 'Movimentação Link Hub') {
     throw fail(410, 'Use a rota de lote dedicada para movimentações por Link Hub.');
   }
 
+  // 1) Validação prévia de campos obrigatórios — nada vai ao banco antes disso.
   const REQUIRED_FIELDS = [
     { key: 'nome_cliente_informado',      label: 'Nome' },
     { key: 'sobrenome_cliente_informado', label: 'Sobrenome' },
@@ -237,12 +244,8 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
     });
   }
 
-  const phoneRaw = String(body.telefone_cliente_informado || '').trim();
-  const phoneDigits = phoneRaw.replace(/\D/g, '');
-  const phoneNational = phoneDigits.startsWith('55') && phoneDigits.length >= 12
-    ? phoneDigits.slice(2)
-    : phoneDigits;
-  if (phoneNational.length !== 10 && phoneNational.length !== 11) {
+  // 2) Validação de formato do telefone antes de qualquer acesso ao banco.
+  if (!validatePhone(body.telefone_cliente_informado)) {
     return res.status(400).json({
       success: false,
       error: 'Telefone inválido. Informe DDD + número (ex.: 11 00000-1234).',
@@ -251,14 +254,18 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
     });
   }
 
+  // 3) Normalização dos campos (a partir daqui pode haver acesso ao banco).
   const key = idempotencyKey(body.idempotency_key);
   const firstName = text(body.nome_cliente_informado, 'Nome', { required: true });
   const lastName = text(body.sobrenome_cliente_informado, 'Sobrenome', { required: true });
   const phone = text(body.telefone_cliente_informado, 'Telefone', { required: true, max: 50 });
   const customerEmail = email(body.email_cliente_informado, 'E-mail do cliente');
+
+  // CPF: se informado, exige 11 dígitos após limpeza.
   const rawCpf = text(body.cpf_cliente_informado, 'CPF', { max: 30 });
   const cpf = rawCpf.replace(/\D/g, '');
   if (rawCpf && cpf.length !== 11) throw fail(400, 'CPF deve conter 11 dígitos.');
+
   const origin = nullable(body.origem_cliente_informada, 'Origem');
   const crmLeadId = nullable(body.crm_lead_id, 'Identificador CRM');
   const rawLeadId = nullable(body.lead_id, 'Identificador do lead');
@@ -269,6 +276,7 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
   const actor = req.supportActor;
   const requestHash = hashRequest({ firstName, lastName, phone, customerEmail, cpf, origin,
     crmLeadId, leadId, reason, observation, destination });
+
   const result = await transaction(async client => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`crm:${actor.email}:${key}`]);
     const existing = await client.query(`
@@ -283,10 +291,16 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
       return { id: existing.rows[0].id_ticket_movimentacao, repeated: true };
     }
     const metadata = {
-      assunto: 'Movimentacao', origem_colaborador: actor.nome || '', origem_equipe: actor.nome_equipe || '',
-      destino_colaborador: destination.name, destino_equipe: destination.team,
-      solicitante_email: actor.email, solicitante_nome: actor.nome || actor.email,
-      colaborador_destino_email: destination.email, idempotency_key: key, request_hash: requestHash,
+      assunto: 'Movimentacao',
+      origem_colaborador: actor.nome || '',
+      origem_equipe: actor.nome_equipe || '',
+      destino_colaborador: destination.name,
+      destino_equipe: destination.team,
+      solicitante_email: actor.email,
+      solicitante_nome: actor.nome || actor.email,
+      colaborador_destino_email: destination.email,
+      idempotency_key: key,
+      request_hash: requestHash,
     };
     const base = await client.query(`
       INSERT INTO app_comissionamento.tickets_suporte
@@ -295,6 +309,7 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
       VALUES ($1, 'Movimentacao', 'Movimentacao', 'NORMAL', 'Aberto', 'movimentacao card', $2,
               'suporte comissionamento', NOW(), NOW(), $3) RETURNING id_ticket`,
     [PLACEHOLDER_UUID, `Movimentação de lead solicitada por ${actor.nome || actor.email}`, JSON.stringify(metadata)]);
+
     const movement = await client.query(`
       INSERT INTO app_comissionamento.tickets_movimentacao_lead
       (ticket_id, lead_id, crm_origem, crm_lead_id, nome_cliente_informado, sobrenome_cliente_informado,
@@ -304,11 +319,37 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
       RETURNING id_ticket_movimentacao`,
     [base.rows[0].id_ticket, leadId, crmLeadId, firstName, lastName, customerEmail, phone, cpf || null,
       origin, destination.name, reason, JSON.stringify({ observacao: observation, idempotency_key: key })]);
+
     return { id: movement.rows[0].id_ticket_movimentacao, repeated: false };
   });
-  res.status(result.repeated ? 200 : 202).json({ success: true, id: result.id, repetido: result.repeated,
+
+  // Resposta enriquecida com o resumo do que foi validado e do que é opcional.
+  const camposValidados = ['Nome', 'Sobrenome', 'Telefone'];
+  const camposOpcionais = [];
+  if (!customerEmail) camposOpcionais.push('E-mail do cliente');
+  if (!cpf) camposOpcionais.push('CPF');
+  if (!origin) camposOpcionais.push('Origem');
+
+  res.status(result.repeated ? 200 : 202).json({
+    success: true,
+    id: result.id,
+    repetido: result.repeated,
+    tipo_solicitacao: 'Movimentação',
+    crm_origem: 'CRM',
     ...(result.repeated ? {} : { status_mapeamento: 'pendente' }),
-    message: result.repeated ? 'Solicitação já registrada.' : 'Solicitação registrada para processamento.' });
+    campos_validados: camposValidados,
+    campos_opcionais: camposOpcionais,
+    ...(result.repeated
+      ? {}
+      : {
+          aviso: camposOpcionais.length
+            ? `A solicitação foi registrada. Caso o contato não seja encontrado no HubSpot, ${camposOpcionais.includes('E-mail do cliente') ? 'sem e-mail informado ' : ''}o worker poderá devolver status "aviso" com instrução de correção.`
+            : undefined,
+        }),
+    message: result.repeated
+      ? 'Solicitação já registrada anteriormente.'
+      : 'Solicitação registrada para processamento. O worker irá validar e movimentar o card.',
+  });
 }));
 
 // ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
@@ -336,7 +377,6 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
   const result = await transaction(async client => {
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`linkhub:${actor.email}:${key}`]);
 
-    // Idempotência baseada nos metadados do ticket_suporte (mesma tabela para os dois fluxos).
     const existing = await client.query(`
       SELECT tml.id_ticket_movimentacao, tml.ticket_id, tml.crm_lead_id
       FROM app_comissionamento.tickets_movimentacao_lead tml
@@ -356,10 +396,16 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
       return {
         id_lote: existing.rows[0].ticket_id,
         total_itens: existing.rowCount,
+        itens: existing.rows.map(r => ({
+          id_ticket_movimentacao: r.id_ticket_movimentacao,
+          deal_id: r.crm_lead_id,
+          status_mapeamento: 'pendente',
+        })),
         repetido: true,
       };
     }
 
+    const itens = [];
     let firstTicketId = null;
     for (const item of items) {
       const metadata = {
@@ -390,13 +436,14 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
       const ticketId = base.rows[0].id_ticket;
       if (firstTicketId === null) firstTicketId = ticketId;
 
-      await client.query(`
+      const movement = await client.query(`
         INSERT INTO app_comissionamento.tickets_movimentacao_lead
         (ticket_id, lead_id, crm_origem, crm_lead_id, nome_cliente_informado, sobrenome_cliente_informado,
          email_cliente_informado, telefone_cliente_informado, cpf_cliente_informado, origem_cliente_informada,
          tipo_solicitacao, colaborador_destino_nome, motivo_solicitacao, status_mapeamento, observacao_sales_ops, atualizado_em)
         VALUES ($1, NULL, 'HUBSPOT_LINK', $2, $3, '', '', '', '', '',
-                'Movimentação Link Hub', $4, $5, 'pendente', $6, NOW())`,
+                'Movimentação Link Hub', $4, $5, 'pendente', $6, NOW())
+        RETURNING id_ticket_movimentacao`,
       [ticketId,
        item.dealId,
        `Deal ${item.dealId}`,
@@ -407,8 +454,14 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
          portal_id: item.portalId,
          idempotency_key: key,
        })]);
+
+      itens.push({
+        id_ticket_movimentacao: movement.rows[0].id_ticket_movimentacao,
+        deal_id: item.dealId,
+        status_mapeamento: 'pendente',
+      });
     }
-    return { id_lote: firstTicketId, total_itens: items.length, repetido: false };
+    return { id_lote: firstTicketId, total_itens: items.length, itens, repetido: false };
   });
 
   res.status(result.repetido ? 200 : 202).json({
@@ -417,7 +470,11 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
     total_itens: result.total_itens,
     duplicados_removidos: links.length - items.length,
     repetido: result.repetido,
+    itens: result.itens,
     ...(result.repetido ? {} : { status: 'pendente' }),
+    message: result.repetido
+      ? 'Lote já registrado anteriormente.'
+      : `Lote registrado com ${result.total_itens} card(s). O worker irá processar em até 5s.`,
   });
 }));
 

@@ -2,6 +2,7 @@
 // Worker do fluxo de movimentação normal (CRM).
 // IMPORTANTE: filtra por crm_origem = 'CRM' para não concorrer com o
 // linkHubBatchQueue.js, que processa apenas crm_origem = 'HUBSPOT_LINK'.
+
 import { pool } from './db.js';
 import {
   findContactAndValidate,
@@ -18,6 +19,45 @@ import teamsNotificador from '../suporte/teams_notificacoes.js';
 
 let isProcessing = false;
 const LOCK_KEY = 854729;
+
+// Rótulos amigáveis para o campo ruleApplied devolvido pelo hubspot.js.
+// Usados quando a função não devolve `message` (casos de sucesso).
+const RULE_LABELS = Object.freeze({
+  created_and_moved: 'Card criado na Base de Leads e movido para o Closer (Em Contato).',
+  base_to_closer: 'Card movido da Base de Leads para o Closer (Em Contato).',
+  desqualificado_to_em_contato: 'Card desqualificado reativado no Closer (Em Contato).',
+  closer_without_owner: 'Card estava no Closer sem responsável; atribuído agora.',
+  reassigned_by_last_modified_date: 'Card reatribuído com base na última modificação.',
+  already_assigned: 'Card já estava com o responsável informado; contato alinhado.',
+  ambiguous_deals: 'Contato associado a vários cards.',
+  fallback_block: 'Card fora dos pipelines permitidos.',
+  owned_by_another_recent_activity: 'Card pertence a outro responsável e a última modificação está dentro do prazo mínimo.',
+  owner_missing: 'Responsável destino não informado.',
+  missing_email: 'Campos pendentes: preencha e-mail para tentar novamente.',
+  invalid_email: 'E-mail inválido. Corrija e reenvie.',
+  contact_data_mismatch: 'Dados divergentes do cadastro. Aguardando suporte.',
+});
+
+// Compõe uma mensagem descritiva quando o ticket é bloqueado.
+// Junta a mensagem original, prazos temporais, pipeline/etapa e última modificação.
+function describeBlockedReason(hubspotData) {
+  const parts = [];
+  if (hubspotData.mensagem) parts.push(hubspotData.mensagem);
+
+  if (Number.isFinite(hubspotData.requiredHours)) {
+    parts.push(`Prazo mínimo: ${hubspotData.requiredHours}h desde a última modificação.`);
+  }
+  if (Number.isFinite(hubspotData.hoursSinceNote)) {
+    parts.push(`Decorrido: ${hubspotData.hoursSinceNote}h.`);
+  }
+  if (hubspotData.notesLastUpdated) {
+    parts.push(`Última modificação: ${hubspotData.notesLastUpdated}.`);
+  }
+  if (hubspotData.pipelineNome || hubspotData.stageNome) {
+    parts.push(`Pipeline: ${hubspotData.pipelineNome || '—'} / Etapa: ${hubspotData.stageNome || '—'}.`);
+  }
+  return parts.filter(Boolean).join(' ');
+}
 
 /**
  * Processa a fila de tickets de movimentação normal (CRM).
@@ -116,6 +156,8 @@ async function handleTicket(ticket, client) {
 
   const nomeCompleto = `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim();
 
+  // Estrutura enriquecida: inclui campos usados para reportar bloqueios,
+  // regra aplicada e histórico temporal.
   const hubspotData = {
     contactId: null,
     existe: false,
@@ -126,6 +168,11 @@ async function handleTicket(ticket, client) {
     stage: null,
     pipelineNome: null,
     stageNome: null,
+    ruleApplied: null,
+    lastUpdatedAt: null,
+    requiredHours: null,
+    hoursSinceNote: null,
+    notesLastUpdated: null,
   };
 
   let contactId = null;
@@ -170,8 +217,9 @@ async function handleTicket(ticket, client) {
     if (!busca.found) {
       if (!ticket.email_cliente_informado) {
         hubspotData.status = 'aviso';
-        hubspotData.mensagem = 'Campos pendentes: preencha e-mail para tentar novamente.';
-        resultado = { blocked: false, message: hubspotData.mensagem };
+        hubspotData.ruleApplied = 'missing_email';
+        hubspotData.mensagem = RULE_LABELS.missing_email;
+        resultado = { blocked: false, message: hubspotData.mensagem, ruleApplied: 'missing_email' };
       } else {
         try {
           const novoContato = await createContact({
@@ -204,8 +252,9 @@ async function handleTicket(ticket, client) {
 
           if (isInvalidEmail) {
             hubspotData.status = 'aviso';
+            hubspotData.ruleApplied = 'invalid_email';
             hubspotData.mensagem = `E-mail inválido: "${ticket.email_cliente_informado}". Corrija e reenvie.`;
-            resultado = { blocked: false, message: hubspotData.mensagem };
+            resultado = { blocked: false, message: hubspotData.mensagem, ruleApplied: 'invalid_email' };
           } else {
             throw createError;
           }
@@ -216,12 +265,13 @@ async function handleTicket(ticket, client) {
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
       hubspotData.status = 'suporte';
-      hubspotData.mensagem = busca.motivo || 'Dados divergentes do cadastro. Aguardando suporte.';
+      hubspotData.ruleApplied = 'contact_data_mismatch';
+      hubspotData.mensagem = busca.motivo || RULE_LABELS.contact_data_mismatch;
 
       if (ownerId) {
         await updateContactOwner(contactId, ownerId);
       }
-      resultado = { blocked: false, message: hubspotData.mensagem };
+      resultado = { blocked: false, message: hubspotData.mensagem, ruleApplied: 'contact_data_mismatch' };
     } else {
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
@@ -267,18 +317,31 @@ async function handleTicket(ticket, client) {
       }
     }
 
-    // 6) Determinar status final.
+    // 6) Determinar status final, propagando todos os campos relevantes
+    //    (regra aplicada, motivo de bloqueio, prazos temporais, etc).
     let statusFinal = 'pendente';
     if (resultado?.blocked) {
       statusFinal = 'bloqueado';
       hubspotData.status = 'bloqueado';
-      hubspotData.mensagem = resultado.message;
-      hubspotData.pipeline = resultado.pipeline;
-      hubspotData.stage = resultado.stage;
-      hubspotData.pipelineNome = resultado.pipelineNome || resultado.pipeline;
-      hubspotData.stageNome = resultado.stageNome || resultado.stage;
+      hubspotData.mensagem = resultado.message || RULE_LABELS[resultado.ruleApplied] || 'Movimentação bloqueada pela política atual.';
+      hubspotData.pipeline = resultado.pipeline || null;
+      hubspotData.stage = resultado.stage || null;
+      hubspotData.pipelineNome = resultado.pipelineNome || resultado.pipeline || null;
+      hubspotData.stageNome = resultado.stageNome || resultado.stage || null;
+      hubspotData.ruleApplied = resultado.ruleApplied || null;
+      hubspotData.lastUpdatedAt = resultado.lastUpdatedAt || null;
+      if (resultado.requiredHours !== undefined && resultado.requiredHours !== null) {
+        hubspotData.requiredHours = resultado.requiredHours;
+      }
+      if (resultado.hoursSinceNote !== undefined && resultado.hoursSinceNote !== null) {
+        hubspotData.hoursSinceNote = Math.round(resultado.hoursSinceNote * 10) / 10;
+      }
+      if (resultado.notesLastUpdated !== undefined && resultado.notesLastUpdated !== null) {
+        hubspotData.notesLastUpdated = resultado.notesLastUpdated;
+      }
     } else if (hubspotData.status === 'suporte' || hubspotData.status === 'aviso') {
       statusFinal = hubspotData.status;
+      hubspotData.ruleApplied = resultado?.ruleApplied || hubspotData.ruleApplied || null;
     } else if (
       resultado?.pipeline === HUBSPOT_PIPELINE_CLOSER_ID &&
       resultado?.stage === HUBSPOT_STAGE_EM_CONTATO_ID
@@ -289,19 +352,51 @@ async function handleTicket(ticket, client) {
       hubspotData.stage = resultado.stage;
       hubspotData.pipelineNome = resultado.pipelineNome || resultado.pipeline;
       hubspotData.stageNome = resultado.stageNome || resultado.stage;
-    } else {
+      hubspotData.ruleApplied = resultado.ruleApplied || null;
+      hubspotData.lastUpdatedAt = resultado.lastUpdatedAt || null;
+      // Mensagem amigável: usa a mensagem devolvida pelo hubspot.js ou o rótulo da regra.
+      hubspotData.mensagem =
+        resultado.message ||
+        RULE_LABELS[resultado.ruleApplied] ||
+        'Movimentação concluída com sucesso.';
+    } else if (resultado && resultado.dealId) {
+      // Card foi atribuído, mas caiu fora do esperado (não está em Closer/Em Contato).
       statusFinal = 'fora_pipeline';
       hubspotData.status = 'fora_pipeline';
+      hubspotData.pipeline = resultado.pipeline || null;
+      hubspotData.stage = resultado.stage || null;
+      hubspotData.pipelineNome =
+        resultado.pipelineNome || resultado.pipeline || 'Pipeline desconhecido';
+      hubspotData.stageNome =
+        resultado.stageNome || resultado.stage || 'Etapa desconhecida';
+      hubspotData.ruleApplied = resultado.ruleApplied || null;
+      hubspotData.lastUpdatedAt = resultado.lastUpdatedAt || null;
+      hubspotData.mensagem =
+        `Card foi atribuído mas está no pipeline "${hubspotData.pipelineNome}" ` +
+        `na etapa "${hubspotData.stageNome}", fora do fluxo esperado ` +
+        `(Closer / Em Contato). Verifique manualmente.`;
+    } else {
+      // Nenhum contato resolvido e nenhum deal atribuído — mantém pendente.
+      statusFinal = 'pendente';
+      hubspotData.status = 'pendente';
+      hubspotData.mensagem = 'Movimentação não pôde ser concluída. Revise os dados do cliente.';
     }
 
     // 7) Persistir observação + status no ticket de movimentação.
+    //    A observação textual prioriza: bloqueio com motivo completo > mensagem simples > rótulo da regra.
+    const observacaoTexto =
+      hubspotData.status === 'bloqueado'
+        ? describeBlockedReason(hubspotData)
+        : (hubspotData.mensagem || RULE_LABELS[hubspotData.ruleApplied] || '');
+
     const novoObservacao = {
       ...observacaoAtual,
       processado: true,
       dealId: dealId || observacaoAtual.dealId || null,
       hubspot: hubspotData,
       motivoOriginal: ticket.motivo_solicitacao || '',
-      observacao: hubspotData.mensagem || '',
+      observacao: observacaoTexto,
+      regra: hubspotData.ruleApplied || null,
       colaboradorDestinoNome: ticket.colaborador_destino_nome,
       colaboradorDestinoEmail: colaboradorEmail,
       validacaoFinal: true,
@@ -323,6 +418,7 @@ async function handleTicket(ticket, client) {
     else if (statusFinal === 'bloqueado') suporteStatus = 'BLOQUEADO';
     else if (statusFinal === 'erro') suporteStatus = 'ERRO';
     else if (statusFinal === 'aviso') suporteStatus = 'AVISO';
+    else if (statusFinal === 'fora_pipeline') suporteStatus = 'EM ANDAMENTO';
 
     if (statusFinal === 'concluido') {
       await client.query(
@@ -340,13 +436,18 @@ async function handleTicket(ticket, client) {
       );
     }
 
-    // 9) Notificação Teams apenas para casos não concluídos.
+    // 9) Notificação Teams para todos os casos não concluídos.
+    //    Inclui tipo de bloqueio, prazos temporais, pipelines e regra aplicada.
     if (statusFinal !== 'concluido') {
       try {
         await teamsNotificador.enviar({
           titulo: 'Movimentação de Lead',
           assunto: 'Movimentacao',
-          descricao: `Movimentação solicitada: ${nomeCompleto} | Tel: ${ticket.telefone_cliente_informado || 'N/A'} | Equipe destino: ${ticket.equipe_destino_nome || 'N/A'}`,
+          descricao:
+            `Movimentação solicitada: ${nomeCompleto} | ` +
+            `Tel: ${ticket.telefone_cliente_informado || 'N/A'} | ` +
+            `Equipe destino: ${ticket.equipe_destino_nome || 'N/A'} | ` +
+            `Status: ${statusFinal}`,
           solicitante: ticket.colaborador_origem_nome || 'N/A',
           equipe: ticket.equipe_origem_nome || 'N/A',
           anexosMarkdown: 'Nenhum anexo',
@@ -355,9 +456,13 @@ async function handleTicket(ticket, client) {
           equipeDestino: ticket.equipe_destino_nome || 'N/A',
           assessorDestino: ticket.colaborador_destino_nome || 'N/A',
           status: statusFinal,
-          mensagem: hubspotData.mensagem || 'N/A',
+          mensagem: observacaoTexto || 'N/A',
+          regra: hubspotData.ruleApplied || null,
           pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
           stage: hubspotData.stageNome || hubspotData.stage || null,
+          requiredHours: hubspotData.requiredHours,
+          hoursSinceNote: hubspotData.hoursSinceNote,
+          notesLastUpdated: hubspotData.notesLastUpdated,
         });
       } catch (notifErr) {
         console.error('Erro ao enviar notificação Teams:', notifErr);
@@ -369,6 +474,7 @@ async function handleTicket(ticket, client) {
       ...observacaoAtual,
       hubspot: { ...hubspotData, erro: true, status: 'erro', mensagem: error.message },
       motivoOriginal: ticket.motivo_solicitacao || '',
+      observacao: `Erro: ${error.message}`,
       processado: true,
     });
     await client.query(
