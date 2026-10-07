@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url';
 import { pool, logDatabaseAccess, waitForDatabase } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 
-// Routers
+// ---------- Routers ----------
 import authRoutes from './routes/auth.js';
 import colaboradoresRoutes from './routes/colaboradores.js';
 import metricsRouter from './routes/metrics.js';
@@ -22,7 +22,7 @@ import suporteRouter from './routes/suporte.js';
 import campanhasRoutes from './routes/campanhas.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 
-// Serviços de background
+// ---------- Serviços de background ----------
 import { startNotificationEngine } from './services/notificationEngine.js';
 import { startTicketQueue } from './services/ticketQueue.js';
 import { startLinkHubBatchQueue } from './services/linkHubBatchQueue.js';
@@ -34,26 +34,36 @@ const app = express();
 const PORT = process.env.PORT || 3007;
 const isProduction = process.env.NODE_ENV === 'production';
 
-// ---------- Configuração de cookies ----------
+// ============================================================
+// CONFIGURAÇÃO DE COOKIES
+// ============================================================
 // COOKIE_SECURE:
-//   - true  → cookies só via HTTPS (produção atrás de Traefik/Dokploy com TLS).
-//   - false → sem flag Secure (dev local / proxy sem X-Forwarded-Proto).
+//   true  → cookies só via HTTPS (produção atrás de Traefik/Dokploy).
+//   false → sem flag Secure (dev local / proxy sem X-Forwarded-Proto).
 const cookieSecure = process.env.COOKIE_SECURE === 'true';
-console.log(`[boot] NODE_ENV = ${process.env.NODE_ENV || 'development'}`);
-console.log(`[boot] cookieSecure = ${cookieSecure} (COOKIE_SECURE=${process.env.COOKIE_SECURE || 'unset'})`);
+console.log(`[boot] NODE_ENV       = ${process.env.NODE_ENV || 'development'}`);
+console.log(`[boot] PORT           = ${PORT}`);
+console.log(`[boot] cookieSecure   = ${cookieSecure} (COOKIE_SECURE=${process.env.COOKIE_SECURE || 'unset'})`);
 
-// ---------- Trust proxy ----------
-// Necessário para req.secure / req.protocol refletirem X-Forwarded-Proto.
+// ============================================================
+// TRUST PROXY — necessário para req.secure / req.protocol
+// refletirem X-Forwarded-Proto do Traefik/Dokploy.
+// ============================================================
 app.set('trust proxy', 1);
 
-// ---------- CORS ----------
+// ============================================================
+// CORS
+// ============================================================
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
   : ['http://localhost:3008'];
 
 console.log(`[boot] ALLOWED_ORIGINS = ${allowedOrigins.join(', ')}`);
 
-// Suporta wildcards no estilo "https://*.dominio.com"
+/**
+ * Suporta wildcards no estilo "https://*.dominio.com".
+ * Necessário porque o pacote `cors` faz comparação literal por padrão.
+ */
 function originMatches(origin, pattern) {
   if (pattern === origin) return true;
   if (!pattern.includes('*')) return false;
@@ -65,7 +75,7 @@ function originMatches(origin, pattern) {
 
 app.use(cors({
   origin(origin, callback) {
-    // Sem origin = curl, health check interno, same-origin sem header. Permitir.
+    // Sem origin = curl, health check interno, same-origin. Permitir.
     if (!origin) return callback(null, true);
     const ok = allowedOrigins.some((pattern) => originMatches(origin, pattern));
     if (ok) return callback(null, true);
@@ -75,11 +85,15 @@ app.use(cors({
   credentials: true,
 }));
 
-// ---------- Body parsers ----------
+// ============================================================
+// BODY PARSERS
+// ============================================================
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// ---------- Helmet ----------
+// ============================================================
+// HELMET
+// ============================================================
 const cspConnectExtra = [];
 if (process.env.FRONTEND_URL) cspConnectExtra.push(process.env.FRONTEND_URL);
 if (process.env.BACKEND_PUBLIC_URL) cspConnectExtra.push(process.env.BACKEND_PUBLIC_URL);
@@ -101,12 +115,12 @@ app.use(helmet({
       fontSrc: ["'self'"],
     },
   },
-  // Evita o warning "Permissions policy violation: unload is not allowed"
-  // que aparece no console do Chrome em SPAs modernas.
   crossOriginEmbedderPolicy: false,
 }));
 
-// ---------- Cookie Parser manual ----------
+// ============================================================
+// COOKIE PARSER MANUAL
+// ============================================================
 app.use((req, res, next) => {
   const raw = req.headers.cookie || '';
   const cookies = {};
@@ -118,7 +132,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------- CSRF Double Submit Cookie ----------
+// ============================================================
+// CSRF — Double Submit Cookie
+// ============================================================
 // Gera o token para todas as requisições (mesmo em GET /).
 app.use((req, res, next) => {
   if (!req.cookies?.['csrf-token']) {
@@ -136,7 +152,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Middleware de verificação CSRF (aplicado às rotas protegidas).
+/**
+ * Verificação CSRF — aplicada apenas às rotas protegidas (depois das públicas).
+ * Ignora métodos seguros (GET/HEAD/OPTIONS).
+ */
 function csrfProtection(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const token = req.headers['x-csrf-token'] || req.body?._csrf;
@@ -147,12 +166,9 @@ function csrfProtection(req, res, next) {
   next();
 }
 
-// Endpoint público que devolve o CSRF token atual.
-app.get('/api/csrf-token', (req, res) => {
-  res.json({ csrfToken: req.csrfToken });
-});
-
-// ---------- Sessão ----------
+// ============================================================
+// SESSÃO
+// ============================================================
 const sessionStore = new PostgreSqlSessionStore(pool);
 
 app.use(session({
@@ -171,8 +187,10 @@ app.use(session({
   },
 }));
 
-// ---------- Log de diagnóstico de autenticação ----------
-// Mostra para cada requisição protegida se a sessão chegou e se está autenticada.
+// ============================================================
+// LOG DE DIAGNÓSTICO DE AUTENTICAÇÃO
+// Mostra sid, estado de autenticação e cookies em cada request /api.
+// ============================================================
 app.use((req, res, next) => {
   const reqPath = req.path || '';
   const skip =
@@ -191,19 +209,24 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// ROTAS PÚBLICAS (não exigem sessão nem CSRF)
+// ROTAS PÚBLICAS — NÃO exigem sessão nem CSRF
 // ============================================================
 
-// Health checks — precisam vir ANTES do middleware de proteção.
+// Health checks — precisam vir ANTES dos middlewares de proteção.
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
+// CSRF token (usado pelo frontend antes do login).
+app.get('/api/csrf-token', (req, res) => {
+  res.json({ csrfToken: req.csrfToken });
+});
+
 // Autenticação (login, 2FA, logout, recuperação de senha, /me).
+// Toda a lógica vive em routes/auth.js.
 app.use('/api/auth', authRoutes);
 
 // ============================================================
-// MIDDLEWARES DE PROTEÇÃO (CSRF + Autenticação)
-// A partir daqui, tudo abaixo exige sessão autenticada.
+// MIDDLEWARES DE PROTEÇÃO (aplicados a tudo abaixo)
 // ============================================================
 app.use(csrfProtection);
 app.use((req, res, next) => {
@@ -212,7 +235,7 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// ARQUIVOS ESTÁTICOS (uploads) — agora protegidos
+// ARQUIVOS ESTÁTICOS (uploads) — protegidos por sessão
 // ============================================================
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
