@@ -106,6 +106,7 @@ interface EscopoSuporte {
     unidadeNome: string | null;
     isAdmin: boolean;
     aplicarFiltroUnidade: boolean;
+    supervisorTravado?: boolean;
   };
   equipes: string[];
   assessores: Array<{
@@ -217,6 +218,11 @@ const EXCLUDED_TEAMS = [
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo',
   'Equipe Lucilene','Equipe Elizandra'
 ];
+
+// Unidades em que o supervisor fica travado à própria equipe também no modo
+// CRM (aba "Movimentar" individual). Precisa ficar em sincronia com o
+// backend/routes/suporte.js (UNIDADES_TRAVADAS_EQUIPE).
+const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
 
 const isExcludedTeam = (teamName: string): boolean => {
   if (!teamName) return false;
@@ -368,19 +374,38 @@ function MovimentacaoTab() {
     || currentUser?.equipe
     || "";
 
+  // Unidade do supervisor (preferindo a que veio do escopo autenticado).
+  const unidadeSupervisorRaw = escopo?.usuario?.unidadeId != null
+    ? escopo.usuario.unidadeId
+    : (accessUser as any)?.unidade_id;
+  const unidadeSupervisor = unidadeSupervisorRaw != null ? Number(unidadeSupervisorRaw) : null;
+
+  // Supervisor em unidade travada (2,3,4,5) → equipe travada em qualquer modo.
+  const unidadeTravada = isSupervisor
+    && unidadeSupervisor != null
+    && UNIDADES_TRAVADAS_EQUIPE.includes(unidadeSupervisor);
+
+  // Regra de destino:
+  //  - Link Hub: sempre trava a equipe do supervisor.
+  //  - CRM em unidade travada (2,3,4,5): também trava.
+  //  - CRM em outras unidades: comportamento antigo (pode escolher outras equipes da unidade).
+  const restringirDestinoAoTimeSupervisor = isSupervisor
+    && !!supervisorTeam
+    && (movimentacaoEmMassa || unidadeTravada);
+
   console.log('[MovimentacaoTab] estado atual', {
     accessLevel,
     isSupervisor,
     supervisorTeam,
+    unidadeSupervisor,
+    unidadeTravada,
+    movimentacaoEmMassa,
+    restringirDestinoAoTimeSupervisor,
     escopoUsuario: escopo?.usuario,
   });
 
-  // Modo Link Hub + supervisor: só a própria equipe é elegível como destino.
-  const restringirDestinoAoTimeSupervisor = isSupervisor && movimentacaoEmMassa && !!supervisorTeam;
-
   // Equipes disponíveis: sempre do escopo (backend já filtrou por unidade).
-  // Supervisor começa selecionado com a própria equipe, mas pode trocar —
-  // exceto no modo Link Hub, onde a própria equipe é a única opção.
+  // Quando a trava está ativa, restringe à própria equipe do supervisor.
   const equipesDisponiveis = useMemo(() => {
     if (!escopo) return [];
     let lista = escopo.equipes.filter(nome => !isExcludedTeam(nome));
@@ -390,11 +415,12 @@ function MovimentacaoTab() {
     return lista;
   }, [escopo, restringirDestinoAoTimeSupervisor, supervisorTeam]);
 
-  // Pré-seleciona a equipe do supervisor apenas na primeira renderização.
-  // No modo Link Hub, força a própria equipe.
+  // Pré-seleciona / força a equipe do supervisor.
+  //  - Trava ativa (Link Hub, ou CRM em unidade travada): força própria equipe.
+  //  - Caso contrário: só preenche se ainda estiver vazio.
   useEffect(() => {
     if (!isSupervisor || !supervisorTeam) return;
-    if (movimentacaoEmMassa) {
+    if (movimentacaoEmMassa || unidadeTravada) {
       setEquipe(supervisorTeam);
       return;
     }
@@ -402,10 +428,10 @@ function MovimentacaoTab() {
       setEquipe(supervisorTeam);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSupervisor, supervisorTeam, movimentacaoEmMassa]);
+  }, [isSupervisor, supervisorTeam, movimentacaoEmMassa, unidadeTravada]);
 
-  // Assessores filtrados apenas pela equipe selecionada.
-  // No modo Link Hub + supervisor, também restringe à própria equipe.
+  // Assessores filtrados pela equipe selecionada.
+  // Quando a trava está ativa, também restringe à própria equipe.
   const assessoresDisponiveis = useMemo(() => {
     if (!escopo?.assessores?.length) return [];
     let filtered = escopo.assessores.filter(a => !isExcludedTeam(a.equipeNome));
@@ -683,7 +709,7 @@ function MovimentacaoTab() {
                     setTelefone("");
                     setCpf("");
                     setOrigem("");
-                    // Supervisor fica travado na própria equipe no modo Link Hub.
+                    // Supervisor fica travado na própria equipe em Link Hub.
                     if (isSupervisor && supervisorTeam) {
                       setEquipe(supervisorTeam);
                       setAssessorId("");
@@ -705,8 +731,11 @@ function MovimentacaoTab() {
 
           {restringirDestinoAoTimeSupervisor && (
             <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800" role="note">
-              Como supervisor, você só pode direcionar movimentações por Link Hub para
-              assessores da sua equipe (<strong>{supervisorTeam}</strong>).
+              {movimentacaoEmMassa ? (
+                <>Como supervisor, você só pode direcionar movimentações por Link Hub para assessores da sua equipe (<strong>{supervisorTeam}</strong>).</>
+              ) : (
+                <>Como supervisor da sua unidade, você só pode movimentar leads para assessores da sua equipe (<strong>{supervisorTeam}</strong>).</>
+              )}
             </div>
           )}
 
@@ -789,7 +818,9 @@ function MovimentacaoTab() {
                 className="block text-sm font-medium text-[#0f172a] mb-1"
                 title={
                   restringirDestinoAoTimeSupervisor
-                    ? "Supervisores só podem movimentar por Link Hub para a própria equipe."
+                    ? (movimentacaoEmMassa
+                        ? "Supervisores só podem movimentar por Link Hub para a própria equipe."
+                        : "Supervisores da sua unidade só podem movimentar leads para a própria equipe.")
                     : undefined
                 }
               >
