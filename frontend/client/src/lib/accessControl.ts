@@ -83,6 +83,7 @@ const CARGO_LEVELS: Record<string, Level> = {
 
   // Supervisão
   'supervisor':              LEVELS.SUPERVISAO,
+  'Supervisor':              LEVELS.SUPERVISAO,
 
   // Coordenador
   'coordenador':             LEVELS.COORDENADOR,
