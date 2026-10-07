@@ -41,6 +41,11 @@ const UNIDADES_MAP = Object.freeze({
 });
 const HO_UNIDADE_ID = 4;
 
+// Unidades em que o supervisor fica travado à própria equipe também no
+// fluxo CRM (aba "Movimentar", modo individual). Coordenador/Admin seguem
+// sem restrição. Link Hub continua travado para qualquer supervisor.
+const UNIDADES_TRAVADAS_EQUIPE = new Set([2, 3, 4, 5]);
+
 function fail(status, message) {
   const error = new Error(message);
   error.status = status;
@@ -187,6 +192,15 @@ async function destinationFor(req, enforceEmail = false, { enforceDestinationSam
     team: text(access.destination.nome_equipe || team, 'Equipe do destino validado', { required: true }),
   };
 }
+
+// Supervisor em unidade travada → precisa informar destino da própria equipe
+// também no fluxo CRM. Coordenador/Admin não são afetados.
+function supervisorDeveTravarEquipe(actor) {
+  if (!isSupportSupervisor(actor?.cargo)) return false;
+  const unidade = actor?.unidade_id != null ? Number(actor.unidade_id) : null;
+  return unidade != null && UNIDADES_TRAVADAS_EQUIPE.has(unidade);
+}
+
 function historyScope(req) {
   const all = req.query.todos === '1';
   if (req.query.todos !== undefined && !['0', '1'].includes(req.query.todos)) throw fail(400, 'Parâmetro todos inválido.');
@@ -317,6 +331,8 @@ router.get('/escopo/debug', asyncRoute(async (req, res) => {
         HO_UNIDADE_ID,
         unidadeId,
         aplicarFiltroUnidade,
+        supervisorTravado: supervisorDeveTravarEquipe(actor),
+        unidadesTravadas: [...UNIDADES_TRAVADAS_EQUIPE],
       },
       dataMetrica,
       sqlExecutada: sql,
@@ -425,6 +441,7 @@ router.get('/escopo', asyncRoute(async (req, res) => {
   console.log(
     `[suporte/escopo] user=${actor.email} cargo=${actor.cargo} ` +
     `unidade_id=${unidadeId} ehHO=${ehHO} isAdmin=${isAdmin} aplicarFiltro=${aplicarFiltroUnidade} ` +
+    `travaEquipe=${supervisorDeveTravarEquipe(actor)} ` +
     `mes=${dataMetrica} equipes=${equipesSet.size} assessores=${assessores.length}`
   );
 
@@ -438,6 +455,7 @@ router.get('/escopo', asyncRoute(async (req, res) => {
         unidadeNome: unidadeId != null ? (UNIDADES_MAP[unidadeId] || null) : null,
         isAdmin,
         aplicarFiltroUnidade,
+        supervisorTravado: supervisorDeveTravarEquipe(actor),
       },
       equipes: [...equipesSet].sort((a, b) => a.localeCompare(b, 'pt-BR')),
       assessores,
@@ -499,7 +517,12 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
   const leadId = rawLeadId ? recordId(rawLeadId) : null;
   const reason = text(body.motivo_solicitacao, 'Motivo', { max: 10000 });
   const observation = text(body.observacao_sales_ops, 'Observação', { max: 10000 });
-  const destination = await destinationFor(req);
+
+  // Supervisor em unidade travada (2,3,4,5) → destino obrigatoriamente na
+  // própria equipe. Coordenador/Admin e demais unidades seguem o fluxo antigo.
+  const destination = await destinationFor(req, false, {
+    enforceDestinationSameTeam: supervisorDeveTravarEquipe(req.supportActor),
+  });
   const actor = req.supportActor;
   const requestHash = hashRequest({ firstName, lastName, phone, customerEmail, cpf, origin,
     crmLeadId, leadId, reason, observation, destination });
@@ -597,7 +620,7 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
   const items = [...byDeal.values()];
 
   // Regra do fluxo Link Hub:
-  //   - Supervisor só pode direcionar para a própria equipe.
+  //   - Supervisor só pode direcionar para a própria equipe (qualquer unidade).
   //   - Coordenador/Admin não são afetados por esta restrição.
   const destination = await destinationFor(req, true, { enforceDestinationSameTeam: true });
   const actor = req.supportActor;
