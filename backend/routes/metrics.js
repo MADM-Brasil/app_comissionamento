@@ -1,3 +1,4 @@
+// backend/routes/metrics.js
 import express from 'express';
 import db from '../services/db.js';
 
@@ -12,7 +13,6 @@ function requireAuth(req, res, next) {
 
 // Auxiliares
 async function getColaboradorNomeFromId(colaboradorId) {
-  // Na view não há internal_id, então se for usado id, retornamos null; mantido para compatibilidade
   return null;
 }
 
@@ -32,6 +32,75 @@ function mapGranularity(granularity) {
 
 function normalize(str) {
   return (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+// ============================================================
+// Filtros fuzzy de colaborador e equipe
+// ------------------------------------------------------------
+// Regra (em ordem):
+//   1) Match EXATO após normalização (caixa/acentos). Se existir ao menos
+//      uma linha exata, retorna somente os exatos — evita incluir
+//      "João" quando o filtro é "João Silva".
+//   2) Fallback por TOKENS: todos os tokens do filtro devem existir,
+//      como tokens, na linha. Cobre variações de nome entre OLOS e
+//      core.view_app_colaboradores (ex.: "Sara Cristina De Moura Lourenco"
+//      vs "Sara Cristina de Moura Lourenço").
+// ============================================================
+function applyColaboradorFilter(rows, colaboradorNome, keyCandidates = ['colaborador', 'agent_name']) {
+  if (!colaboradorNome) return rows;
+  const normFilter = normalize(colaboradorNome);
+  const filterTokens = normFilter.split(/\s+/).filter(Boolean);
+
+  // 1) Match EXATO normalizado
+  const exact = rows.filter(row => {
+    for (const key of keyCandidates) {
+      const raw = row[key];
+      if (!raw) continue;
+      if (normalize(raw) === normFilter) return true;
+    }
+    return false;
+  });
+  if (exact.length > 0) return exact;
+
+  // 2) Fallback: TODOS os tokens do filtro devem existir na linha (como tokens)
+  return rows.filter(row => {
+    for (const key of keyCandidates) {
+      const raw = row[key];
+      if (!raw) continue;
+      const rowTokens = new Set(normalize(raw).split(/\s+/).filter(Boolean));
+      if (filterTokens.every(token => rowTokens.has(token))) return true;
+    }
+    return false;
+  });
+}
+
+// Aplica filtro fuzzy de equipe no resultado (não no SQL).
+function applyEquipeFilter(rows, equipeNome, keyCandidates = ['equipe']) {
+  if (!equipeNome || equipeNome === 'todas') return rows;
+  const normFilter = normalize(equipeNome);
+  const filterTokens = normFilter.split(/\s+/).filter(Boolean);
+
+  // 1) Match EXATO normalizado
+  const exact = rows.filter(row => {
+    for (const key of keyCandidates) {
+      const raw = row[key];
+      if (!raw) continue;
+      if (normalize(raw) === normFilter) return true;
+    }
+    return false;
+  });
+  if (exact.length > 0) return exact;
+
+  // 2) Fallback: todos os tokens do filtro devem estar presentes
+  return rows.filter(row => {
+    for (const key of keyCandidates) {
+      const raw = row[key];
+      if (!raw) continue;
+      const rowTokens = new Set(normalize(raw).split(/\s+/).filter(Boolean));
+      if (filterTokens.every(token => rowTokens.has(token))) return true;
+    }
+    return false;
+  });
 }
 
 const QUALIFICATIONS = {
@@ -119,15 +188,7 @@ router.get('/emitidos', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    let rows = result.rows;
-
-    if (colaboradorNome) {
-      const normFilter = normalize(colaboradorNome);
-      rows = rows.filter(row => {
-        const rowColab = normalize(row.colaborador);
-        return rowColab === normFilter || rowColab.includes(normFilter) || normFilter.includes(rowColab);
-      });
-    }
+    const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /emitidos:', err);
@@ -191,15 +252,7 @@ router.get('/assinados', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    let rows = result.rows;
-
-    if (colaboradorNome) {
-      const normFilter = normalize(colaboradorNome);
-      rows = rows.filter(row => {
-        const rowColab = normalize(row.colaborador);
-        return rowColab === normFilter || rowColab.includes(normFilter) || normFilter.includes(rowColab);
-      });
-    }
+    const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /assinados:', err);
@@ -338,15 +391,7 @@ router.get('/protocolados', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    let rows = result.rows;
-
-    if (colaboradorNome) {
-      const normFilter = normalize(colaboradorNome);
-      rows = rows.filter(row => {
-        const rowColab = normalize(row.colaborador);
-        return rowColab === normFilter || rowColab.includes(normFilter) || normFilter.includes(rowColab);
-      });
-    }
+    const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /protocolados:', err);
@@ -413,15 +458,7 @@ router.get('/ganhos', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    let rows = result.rows;
-
-    if (colaboradorNome) {
-      const normFilter = normalize(colaboradorNome);
-      rows = rows.filter(row => {
-        const rowColab = normalize(row.colaborador);
-        return rowColab === normFilter || rowColab.includes(normFilter) || normFilter.includes(rowColab);
-      });
-    }
+    const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /ganhos:', err);
@@ -487,15 +524,7 @@ router.get('/perdidos', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    let rows = result.rows;
-
-    if (colaboradorNome) {
-      const normFilter = normalize(colaboradorNome);
-      rows = rows.filter(row => {
-        const rowColab = normalize(row.colaborador);
-        return rowColab === normFilter || rowColab.includes(normFilter) || normFilter.includes(rowColab);
-      });
-    }
+    const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /perdidos:', err);
@@ -546,15 +575,7 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    let rows = result.rows;
-
-    if (colaboradorNome) {
-      const normFilter = normalize(colaboradorNome);
-      rows = rows.filter(row => {
-        const rowColab = normalize(row.colaborador);
-        return rowColab === normFilter || rowColab.includes(normFilter) || normFilter.includes(rowColab);
-      });
-    }
+    const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /leads-recebidos:', err);
@@ -563,6 +584,11 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
 });
 
 // --- METRICAS DE LIGACOES ---
+// O filtro de colaborador e equipe é aplicado NO NODE (fuzzy match),
+// não no SQL — mesmo padrão usado nas demais rotas.
+// Isso resolve a divergência de nomes entre view_base_olos_temp.agent_name
+// e view_app_colaboradores.nome (ex.: "Sara Cristina De Moura Lourenco" vs
+// "Sara Cristina de Moura Lourenço").
 router.get('/ligacoes', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, colaborador, granularity } = req.query;
@@ -611,18 +637,8 @@ router.get('/ligacoes', requireAuth, async (req, res) => {
       QUALIFICATIONS.occurrences.map(value => value.trim().toLowerCase()),
       QUALIFICATIONS.failures,
     ];
-    let idx = 7;
 
-    if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(equipe)) = LOWER(TRIM($${idx}))`;
-      params.push(equipe);
-      idx++;
-    }
-    if (colaborador) {
-      query += ` AND LOWER(TRIM(agent_name)) = LOWER(TRIM($${idx}))`;
-      params.push(colaborador);
-      idx++;
-    }
+    // Sem filtro de equipe/colaborador no SQL — aplicamos no Node.
     if (gran) {
       query += ` GROUP BY DATE_TRUNC('${gran}', call_date), agent_name, equipe, campaign_name ORDER BY periodo, colaborador`;
     } else {
@@ -630,7 +646,12 @@ router.get('/ligacoes', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-    res.json({ success: true, data: result.rows });
+
+    let rows = result.rows;
+    rows = applyEquipeFilter(rows, equipe, ['equipe']);
+    rows = applyColaboradorFilter(rows, colaborador, ['colaborador', 'agent_name']);
+
+    res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /ligacoes:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -651,32 +672,41 @@ router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
     const qualifications = typeof categoria === 'string' ? categories[categoria] : null;
     if (!qualifications) return res.status(400).json({ success: false, error: 'categoria inválida' });
 
+    // Busca todas as linhas relevantes do período + categoria, e filtra
+    // equipe/colaborador no Node (fuzzy match). Isso é necessário porque
+    // o agrupamento no SQL apaga a coluna agent_name/equipe.
     let query = `
-      SELECT qualification_name AS tabulacao, COUNT(*)::int AS total
+      SELECT qualification_name AS tabulacao,
+             agent_name AS colaborador,
+             equipe AS equipe,
+             COUNT(*)::int AS total
       FROM madm.view_base_olos_temp
       WHERE call_date::date >= $1::date
         AND call_date::date < $2::date
         AND LOWER(BTRIM(qualification_name)) = ANY($3::text[])
     `;
     const params = [start, end, qualifications.map(value => value.trim().toLowerCase())];
-    let idx = 4;
 
-    if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(equipe)) = LOWER(TRIM($${idx}))`;
-      params.push(equipe);
-      idx++;
-    }
-    if (colaborador) {
-      query += ` AND LOWER(TRIM(agent_name)) = LOWER(TRIM($${idx}))`;
-      params.push(colaborador);
-    }
+    query += ` GROUP BY qualification_name, agent_name, equipe ORDER BY total DESC, tabulacao`;
 
-    query += ` GROUP BY qualification_name ORDER BY total DESC, tabulacao`;
-    const result = await db.query(query, params);
-    res.json({
-      success: true,
-      data: result.rows.map(row => ({ ...row, total: Number(row.total) || 0 })),
+    const rawResult = await db.query(query, params);
+
+    let filtered = rawResult.rows;
+    filtered = applyEquipeFilter(filtered, equipe, ['equipe']);
+    filtered = applyColaboradorFilter(filtered, colaborador, ['colaborador', 'agent_name']);
+
+    // Reagrega por tabulacao após o filtro fuzzy.
+    const agg = new Map();
+    filtered.forEach(row => {
+      const key = row.tabulacao;
+      agg.set(key, (agg.get(key) || 0) + (Number(row.total) || 0));
     });
+
+    const data = Array.from(agg.entries())
+      .map(([tabulacao, total]) => ({ tabulacao, total }))
+      .sort((left, right) => right.total - left.total || left.tabulacao.localeCompare(right.tabulacao));
+
+    res.json({ success: true, data });
   } catch (err) {
     console.error('Erro em /ligacoes/tabulacoes:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -745,15 +775,7 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
     query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), l.etapa_lead, c.nome_equipe ORDER BY colaborador`;
 
     const result = await db.query(query, params);
-    let rows = result.rows;
-
-    if (colaboradorNome) {
-      const normFilter = normalize(colaboradorNome);
-      rows = rows.filter(row => {
-        const rowColab = normalize(row.colaborador);
-        return rowColab === normFilter || rowColab.includes(normFilter) || normFilter.includes(rowColab);
-      });
-    }
+    const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /leads/stages:', err);
