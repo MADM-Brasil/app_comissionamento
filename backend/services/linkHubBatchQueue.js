@@ -347,6 +347,9 @@ async function handleLinkHubTicket(ticket, client) {
     destinationTeam,
     sourceTeam: sourceOwner?.nome_equipe || null,
     enforceSourceTeam: true,
+    // NOVO: no fluxo Link Hub, supervisores só podem direcionar para a própria equipe.
+    // Coordenador/Admin não são afetados por esta restrição.
+    enforceDestinationSameTeam: true,
   });
   if (access.error) {
     const error = new Error(access.error);

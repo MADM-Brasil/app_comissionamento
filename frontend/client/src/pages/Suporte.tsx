@@ -375,32 +375,50 @@ function MovimentacaoTab() {
     escopoUsuario: escopo?.usuario,
   });
 
+  // Modo Link Hub + supervisor: só a própria equipe é elegível como destino.
+  const restringirDestinoAoTimeSupervisor = isSupervisor && movimentacaoEmMassa && !!supervisorTeam;
+
   // Equipes disponíveis: sempre do escopo (backend já filtrou por unidade).
-  // Supervisor começa selecionado com a própria equipe, mas pode trocar.
+  // Supervisor começa selecionado com a própria equipe, mas pode trocar —
+  // exceto no modo Link Hub, onde a própria equipe é a única opção.
   const equipesDisponiveis = useMemo(() => {
     if (!escopo) return [];
-    return escopo.equipes.filter(nome => !isExcludedTeam(nome));
-  }, [escopo]);
+    let lista = escopo.equipes.filter(nome => !isExcludedTeam(nome));
+    if (restringirDestinoAoTimeSupervisor) {
+      lista = lista.filter(nome => normalize(nome) === normalize(supervisorTeam));
+    }
+    return lista;
+  }, [escopo, restringirDestinoAoTimeSupervisor, supervisorTeam]);
 
   // Pré-seleciona a equipe do supervisor apenas na primeira renderização.
+  // No modo Link Hub, força a própria equipe.
   useEffect(() => {
-    if (isSupervisor && supervisorTeam && !equipe) {
+    if (!isSupervisor || !supervisorTeam) return;
+    if (movimentacaoEmMassa) {
+      setEquipe(supervisorTeam);
+      return;
+    }
+    if (!equipe) {
       setEquipe(supervisorTeam);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isSupervisor, supervisorTeam]);
+  }, [isSupervisor, supervisorTeam, movimentacaoEmMassa]);
 
   // Assessores filtrados apenas pela equipe selecionada.
+  // No modo Link Hub + supervisor, também restringe à própria equipe.
   const assessoresDisponiveis = useMemo(() => {
     if (!escopo?.assessores?.length) return [];
     let filtered = escopo.assessores.filter(a => !isExcludedTeam(a.equipeNome));
+    if (restringirDestinoAoTimeSupervisor) {
+      filtered = filtered.filter(a => normalize(a.equipeNome) === normalize(supervisorTeam));
+    }
     if (equipe) {
       filtered = filtered.filter(a => normalize(a.equipeNome) === normalize(equipe));
     }
     return filtered
       .map(a => ({ id: a.id, nome: a.nome, email: a.email }))
       .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-  }, [escopo, equipe]);
+  }, [escopo, equipe, restringirDestinoAoTimeSupervisor, supervisorTeam]);
 
   useEffect(() => {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
@@ -665,6 +683,11 @@ function MovimentacaoTab() {
                     setTelefone("");
                     setCpf("");
                     setOrigem("");
+                    // Supervisor fica travado na própria equipe no modo Link Hub.
+                    if (isSupervisor && supervisorTeam) {
+                      setEquipe(supervisorTeam);
+                      setAssessorId("");
+                    }
                   } else {
                     setHubLink("");
                   }
@@ -679,6 +702,13 @@ function MovimentacaoTab() {
                 ? "Modo de alteração por link hub: Os links são lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado. Pode ser feito o ajuste "
                 : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso não o localize vai cadastra-lo(Caso todos os dados necessários estejam preenchidos)."}
             </p>
+
+          {restringirDestinoAoTimeSupervisor && (
+            <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800" role="note">
+              Como supervisor, você só pode direcionar movimentações por Link Hub para
+              assessores da sua equipe (<strong>{supervisorTeam}</strong>).
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {movimentacaoEmMassa && (
@@ -755,13 +785,22 @@ function MovimentacaoTab() {
             )}
 
             <div>
-              <label className="block text-sm font-medium text-[#0f172a] mb-1">Equipe Destino *</label>
+              <label
+                className="block text-sm font-medium text-[#0f172a] mb-1"
+                title={
+                  restringirDestinoAoTimeSupervisor
+                    ? "Supervisores só podem movimentar por Link Hub para a própria equipe."
+                    : undefined
+                }
+              >
+                Equipe Destino *
+              </label>
               <select
                 value={equipe}
                 onChange={e => setEquipe(e.target.value)}
                 className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
                 required
-                disabled={loadingEscopo}
+                disabled={loadingEscopo || restringirDestinoAoTimeSupervisor}
               >
                 <option value="" disabled>
                   {loadingEscopo

@@ -39,7 +39,7 @@ class AccessControl {
 
       // Supervisão (unidade-scoped no Link Hub)
       'supervisor':              this.LEVELS.SUPERVISAO,
-      'Supervisor':                 this.LEVELS.SUPERVISAO,
+      'Supervisor':              this.LEVELS.SUPERVISAO,
 
       // Coordenador
       'coordenador':             this.LEVELS.COORDENADOR,
@@ -353,6 +353,21 @@ class AccessControl {
     return this.normalize(user?.status) === 'ativo' ? user : null;
   }
 
+  /**
+   * Valida se o solicitante pode movimentar cards para um destino.
+   *
+   * @param {object}  params
+   * @param {string}  params.requesterEmail
+   * @param {string}  params.destinationName
+   * @param {string} [params.destinationEmail]
+   * @param {string}  params.destinationTeam
+   * @param {string} [params.sourceTeam]                  - usado quando enforceSourceTeam = true
+   * @param {boolean} [params.enforceSourceTeam=false]    - exige que a origem pertença à unidade do supervisor
+   * @param {boolean} [params.enforceDestinationSameTeam=false]
+   *        - NOVO: quando true, supervisores só podem direcionar para a PRÓPRIA equipe
+   *          (usado pelo fluxo Link Hub). Coordenador/Admin não são afetados.
+   * @param {object} [params.db=pool]
+   */
   async validateHubSpotMovementAccess({
     requesterEmail,
     destinationName,
@@ -360,6 +375,7 @@ class AccessControl {
     destinationTeam,
     sourceTeam,
     enforceSourceTeam = false,
+    enforceDestinationSameTeam = false,
     db = pool,
   }) {
     const requester = await this.getActiveSupportUser(requesterEmail, db);
@@ -374,7 +390,7 @@ class AccessControl {
       `SELECT nome, email, cargo, status, nome_equipe, unidade_id
        FROM core.view_app_colaboradores
        WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
-         AND LOWER(TRIM(nome)) = LOWER(TRIM($2))
+         AND LOWER(TRIM(nome))  = LOWER(TRIM($2))
        LIMIT 1`,
       [destinationEmail, destinationName]
     );
@@ -393,9 +409,9 @@ class AccessControl {
     }
 
     // Regra específica de SUPERVISOR (nível 2): mesma unidade apenas.
-    // Coordenador (3+) e admin (4+) não passam por esta checagem.
+    // Coordenador (3+) e admin (4+) não passam por estas checagens.
     if (isSupervisor) {
-      const requesterUnidade = requester.unidade_id != null ? Number(requester.unidade_id) : null;
+      const requesterUnidade   = requester.unidade_id   != null ? Number(requester.unidade_id)   : null;
       const destinationUnidade = destination.unidade_id != null ? Number(destination.unidade_id) : null;
 
       if (requesterUnidade == null) {
@@ -406,6 +422,17 @@ class AccessControl {
       }
       if (requesterUnidade !== destinationUnidade) {
         return { status: 403, error: 'Supervisores só podem movimentar cards para assessores da própria unidade.' };
+      }
+
+      // NOVO: em fluxos que exigem vínculo de equipe (Link Hub),
+      // o supervisor só pode direcionar para assessores da própria equipe.
+      if (enforceDestinationSameTeam) {
+        if (this.normalize(destination.nome_equipe) !== this.normalize(requester.nome_equipe)) {
+          return {
+            status: 403,
+            error: 'Supervisores só podem movimentar cards por Link Hub para assessores da própria equipe.',
+          };
+        }
       }
 
       if (enforceSourceTeam) {
@@ -434,7 +461,7 @@ class AccessControl {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Singleton + reexports 
+// Singleton + reexports
 // ─────────────────────────────────────────────────────────────
 const instance = new AccessControl();
 

@@ -168,13 +168,16 @@ router.use(asyncRoute(async (req, res, next) => {
 function requireAdmin(req) {
   if (!isSupportAdmin(req.supportActor.cargo)) throw fail(403, 'Sem permissão para esta operação.');
 }
-async function destinationFor(req, enforceEmail = false) {
+async function destinationFor(req, enforceEmail = false, { enforceDestinationSameTeam = false } = {}) {
   const name = text(req.body.colaborador_destino_nome, 'Assessor destino', { required: true });
   const team = text(req.body.equipe_destino_nome, 'Equipe destino', { required: true });
   const destinationEmail = email(req.body.colaborador_destino_email, 'E-mail destino', enforceEmail);
   const access = await validateHubSpotMovementAccess({
-    requesterEmail: req.supportActor.email, destinationName: name,
-    destinationEmail: destinationEmail || undefined, destinationTeam: team,
+    requesterEmail: req.supportActor.email,
+    destinationName: name,
+    destinationEmail: destinationEmail || undefined,
+    destinationTeam: team,
+    enforceDestinationSameTeam,
   });
   if (access.error) throw fail(access.status || 403, access.error);
   if (!access.destination) throw fail(500, 'A validação do destino não retornou o colaborador.');
@@ -592,7 +595,11 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
     if (!byDeal.has(parsed.dealId)) byDeal.set(parsed.dealId, parsed);
   }
   const items = [...byDeal.values()];
-  const destination = await destinationFor(req, true);
+
+  // Regra do fluxo Link Hub:
+  //   - Supervisor só pode direcionar para a própria equipe.
+  //   - Coordenador/Admin não são afetados por esta restrição.
+  const destination = await destinationFor(req, true, { enforceDestinationSameTeam: true });
   const actor = req.supportActor;
 
   const result = await transaction(async client => {
