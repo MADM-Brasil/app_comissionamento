@@ -218,7 +218,7 @@ function getFaixaProductType(colab: any): string {
   if (cargoNormalizado === 'concomitante') return 'CONCOMITANTE';
 
   const equipeNormalizada = (colab?.equipeNome || '').toLowerCase().trim();
-  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiana')) {
+  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiane')) {
     return 'QUINQUENIO';
   }
   if (equipeNormalizada.includes('concomitante')) {
@@ -452,8 +452,6 @@ function calcularCampGanhos2026(
 
 // ============================================================
 //  Próxima faixa da campanha ativa (barra de progresso)
-//  - Assessor  → CAMPGANHOS_DIA_2026 (ganhos do dia)
-//  - Supervisor/Coordenador → CAMPGANHOS_SEM_2026_SUPER (ganhos da semana)
 // ============================================================
 interface NextTierInfo {
   currentGains: number;
@@ -1082,7 +1080,7 @@ export default function Comissoes() {
     const loadAll = async () => {
       setLoadingAllTabulations(true);
       try {
-        const isSupervisorFocus = (userColab.cargo || '').toLowerCase() === 'supervisor';
+        const isSupervisorFocus = normalizeName(userColab.cargo || '').startsWith('supervisor');
 
         let equipe = canUseFilterBar
           ? (filters.equipe !== 'todas' ? filters.equipe : undefined)
@@ -1853,7 +1851,7 @@ export default function Comissoes() {
     setLoadingCallTabulations(true);
 
     try {
-      const isSupervisorFocus = (userColab?.cargo || '').toLowerCase() === 'supervisor';
+      const isSupervisorFocus = normalizeName(userColab?.cargo || '').startsWith('supervisor');
 
       let equipe = canUseFilterBar
         ? (filters.equipe !== 'todas' ? filters.equipe : undefined)
@@ -2119,34 +2117,31 @@ export default function Comissoes() {
                   {commissionData.length === 0 ? (
                     <div className="text-center text-[#94a3b8] py-8">Nenhum dado disponível.</div>
                   ) : (
-                    <>
-                      <div className="flex-1" style={{ minHeight: `${Math.max(220, commissionChartData.length * 56)}px` }}>
-                        <ResponsiveContainer width="100%" height={Math.max(220, commissionChartData.length * 56)}>
-                          <BarChart data={commissionChartData} layout="vertical" margin={{ top: 5, right: 90, left: 20, bottom: 5 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
-                            <XAxis
-                              type="number"
-                              domain={[0, 9000]}
-                              ticks={[0, 1800, 3600, 5400, 7200, 9000]}
-                              tickFormatter={v => hideValues ? "***" : formatCurrency(v)}
-                              tick={{ fontSize: 11, fill: "#64748b" }}
+                    <div className="flex-1" style={{ minHeight: `${Math.max(220, commissionChartData.length * 56)}px` }}>
+                      <ResponsiveContainer width="100%" height={Math.max(220, commissionChartData.length * 56)}>
+                        <BarChart data={commissionChartData} layout="vertical" margin={{ top: 5, right: 90, left: 20, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                          <XAxis
+                            type="number"
+                            domain={[0, 9000]}
+                            ticks={[0, 1800, 3600, 5400, 7200, 9000]}
+                            tickFormatter={v => hideValues ? "***" : formatCurrency(v)}
+                            tick={{ fontSize: 11, fill: "#64748b" }}
+                          />
+                          <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: "#64748b" }} />
+                          <Tooltip content={<CustomTooltip hideValues={hideValues} />} />
+                          <Bar dataKey="value" name="Comissão" barSize={44} radius={[0, 4, 4, 0]}>
+                            {commissionChartData.map(item => <Cell key={item.name} fill={item.color} />)}
+                            <LabelList
+                              dataKey="value"
+                              position="right"
+                              formatter={(value: number) => hideValues ? '***' : formatCurrency(value)}
+                              style={{ fontSize: 10, fill: '#475569' }}
                             />
-                            <YAxis dataKey="name" type="category" tick={{ fontSize: 11, fill: "#64748b" }} />
-                            <Tooltip content={<CustomTooltip hideValues={hideValues} />} />
-                            <Bar dataKey="value" name="Comissão" barSize={44} radius={[0, 4, 4, 0]}>
-                              {commissionChartData.map(item => <Cell key={item.name} fill={item.color} />)}
-                              <LabelList
-                                dataKey="value"
-                                position="right"
-                                formatter={(value: number) => hideValues ? '***' : formatCurrency(value)}
-                                style={{ fontSize: 10, fill: '#475569' }}
-                              />
-                            </Bar>
-                          </BarChart>
-                        </ResponsiveContainer>
-                      </div>
-
-                    </>
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
                   )}
 
                   <button
@@ -2183,19 +2178,6 @@ export default function Comissoes() {
                             }]
                           : [item.originalColab];
 
-                        return (
-                          <div key={item.id || item.name}>
-                            {goalCollaborators.map((colabOriginal) => {
-                              const memberDailyMetrics = isSupervisorUser
-                                ? teamDailyMetricsForGoals
-                                : dailyMetrics;
-                        const metaDiarioAss = Number(colabOriginal?.pesoDiarioAssinados ?? colabOriginal?.metaDiarioAssinados ?? 3);
-                        const metaDiarioProt = Number(colabOriginal?.pesoDiarioGanhos ?? colabOriginal?.metaDiarioGanhos ?? 3);
-                        const metaSemanalAss = Number(colabOriginal?.pesoSemanalAssinados ?? colabOriginal?.metaSemanalAssinados ?? 15);
-                        const metaSemanalProt = Number(colabOriginal?.pesoSemanalGanhos ?? colabOriginal?.metaSemanalGanhos ?? 15);
-                        const metaMensalAss = Number(colabOriginal?.pesoMensalAssinados ?? colabOriginal?.metaMensalAssinados ?? 60);
-                        const metaMensalProt = Number(colabOriginal?.pesoMensalGanhos ?? colabOriginal?.metaMensalGanhos ?? 60);
-
                         const now = new Date();
                         const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
                         const dayOfWeek = now.getDay();
@@ -2210,78 +2192,109 @@ export default function Comissoes() {
                         const monthStartStr = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}-${String(monthStart.getDate()).padStart(2, '0')}`;
                         const monthEndStr = `${monthEnd.getFullYear()}-${String(monthEnd.getMonth() + 1).padStart(2, '0')}-${String(monthEnd.getDate()).padStart(2, '0')}`;
 
-                        const dailyDataDiario = memberDailyMetrics.filter(d => d.date && d.date.slice(0,10) === todayStr);
-                        const dailyDataSemanal = memberDailyMetrics.filter(d => d.date && d.date.slice(0,10) >= mondayStr && d.date.slice(0,10) <= sundayStr);
-                        const dailyDataMensal = memberDailyMetrics.filter(d => d.date && d.date.slice(0,10) >= monthStartStr && d.date.slice(0,10) <= monthEndStr);
-
-                        const assinadosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
-                        const assinadosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
-                        const assinadosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
-
-                        const protocoladosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
-                        const protocoladosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
-                        const protocoladosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
-
-                        const periodos = [
-                          { label: "Diário (hoje)", metaAss: metaDiarioAss, metaProt: metaDiarioProt, atualAss: assinadosDiario, atualProt: protocoladosDiario, colorAss: "#2F6FED", colorProt: "#16A34A" },
-                          { label: "Semanal (semana atual)", metaAss: metaSemanalAss, metaProt: metaSemanalProt, atualAss: assinadosSemanal, atualProt: protocoladosSemanal, colorAss: "#EA8C1D", colorProt: "#16A34A" },
-                          { label: "Mensal (mês atual)", metaAss: metaMensalAss, metaProt: metaMensalProt, atualAss: assinadosMensal, atualProt: protocoladosMensal, colorAss: "#8B5CF6", colorProt: "#16A34A" },
-                        ];
-
                         return (
-                          <div key={colabOriginal.id || colabOriginal.name} className="mb-4 last:mb-0">
-                            <div className="flex items-center gap-3 mb-3">
-                              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center text-xs font-bold">{colabOriginal.avatar}</div>
-                              <div><span className="font-medium text-[#0f172a] text-sm">{colabOriginal.name}</span></div>
-                            </div>
+                          <div key={item.id || item.name}>
+                            {goalCollaborators.map((colabOriginal) => {
+                              const memberDailyMetrics = isSupervisorUser
+                                ? teamDailyMetricsForGoals
+                                : dailyMetrics;
 
-                            {!isSpecialGroupColaborador(colabOriginal) && currentRole !== 'coordenador' && periodos.map((p) => {
-                              const pctAss = calcPercent(p.atualAss, p.metaAss);
-                              const pctProt = p.metaProt > 0 ? calcPercent(p.atualProt, p.metaProt) : 0;
-                              const faltaAss = Math.max(0, p.metaAss - p.atualAss);
-                              const faltaProt = Math.max(0, p.metaProt - p.atualProt);
+                              const metaDiarioAss = Number(colabOriginal?.pesoDiarioAssinados ?? colabOriginal?.metaDiarioAssinados ?? 3);
+                              const metaDiarioProt = Number(colabOriginal?.pesoDiarioGanhos ?? colabOriginal?.metaDiarioGanhos ?? 3);
+                              const metaSemanalAss = Number(colabOriginal?.pesoSemanalAssinados ?? colabOriginal?.metaSemanalAssinados ?? 15);
+                              const metaSemanalProt = Number(colabOriginal?.pesoSemanalGanhos ?? colabOriginal?.metaSemanalGanhos ?? 15);
+                              const metaMensalAss = Number(colabOriginal?.pesoMensalAssinados ?? colabOriginal?.metaMensalAssinados ?? 60);
+                              const metaMensalProt = Number(colabOriginal?.pesoMensalGanhos ?? colabOriginal?.metaMensalGanhos ?? 60);
+
+                              const dailyDataDiario = memberDailyMetrics.filter(d => d.date && d.date.slice(0, 10) === todayStr);
+                              const dailyDataSemanal = memberDailyMetrics.filter(d => d.date && d.date.slice(0, 10) >= mondayStr && d.date.slice(0, 10) <= sundayStr);
+                              const dailyDataMensal = memberDailyMetrics.filter(d => d.date && d.date.slice(0, 10) >= monthStartStr && d.date.slice(0, 10) <= monthEndStr);
+
+                              const assinadosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                              const assinadosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+                              const assinadosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.assinados) || 0), 0);
+
+                              const protocoladosDiario = dailyDataDiario.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
+                              const protocoladosSemanal = dailyDataSemanal.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
+                              const protocoladosMensal = dailyDataMensal.reduce((sum, d) => sum + (Number(d.protocolados) || 0), 0);
+
+                              const periodos = [
+                                { label: "Diário (hoje)", metaAss: metaDiarioAss, metaProt: metaDiarioProt, atualAss: assinadosDiario, atualProt: protocoladosDiario, colorAss: "#2F6FED", colorProt: "#16A34A" },
+                                { label: "Semanal (semana atual)", metaAss: metaSemanalAss, metaProt: metaSemanalProt, atualAss: assinadosSemanal, atualProt: protocoladosSemanal, colorAss: "#EA8C1D", colorProt: "#16A34A" },
+                                { label: "Mensal (mês atual)", metaAss: metaMensalAss, metaProt: metaMensalProt, atualAss: assinadosMensal, atualProt: protocoladosMensal, colorAss: "#8B5CF6", colorProt: "#16A34A" },
+                              ];
+
+                              const showPeriodos = !isSpecialGroupColaborador(colabOriginal) && currentRole !== 'coordenador';
 
                               return (
-                                <div key={p.label} className="mb-3 last:mb-0">
-                                  <p className="text-xs font-semibold text-[#475569] mb-1">{p.label}</p>
-                                  <div className="flex items-center gap-2 mb-1">
-                                    <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
-                                    <div className="flex-1 progress-bar h-2">
-                                      <div className="progress-fill" style={{ width: `${pctAss}%`, background: p.colorAss }} />
+                                <div key={colabOriginal.id || colabOriginal.name} className="mb-4 last:mb-0">
+                                  <div className="flex items-center gap-3 mb-3">
+                                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-100 to-blue-200 flex items-center justify-center text-xs font-bold">
+                                      {colabOriginal.avatar}
                                     </div>
-                                    <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualAss)}/{formatInt(p.metaAss)}</span>
-                                    <span className="text-[10px] font-medium" style={{ color: p.colorAss }}>{pctAss.toFixed(0)}%</span>
+                                    <div>
+                                      <span className="font-medium text-[#0f172a] text-sm">{colabOriginal.name}</span>
+                                    </div>
                                   </div>
-                                  <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaAss > 0 ? `Faltam ${formatInt(faltaAss)}` : "Atingido"}</div>
-                                  {!isSpecialGroupColaborador(colabOriginal) && (
-                                    <>
-                                      <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
-                                        <div className="flex-1 progress-bar h-2">
-                                          <div className="progress-fill" style={{ width: `${pctProt}%`, background: p.colorProt }} />
+
+                                  {showPeriodos && periodos.map((p) => {
+                                    const pctAss = calcPercent(p.atualAss, p.metaAss);
+                                    const pctProt = p.metaProt > 0 ? calcPercent(p.atualProt, p.metaProt) : 0;
+                                    const faltaAss = Math.max(0, p.metaAss - p.atualAss);
+                                    const faltaProt = Math.max(0, p.metaProt - p.atualProt);
+
+                                    return (
+                                      <div key={p.label} className="mb-3 last:mb-0">
+                                        <p className="text-xs font-semibold text-[#475569] mb-1">{p.label}</p>
+
+                                        <div className="flex items-center gap-2 mb-1">
+                                          <span className="text-[10px] text-[#64748b] w-12">Assin.</span>
+                                          <div className="flex-1 progress-bar h-2">
+                                            <div className="progress-fill" style={{ width: `${pctAss}%`, background: p.colorAss }} />
+                                          </div>
+                                          <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">
+                                            {formatInt(p.atualAss)}/{formatInt(p.metaAss)}
+                                          </span>
+                                          <span className="text-[10px] font-medium" style={{ color: p.colorAss }}>
+                                            {pctAss.toFixed(0)}%
+                                          </span>
                                         </div>
-                                        <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">{formatInt(p.atualProt)}/{formatInt(p.metaProt)}</span>
-                                        <span className="text-[10px] font-medium" style={{ color: p.colorProt }}>{pctProt.toFixed(0)}%</span>
+                                        <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">
+                                          {faltaAss > 0 ? `Faltam ${formatInt(faltaAss)}` : "Atingido"}
+                                        </div>
+
+                                        <div className="flex items-center gap-2 mb-1">
+                                          <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
+                                          <div className="flex-1 progress-bar h-2">
+                                            <div className="progress-fill" style={{ width: `${pctProt}%`, background: p.colorProt }} />
+                                          </div>
+                                          <span className="text-[10px] font-medium text-[#0f172a] w-16 text-right">
+                                            {formatInt(p.atualProt)}/{formatInt(p.metaProt)}
+                                          </span>
+                                          <span className="text-[10px] font-medium" style={{ color: p.colorProt }}>
+                                            {pctProt.toFixed(0)}%
+                                          </span>
+                                        </div>
+                                        <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">
+                                          {faltaProt > 0 ? `Faltam ${formatInt(faltaProt)}` : "Atingido"}
+                                        </div>
                                       </div>
-                                      <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">{faltaProt > 0 ? `Faltam ${formatInt(faltaProt)}` : "Atingido"}</div>
-                                    </>
-                                  )}
+                                    );
+                                  })}
                                 </div>
                               );
                             })}
-                          </div>
-                        );
-                      })}
 
-                            {campaignProgressRows.map(row => {
+                            {campaignProgressRows.map((row) => {
                               const targetMin = row.progress.next?.faixa_min ?? row.progress.current?.faixa_min ?? 0;
                               const faixaValue = row.progress.current?.valor_comissao ?? row.progress.next?.valor_comissao ?? 0;
 
                               return (
                                 <div key={row.tipo} className="mb-3 last:mb-0">
                                   <p className="text-xs font-semibold text-[#475569] mb-1">{row.label}</p>
+
                                   {row.progress.hasBands ? (
-                                    <>
+                                    <div>
                                       <div className="flex items-center gap-2 mb-1">
                                         <span className="text-[10px] text-[#64748b] w-12">Ganhos</span>
                                         <div className="flex-1 progress-bar h-2">
@@ -2294,18 +2307,22 @@ export default function Comissoes() {
                                           {row.progress.progress.toFixed(0)}%
                                         </span>
                                       </div>
+
                                       {row.daysWithGoalMet != null && (
                                         <div className="text-[9px] text-[#94a3b8] ml-14 mb-1">
                                           Dias com meta batida: {formatInt(row.daysWithGoalMet)}
                                         </div>
                                       )}
+
                                       <div className="text-[9px] text-[#94a3b8] ml-14">
                                         {row.progress.current ? 'Faixa atual' : 'Próxima faixa'}: {displayCurrency(faixaValue)}
                                         {' · '}{row.monthValueLabel}: {displayCurrency(row.monthValue)}
                                       </div>
-                                    </>
+                                    </div>
                                   ) : (
-                                    <div className="text-[9px] text-[#94a3b8] ml-14">Nenhuma faixa configurada para esta campanha.</div>
+                                    <div className="text-[9px] text-[#94a3b8] ml-14">
+                                      Nenhuma faixa configurada para esta campanha.
+                                    </div>
                                   )}
                                 </div>
                               );
@@ -2629,9 +2646,9 @@ export default function Comissoes() {
               <div className="card p-5 mb-6">
                 <h3 className="text-sm font-bold mb-3">Como a estimativa da comissão é calculada</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">
-                    <div className="bg-[#f8fafc] rounded-lg p-3">
+                  <div className="bg-[#f8fafc] rounded-lg p-3">
                     <span className="font-bold text-[#0f172a]">1. Estimativa:</span> Valores apresentados não representam a comissão real que será paga, pois podem haver ajustes de valores e regras especificas
-                     dentro das faixas de comissões e campanhas ativas, que precisam ser verificadas adequadamente antes do pagamento da comissão.
+                    dentro das faixas de comissões e campanhas ativas, que precisam ser verificadas adequadamente antes do pagamento da comissão.
                   </div>
                   <div className="bg-[#f8fafc] rounded-lg p-3">
                     <span className="font-bold text-[#0f172a]">2. Estimativa Comissão do colaborador:</span> a comissão é calculada pela faixa de ganhos do produto do colaborador (AUXILIO ACIDENTE, QUINQUENIO, CONCOMITANTE).
