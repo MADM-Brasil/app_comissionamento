@@ -4,17 +4,34 @@ import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import twoFactorService from '../services/twoFactorService.js';
 import { pool } from '../services/db.js';
+import { accessControl } from '../services/access-control.js';
 
 const router = express.Router();
 console.log('✅ [AUTH] Módulo de autenticação carregado');
 
-// Grupos permitidos (igual ao original + Desenvolvedor)
-const gruposPermitidos = [
-  'Elite', 'Supervisor', 'Análise de segurado', 'Concomitante',
-  'Salesops', 'Quinquenio', 'Quinquênio ',
-  'Coordenador', 'CEO', 'Diretoria',
-  'Desenvolvedor',
-];
+// ============================================================
+// AUTORIZAÇÃO DE CARGO — fonte única de verdade: access-control.js
+// ============================================================
+// Permitido se:
+//   - cargo está mapeado em accessControl.CARGO_LEVELS, E
+//   - nível >= ASSESSOR (exclui NONE).
+//
+// Cargos com NONE (assistente, analista, desativado, etc.) permanecem
+// bloqueados. Adicionar um novo cargo em access-control.js já o libera
+// automaticamente, sem precisar tocar neste arquivo.
+// ============================================================
+function cargoPermitido(cargo, status) {
+  if (!cargo) return false;
+
+  // Bloqueia explicitamente quem está com status "desativado"
+  if (status && accessControl.normalize(status) === 'desativado') {
+    return false;
+  }
+
+  const level = accessControl.getCargoLevel(cargo);
+  if (level === undefined) return false;
+  return level >= accessControl.LEVELS.ASSESSOR;
+}
 
 // ============================================================
 // HELPER — salva sessão e devolve Promise
@@ -59,6 +76,8 @@ router.post('/login', async (req, res) => {
   }
 
   try {
+    // Busca o usuário SEM filtrar por cargo no SQL — o filtro é feito via
+    // accessControl, para que a lista de cargos viva só em access-control.js.
     const result = await pool.query(
       `SELECT 
           a.id_assessor,
@@ -72,14 +91,24 @@ router.post('/login', async (req, res) => {
        FROM app_comissionamento.view_app_metricas_assessores a
        INNER JOIN core.view_app_colaboradores c 
            ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
-         AND TRIM(c.cargo) = ANY($2)`,
-      [email, gruposPermitidos]
+       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))`,
+      [email]
     );
 
     const user = result.rows[0];
     if (!user) {
       console.log(`❌ Login falhou: usuário não encontrado para ${email}`);
+      return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
+    }
+
+    // Aplica a regra de autorização via access-control.js
+    if (!cargoPermitido(user.cargo, user.status)) {
+      const level = accessControl.getCargoLevel(user.cargo);
+      const levelName = accessControl.getLevelName(level ?? accessControl.LEVELS.NONE);
+      console.log(
+        `🚫 Login negado: cargo="${user.cargo}" status="${user.status}" ` +
+        `nível=${levelName}`
+      );
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
 
@@ -150,8 +179,16 @@ router.post('/verify-2fa', async (req, res) => {
     return res.status(401).json({ success: false, error: 'Sessão expirada. Faça login novamente.' });
   }
 
+  // Revalida autorização no momento do 2FA (caso o cargo/status tenham mudado)
+  if (!cargoPermitido(user.cargo, user.status)) {
+    console.log(`🚫 [2FA] autorização revogada para ${user.email} (cargo="${user.cargo}", status="${user.status}")`);
+    return req.session.destroy(() =>
+      res.status(401).json({ success: false, error: 'Acesso não autorizado' })
+    );
+  }
+
   // Marca sessão autenticada em AMBAS as convenções:
-  // - req.session.user         (usada por /me e pelo frontend)
+  // - req.session.user                     (usada por /me e pelo frontend)
   // - req.session.isAuthenticated + userId (usadas pelo middleware do server.js)
   req.session.user = user;
   req.session.userId = user.email;
@@ -164,6 +201,11 @@ router.post('/verify-2fa', async (req, res) => {
   await saveSession(req);
 
   console.log(`✅ [2FA] usuário autenticado: ${user.email}`);
+
+  // Anexa o nível de acesso resolvido pelo accessControl — útil para o frontend
+  const level = accessControl.getAccessLevel(user.cargo, user.status);
+  const levelName = accessControl.getLevelName(level);
+
   return res.json({
     success: true,
     accessToken,
@@ -178,6 +220,7 @@ router.post('/verify-2fa', async (req, res) => {
       cargo: user.cargo,
       status: user.status,
       periodo: user.periodo,
+      accessLevel: levelName,
     },
   });
 });
@@ -219,13 +262,12 @@ router.post('/forgot-password', async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT c.nome, a.email
+      `SELECT c.nome, a.email, c.cargo, c.status
        FROM app_comissionamento.view_app_metricas_assessores a
        INNER JOIN core.view_app_colaboradores c 
            ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))
-         AND TRIM(c.cargo) = ANY($2)`,
-      [email, gruposPermitidos]
+       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))`,
+      [email]
     );
 
     if (result.rows.length === 0) {
@@ -233,6 +275,12 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     const user = result.rows[0];
+
+    // Mesma regra de autorização do login
+    if (!cargoPermitido(user.cargo, user.status)) {
+      return res.status(404).json({ success: false, error: 'E-mail não encontrado ou sem permissão.' });
+    }
+
     const userId = user.nome;
     const userEmail = user.email;
 

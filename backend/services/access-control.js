@@ -39,6 +39,7 @@ class AccessControl {
 
       // Supervisão (unidade-scoped no Link Hub)
       'supervisor':              this.LEVELS.SUPERVISAO,
+      'Supervisor':                 this.LEVELS.SUPERVISAO,
 
       // Coordenador
       'coordenador':             this.LEVELS.COORDENADOR,
