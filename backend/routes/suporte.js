@@ -1,4 +1,9 @@
 // backend/routes/suporte.js
+// Fluxo unificado: movimentações normais (CRM) e por Link Hub (HUBSPOT_LINK)
+// compartilham a mesma tabela app_comissionamento.tickets_movimentacao_lead.
+// Nenhuma tabela adicional é necessária.
+// Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
+
 import express from 'express';
 import { createHash, randomUUID } from 'crypto';
 import multer from 'multer';
@@ -32,9 +37,32 @@ const STATUS_MAP = Object.freeze({
 });
 const SUPPORT_STATUSES = new Set(Object.values(STATUS_MAP));
 
-const UNIDADES_MAP = Object.freeze({ 1: 'Osasco', 2: 'Ribeirão Preto', 3: 'Curitiba' });
+// Mapeamento de unidade_id para nome legível.
+// 4 (HO) é tratado como "vê todas as unidades".
+const UNIDADES_MAP = Object.freeze({
+  1: 'Osasco',
+  2: 'Ribeirão Preto',
+  3: 'Curitiba',
+});
 const HO_UNIDADE_ID = 4;
+
+// Unidades em que o supervisor fica travado à própria equipe também no
+// fluxo CRM (aba "Movimentar", modo individual). Coordenador/Admin seguem
+// sem restrição. Link Hub continua travado para qualquer supervisor.
 const UNIDADES_TRAVADAS_EQUIPE = new Set([2, 3, 4, 5]);
+
+// Equipes que impõem trava de destino para supervisores que PERTENCEM a elas
+// (mesmo fora das unidades 2–5). Hoje: Equipe Tatiane (unidade 1).
+//
+// Regra adicional: supervisores de unidade 1 que NÃO pertencem a uma equipe
+// reservada não veem a equipe reservada na seleção de destino e não
+// conseguem direcionar movimentações para ela (a validação final fica em
+// access-control.js, via RESERVED_DESTINATION_TEAMS).
+//
+// Chaves normalizadas (lowercase, sem acento).
+const EQUIPES_TRAVADAS_DESTINO = new Set([
+  normalizeAccessValue('Equipe Tatiane'),
+]);
 
 function fail(status, message) {
   const error = new Error(message);
@@ -122,7 +150,9 @@ function extractHubSpotDealId(link) {
 
 function validatePhone(rawPhone) {
   const digits = String(rawPhone || '').replace(/\D/g, '');
-  const national = digits.startsWith('55') && digits.length >= 12 ? digits.slice(2) : digits;
+  const national = digits.startsWith('55') && digits.length >= 12
+    ? digits.slice(2)
+    : digits;
   return national.length === 10 || national.length === 11;
 }
 
@@ -147,6 +177,7 @@ async function transaction(callback) {
 }
 const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
+// Executado antes de uploads e antes de qualquer acesso aos dados.
 router.use(asyncRoute(async (req, res, next) => {
   const requesterEmail = email(req.session?.userId, 'Identidade da sessão');
   if (!requesterEmail) throw fail(401, 'Autenticação necessária.');
@@ -160,6 +191,7 @@ router.use(asyncRoute(async (req, res, next) => {
 function requireAdmin(req) {
   if (!isSupportAdmin(req.supportActor.cargo)) throw fail(403, 'Sem permissão para esta operação.');
 }
+
 async function destinationFor(req, enforceEmail = false, { enforceDestinationSameTeam = false } = {}) {
   const name = text(req.body.colaborador_destino_nome, 'Assessor destino', { required: true });
   const team = text(req.body.equipe_destino_nome, 'Equipe destino', { required: true });
@@ -179,11 +211,32 @@ async function destinationFor(req, enforceEmail = false, { enforceDestinationSam
     team: text(access.destination.nome_equipe || team, 'Equipe do destino validado', { required: true }),
   };
 }
+
+// Supervisor em unidade travada (2,3,4,5) OU pertencente a uma equipe
+// reservada (Equipe Tatiane) → destino travado na própria equipe.
+// Coordenador/Admin não são afetados.
 function supervisorDeveTravarEquipe(actor) {
   if (!isSupportSupervisor(actor?.cargo)) return false;
+
   const unidade = actor?.unidade_id != null ? Number(actor.unidade_id) : null;
-  return unidade != null && UNIDADES_TRAVADAS_EQUIPE.has(unidade);
+  if (unidade != null && UNIDADES_TRAVADAS_EQUIPE.has(unidade)) return true;
+
+  const equipeNorm = normalizeAccessValue(actor?.nome_equipe);
+  return !!equipeNorm && EQUIPES_TRAVADAS_DESTINO.has(equipeNorm);
 }
+
+// Supervisor de unidade 1 que NÃO pertence a uma equipe reservada → não deve
+// ver equipes reservadas (ex.: Equipe Tatiane) na lista de destino.
+function deveOcultarEquipesReservadas(actor) {
+  if (!isSupportSupervisor(actor?.cargo)) return false;
+
+  const unidade = actor?.unidade_id != null ? Number(actor.unidade_id) : null;
+  if (unidade !== 1) return false;
+
+  const equipeNorm = normalizeAccessValue(actor?.nome_equipe);
+  return !EQUIPES_TRAVADAS_DESTINO.has(equipeNorm);
+}
+
 function historyScope(req) {
   const all = req.query.todos === '1';
   if (req.query.todos !== undefined && !['0', '1'].includes(req.query.todos)) throw fail(400, 'Parâmetro todos inválido.');
@@ -200,6 +253,7 @@ function historyScope(req) {
   return { email: requestedEmail || (requestedName || all ? null : req.supportActor.email), name: requestedName || null };
 }
 
+// Upload: autenticação já executada pelo router.use acima.
 const uploadDir = path.join(process.cwd(), 'uploads', 'suporte');
 fs.mkdirSync(uploadDir, { recursive: true });
 const allowedExtensions = new Set(['.jpeg', '.jpg', '.png', '.gif', '.webp', '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt', '.zip']);
@@ -226,6 +280,8 @@ function notify(payload) {
 
 // ============================================================
 // GET /escopo/debug
+// Diagnóstico temporário. Mostra exatamente o que o servidor vê.
+// Pode ser removido após a validação do filtro por unidade.
 // ============================================================
 router.get('/escopo/debug', asyncRoute(async (req, res) => {
   const actor = req.supportActor;
@@ -253,7 +309,10 @@ router.get('/escopo/debug', asyncRoute(async (req, res) => {
   const sql = `SELECT
        COALESCE(c.email, m.email) AS email,
        COALESCE(c.nome, m.email) AS nome,
-       c.nome_equipe, c.cargo, c.status, c.unidade_id
+       c.nome_equipe,
+       c.cargo,
+       c.status,
+       c.unidade_id
      FROM app_comissionamento.view_app_metricas_assessores m
      LEFT JOIN core.view_app_colaboradores c
        ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
@@ -270,23 +329,31 @@ router.get('/escopo/debug', asyncRoute(async (req, res) => {
   try {
     const r = await pool.query(sql, params);
     queryResult = r.rows;
-  } catch (err) { queryError = err.message; }
+  } catch (err) {
+    queryError = err.message;
+  }
 
   let distribuicao = [];
   try {
     const r = await pool.query(
-      `SELECT COALESCE(c.unidade_id::text, 'null') AS unidade, COUNT(*) AS total
-         FROM app_comissionamento.view_app_metricas_assessores m
-         LEFT JOIN core.view_app_colaboradores c ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
-        WHERE m.data_metrica::date = $1::date
-          AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
-          AND (c.cargo IS NULL OR LOWER(TRIM(c.cargo)) != 'desativado')
-          AND m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != ''
-        GROUP BY c.unidade_id ORDER BY c.unidade_id NULLS LAST`,
+      `SELECT
+         COALESCE(c.unidade_id::text, 'null') AS unidade,
+         COUNT(*) AS total
+       FROM app_comissionamento.view_app_metricas_assessores m
+       LEFT JOIN core.view_app_colaboradores c
+         ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
+       WHERE m.data_metrica::date = $1::date
+         AND (c.status IS NULL OR LOWER(TRIM(c.status)) != 'desativado')
+         AND (c.cargo IS NULL OR LOWER(TRIM(c.cargo)) != 'desativado')
+         AND m.classificacao_operacional IS NOT NULL AND TRIM(m.classificacao_operacional) != ''
+       GROUP BY c.unidade_id
+       ORDER BY c.unidade_id NULLS LAST`,
       [dataMetrica]
     );
     distribuicao = r.rows;
-  } catch (err) { distribuicao = [{ erro: err.message }]; }
+  } catch (err) {
+    distribuicao = [{ erro: err.message }];
+  }
 
   const equipesUnicas = [...new Set(queryResult.map(r => r.nome_equipe).filter(Boolean))];
 
@@ -295,12 +362,25 @@ router.get('/escopo/debug', asyncRoute(async (req, res) => {
     debug: {
       supportActorCompleto: actor,
       calculo: {
-        isAdmin, ehHO, HO_UNIDADE_ID, unidadeId, aplicarFiltroUnidade,
+        isAdmin,
+        ehHO,
+        HO_UNIDADE_ID,
+        unidadeId,
+        aplicarFiltroUnidade,
         supervisorTravado: supervisorDeveTravarEquipe(actor),
+        equipesReservadasOcultas: deveOcultarEquipesReservadas(actor),
         unidadesTravadas: [...UNIDADES_TRAVADAS_EQUIPE],
+        equipesTravadas: [...EQUIPES_TRAVADAS_DESTINO],
       },
-      dataMetrica, sqlExecutada: sql, paramsEnviados: params, queryError,
-      resultado: { totalLinhas: queryResult.length, equipesUnicas, primeiraLinha: queryResult[0] || null },
+      dataMetrica,
+      sqlExecutada: sql,
+      paramsEnviados: params,
+      queryError,
+      resultado: {
+        totalLinhas: queryResult.length,
+        equipesUnicas,
+        primeiraLinha: queryResult[0] || null,
+      },
       distribuicaoPorUnidade: distribuicao,
     },
   });
@@ -308,19 +388,41 @@ router.get('/escopo/debug', asyncRoute(async (req, res) => {
 
 // ============================================================
 // GET /escopo
+// Retorna equipes e assessores disponíveis para o usuário logado.
+//
+// Regra de unidade:
+//   - Admin → sem filtro.
+//   - HO (unidade_id = 4) → sem filtro (HO vê todas as unidades).
+//   - Coordenador / Supervisor com unidade_id (1, 2, 3) → apenas da própria unidade.
+//   - Sem unidade_id → fallback sem filtro (com aviso no log).
+//
+// Regra de equipes reservadas (Equipe Tatiane):
+//   - Supervisor fora da equipe reservada na unidade 1 → não vê a equipe
+//     reservada na lista.
+//
+// Fonte: view_app_metricas_assessores (mês corrente) JOIN view_app_colaboradores.
+//  - m.data_metrica do mês corrente garante apenas colaboradores do mês.
+//  - m.classificacao_operacional preenchida filtra os desativados/duplicados.
+//  - c.unidade_id aplica o filtro de unidade.
 // ============================================================
 router.get('/escopo', asyncRoute(async (req, res) => {
   const actor = req.supportActor;
   const isAdmin = isSupportAdmin(actor.cargo);
   const unidadeId = actor.unidade_id != null ? Number(actor.unidade_id) : null;
+
   const ehHO = unidadeId === HO_UNIDADE_ID;
   const aplicarFiltroUnidade = !isAdmin && !ehHO && unidadeId != null;
 
   if (!isAdmin && unidadeId == null) {
-    console.warn(`[suporte/escopo] Usuário ${actor.email} (${actor.cargo}) sem unidade_id definida; exibindo todas as unidades.`);
+    console.warn(
+      `[suporte/escopo] Usuário ${actor.email} (${actor.cargo}) sem unidade_id definida; ` +
+      `exibindo equipes e assessores de todas as unidades.`
+    );
   }
   if (ehHO) {
-    console.info(`[suporte/escopo] Usuário ${actor.email} pertence a HO; exibindo todas as unidades.`);
+    console.info(
+      `[suporte/escopo] Usuário ${actor.email} pertence a HO; exibindo todas as unidades.`
+    );
   }
 
   const mesParam = text(req.query.mes, 'Mês');
@@ -343,7 +445,10 @@ router.get('/escopo', asyncRoute(async (req, res) => {
     `SELECT
        COALESCE(c.email, m.email) AS email,
        COALESCE(c.nome, m.email) AS nome,
-       c.nome_equipe, c.cargo, c.status, c.unidade_id
+       c.nome_equipe,
+       c.cargo,
+       c.status,
+       c.unidade_id
      FROM app_comissionamento.view_app_metricas_assessores m
      LEFT JOIN core.view_app_colaboradores c
        ON LOWER(TRIM(c.email)) = LOWER(TRIM(m.email))
@@ -359,9 +464,19 @@ router.get('/escopo', asyncRoute(async (req, res) => {
 
   const equipesSet = new Set();
   const assessores = [];
+  const ocultarEquipesReservadas = deveOcultarEquipesReservadas(actor);
+
   for (const row of result.rows) {
     const equipeNome = (row.nome_equipe || '').trim();
     if (!equipeNome) continue;
+
+    // Unidade 1 (supervisor fora da equipe reservada): não exibe a equipe
+    // reservada nem seus assessores.
+    if (ocultarEquipesReservadas
+        && EQUIPES_TRAVADAS_DESTINO.has(normalizeAccessValue(equipeNome))) {
+      continue;
+    }
+
     equipesSet.add(equipeNome);
     assessores.push({
       id: row.email,
@@ -377,7 +492,7 @@ router.get('/escopo', asyncRoute(async (req, res) => {
   console.log(
     `[suporte/escopo] user=${actor.email} cargo=${actor.cargo} ` +
     `unidade_id=${unidadeId} ehHO=${ehHO} isAdmin=${isAdmin} aplicarFiltro=${aplicarFiltroUnidade} ` +
-    `travaEquipe=${supervisorDeveTravarEquipe(actor)} ` +
+    `travaEquipe=${supervisorDeveTravarEquipe(actor)} ocultaReservadas=${ocultarEquipesReservadas} ` +
     `mes=${dataMetrica} equipes=${equipesSet.size} assessores=${assessores.length}`
   );
 
@@ -392,6 +507,7 @@ router.get('/escopo', asyncRoute(async (req, res) => {
         isAdmin,
         aplicarFiltroUnidade,
         supervisorTravado: supervisorDeveTravarEquipe(actor),
+        equipesReservadasOcultas: ocultarEquipesReservadas,
       },
       equipes: [...equipesSet].sort((a, b) => a.localeCompare(b, 'pt-BR')),
       assessores,
@@ -458,6 +574,9 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
   const reason = text(body.motivo_solicitacao, 'Motivo', { max: 10000 });
   const observation = text(body.observacao_sales_ops, 'Observação', { max: 10000 });
 
+  // Supervisor em unidade travada (2,3,4,5) OU pertencente à Equipe Tatiane
+  // → destino obrigatoriamente na própria equipe. Coordenador/Admin e demais
+  // supervisores seguem o fluxo antigo.
   const destination = await destinationFor(req, false, {
     enforceDestinationSameTeam: supervisorDeveTravarEquipe(req.supportActor),
   });
@@ -549,7 +668,7 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
   });
 }));
 
-// ---------------------- Movimentação por Link Hub ----------------------
+// ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
 router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
   const { links } = req.body;
   if (!Array.isArray(links) || links.length < 1 || links.length > 50) {
@@ -567,6 +686,9 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
   }
   const items = [...byDeal.values()];
 
+  // Regra do fluxo Link Hub:
+  //   - Supervisor só pode direcionar para a própria equipe (qualquer unidade).
+  //   - Coordenador/Admin não são afetados por esta restrição.
   const destination = await destinationFor(req, true, { enforceDestinationSameTeam: true });
   const actor = req.supportActor;
 

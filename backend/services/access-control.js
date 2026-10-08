@@ -65,6 +65,22 @@ class AccessControl {
     this.DEFAULT_CARGO_LEVELS = { ...this.CARGO_LEVELS };
 
     // ─────────────────────────────────────────────────────────────
+    // Equipes "reservadas" — só supervisores da PRÓPRIA equipe podem
+    // direcionar movimentações para elas. Chaves normalizadas.
+    //
+    // Regra do produto:
+    //   - Unidades 2,3,4,5 → trava de destino por unidade (ver UNIDADES_TRAVADAS_EQUIPE
+    //     em backend/routes/suporte.js e no frontend).
+    //   - Unidade 1 → trava de destino APENAS para a Equipe Tatiane. Os
+    //     demais supervisores da unidade 1 NÃO veem a Equipe Tatiane na lista
+    //     de destino e não conseguem movimentar para ela.
+    // Coordenador (3+) e Admin (4+) não são afetados.
+    // ─────────────────────────────────────────────────────────────
+    this.RESERVED_DESTINATION_TEAMS = new Set([
+      'equipe tatiane', // normalizado
+    ]);
+
+    // ─────────────────────────────────────────────────────────────
     // Matriz de permissões por nível
     // ─────────────────────────────────────────────────────────────
     this.PERMISSIONS = {
@@ -177,11 +193,6 @@ class AccessControl {
   // ─────────────────────────────────────────────────────────────
   // Gerenciamento de níveis por cargo (override individual)
   // ─────────────────────────────────────────────────────────────
-  /**
-   * Altera o nível de acesso de um cargo individualmente (em runtime).
-   * @param {string} cargo  - ex.: 'desenvolvedor'
-   * @param {number} level  - 0 a 5 (use this.LEVELS.*)
-   */
   setCargoLevel(cargo, level) {
     if (typeof level !== 'number' || level < 0 || level > 5) {
       throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–5.`);
@@ -190,12 +201,10 @@ class AccessControl {
     console.log(`[accessControl] setCargoLevel("${cargo}") → ${level}`);
   }
 
-  /** Retorna o nível atual de um cargo (ou undefined se não mapeado). */
   getCargoLevel(cargo) {
     return this.CARGO_LEVELS[this.normalize(cargo)];
   }
 
-  /** Restaura o nível padrão de um cargo. */
   resetCargoLevel(cargo) {
     const key = this.normalize(cargo);
     const def = this.DEFAULT_CARGO_LEVELS[key];
@@ -203,7 +212,6 @@ class AccessControl {
     else this.CARGO_LEVELS[key] = def;
   }
 
-  /** Lista todos os cargos mapeados e seus níveis atuais. */
   listCargoLevels() {
     return { ...this.CARGO_LEVELS };
   }
@@ -364,8 +372,9 @@ class AccessControl {
    * @param {string} [params.sourceTeam]                  - usado quando enforceSourceTeam = true
    * @param {boolean} [params.enforceSourceTeam=false]    - exige que a origem pertença à unidade do supervisor
    * @param {boolean} [params.enforceDestinationSameTeam=false]
-   *        - NOVO: quando true, supervisores só podem direcionar para a PRÓPRIA equipe
-   *          (usado pelo fluxo Link Hub). Coordenador/Admin não são afetados.
+   *        - quando true, supervisores só podem direcionar para a PRÓPRIA equipe.
+   *          Usado pelo fluxo Link Hub e por unidades 2-5 no fluxo CRM.
+   *          Coordenador/Admin não são afetados.
    * @param {object} [params.db=pool]
    */
   async validateHubSpotMovementAccess({
@@ -408,8 +417,8 @@ class AccessControl {
       return { status: 400, error: 'Equipe destino não corresponde à equipe do assessor.' };
     }
 
-    // Regra específica de SUPERVISOR (nível 2): mesma unidade apenas.
-    // Coordenador (3+) e admin (4+) não passam por estas checagens.
+    // Regra específica de SUPERVISOR (nível 2). Coordenador (3+) e admin (4+)
+    // não passam por estas checagens.
     if (isSupervisor) {
       const requesterUnidade   = requester.unidade_id   != null ? Number(requester.unidade_id)   : null;
       const destinationUnidade = destination.unidade_id != null ? Number(destination.unidade_id) : null;
@@ -424,13 +433,27 @@ class AccessControl {
         return { status: 403, error: 'Supervisores só podem movimentar cards para assessores da própria unidade.' };
       }
 
-      // NOVO: em fluxos que exigem vínculo de equipe (Link Hub),
-      // o supervisor só pode direcionar para assessores da própria equipe.
+      const requesterTeamNorm   = this.normalize(requester.nome_equipe);
+      const destinationTeamNorm = this.normalize(destination.nome_equipe);
+
+      // Equipes reservadas: mesmo dentro da mesma unidade, apenas membros da
+      // própria equipe reservada podem direcionar movimentações para ela.
+      // (Hoje: "Equipe Tatiane" na unidade 1.)
+      if (this.RESERVED_DESTINATION_TEAMS.has(destinationTeamNorm)
+          && requesterTeamNorm !== destinationTeamNorm) {
+        return {
+          status: 403,
+          error: 'Somente supervisores da própria equipe podem direcionar movimentações para esta equipe.',
+        };
+      }
+
+      // Trava de destino na própria equipe (Link Hub sempre; CRM em unidades
+      // 2–5, ou quando o solicitante pertence a uma equipe reservada).
       if (enforceDestinationSameTeam) {
-        if (this.normalize(destination.nome_equipe) !== this.normalize(requester.nome_equipe)) {
+        if (destinationTeamNorm !== requesterTeamNorm) {
           return {
             status: 403,
-            error: 'Supervisores só podem movimentar cards por Link Hub para assessores da própria equipe.',
+            error: 'Supervisores só podem movimentar cards para assessores da própria equipe.',
           };
         }
       }
