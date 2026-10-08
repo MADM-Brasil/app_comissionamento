@@ -6,7 +6,7 @@
 // - reassignDealAndContactsOwner exige expectedCurrentContext (fluxo normal);
 // - reassignDealForLinkHubMovement: regra do Link Hub:
 //     * Base de Leads → move para Closer (Em Contato), limpa motivo_da_perda;
-//     * Closer → apenas troca o proprietário, preserva pipeline/etapa;
+//     * Closer → apenas troca o proprietário, preserva pipeline/etapa.
 // - garantirLeadNoCloser devolve "message" descritiva em todas as decisões
 //   (inclusive sucesso), para que o worker CRM propague no histórico;
 // - bloqueios temporais incluem requiredHours, hoursSinceNote, notesLastUpdated;
@@ -16,7 +16,14 @@
 // - mutexes abaixo protegem somente ESTE processo. O worker precisa de locks
 //   distribuídos por conta/card/contato (por exemplo no PostgreSQL) e reserva exclusiva;
 // - autorização de usuário/equipe continua a cargo de access-control.js e do worker.
-// Configurar CHV_Hubspot, HUBSPOT_PORTAL_ID e IDs reais de pipeline/etapa.
+//
+// PRODUTO:
+// - Contact: propriedade `contact_produto` (nomes internos: quinquenio |
+//   auxilio_acidente | Fator K | Concomitante | BPC/LOAS)
+// - Deal:    propriedade `produto` (mesmos nomes internos)
+// - Preenchidas a partir do mapeamento equipe→produto em
+//   backend/config/teamProducts.js, propagado pela rota /ticket-movimentacao
+//   (gravado em observacao_sales_ops.produto) e lido pelos workers.
 
 const API_ORIGIN = 'https://api.hubapi.com';
 const setting = (name, fallback = '') => String(process.env[name] || fallback).trim();
@@ -41,11 +48,13 @@ export const HUBSPOT_STAGE_ENTRADA_ID = STAGE_ENTRADA_ID;
 
 const CONTACT_PROPERTIES = [
   'email', 'firstname', 'lastname', 'phone', 'hs_whatsapp_phone_number',
-  'contact_cpf', 'contact_fonte', 'hubspot_owner_id',
+  'contact_cpf', 'contact_fonte', 'contact_produto',
+  'hubspot_owner_id',
 ];
 const DEAL_PROPERTIES = [
   'dealname', 'pipeline', 'dealstage', 'hubspot_owner_id',
   'notes_last_updated', 'motivo_da_perda', 'hs_lastmodifieddate',
+  'produto',
 ];
 
 const PIPELINE_NAMES = {
@@ -63,8 +72,6 @@ const STAGE_NAMES = {
   ...(STAGE_ENTRADA_ID ? { [STAGE_ENTRADA_ID]: 'Entrada' } : {}),
 };
 
-// Mensagens amigáveis devolvidas em `message` para cada regra aplicada.
-// O worker CRM propaga esses textos no histórico e nas notificações Teams.
 const RULE_MESSAGES = Object.freeze({
   created_and_moved: 'Card criado na Base de Leads e movido para o Closer (Em Contato).',
   base_to_closer: 'Card movido da Base de Leads para o Closer (Em Contato).',
@@ -276,6 +283,7 @@ function mapDeal(deal) {
     notesLastUpdated: properties.notes_last_updated || null,
     motivoDaPerda: properties.motivo_da_perda || null,
     lastModifiedDate: properties.hs_lastmodifieddate || null,
+    produto: properties.produto || null,
   };
 }
 
@@ -503,7 +511,6 @@ export async function findOwnerIdByEmailStrict(email) {
   return matches.length ? id(matches[0].id, 'Proprietário') : null;
 }
 
-// Compatibilidade de assinatura, mas sem ocultar falhas técnicas.
 export async function findOwnerIdByEmail(email) {
   return findOwnerIdByEmailStrict(email);
 }
@@ -523,7 +530,13 @@ export async function getHubSpotOwnerEmail(ownerId) {
   return cleanEmail(owner.email) || null;
 }
 
-export async function createContact({ firstName, lastName, email, phone, cpf, origem, ownerId } = {}) {
+// =====================================================================
+// Criação de contato — grava `contact_produto` quando `produto` é informado.
+// =====================================================================
+export async function createContact({
+  firstName, lastName, email, phone, cpf, origem, ownerId,
+  produto,
+} = {}) {
   await accountReady();
   const properties = {
     firstname: optionalText(firstName),
@@ -543,6 +556,7 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
     properties.contact_cpf = cleaned;
   }
   if (origem) properties.contact_fonte = optionalText(origem);
+  if (produto) properties.contact_produto = optionalText(produto);
   if (ownerId) {
     await activeOwner(ownerId);
     properties.hubspot_owner_id = id(ownerId);
@@ -564,6 +578,20 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
         if (validated.divergente) {
           throw hubError(validated.motivo, { blocked: true });
         }
+        if (produto && String(existing.properties?.contact_produto || '') !== String(produto)) {
+          try {
+            await request(`/crm/v3/objects/contacts/${id(existing.id)}`, {
+              method: 'PATCH',
+              body: { properties: { contact_produto: optionalText(produto) } },
+            });
+            existing.properties = {
+              ...(existing.properties || {}),
+              contact_produto: optionalText(produto),
+            };
+          } catch (patchError) {
+            console.error('[hubspot] Falha ao sincronizar contact_produto:', patchError.message);
+          }
+        }
         return existing;
       }
     }
@@ -571,13 +599,19 @@ export async function createContact({ firstName, lastName, email, phone, cpf, or
   }
 }
 
-export async function updateContactOwner(contactId, ownerId) {
+// =====================================================================
+// Atualiza dono do contato — aceita `produto` opcional para sincronizar
+// `contact_produto`.
+// =====================================================================
+export async function updateContactOwner(contactId, ownerId, produto = null) {
   await accountReady();
   id(contactId, 'Contato');
   await activeOwner(ownerId);
+  const properties = { hubspot_owner_id: id(ownerId) };
+  if (produto) properties.contact_produto = optionalText(produto);
   return request(`/crm/v3/objects/contacts/${id(contactId)}`, {
     method: 'PATCH',
-    body: { properties: { hubspot_owner_id: id(ownerId) } },
+    body: { properties },
   });
 }
 
@@ -613,7 +647,17 @@ async function dealContactAssociationType() {
   return Number(id(types[0].typeId, 'Tipo de associação'));
 }
 
-export async function createDealForContact(contactId, dealName, pipelineId, stageId = null, ownerId = null) {
+// =====================================================================
+// Criação de deal — aceita `produto` opcional (6º arg), gravado em `produto`.
+// =====================================================================
+export async function createDealForContact(
+  contactId,
+  dealName,
+  pipelineId,
+  stageId = null,
+  ownerId = null,
+  produto = null,
+) {
   await accountReady();
   id(contactId, 'Contato');
   id(pipelineId, 'Pipeline');
@@ -630,6 +674,7 @@ export async function createDealForContact(contactId, dealName, pipelineId, stag
         pipeline: String(pipelineId),
         dealstage: String(finalStage),
         motivo_da_perda: '',
+        ...(produto ? { produto: optionalText(produto) } : {}),
         ...(ownerId ? { hubspot_owner_id: id(ownerId) } : {}),
       },
       associations: [
@@ -644,7 +689,10 @@ export async function createDealForContact(contactId, dealName, pipelineId, stag
   });
 }
 
-export async function moveDealToCloserEmContato(dealId, ownerId = null) {
+// =====================================================================
+// Move deal para Closer/Em Contato — aceita `produto` opcional (3º arg).
+// =====================================================================
+export async function moveDealToCloserEmContato(dealId, ownerId = null, produto = null) {
   await accountReady();
   await validateStage(PIPELINE_CLOSER_ID, STAGE_EM_CONTATO_ID);
   if (ownerId) await activeOwner(ownerId);
@@ -655,11 +703,40 @@ export async function moveDealToCloserEmContato(dealId, ownerId = null) {
         pipeline: PIPELINE_CLOSER_ID,
         dealstage: STAGE_EM_CONTATO_ID,
         motivo_da_perda: '',
+        ...(produto ? { produto: optionalText(produto) } : {}),
         ...(ownerId ? { hubspot_owner_id: id(ownerId) } : {}),
       },
     },
   });
   return { deal, lastUpdatedAt: deal.properties?.hs_lastmodifieddate || null };
+}
+
+// =====================================================================
+// Sincroniza produto no deal e no contato, confirmando leitura final.
+// Usado quando o card JÁ está com o proprietário destino (nada mais a
+// movimentar), garantindo que `produto` e `contact_produto` batem com o
+// valor resolvido pela rota.
+// =====================================================================
+export async function syncMovementProduct(dealId, contactId, produto) {
+  if (!produto) return;
+  await accountReady();
+  const value = optionalText(produto);
+  await request(`/crm/v3/objects/deals/${id(dealId)}`, {
+    method: 'PATCH',
+    body: { properties: { produto: value } },
+  });
+  await request(`/crm/v3/objects/contacts/${id(contactId)}`, {
+    method: 'PATCH',
+    body: { properties: { contact_produto: value } },
+  });
+  const deal = await getDeal(dealId);
+  const contact = await getContact(contactId, ['contact_produto']);
+  if (String(deal.properties?.produto || '') !== value ||
+      String(contact.properties?.contact_produto || '') !== value) {
+    throw hubError('Produto final do card ou contato não confirmado.', {
+      code: 'PRODUCT_CONFIRMATION_FAILED',
+    });
+  }
 }
 
 function hoursSince(value) {
@@ -710,7 +787,16 @@ function assignmentResult(deal, extras = {}) {
   };
 }
 
-export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '') {
+// =====================================================================
+// Garante o lead no Closer — aceita `produto` (5º arg) e propaga.
+// =====================================================================
+export async function garantirLeadNoCloser(
+  contactId,
+  dealName,
+  ownerId = null,
+  collaboratorName = '',
+  produto = null,
+) {
   if (!ownerId) {
     return assignmentResult(null, {
       blocked: true,
@@ -744,12 +830,23 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     } else if (!deal.ownerId) {
       rule = 'closer_without_owner';
     } else if (String(deal.ownerId) === String(ownerId)) {
-      await updateContactOwner(contactId, ownerId);
-      return assignmentResult(deal, {
-        alreadyAssigned: true,
-        ruleApplied: 'already_assigned',
-        message: RULE_MESSAGES.already_assigned,
-      });
+      // Card já é do responsável informado. Apenas sincroniza
+      // contato (owner + contact_produto) e o produto do deal.
+      try {
+        await updateContactOwner(contactId, ownerId, produto);
+        await syncMovementProduct(deal.id, contactId, produto);
+        const confirmed = mapDeal(await getDeal(deal.id));
+        return assignmentResult(confirmed, {
+          alreadyAssigned: true,
+          ruleApplied: 'already_assigned',
+          message: RULE_MESSAGES.already_assigned,
+        });
+      } catch (error) {
+        error.partialResult = { dealId: deal.id, contactId: String(contactId), produto };
+        error.requiresReconciliation = true;
+        error.retryable = false;
+        throw error;
+      }
     } else {
       const check = temporalCheck(deal);
       if (!check.allowed) {
@@ -787,14 +884,17 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
           dealName,
           PIPELINE_BASE_LEADS_ID,
           null,
-          ownerId
+          ownerId,
+          produto,
         );
         createdDealId = String(created.id);
         deal = mapDeal(created);
       }
       writeAttempted = true;
-      await moveDealToCloserEmContato(deal.id, ownerId);
-      await updateContactOwner(contactId, ownerId);
+      await moveDealToCloserEmContato(deal.id, ownerId, produto);
+      await updateContactOwner(contactId, ownerId, produto);
+      await syncMovementProduct(deal.id, contactId, produto);
+
       const confirmedDeal = mapDeal(await getDeal(deal.id));
       const confirmedContact = await getContact(contactId, ['hubspot_owner_id']);
       if (
@@ -817,6 +917,7 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
           contactId: String(contactId),
           previousContactOwnerId: previousContact.properties?.hubspot_owner_id || '',
           writeAttempted: true,
+          produto,
         };
         error.requiresReconciliation = true;
         error.retryable = false;
@@ -952,11 +1053,18 @@ function assertContext(expected, actual) {
 // =====================================================================
 // FLUXO LINK HUB
 // Regra:
-//   - Card na Base de Leads → mover para o pipeline Closer, etapa Em Contato,
-//     limpar motivo_da_perda, trocar proprietário do card e do contato.
-//   - Card já no Closer → apenas trocar o proprietário; preservar pipeline/etapa.
+//   - Card na Base de Leads → mover para Closer/Em Contato, limpar
+//     motivo_da_perda, trocar dono do card/contato e gravar produto.
+//   - Card já no Closer → apenas trocar o dono; preservar pipeline/etapa;
+//     gravar produto.
 // =====================================================================
-export async function reassignDealForLinkHubMovement(dealId, ownerId, portalId, expectedCurrentContext) {
+export async function reassignDealForLinkHubMovement(
+  dealId,
+  ownerId,
+  portalId,
+  expectedCurrentContext,
+  produto = null,
+) {
   id(dealId, 'Card');
   id(ownerId, 'Proprietário destino');
   return withLocks([`deal:${dealId}`], async () => {
@@ -1026,6 +1134,7 @@ export async function reassignDealForLinkHubMovement(dealId, ownerId, portalId, 
                 dealstage: STAGE_EM_CONTATO_ID,
                 motivo_da_perda: '',
                 hubspot_owner_id: String(ownerId),
+                ...(produto ? { produto: optionalText(produto) } : {}),
               },
             },
           });
@@ -1035,6 +1144,7 @@ export async function reassignDealForLinkHubMovement(dealId, ownerId, portalId, 
             body: {
               properties: {
                 hubspot_owner_id: String(ownerId),
+                ...(produto ? { produto: optionalText(produto) } : {}),
               },
             },
           });
@@ -1042,7 +1152,9 @@ export async function reassignDealForLinkHubMovement(dealId, ownerId, portalId, 
         dealUpdated = true;
 
         attemptedContactIds.push(contactId);
-        await updateContactOwner(contactId, ownerId);
+        await updateContactOwner(contactId, ownerId, produto);
+        await syncMovementProduct(dealId, contactId, produto);
+
         const contact = await getContact(contactId, ['hubspot_owner_id']);
         if (String(contact.properties?.hubspot_owner_id || '') !== String(ownerId)) {
           throw hubError('Proprietário do contato não confirmado.');
@@ -1090,6 +1202,7 @@ export async function reassignDealForLinkHubMovement(dealId, ownerId, portalId, 
           previousContactOwners,
           contactIds,
           lastUpdatedAt: finalContext.lastModifiedDate,
+          produto: produto || null,
         };
       } catch (error) {
         error.partialResult = {
@@ -1106,6 +1219,7 @@ export async function reassignDealForLinkHubMovement(dealId, ownerId, portalId, 
           expectedDestinationOwnerId: String(ownerId),
           previousPipeline: context.pipeline,
           previousStage: context.stage,
+          produto: produto || null,
         };
         error.requiresReconciliation = dealWriteAttempted;
         error.retryable = false;

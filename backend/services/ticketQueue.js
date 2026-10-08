@@ -1,7 +1,22 @@
 // backend/services/ticketQueue.js
 // Worker do fluxo de movimentação normal (CRM).
+//
 // IMPORTANTE: filtra por crm_origem = 'CRM' para não concorrer com o
 // linkHubBatchQueue.js, que processa apenas crm_origem = 'HUBSPOT_LINK'.
+//
+// Produto: lido de `observacao_sales_ops.produto` (fonte principal) ou, em
+// tickets legados, de `metadados.produto`. É propagado via garantirLeadNoCloser,
+// que grava `produto` no deal e `contact_produto` no contato.
+//
+// Não chamamos updateContactOwner direto aqui — deixamos que
+// garantirLeadNoCloser sincronize proprietário + produto apenas depois de
+// avaliar as regras do card (evita alterar contato em ticket bloqueado).
+//
+// Fila: o SELECT exclui explicitamente tickets com processado=true em
+// observacao_sales_ops. Isso evita loop infinito caso status_mapeamento e o
+// marcador `processado` divirjam (ex.: ticket devolvido a 'pendente' sem
+// revisão do resultado). Esses tickets só voltam a ser processados após
+// revisão manual e limpeza controlada do marcador.
 
 import { pool } from './db.js';
 import {
@@ -9,7 +24,6 @@ import {
   createContact,
   garantirLeadNoCloser,
   findOwnerIdByEmail,
-  updateContactOwner,
   validateFinalAssignment,
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_STAGE_EM_CONTATO_ID,
@@ -29,8 +43,6 @@ const ACCEPTED_CLOSER_STAGES = new Set(
     .filter(Boolean)
 );
 
-// Flag legado: se true, exige a etapa exata Em Contato (comportamento antigo).
-// Default false — aceita qualquer etapa em ACCEPTED_CLOSER_STAGES.
 const ENFORCE_EXACT_STAGE =
   String(process.env.MOVIMENTACAO_CRM_EXIGE_ETAPA || 'false').toLowerCase() === 'true';
 
@@ -88,6 +100,8 @@ async function processTicketQueue() {
 
     isProcessing = true;
     while (true) {
+      // SELECT exclui tickets já marcados como processado=true no JSON.
+      // Isso evita loop quando o status estiver em 'pendente' por engano.
       const result = await client.query(
         `SELECT tml.*, ts.metadados
          FROM app_comissionamento.tickets_movimentacao_lead tml
@@ -96,6 +110,7 @@ async function processTicketQueue() {
            AND (tml.status_mapeamento IS NULL
                 OR tml.status_mapeamento = ''
                 OR tml.status_mapeamento = 'pendente')
+           AND COALESCE(tml.observacao_sales_ops::jsonb->>'processado', 'false') <> 'true'
          ORDER BY tml.id_ticket_movimentacao
          LIMIT 1
          FOR UPDATE SKIP LOCKED`
@@ -108,11 +123,29 @@ async function processTicketQueue() {
         await handleTicket(ticket, client);
       } catch (err) {
         console.error(`Erro no ticket ${ticket.id_ticket_movimentacao}:`, err);
+
+        // Preserva o JSON existente (produto, idempotency_key, etc.) em vez
+        // de sobrescrever com apenas { erro, timestamp }.
+        let previous = {};
+        try {
+          const persisted = await client.query(
+            `SELECT observacao_sales_ops
+             FROM app_comissionamento.tickets_movimentacao_lead
+             WHERE id_ticket_movimentacao = $1`,
+            [ticket.id_ticket_movimentacao]
+          );
+          const raw = persisted.rows[0]?.observacao_sales_ops;
+          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) previous = parsed;
+        } catch { /* Mantém fallback vazio para observação legada. */ }
+
         const obs = JSON.stringify({
+          ...previous,
           erro: err.message,
           timestamp: new Date().toISOString(),
           ...(err.partialResult ? { resultadoParcial: err.partialResult } : {}),
         });
+
         await client.query(
           `UPDATE app_comissionamento.tickets_movimentacao_lead
            SET status_mapeamento = 'erro',
@@ -158,6 +191,14 @@ async function handleTicket(ticket, client) {
     return;
   }
 
+  // Produto: tenta primeiro em observacao_sales_ops.produto (fonte nova);
+  // em seguida em metadados.produto (fallback para tickets que não gravaram
+  // na observação). Nunca assume um default — o default vem da rota.
+  const produto =
+    observacaoAtual.produto ||
+    ticket.metadados?.produto ||
+    null;
+
   const nomeCompleto = `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim();
 
   const hubspotData = {
@@ -175,6 +216,7 @@ async function handleTicket(ticket, client) {
     requiredHours: null,
     hoursSinceNote: null,
     notesLastUpdated: null,
+    produto,
   };
 
   let contactId = null;
@@ -229,6 +271,7 @@ async function handleTicket(ticket, client) {
             cpf: ticket.cpf_cliente_informado,
             origem: ticket.origem_cliente_informada,
             ownerId,
+            produto,
           });
           contactId = novoContato.id;
           hubspotData.contactId = contactId;
@@ -239,7 +282,8 @@ async function handleTicket(ticket, client) {
             contactId,
             nomeCompleto,
             ownerId,
-            ticket.colaborador_destino_nome
+            ticket.colaborador_destino_nome,
+            produto
           );
           if (resultado && !resultado.blocked && resultado.dealId) {
             dealId = resultado.dealId;
@@ -260,40 +304,32 @@ async function handleTicket(ticket, client) {
         }
       }
     } else if (busca.divergente) {
+      // Contato divergente: apenas sinaliza suporte. NÃO altera o contato no
+      // HubSpot.
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
       hubspotData.status = 'suporte';
       hubspotData.ruleApplied = 'contact_data_mismatch';
       hubspotData.mensagem = busca.motivo || RULE_LABELS.contact_data_mismatch;
-
-      if (ownerId) {
-        await updateContactOwner(contactId, ownerId);
-      }
       resultado = { blocked: false, message: hubspotData.mensagem, ruleApplied: 'contact_data_mismatch' };
     } else {
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
 
-      if (ownerId) {
-        await updateContactOwner(contactId, ownerId);
-      }
-
       resultado = await garantirLeadNoCloser(
         contactId,
         nomeCompleto,
         ownerId,
-        ticket.colaborador_destino_nome
+        ticket.colaborador_destino_nome,
+        produto
       );
       if (resultado && !resultado.blocked && resultado.dealId) {
         dealId = resultado.dealId;
       }
     }
 
-    // 5) Validação final.
-    //    Se ENFORCE_EXACT_STAGE = true, exige a etapa exata Em Contato.
-    //    Caso contrário, aceita qualquer etapa em ACCEPTED_CLOSER_STAGES.
     if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
       const validateOptions = {
         expectedPipeline: HUBSPOT_PIPELINE_CLOSER_ID,
@@ -317,9 +353,6 @@ async function handleTicket(ticket, client) {
       }
 
       if (!finalCheck || !finalCheck.ok) {
-        // Checagem estrutural: owner do card, owner do contato e pipeline.
-        // A etapa é aceita se estiver em ACCEPTED_CLOSER_STAGES (a menos que
-        // ENFORCE_EXACT_STAGE exija Em Contato).
         const d = finalCheck?.details || {};
         const ownerOk = String(d.dealOwnerId) === String(ownerId)
           && String(d.contactOwnerId) === String(ownerId);
@@ -341,8 +374,6 @@ async function handleTicket(ticket, client) {
       }
     }
 
-    // 6) Determinar status final.
-    //    Aceita qualquer etapa do Closer presente em ACCEPTED_CLOSER_STAGES.
     let statusFinal = 'pendente';
     if (resultado?.blocked) {
       statusFinal = 'bloqueado';
@@ -370,7 +401,6 @@ async function handleTicket(ticket, client) {
       resultado?.pipeline === HUBSPOT_PIPELINE_CLOSER_ID &&
       ACCEPTED_CLOSER_STAGES.has(String(resultado.stage))
     ) {
-      // ✅ Aceita qualquer etapa do Closer em ACCEPTED_CLOSER_STAGES.
       statusFinal = 'concluido';
       hubspotData.status = 'concluido';
       hubspotData.pipeline = resultado.pipeline;
@@ -384,16 +414,12 @@ async function handleTicket(ticket, client) {
         RULE_LABELS[resultado.ruleApplied] ||
         'Movimentação concluída com sucesso.';
     } else if (resultado && resultado.dealId) {
-      // Card foi atribuído mas está no Closer em uma etapa não aceita,
-      // ou está em outro pipeline. Reporta como fora do fluxo esperado.
       statusFinal = 'fora_pipeline';
       hubspotData.status = 'fora_pipeline';
       hubspotData.pipeline = resultado.pipeline || null;
       hubspotData.stage = resultado.stage || null;
-      hubspotData.pipelineNome =
-        resultado.pipelineNome || resultado.pipeline || 'Pipeline desconhecido';
-      hubspotData.stageNome =
-        resultado.stageNome || resultado.stage || 'Etapa desconhecida';
+      hubspotData.pipelineNome = resultado.pipelineNome || resultado.pipeline || 'Pipeline desconhecido';
+      hubspotData.stageNome = resultado.stageNome || resultado.stage || 'Etapa desconhecida';
       hubspotData.ruleApplied = resultado.ruleApplied || null;
       hubspotData.lastUpdatedAt = resultado.lastUpdatedAt || null;
       hubspotData.mensagem =
@@ -422,6 +448,7 @@ async function handleTicket(ticket, client) {
       colaboradorDestinoNome: ticket.colaborador_destino_nome,
       colaboradorDestinoEmail: colaboradorEmail,
       validacaoFinal: true,
+      produto: observacaoAtual.produto || produto || null,
     };
 
     await client.query(
@@ -466,6 +493,7 @@ async function handleTicket(ticket, client) {
             `Movimentação solicitada: ${nomeCompleto} | ` +
             `Tel: ${ticket.telefone_cliente_informado || 'N/A'} | ` +
             `Equipe destino: ${ticket.equipe_destino_nome || 'N/A'} | ` +
+            `Produto: ${produto || 'N/A'} | ` +
             `Status: ${statusFinal}`,
           solicitante: ticket.colaborador_origem_nome || 'N/A',
           equipe: ticket.equipe_origem_nome || 'N/A',
@@ -479,6 +507,7 @@ async function handleTicket(ticket, client) {
           regra: hubspotData.ruleApplied || null,
           pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
           stage: hubspotData.stageNome || hubspotData.stage || null,
+          produto: produto || null,
           requiredHours: hubspotData.requiredHours,
           hoursSinceNote: hubspotData.hoursSinceNote,
           notesLastUpdated: hubspotData.notesLastUpdated,
@@ -495,6 +524,7 @@ async function handleTicket(ticket, client) {
       motivoOriginal: ticket.motivo_solicitacao || '',
       observacao: `Erro: ${error.message}`,
       processado: true,
+      produto: observacaoAtual.produto || produto || null,
     });
     await client.query(
       `UPDATE app_comissionamento.tickets_movimentacao_lead
