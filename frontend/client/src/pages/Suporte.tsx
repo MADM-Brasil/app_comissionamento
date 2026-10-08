@@ -41,6 +41,7 @@ interface MovementItem {
   usuario: string;
   atualizadoEm: string;
   observacao_sales_ops?: string;
+  produto?: string | null;
   hubspot?: {
     contactId?: string;
     existe?: boolean;
@@ -84,6 +85,7 @@ interface TicketMovimentacao {
   observacao_sales_ops?: string;
   motivo_solicitacao?: string;
   criado_em: string;
+  produto?: string | null;
 }
 
 interface TicketSuporte {
@@ -96,6 +98,12 @@ interface TicketSuporte {
   status: string;
   observacao_sales_ops?: string;
   criado_em: string;
+}
+
+interface ProdutoConfig {
+  default: string;
+  options: string[];
+  allowChange: boolean;
 }
 
 interface EscopoSuporte {
@@ -118,6 +126,10 @@ interface EscopoSuporte {
     equipeNome: string;
     unidadeId: number | null;
   }>;
+  produtos?: {
+    default: string;
+    porEquipe: Record<string, ProdutoConfig>;
+  };
 }
 
 // ---------------------- Helpers ----------------------
@@ -164,6 +176,14 @@ const formatCPF = (cpf: string): string => {
 };
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
+
+const normalizeKey = (str: string): string =>
+  String(str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
 
 function getSupportAccessLevel(cargo?: string, status?: string): number {
   const level = resolveAccessLevel(cargo, status);
@@ -219,9 +239,6 @@ const EXCLUDED_TEAMS = [
   'Equipe Lucilene','Equipe Elizandra'
 ];
 
-// Unidades em que o supervisor fica travado à própria equipe também no modo
-// CRM (aba "Movimentar" individual). Precisa ficar em sincronia com o
-// backend/routes/suporte.js (UNIDADES_TRAVADAS_EQUIPE).
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
 
 const isExcludedTeam = (teamName: string): boolean => {
@@ -229,6 +246,69 @@ const isExcludedTeam = (teamName: string): boolean => {
   const n = teamName.trim().toLowerCase();
   return EXCLUDED_TEAMS.some(t => t.trim().toLowerCase() === n);
 };
+
+// =====================================================================
+// PRODUTO — nomes internos
+// =====================================================================
+const PRODUCT = Object.freeze({
+  QUINQUENIO:       'quinquenio',
+  AUXILIO_ACIDENTE: 'auxilio_acidente',
+  FATOR_K:          'Fator K',
+  CONCOMITANTE:     'Concomitante',
+  BPC_LOAS:         'BPC/LOAS',
+});
+
+const PRODUCT_LABELS: Record<string, string> = {
+  [PRODUCT.QUINQUENIO]:       'Quinquenio',
+  [PRODUCT.AUXILIO_ACIDENTE]: 'Auxilio Acidente',
+  [PRODUCT.FATOR_K]:          'Fator K',
+  [PRODUCT.CONCOMITANTE]:     'Concomitante',
+  [PRODUCT.BPC_LOAS]:         'BPC/LOAS',
+};
+
+function maskProduct(value?: string | null): string {
+  if (!value) return '';
+  const key = String(value);
+  if (PRODUCT_LABELS[key]) return PRODUCT_LABELS[key];
+  return key
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+const FALLBACK_PRODUTO_DEFAULT = PRODUCT.AUXILIO_ACIDENTE;
+
+const FALLBACK_PRODUTOS_POR_EQUIPE: Record<string, ProdutoConfig> = {
+  [normalizeKey('Equipe Tatiane')]: {
+    default: PRODUCT.QUINQUENIO,
+    options: [PRODUCT.QUINQUENIO, PRODUCT.CONCOMITANTE],
+    allowChange: true,
+  },
+};
+
+function findProdutoConfig(
+  mapa: Record<string, ProdutoConfig> | undefined,
+  equipe: string,
+): ProdutoConfig | null {
+  if (!equipe) return null;
+  const key = normalizeKey(equipe);
+
+  if (mapa) {
+    for (const [k, v] of Object.entries(mapa)) {
+      if (normalizeKey(k) === key) {
+        return {
+          default: v.default,
+          options: Array.isArray(v.options) ? [...v.options] : [v.default],
+          allowChange: Boolean(v.allowChange),
+        };
+      }
+    }
+  }
+
+  const hit = FALLBACK_PRODUTOS_POR_EQUIPE[key];
+  return hit ? { ...hit, options: [...hit.options] } : null;
+}
 
 function getCsrfHeaders() {
   const token = localStorage.getItem('csrfToken') || '';
@@ -295,6 +375,7 @@ function MovimentacaoTab() {
   const [origem, setOrigem] = useState("");
   const [equipe, setEquipe] = useState("");
   const [assessorId, setAssessorId] = useState("");
+  const [produto, setProduto] = useState("");
   const [movimentacaoEmMassa, setMovimentacaoEmMassa] = useState(false);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
@@ -309,7 +390,7 @@ function MovimentacaoTab() {
   const [loadingEscopo, setLoadingEscopo] = useState(true);
   const [escopoError, setEscopoError] = useState<string | null>(null);
 
-  // ---------- Refresh da sessão ao entrar na página ----------
+  // ---------- Refresh da sessão ----------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -319,11 +400,6 @@ function MovimentacaoTab() {
         const data = await res.json();
         if (cancelled || !data?.success || !data.user) return;
         setCurrentUser(data.user);
-        console.log('[MovimentacaoTab] Sessão atualizada via /auth/me:', {
-          cargo: data.user.cargo,
-          nome_equipe: data.user.nome_equipe,
-          unidade_id: data.user.unidade_id,
-        });
       } catch (err) {
         console.warn('[MovimentacaoTab] Falha ao atualizar sessão:', err);
       }
@@ -331,7 +407,7 @@ function MovimentacaoTab() {
     return () => { cancelled = true; };
   }, [setCurrentUser]);
 
-  // ---------- Carrega o escopo filtrado por unidade ----------
+  // ---------- Carrega o escopo ----------
   useEffect(() => {
     let cancelled = false;
     const carregarEscopo = async () => {
@@ -341,16 +417,6 @@ function MovimentacaoTab() {
         const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: 'include' });
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
-
-        console.log('[MovimentacaoTab] /suporte/escopo →', {
-          status: res.status,
-          ok: res.ok,
-          success: data?.success,
-          usuario: data?.data?.usuario,
-          equipesCount: Array.isArray(data?.data?.equipes) ? data.data.equipes.length : 0,
-          assessoresCount: Array.isArray(data?.data?.assessores) ? data.data.assessores.length : 0,
-        });
-
         if (!res.ok || !data.success) {
           throw new Error(data?.error || `Erro HTTP ${res.status}`);
         }
@@ -367,45 +433,25 @@ function MovimentacaoTab() {
     return () => { cancelled = true; };
   }, []);
 
-  // Equipe do próprio supervisor — usada apenas para pré-seleção inicial.
   const supervisorTeam =
     (accessUser as any)?.equipe
     || (accessUser as any)?.nome_equipe
     || currentUser?.equipe
     || "";
 
-  // Unidade do supervisor (preferindo a que veio do escopo autenticado).
   const unidadeSupervisorRaw = escopo?.usuario?.unidadeId != null
     ? escopo.usuario.unidadeId
     : (accessUser as any)?.unidade_id;
   const unidadeSupervisor = unidadeSupervisorRaw != null ? Number(unidadeSupervisorRaw) : null;
 
-  // Supervisor em unidade travada (2,3,4,5) → equipe travada em qualquer modo.
   const unidadeTravada = isSupervisor
     && unidadeSupervisor != null
     && UNIDADES_TRAVADAS_EQUIPE.includes(unidadeSupervisor);
 
-  // Regra de destino:
-  //  - Link Hub: sempre trava a equipe do supervisor.
-  //  - CRM em unidade travada (2,3,4,5): também trava.
-  //  - CRM em outras unidades: comportamento antigo (pode escolher outras equipes da unidade).
   const restringirDestinoAoTimeSupervisor = isSupervisor
     && !!supervisorTeam
     && (movimentacaoEmMassa || unidadeTravada);
 
-  console.log('[MovimentacaoTab] estado atual', {
-    accessLevel,
-    isSupervisor,
-    supervisorTeam,
-    unidadeSupervisor,
-    unidadeTravada,
-    movimentacaoEmMassa,
-    restringirDestinoAoTimeSupervisor,
-    escopoUsuario: escopo?.usuario,
-  });
-
-  // Equipes disponíveis: sempre do escopo (backend já filtrou por unidade).
-  // Quando a trava está ativa, restringe à própria equipe do supervisor.
   const equipesDisponiveis = useMemo(() => {
     if (!escopo) return [];
     let lista = escopo.equipes.filter(nome => !isExcludedTeam(nome));
@@ -415,9 +461,6 @@ function MovimentacaoTab() {
     return lista;
   }, [escopo, restringirDestinoAoTimeSupervisor, supervisorTeam]);
 
-  // Pré-seleciona / força a equipe do supervisor.
-  //  - Trava ativa (Link Hub, ou CRM em unidade travada): força própria equipe.
-  //  - Caso contrário: só preenche se ainda estiver vazio.
   useEffect(() => {
     if (!isSupervisor || !supervisorTeam) return;
     if (movimentacaoEmMassa || unidadeTravada) {
@@ -430,8 +473,6 @@ function MovimentacaoTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSupervisor, supervisorTeam, movimentacaoEmMassa, unidadeTravada]);
 
-  // Assessores filtrados pela equipe selecionada.
-  // Quando a trava está ativa, também restringe à própria equipe.
   const assessoresDisponiveis = useMemo(() => {
     if (!escopo?.assessores?.length) return [];
     let filtered = escopo.assessores.filter(a => !isExcludedTeam(a.equipeNome));
@@ -450,6 +491,31 @@ function MovimentacaoTab() {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
   }, [assessoresDisponiveis, assessorId]);
 
+  // ---------- Produto: configuração por equipe ----------
+  const produtoConfig: ProdutoConfig = useMemo(() => {
+    const mapaBackend = escopo?.produtos?.porEquipe;
+    const hit = findProdutoConfig(mapaBackend, equipe);
+    if (hit) return hit;
+    const defaultGlobal = escopo?.produtos?.default || FALLBACK_PRODUTO_DEFAULT;
+    return {
+      default: defaultGlobal,
+      options: [defaultGlobal],
+      allowChange: false,
+    };
+  }, [escopo, equipe]);
+
+  useEffect(() => {
+    if (!equipe) return;
+    if (!produtoConfig.allowChange) {
+      if (produto !== produtoConfig.default) setProduto(produtoConfig.default);
+      return;
+    }
+    if (!produtoConfig.options.includes(produto)) {
+      setProduto(produtoConfig.default);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [equipe, produtoConfig.allowChange, produtoConfig.default, produtoConfig.options.join('|')]);
+
   const loadUserHistory = async () => {
     if (!currentUser?.nome) return;
     try {
@@ -462,6 +528,8 @@ function MovimentacaoTab() {
           let hubspotData;
           let motivoOriginal = "Registro Concluido";
           let observacao = '';
+          // Produto: campo próprio do payload OR JSON de observacao_sales_ops
+          let produtoHistorico: string | null = ticket.produto || null;
 
           if (ticket.observacao_sales_ops) {
             try {
@@ -469,6 +537,7 @@ function MovimentacaoTab() {
               if (parsed.hubspot) hubspotData = parsed.hubspot;
               if (parsed.motivoOriginal) motivoOriginal = parsed.motivoOriginal;
               if (parsed.observacao) observacao = parsed.observacao;
+              if (!produtoHistorico && parsed.produto) produtoHistorico = parsed.produto;
             } catch (e) {
               observacao = ticket.observacao_sales_ops;
             }
@@ -492,6 +561,7 @@ function MovimentacaoTab() {
             atualizadoEm: ticket.criado_em,
             observacao_sales_ops: observacao,
             hubspot: hubspotData,
+            produto: produtoHistorico,
           };
         });
         setMovements(historico);
@@ -517,6 +587,7 @@ function MovimentacaoTab() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting.current) return;
+
     const hubLinks = [...new Set(hubLink.split(/[\r\n\s,;]+/).map(link => link.trim()).filter(Boolean))];
     if (movimentacaoEmMassa && hubLinks.length === 0) {
       setMessage({ text: "Informe ao menos um link HubSpot", type: "error" });
@@ -537,6 +608,14 @@ function MovimentacaoTab() {
     }
 
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
+
+    // NOVO: resolve produto antes de qualquer envio e valida contra a equipe.
+    // Usa o mesmo valor no payload individual e no payload do lote Link Hub.
+    const produtoSelecionado = produto || produtoConfig.default;
+    if (!produtoConfig.options.includes(produtoSelecionado)) {
+      setMessage({ text: "Selecione um produto válido para a equipe.", type: "error" });
+      return;
+    }
 
     isSubmitting.current = true;
     setLoading(true);
@@ -563,6 +642,7 @@ function MovimentacaoTab() {
             colaborador_destino_nome: assessorNome,
             colaborador_destino_email: assessorEmail,
             idempotency_key: idempotencyKey,
+            produto: produtoSelecionado,
           }),
         });
         const result = await response.json();
@@ -611,6 +691,7 @@ function MovimentacaoTab() {
       observacao_sales_ops: null,
       status_mapeamento: "pendente",
       idempotency_key: idempotencyKey,
+      produto: produtoSelecionado,
     };
 
     try {
@@ -629,6 +710,8 @@ function MovimentacaoTab() {
       await loadUserHistory();
       if (result.success) {
         setFirstName(""); setHubLink(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
+        // Reset preservando coerência com a equipe atual.
+        setProduto(isSupervisor ? produtoConfig.default : "");
         if (!isSupervisor) setEquipe("");
         setAssessorId(""); setMovimentacaoEmMassa(false);
       }
@@ -650,7 +733,7 @@ function MovimentacaoTab() {
 
   const exportHistory = () => {
     if (movements.length === 0) return;
-    const headers = ["Data/Hora", "Cliente", "E-mail", "Telefone", "CPF", "Equipe", "Assessor", "Status", "HubSpot", "Resultado"];
+    const headers = ["Data/Hora", "Cliente", "E-mail", "Telefone", "CPF", "Equipe", "Assessor", "Produto", "Status", "HubSpot", "Resultado"];
     const rows = movements.map(m => {
       const hubspotInfo = m.hubspot
         ? m.hubspot.erro
@@ -667,6 +750,7 @@ function MovimentacaoTab() {
         `"${m.cpf}"`,
         `"${m.equipe}"`,
         `"${m.assessor}"`,
+        `"${maskProduct(m.produto)}"`,
         `"${getStatusInfo(m.status).label}"`,
         `"${hubspotInfo}"`,
         `"${m.resultado}"`,
@@ -709,7 +793,8 @@ function MovimentacaoTab() {
                     setTelefone("");
                     setCpf("");
                     setOrigem("");
-                    // Supervisor fica travado na própria equipe em Link Hub.
+                    // NOVO: preserva o produto coerente com a equipe atual.
+                    setProduto(produtoConfig.default);
                     if (isSupervisor && supervisorTeam) {
                       setEquipe(supervisorTeam);
                       setAssessorId("");
@@ -866,6 +951,58 @@ function MovimentacaoTab() {
                 ))}
               </select>
             </div>
+
+            {/* Produto — visível nos DOIS modos (individual e Link Hub) */}
+            <div className="md:col-span-2">
+              <label
+                htmlFor="mov-produto"
+                className="block text-sm font-medium text-[#0f172a] mb-1"
+                title={
+                  produtoConfig.allowChange
+                    ? 'Esta equipe permite escolher entre os produtos listados.'
+                    : 'O produto é definido automaticamente pela equipe selecionada.'
+                }
+              >
+                Produto{' '}
+                {!produtoConfig.allowChange && (
+                  <span className="text-[#94a3b8]">(definido pela equipe)</span>
+                )}
+              </label>
+
+              {produtoConfig.allowChange ? (
+                <select
+                  id="mov-produto"
+                  value={produto}
+                  onChange={e => setProduto(e.target.value)}
+                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                  disabled={!equipe}
+                  required
+                >
+                  <option value="" disabled>
+                    {equipe ? 'Selecione o produto' : 'Selecione a equipe primeiro'}
+                  </option>
+                  {produtoConfig.options.map(opt => (
+                    <option key={opt} value={opt}>{maskProduct(opt)}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="mov-produto"
+                  type="text"
+                  value={equipe ? maskProduct(produto) : ''}
+                  readOnly
+                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg bg-[#f8fafc] text-[#475569] cursor-not-allowed"
+                  placeholder={equipe ? '' : 'Selecione a equipe primeiro'}
+                />
+              )}
+
+              {produtoConfig.allowChange && equipe && (
+                <p className="mt-1 text-xs text-[#64748b]">
+                  A equipe <strong>{equipe}</strong> pode alternar entre:{' '}
+                  {produtoConfig.options.map(maskProduct).join(' / ')}.
+                </p>
+              )}
+            </div>
           </div>
 
           {escopoError && (
@@ -932,6 +1069,7 @@ function MovimentacaoTab() {
                   <th>Cliente</th>
                   <th>Contato</th>
                   <th>Equipe/Assessor</th>
+                  <th>Produto</th>
                   <th>Status</th>
                   <th>Obs. SalesOps</th>
                   <th>Resultado</th>
@@ -952,6 +1090,9 @@ function MovimentacaoTab() {
                       <td>
                         <div>{m.equipe}</div>
                         <small>{m.assessor}</small>
+                      </td>
+                      <td className="text-[#475569]" title={m.produto || ''}>
+                        {m.produto ? maskProduct(m.produto) : '—'}
                       </td>
                       <td>
                         <span className={cn("badge", info.className)} title={m.hubspot?.mensagem || info.label}>
@@ -1450,7 +1591,7 @@ function EditModal({ isOpen, onClose, title, children, onSave, saving }: EditMod
   );
 }
 
-// ---------------------- Tabela de movimentações com edição via modal ----------------------
+// ---------------------- Movimentações (SalesOps) ----------------------
 function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1614,6 +1755,7 @@ function MovimentacoesSuporteTab() {
                   <th>Contato</th>
                   <th>Origem</th>
                   <th>Destino</th>
+                  <th>Produto</th>
                   <th>Status</th>
                   <th>Obs.</th>
                   <th className="w-20">Ações</th>
@@ -1622,6 +1764,15 @@ function MovimentacoesSuporteTab() {
               <tbody>
                 {filteredTickets.map(ticket => {
                   const statusInfo = getStatusInfo(ticket.status_mapeamento || 'pendente');
+                  const produtoInterno = (() => {
+                    if (ticket.produto) return ticket.produto;
+                    try {
+                      const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
+                      return parsed.produto || null;
+                    } catch {
+                      return null;
+                    }
+                  })();
                   return (
                     <tr key={ticket.id_ticket_movimentacao}>
                       <td>{ticket.id_ticket_movimentacao}</td>
@@ -1635,6 +1786,9 @@ function MovimentacoesSuporteTab() {
                       </td>
                       <td>{ticket.origem_cliente_informada || "—"}</td>
                       <td>{ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</td>
+                      <td className="text-[#475569]" title={produtoInterno || ''}>
+                        {produtoInterno ? maskProduct(produtoInterno) : '—'}
+                      </td>
                       <td>
                         <span className={cn("badge", statusInfo.className)}>
                           {statusInfo.icon} {statusInfo.label}
@@ -1707,7 +1861,7 @@ function MovimentacoesSuporteTab() {
   );
 }
 
-// ---------------------- Tabela de reportes com edição via modal (SalesOps) ----------------------
+// ---------------------- Reportes (SalesOps) ----------------------
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);

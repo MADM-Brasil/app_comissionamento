@@ -1,25 +1,22 @@
 # Sistema-Comissionamento
-Sistema que calcula o comissionamento de colaboradores da empresa MADM Brasil.
+Sistema que calcula o comissionamento de colaboradores e também faz movimentação, alteração de proprietarios e notificação de reports da empresa MADM Brasil.
 
-passo á passo do sistema
+passo á passo de login e cadastro do sistema
 
-acesso 2FN
-    login e-mail
-    senha 
+1° Criação de usuários   
+    => Colaborador precisa ter o acesso criado dentro do app_comissionamento.metricas_assessores e na core.colaboradores para envio do código de acesso via e-mail
+e para o sisitema conseguir puxar dados referentes ao usuário como por exemplo: Equipe.
+        Pronpt para criação de usuários na app_comissionamento.metricas_assessores:
 
-informações principais
-    login:
-        nome do cloaborador
-        equipe
+    INSERT INTO app_comissionamento.metricas_assessores 
+(id_assessor, email, data_metrica, comissao_bonus, colaborador, classificacao_operacional, peso_meta_ganho_diario,peso_meta_ganho_semanal,peso_meta_ganho_mensal)
+VALUES 
+  (1, 'email@@madmbrasil.com.br', '2026-10-01', 1, 'nome', 'Discador',1,1,1)
 
-    comissionamento:
-        emitidos
-        assinados
-        ganhos
-        perdidos
-        Meta
-        Bonus
-        Comissão
+OBS: id_assessor, email e colaborador precisam ser os mesmos da core. data_metrica sempre referente ao dia 1 do mês do registro
+
+2° acesso do colaborador
+    => Primiero acesso precisa ser feito indo primeiro em "Esqueci a minnha senha" para registrar a senha do usuario dentro do app_comissionamento.metricas_assessores
 
 -----------------------------------------------------------------------------------------
 
@@ -44,19 +41,23 @@ controle
 
 
     Nivel de acesso (hierarquia)
-       
+
             Nivel          |                Grupo
 ---------------------------|-------------------------------------------------------------
-    Desc                   | Desativado, Juridico, Ultravita, ProntuÃ¡rio, Diligencia,   
-                           | ComunicaÃ§Ã£o, Ganho, Marketing, Dr. Felipe Marx, NULL
+    Desc                   | status = desativado
+                           | cargo = Assistente,Analista Juridico,Gestor de projetos
+                           | Analista, Analista Juridico, Analista de discadora
                            |
-    Assessor               | Elite, AnÃ¡lise de segurado, Concomitante, QuinquÃªnio
+    Assessor               | Assessor, Analista de pastas
                            |
     Supervisão             | Supervisor
                            |
     Coordenador            | Coordenador
                            |
-    Administrativo         | Salesops, CEO, administrativo(validar)
+    Administrativo         | Salesops, Analista de CRM,Desenvolvedor,Diretora,
+                           | Analista de dados, Desenvolvedor Make
+                           |
+    SUPER_ADMIN            | Desenvolvedor, CEO, diretora                                     
 
     
    Permissões:
@@ -74,11 +75,31 @@ select internal_id, colaborador, e_mail, equipe, grupo , status, periodo
   grupo in ('Elite','Supervisor','Análise de segurado','Concomitante','Salesops','Quinquenio','Coordenador','CEO','Diretoria')
 
 -----------------------------------------------------------------------------------------
+# CAMPANHAS
 
-Cores
+É possivel registrar campanhas e ativa-las na página configuration.tsx, cada campanha possui um modelo especifico, faixa de comissão e regras registradas dentro do campanhas.js
 
- * Primary: #09175b | Success: #34a853 | Ice: #c8eaed | Emerald: #045b5b | Gold: #ffcc00
+Atuais campanhas:
 
+GOLS, subcampanhas:
+  -assinados
+  -gols
+  -progressiva
+
+CAMPGANHOS_2026, subcampanhas:
+  -diaria
+  -semanal
+  -mensal
+
+# FAIXAS DE COMISSAO
+
+A comissão é calculada por meio das faixas atingidas pelo colaborador. Os colaboradores possuem uma faixa de comissão padrão e uma faixa especifica por campanha. As campanhas só são levadas em consideração para o calculo quando ativas no periodo.
+
+Exemplo de faixa:
+
+  campanha= X, faixa_min = 5, faixa_max = 10, valor = R$10
+
+Regra: Campanha x calcula a faixa por meio da quantidade de ganhos, logo caso o colaborador tenha entre 5 a 10 ganhos ele receberá R$10
 -----------------------------------------------------------------------------------------
 
 Calculo do peso da meta na página de relatório:
@@ -110,27 +131,6 @@ Calculo para Melhor colaborador e Precisa de atenção
 
        Precisa de atenção: aquele com menor número de assinados.
 -------------------------------------------------------------------------------------------
-
-Mudança para views:
-
-            Nivel          |                Grupo
----------------------------|-------------------------------------------------------------
-    Desc                   | status = desativado
-                           | cargo = Assistente,Analista Juridico,Gestor de projetos
-                           | Analista, Analista Juridico, Analista de discadora
-                           |
-    Assessor               | Assessor, Analista de pastas
-                           |
-    Supervisão             | Supervisor
-                           |
-    Coordenador            | Coordenador
-                           |
-    Administrativo         | Salesops, Analista de CRM,Desenvolvedor,Diretora,
-                           | Analista de dados, Desenvolvedor Make
-                           |
-    SUPER_ADMIN            | Desenvolvedor, CEO, diretora                                     
-
-Equipe.tsx
 
 Card do colaborador
 

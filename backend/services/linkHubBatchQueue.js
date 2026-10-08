@@ -3,12 +3,9 @@
 // Opera sobre a MESMA tabela app_comissionamento.tickets_movimentacao_lead,
 // filtrando por crm_origem = 'HUBSPOT_LINK'.
 //
-// Regra aplicada no HubSpot (via reassignDealForLinkHubMovement):
-//   - Base de Leads → move para Closer (Em Contato), limpa motivo_da_perda;
-//   - Closer → apenas troca o proprietário, preserva pipeline/etapa.
-//
-// O estado de tentativas/lease é mantido dentro do JSON observacao_sales_ops
-// na chave "_worker", para não exigir novas colunas na tabela.
+// Produto: lido de observacao_sales_ops.produto (gravado pela rota) e
+// propagado para `reassignDealForLinkHubMovement`, que grava `produto` no
+// deal e `contact_produto` no contato.
 import { pool } from './db.js';
 import {
   findOwnerIdByEmailStrict,
@@ -57,9 +54,7 @@ function safeParse(value) {
   try {
     const parsed = JSON.parse(value);
     return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
+  } catch { return {}; }
 }
 
 function describeFailure(error, attempts) {
@@ -69,15 +64,9 @@ function describeFailure(error, attempts) {
     parts.push(`Tentativas: ${attempts}/${MAX_ATTEMPTS}.`);
   }
   const partial = error.partialResult;
-  if (partial?.previousPipeline) {
-    parts.push(`Pipeline de origem: ${partial.previousPipeline}.`);
-  }
-  if (partial?.previousStage) {
-    parts.push(`Etapa de origem: ${partial.previousStage}.`);
-  }
-  if (error.blocked) {
-    parts.push('Bloqueio definitivo — requer revisão manual.');
-  }
+  if (partial?.previousPipeline) parts.push(`Pipeline de origem: ${partial.previousPipeline}.`);
+  if (partial?.previousStage) parts.push(`Etapa de origem: ${partial.previousStage}.`);
+  if (error.blocked) parts.push('Bloqueio definitivo — requer revisão manual.');
   return parts.filter(Boolean).join(' ');
 }
 
@@ -173,6 +162,7 @@ async function markSuccess(client, ticket, resultData) {
     processado: true,
     dealId: resultData.dealId,
     regra,
+    produto: resultData.produto || observacao.produto || null,
     hubspot: {
       status: 'concluido',
       dealId: resultData.dealId,
@@ -188,6 +178,7 @@ async function markSuccess(client, ticket, resultData) {
       ownerDestinoId: resultData.ownerDestinoId || null,
       ruleApplied: regra,
       mensagem,
+      produto: resultData.produto || observacao.produto || null,
     },
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
     observacao: mensagem,
@@ -248,9 +239,6 @@ async function markFailure(client, ticket, error) {
     },
   };
 
-  // Correção do erro 42P08: $2 era usado em dois contextos com tipos diferentes
-  // (coluna varchar e comparação com literais text). Forçamos cast explícito
-  // em ambas as ocorrências para unificar a inferência como text.
   await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
      SET observacao_sales_ops = $1::text,
@@ -296,6 +284,7 @@ async function markFailure(client, ticket, error) {
         stage: partial.previousStage || null,
         dealId: ticket.crm_lead_id || null,
         link: meta.link_hub || null,
+        produto: observacao.produto || meta.produto || null,
       });
     } catch (notifErr) {
       console.error('Erro ao enviar notificação Teams (Link Hub):', notifErr);
@@ -313,6 +302,9 @@ async function handleLinkHubTicket(ticket, client) {
   }
 
   const meta = ticket.metadados || {};
+  const observacao = safeParse(ticket.observacao_sales_ops);
+  const produto = observacao.produto || meta.produto || null;
+
   const portalId = String(meta.portal_id || '').trim();
   if (!/^\d+$/.test(portalId)) {
     const error = new Error('Portal ID do HubSpot ausente ou inválido.');
@@ -330,9 +322,7 @@ async function handleLinkHubTicket(ticket, client) {
   }
 
   const destinationEmail = String(meta.colaborador_destino_email || '').trim();
-  const destinationName = String(
-    meta.destino_colaborador || ticket.colaborador_destino_nome || ''
-  ).trim();
+  const destinationName = String(meta.destino_colaborador || ticket.colaborador_destino_nome || '').trim();
   const destinationTeam = String(meta.destino_equipe || '').trim();
 
   const context = await getDealMovementContext(dealId, portalId);
@@ -347,8 +337,6 @@ async function handleLinkHubTicket(ticket, client) {
     destinationTeam,
     sourceTeam: sourceOwner?.nome_equipe || null,
     enforceSourceTeam: true,
-    // NOVO: no fluxo Link Hub, supervisores só podem direcionar para a própria equipe.
-    // Coordenador/Admin não são afetados por esta restrição.
     enforceDestinationSameTeam: true,
   });
   if (access.error) {
@@ -370,12 +358,14 @@ async function handleLinkHubTicket(ticket, client) {
     dealId,
     ownerId,
     portalId,
-    context
+    context,
+    produto,
   );
 
   return {
     ...assignment,
     ownerDestinoId: ownerId,
+    produto,
     sucesso: true,
   };
 }
