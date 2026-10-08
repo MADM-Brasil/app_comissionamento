@@ -99,7 +99,7 @@ const CARGO_LEVELS: Record<string, Level> = {
   'administrador':           LEVELS.ADMINISTRATIVO,
 
   // Super Admin / visão liberada
-  'desenvolvedor':           LEVELS.SUPER_ADMIN, 
+  'desenvolvedor':           LEVELS.SUPER_ADMIN,
   'diretora':                LEVELS.SUPER_ADMIN,
   'ceo':                     LEVELS.SUPER_ADMIN,
   'coordenador sales ops':   LEVELS.SUPER_ADMIN,

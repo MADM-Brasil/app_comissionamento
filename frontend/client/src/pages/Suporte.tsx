@@ -115,6 +115,7 @@ interface EscopoSuporte {
     isAdmin: boolean;
     aplicarFiltroUnidade: boolean;
     supervisorTravado?: boolean;
+    equipesReservadasOcultas?: boolean;
   };
   equipes: string[];
   assessores: Array<{
@@ -177,6 +178,9 @@ const formatCPF = (cpf: string): string => {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
+// Normalização agressiva para casar nomes de equipe e chaves do mapa de produto:
+// trim + colapso de espaços + lowercase + remoção de acentos.
+// Precisa ficar idêntica à `normalizeKey` de backend/config/teamProducts.js.
 const normalizeKey = (str: string): string =>
   String(str || '')
     .trim()
@@ -236,10 +240,26 @@ const EXCLUDED_TEAMS = [
    'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo',
-  'Equipe Lucilene','Equipe Elizandra'
+  'Equipe Lucilene','Equipe Elizandra','Backoffice'
 ];
 
+// Unidades em que o supervisor fica travado à própria equipe também no CRM
+// (aba "Movimentar" individual). Precisa ficar em sincronia com
+// backend/routes/suporte.js (UNIDADES_TRAVADAS_EQUIPE).
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
+
+// Equipes que impõem trava de destino para supervisores que PERTENCEM a elas,
+// mesmo fora das unidades 2–5. Hoje: Equipe Tatiane (unidade 1).
+// Nomes normalizados (lowercase, sem acento).
+// Precisa ficar em sincronia com backend/services/access-control.js
+// (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
+// (EQUIPES_TRAVADAS_DESTINO).
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+
+function isEquipeTravadaDestino(nome: string): boolean {
+  const n = normalizeKey(nome);
+  return EQUIPES_TRAVADAS_DESTINO.includes(n);
+}
 
 const isExcludedTeam = (teamName: string): boolean => {
   if (!teamName) return false;
@@ -248,7 +268,7 @@ const isExcludedTeam = (teamName: string): boolean => {
 };
 
 // =====================================================================
-// PRODUTO — nomes internos
+// PRODUTO — nomes internos (espelham backend/config/teamProducts.js).
 // =====================================================================
 const PRODUCT = Object.freeze({
   QUINQUENIO:       'quinquenio',
@@ -390,7 +410,7 @@ function MovimentacaoTab() {
   const [loadingEscopo, setLoadingEscopo] = useState(true);
   const [escopoError, setEscopoError] = useState<string | null>(null);
 
-  // ---------- Refresh da sessão ----------
+  // ---------- Refresh da sessão ao entrar na página ----------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -407,7 +427,7 @@ function MovimentacaoTab() {
     return () => { cancelled = true; };
   }, [setCurrentUser]);
 
-  // ---------- Carrega o escopo ----------
+  // ---------- Carrega o escopo filtrado por unidade ----------
   useEffect(() => {
     let cancelled = false;
     const carregarEscopo = async () => {
@@ -433,34 +453,68 @@ function MovimentacaoTab() {
     return () => { cancelled = true; };
   }, []);
 
+  // Equipe do próprio supervisor — usada apenas para pré-seleção inicial.
   const supervisorTeam =
     (accessUser as any)?.equipe
     || (accessUser as any)?.nome_equipe
     || currentUser?.equipe
     || "";
 
+  // Unidade do supervisor (preferindo a que veio do escopo autenticado).
   const unidadeSupervisorRaw = escopo?.usuario?.unidadeId != null
     ? escopo.usuario.unidadeId
     : (accessUser as any)?.unidade_id;
   const unidadeSupervisor = unidadeSupervisorRaw != null ? Number(unidadeSupervisorRaw) : null;
 
-  const unidadeTravada = isSupervisor
+  // ---------- Regras de trava de destino ----------
+  // 1) Supervisor em unidade travada (2,3,4,5) → destino travado na própria equipe.
+  const unidadeTravadaPorUnidade = isSupervisor
     && unidadeSupervisor != null
     && UNIDADES_TRAVADAS_EQUIPE.includes(unidadeSupervisor);
 
+  // 2) Supervisor pertencente a uma equipe reservada (Equipe Tatiane) →
+  //    destino travado na própria equipe, mesmo estando na unidade 1.
+  const unidadeTravadaPorEquipe = isSupervisor
+    && !!supervisorTeam
+    && isEquipeTravadaDestino(supervisorTeam);
+
+  const unidadeTravada = unidadeTravadaPorUnidade || unidadeTravadaPorEquipe;
+
+  // 3) Supervisor de unidade 1 que NÃO pertence à equipe reservada → esconde
+  //    a Equipe Tatiane da seleção de destino.
+  const deveOcultarEquipesReservadas = isSupervisor
+    && unidadeSupervisor === 1
+    && !unidadeTravadaPorEquipe;
+
+  // Regra consolidada de destino:
+  //  - Link Hub: sempre trava a equipe do supervisor.
+  //  - CRM em unidade travada (2–5) OU quando o supervisor pertence a uma
+  //    equipe reservada: também trava.
+  //  - CRM em outras situações: comportamento antigo (pode escolher outras
+  //    equipes da unidade, exceto as reservadas ocultadas).
   const restringirDestinoAoTimeSupervisor = isSupervisor
     && !!supervisorTeam
     && (movimentacaoEmMassa || unidadeTravada);
 
+  // Equipes disponíveis: sempre do escopo (backend já filtrou por unidade).
+  // Quando a trava está ativa, restringe à própria equipe do supervisor.
+  // Unidade 1 fora da equipe reservada: oculta as equipes reservadas.
   const equipesDisponiveis = useMemo(() => {
     if (!escopo) return [];
     let lista = escopo.equipes.filter(nome => !isExcludedTeam(nome));
+
+    if (deveOcultarEquipesReservadas) {
+      lista = lista.filter(nome => !isEquipeTravadaDestino(nome));
+    }
     if (restringirDestinoAoTimeSupervisor) {
       lista = lista.filter(nome => normalize(nome) === normalize(supervisorTeam));
     }
     return lista;
-  }, [escopo, restringirDestinoAoTimeSupervisor, supervisorTeam]);
+  }, [escopo, restringirDestinoAoTimeSupervisor, supervisorTeam, deveOcultarEquipesReservadas]);
 
+  // Pré-seleciona / força a equipe do supervisor.
+  //  - Trava ativa (Link Hub, unidade 2–5, ou equipe reservada): força própria equipe.
+  //  - Caso contrário: só preenche se ainda estiver vazio.
   useEffect(() => {
     if (!isSupervisor || !supervisorTeam) return;
     if (movimentacaoEmMassa || unidadeTravada) {
@@ -473,9 +527,16 @@ function MovimentacaoTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSupervisor, supervisorTeam, movimentacaoEmMassa, unidadeTravada]);
 
+  // Assessores filtrados pela equipe selecionada.
+  // Quando a trava está ativa, também restringe à própria equipe.
+  // Unidade 1 fora da equipe reservada: oculta os assessores da equipe reservada.
   const assessoresDisponiveis = useMemo(() => {
     if (!escopo?.assessores?.length) return [];
     let filtered = escopo.assessores.filter(a => !isExcludedTeam(a.equipeNome));
+
+    if (deveOcultarEquipesReservadas) {
+      filtered = filtered.filter(a => !isEquipeTravadaDestino(a.equipeNome));
+    }
     if (restringirDestinoAoTimeSupervisor) {
       filtered = filtered.filter(a => normalize(a.equipeNome) === normalize(supervisorTeam));
     }
@@ -485,7 +546,7 @@ function MovimentacaoTab() {
     return filtered
       .map(a => ({ id: a.id, nome: a.nome, email: a.email }))
       .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
-  }, [escopo, equipe, restringirDestinoAoTimeSupervisor, supervisorTeam]);
+  }, [escopo, equipe, restringirDestinoAoTimeSupervisor, supervisorTeam, deveOcultarEquipesReservadas]);
 
   useEffect(() => {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
@@ -504,6 +565,9 @@ function MovimentacaoTab() {
     };
   }, [escopo, equipe]);
 
+  // Mantém `produto` coerente com a equipe atual:
+  //   - Equipe travada → força o default.
+  //   - Equipe que alterna → se o valor atual não é uma opção válida, cai no default.
   useEffect(() => {
     if (!equipe) return;
     if (!produtoConfig.allowChange) {
@@ -528,7 +592,6 @@ function MovimentacaoTab() {
           let hubspotData;
           let motivoOriginal = "Registro Concluido";
           let observacao = '';
-          // Produto: campo próprio do payload OR JSON de observacao_sales_ops
           let produtoHistorico: string | null = ticket.produto || null;
 
           if (ticket.observacao_sales_ops) {
@@ -609,8 +672,7 @@ function MovimentacaoTab() {
 
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
 
-    // NOVO: resolve produto antes de qualquer envio e valida contra a equipe.
-    // Usa o mesmo valor no payload individual e no payload do lote Link Hub.
+    // Resolve produto antes de qualquer envio e valida contra a equipe.
     const produtoSelecionado = produto || produtoConfig.default;
     if (!produtoConfig.options.includes(produtoSelecionado)) {
       setMessage({ text: "Selecione um produto válido para a equipe.", type: "error" });
@@ -710,7 +772,6 @@ function MovimentacaoTab() {
       await loadUserHistory();
       if (result.success) {
         setFirstName(""); setHubLink(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
-        // Reset preservando coerência com a equipe atual.
         setProduto(isSupervisor ? produtoConfig.default : "");
         if (!isSupervisor) setEquipe("");
         setAssessorId(""); setMovimentacaoEmMassa(false);
@@ -793,7 +854,6 @@ function MovimentacaoTab() {
                     setTelefone("");
                     setCpf("");
                     setOrigem("");
-                    // NOVO: preserva o produto coerente com a equipe atual.
                     setProduto(produtoConfig.default);
                     if (isSupervisor && supervisorTeam) {
                       setEquipe(supervisorTeam);
@@ -819,7 +879,7 @@ function MovimentacaoTab() {
               {movimentacaoEmMassa ? (
                 <>Como supervisor, você só pode direcionar movimentações por Link Hub para assessores da sua equipe (<strong>{supervisorTeam}</strong>).</>
               ) : (
-                <>Como supervisor da sua unidade, você só pode movimentar leads para assessores da sua equipe (<strong>{supervisorTeam}</strong>).</>
+                <>Como supervisor, você só pode movimentar leads para assessores da sua equipe (<strong>{supervisorTeam}</strong>).</>
               )}
             </div>
           )}
@@ -905,7 +965,7 @@ function MovimentacaoTab() {
                   restringirDestinoAoTimeSupervisor
                     ? (movimentacaoEmMassa
                         ? "Supervisores só podem movimentar por Link Hub para a própria equipe."
-                        : "Supervisores da sua unidade só podem movimentar leads para a própria equipe.")
+                        : "Supervisores só podem movimentar leads para a própria equipe.")
                     : undefined
                 }
               >
@@ -964,6 +1024,9 @@ function MovimentacaoTab() {
                 }
               >
                 Produto{' '}
+                {!produtoConfig.allowChange && (
+                  <span className="text-[#94a3b8]">(definido pela equipe)</span>
+                )}
               </label>
 
               {produtoConfig.allowChange ? (
@@ -1588,7 +1651,7 @@ function EditModal({ isOpen, onClose, title, children, onSave, saving }: EditMod
   );
 }
 
-// ---------------------- Movimentações (SalesOps) ----------------------
+// ---------------------- Tabela de movimentações com edição via modal ----------------------
 function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1858,7 +1921,7 @@ function MovimentacoesSuporteTab() {
   );
 }
 
-// ---------------------- Reportes (SalesOps) ----------------------
+// ---------------------- Tabela de reportes com edição via modal (SalesOps) ----------------------
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
