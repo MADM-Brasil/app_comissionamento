@@ -964,9 +964,6 @@ function MovimentacaoTab() {
                 }
               >
                 Produto{' '}
-                {!produtoConfig.allowChange && (
-                  <span className="text-[#94a3b8]">(definido pela equipe)</span>
-                )}
               </label>
 
               {produtoConfig.allowChange ? (
