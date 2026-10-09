@@ -11,7 +11,10 @@ import {
   fetchLeadsRecebidos,
   fetchWeeklyPerformance,
   fetchCollaborators,
-  fetchEquipes, 
+  fetchEquipes,
+  fetchDemandaAtual,
+  fetchDemandaReprimida,
+  fetchDemandaResumo,
   API_BASE,
 } from './api';
 import { calculator } from './calculator';
@@ -131,6 +134,42 @@ export interface Campaign {
   data_publicacao: string;
   descricao: string;
   validacao_financeiro: boolean;
+}
+
+// ============================================================
+// TIPOS — DEMANDA ATUAL / REPRIMIDA
+// ============================================================
+export interface DemandaItem {
+  colaborador: string;
+  equipe: string;
+  lead_id: string | number | null;
+  deal_id: string | number | null;
+  data_emissao: string | null;
+  data_assinatura: string | null;
+  data_ganho: string | null;
+  pipeline: string | null;
+  etapa: string | null;
+}
+
+export interface DemandaResumoLinha {
+  colaborador: string;
+  equipe: string;
+  total: number;
+}
+
+export interface DemandaResumo {
+  atual: DemandaResumoLinha[];
+  reprimida: DemandaResumoLinha[];
+  totalAtual: number;
+  totalReprimida: number;
+}
+
+// Parâmetros comuns usados nos loaders de demanda
+export interface DemandaLoaderParams {
+  equipeNome?: string;
+  colaboradorNome?: string;
+  colaboradorId?: string | number;
+  produto?: string;
 }
 
 // ============================================================
@@ -261,6 +300,13 @@ const initialRawMetrics: RawMetrics = { emitidos: 0, assinados: 0, protocolados:
 const initialTabelaComissoes: TabelaComissaoItem[] = [];
 const initialCampaigns: Campaign[] = [];
 
+// --- Demanda ---
+const initialDemandaAtual: DemandaItem[] = [];
+const initialDemandaReprimida: DemandaItem[] = [];
+const initialDemandaResumo: DemandaResumo = {
+  atual: [], reprimida: [], totalAtual: 0, totalReprimida: 0,
+};
+
 // ============================================================
 // INTERFACE DA STORE
 // ============================================================
@@ -283,6 +329,18 @@ interface AppStore {
   // Estado para o colaborador selecionado (e-mail) – usado para ocultar/bloquear no DashboardLayout
   selectedCollaboratorEmail: string | null;
   setSelectedCollaboratorEmail: (email: string | null) => void;
+
+  // --- Demanda atual / reprimida ---
+  demandaAtual: DemandaItem[];
+  demandaReprimida: DemandaItem[];
+  demandaResumo: DemandaResumo;
+  setDemandaAtual: (data: DemandaItem[]) => void;
+  setDemandaReprimida: (data: DemandaItem[]) => void;
+  setDemandaResumo: (data: DemandaResumo) => void;
+  loadDemandaAtual: (params?: DemandaLoaderParams) => Promise<void>;
+  loadDemandaReprimida: (params?: DemandaLoaderParams) => Promise<void>;
+  loadDemandaResumo: (params?: DemandaLoaderParams) => Promise<void>;
+  loadDemandaCompleta: (params?: DemandaLoaderParams) => Promise<void>;
 
   resetStore: () => void;
   setKpiData: (data: KpiData) => void; setBonusData: (data: BonusData) => void; setWeeklyPerformance: (data: WeeklyPerformance[]) => void;
@@ -368,6 +426,14 @@ export const useAppStore = create<AppStore>()(
       selectedCollaboratorEmail: null,
       setSelectedCollaboratorEmail: (email) => set({ selectedCollaboratorEmail: email }),
 
+      // --- Demanda ---
+      demandaAtual: initialDemandaAtual,
+      demandaReprimida: initialDemandaReprimida,
+      demandaResumo: initialDemandaResumo,
+      setDemandaAtual: (data) => set({ demandaAtual: data }),
+      setDemandaReprimida: (data) => set({ demandaReprimida: data }),
+      setDemandaResumo: (data) => set({ demandaResumo: data }),
+
       // ========== PERÍODO ==========
       setPeriod: (period) => {
         if (period !== 'Custom') {
@@ -423,6 +489,9 @@ export const useAppStore = create<AppStore>()(
         tabelaComissoes: initialTabelaComissoes,
         campaigns: initialCampaigns,
         selectedCollaboratorEmail: null,
+        demandaAtual: initialDemandaAtual,
+        demandaReprimida: initialDemandaReprimida,
+        demandaResumo: initialDemandaResumo,
       }),
 
       // ========== SETTERS BÁSICOS ==========
@@ -803,6 +872,9 @@ export const useAppStore = create<AppStore>()(
           leadsData.forEach((l: any) => leadsByDate.set(l.data, (leadsByDate.get(l.data) || 0) + l.total));
           const dailyProd: DailyProduction[] = Array.from(leadsByDate.entries()).map(([date, leads]) => ({ date, vendas: 0, leads }));
           if (dailyProd.length) set({ dailyProduction: dailyProd.sort((a, b) => a.date.localeCompare(b.date)) });
+
+          // Demanda atual / reprimida acompanham o filtro ativo (fuzzy no backend).
+          get().loadDemandaCompleta({ equipeNome, colaboradorNome, colaboradorId, produto });
         } catch (err) {
           console.error('Erro ao carregar métricas:', err);
         }
@@ -907,6 +979,63 @@ export const useAppStore = create<AppStore>()(
         } catch { return []; }
       },
 
+      // ============================================================
+      // DEMANDA ATUAL / REPRIMIDA — LOADERS
+      // ============================================================
+      loadDemandaAtual: async (params = {}) => {
+        try {
+          const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
+          const data = await fetchDemandaAtual({
+            equipe: equipeNome,
+            colaborador: colaboradorNome,
+            colaboradorId,
+            produto,
+          });
+          set({ demandaAtual: data as DemandaItem[] });
+        } catch (err) {
+          console.error('❌ [loadDemandaAtual] Erro:', err);
+        }
+      },
+
+      loadDemandaReprimida: async (params = {}) => {
+        try {
+          const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
+          const data = await fetchDemandaReprimida({
+            equipe: equipeNome,
+            colaborador: colaboradorNome,
+            colaboradorId,
+            produto,
+          });
+          set({ demandaReprimida: data as DemandaItem[] });
+        } catch (err) {
+          console.error('❌ [loadDemandaReprimida] Erro:', err);
+        }
+      },
+
+      loadDemandaResumo: async (params = {}) => {
+        try {
+          const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
+          const data = await fetchDemandaResumo({
+            equipe: equipeNome,
+            colaborador: colaboradorNome,
+            colaboradorId,
+            produto,
+          });
+          set({ demandaResumo: data as DemandaResumo });
+        } catch (err) {
+          console.error('❌ [loadDemandaResumo] Erro:', err);
+        }
+      },
+
+      // Conveniência: carrega tudo de uma vez (detalhado + resumo)
+      loadDemandaCompleta: async (params = {}) => {
+        await Promise.all([
+          get().loadDemandaAtual(params),
+          get().loadDemandaReprimida(params),
+          get().loadDemandaResumo(params),
+        ]);
+      },
+
       updateCollaboratorWeights: (id, weights) => {
         set((state) => ({
           collaborators: state.collaborators.map(c => c.id === id ? { ...c, ...weights } : c)
@@ -974,6 +1103,8 @@ export const useAppStore = create<AppStore>()(
         period: state.period,
         customStartDate: state.customStartDate,
         customEndDate: state.customEndDate,
+        // Persistência opcional do resumo de demanda (comente se não quiser)
+        demandaResumo: state.demandaResumo,
       }),
     }
   )

@@ -182,7 +182,12 @@ router.get('/emitidos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'), e.equipe_responsavel_emissao, DATE_TRUNC('${gran}', e.data_emissao) ORDER BY periodo, colaborador`;
+      // ⚠️ GROUP BY repete EXATAMENTE a mesma expressão do SELECT
+      query += ` GROUP BY 
+        COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'),
+        e.equipe_responsavel_emissao,
+        (DATE_TRUNC('${gran}', e.data_emissao) AT TIME ZONE 'UTC')::date
+        ORDER BY periodo, colaborador`;
     } else {
       query += ` GROUP BY COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'), e.equipe_responsavel_emissao ORDER BY colaborador`;
     }
@@ -246,7 +251,11 @@ router.get('/assinados', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura, DATE_TRUNC('${gran}', data_assinatura) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY 
+        COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável'),
+        equipe_responsavel_assinatura,
+        (DATE_TRUNC('${gran}', data_assinatura) AT TIME ZONE 'UTC')::date
+        ORDER BY periodo, colaborador`;
     } else {
       query += ` GROUP BY COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável'), equipe_responsavel_assinatura ORDER BY colaborador`;
     }
@@ -385,7 +394,11 @@ router.get('/protocolados', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY 
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
+        c.nome_equipe,
+        (DATE_TRUNC('${gran}', l.data_ganho) AT TIME ZONE 'UTC')::date
+        ORDER BY periodo, colaborador`;
     } else {
       query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
@@ -400,12 +413,23 @@ router.get('/protocolados', requireAuth, async (req, res) => {
 });
 
 // --- GANHOS ---
+// Query params:
+//   start, end, equipe, produto, granularity (comportamento antigo)
+//   + demanda = 'todos' (default) | 'atual'
+//       'atual' → considera apenas ganhos cuja ASSINATURA (core.assinaturas)
+//       ocorreu no mês do `start`. Exclui, portanto, ganhos originados
+//       de "demanda reprimida" (assinaturas de meses anteriores que só
+//       viraram ganho agora).
+//
+// Usado pela página de Comissões para que o cálculo da campanha
+// CAMPGANHOS_2026 contabilize somente a demanda do mês corrente.
 router.get('/ganhos', requireAuth, async (req, res) => {
   try {
-    let { start, end, equipe, produto, granularity } = req.query;
+    let { start, end, equipe, produto, granularity, demanda } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
     const gran = mapGranularity(granularity);
+    const somenteDemandaAtual = String(demanda || '').toLowerCase() === 'atual';
 
     let query = `
       SELECT 
@@ -428,6 +452,21 @@ router.get('/ganhos', requireAuth, async (req, res) => {
       WHERE (l.data_ganho AT TIME ZONE 'UTC')::date >= $1 AND (l.data_ganho AT TIME ZONE 'UTC')::date < $2
         AND l.etapa <> 'Venda perdida'
     `;
+
+    // >>> FILTRO DE DEMANDA DO MÊS <<<
+    // Fonte de verdade: core.assinaturas.data_assinatura (ligada por deal_id).
+    // Isso evita a divergência de `l.data_assinatura` da view, que não
+    // reflete a data real da assinatura para todos os deals.
+    if (somenteDemandaAtual) {
+      query += ` AND EXISTS (
+        SELECT 1
+        FROM core.assinaturas a
+        WHERE a.deal_id = l.deal_id
+          AND (a.data_assinatura AT TIME ZONE 'UTC')::date >= DATE_TRUNC('month', $1::date)
+          AND (a.data_assinatura AT TIME ZONE 'UTC')::date <  DATE_TRUNC('month', $1::date) + INTERVAL '1 month'
+      )`;
+    }
+
     const params = [start, end];
     let idx = 3;
 
@@ -452,7 +491,12 @@ router.get('/ganhos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_ganho) ORDER BY periodo, colaborador`;
+      // ⚠️ GROUP BY repete EXATAMENTE a mesma expressão do SELECT
+      query += ` GROUP BY 
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
+        c.nome_equipe,
+        (DATE_TRUNC('${gran}', l.data_ganho) AT TIME ZONE 'UTC')::date
+        ORDER BY periodo, colaborador`;
     } else {
       query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
@@ -518,7 +562,11 @@ router.get('/perdidos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_perda) ORDER BY periodo, colaborador`;
+      query += ` GROUP BY 
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
+        c.nome_equipe,
+        (DATE_TRUNC('${gran}', l.data_perda) AT TIME ZONE 'UTC')::date
+        ORDER BY periodo, colaborador`;
     } else {
       query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
@@ -569,7 +617,12 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       params.push(equipe); idx++;
     }
     if (gran) {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe, DATE_TRUNC('${gran}', l.data_qualificacao::timestamp)::date ORDER BY periodo, colaborador`;
+      // Aqui o SELECT e o GROUP BY já usam a mesma expressão (sem AT TIME ZONE)
+      query += ` GROUP BY 
+        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
+        c.nome_equipe,
+        DATE_TRUNC('${gran}', l.data_qualificacao::timestamp)::date
+        ORDER BY periodo, colaborador`;
     } else {
       query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
     }
@@ -640,7 +693,7 @@ router.get('/ligacoes', requireAuth, async (req, res) => {
 
     // Sem filtro de equipe/colaborador no SQL — aplicamos no Node.
     if (gran) {
-      query += ` GROUP BY DATE_TRUNC('${gran}', call_date), agent_name, equipe, campaign_name ORDER BY periodo, colaborador`;
+      query += ` GROUP BY (DATE_TRUNC('${gran}', call_date) AT TIME ZONE 'UTC')::date, agent_name, equipe, campaign_name ORDER BY periodo, colaborador`;
     } else {
       query += ` GROUP BY agent_name, equipe, campaign_name ORDER BY colaborador`;
     }
@@ -794,7 +847,7 @@ router.get('/weekly', requireAuth, async (req, res) => {
         COUNT(*)::int as vendas
       FROM core.view_assinados
       WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1 AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-      GROUP BY semana
+      GROUP BY (DATE_TRUNC('week', data_assinatura) AT TIME ZONE 'UTC')::date
       ORDER BY semana
     `;
     const result = await db.query(query, [start, end]);
@@ -813,6 +866,164 @@ router.get('/weekly', requireAuth, async (req, res) => {
       { semana: '2026-05-25', vendas: 0, meta: 5 },
     ];
     res.json({ success: true, data: mock });
+  }
+});
+
+// ============================================================
+// DEMANDA ATUAL E DEMANDA REPRIMIDA
+// ------------------------------------------------------------
+// Demanda Atual   : assinaturas com data_assinatura no mês corrente.
+// Demanda Reprimida: assinaturas de meses anteriores cujo deal
+//                    ainda não possui data_ganho (não convertido).
+// O filtro de colaborador/equipe é aplicado no Node (fuzzy match),
+// seguindo o padrão das demais rotas — evita divergências entre
+// core.colaboradores.nome e core.view_app_colaboradores.nome.
+// ============================================================
+
+// Executa a query base compartilhada entre os endpoints de demanda.
+// `tipo` = 'atual' | 'reprimida'
+async function runDemandaQuery({ tipo, equipe, produto }) {
+  const baseSelect = `
+    SELECT
+      c.nome AS colaborador,
+      COALESCE(cc.nome_equipe, '') AS equipe,
+      a.lead_id,
+      a.deal_id,
+      (a.data_emissao    AT TIME ZONE 'UTC')::date AS data_emissao,
+      (a.data_assinatura AT TIME ZONE 'UTC')::date AS data_assinatura,
+      (d.data_ganho      AT TIME ZONE 'UTC')::date AS data_ganho,
+      p.nome_pipeline AS pipeline,
+      e.nome_etapa    AS etapa
+    FROM core.assinaturas a
+    INNER JOIN core.colaboradores c
+      ON c.colaborador_id = a.consultor_responsavel_assinatura_id
+    INNER JOIN core.deals d
+      ON d.deal_id = a.deal_id
+    LEFT JOIN core.view_app_colaboradores cc
+      ON cc.nome = c.nome
+    LEFT JOIN ops.crm_pipelines p
+      ON p.pipeline_id = d.pipeline_id
+     AND p.crm = 'HUBSPOT'
+    LEFT JOIN ops.crm_etapas e
+      ON e.etapa_id = d.etapa_id
+     AND e.crm = 'HUBSPOT'
+  `;
+
+  const where = tipo === 'atual'
+    ? `WHERE a.data_assinatura >= DATE_TRUNC('month', CURRENT_DATE)`
+    : `WHERE a.data_assinatura <  DATE_TRUNC('month', CURRENT_DATE)
+         AND d.data_ganho IS NULL`;
+
+  let query = `${baseSelect} ${where}`;
+  const params = [];
+  let idx = 1;
+
+  if (equipe && equipe !== 'todas') {
+    query += ` AND LOWER(TRIM(cc.nome_equipe)) = LOWER(TRIM($${idx}))`;
+    params.push(equipe); idx++;
+  }
+
+  // Produto (opcional — só aplica se a coluna existir em core.assinaturas).
+  if (produto && produto !== 'Todos') {
+    const productVariants = {
+      'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
+      'Quinquenio': ['Quinquenio', 'Quinquênio'],
+    };
+    if (productVariants[produto]) {
+      const variants = productVariants[produto];
+      const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
+      query += ` AND a.produto IN (${placeholders})`;
+      params.push(...variants);
+      idx += variants.length;
+    } else {
+      query += ` AND a.produto = $${idx}`;
+      params.push(produto); idx++;
+    }
+  }
+
+  query += ` ORDER BY a.data_assinatura DESC`;
+
+  const result = await db.query(query, params);
+  return result.rows;
+}
+
+// --- DEMANDA ATUAL ---
+router.get('/demanda-atual', requireAuth, async (req, res) => {
+  try {
+    const { equipe, produto } = req.query;
+    const colaboradorNome = await resolveColaboradorNome(req);
+
+    const rows = await runDemandaQuery({ tipo: 'atual', equipe, produto });
+    const filtered = applyColaboradorFilter(rows, colaboradorNome, ['colaborador']);
+
+    res.json({
+      success: true,
+      total: filtered.length,
+      data: filtered,
+    });
+  } catch (err) {
+    console.error('Erro em /demanda-atual:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- DEMANDA REPRIMIDA ---
+router.get('/demanda-reprimida', requireAuth, async (req, res) => {
+  try {
+    const { equipe, produto } = req.query;
+    const colaboradorNome = await resolveColaboradorNome(req);
+
+    const rows = await runDemandaQuery({ tipo: 'reprimida', equipe, produto });
+    const filtered = applyColaboradorFilter(rows, colaboradorNome, ['colaborador']);
+
+    res.json({
+      success: true,
+      total: filtered.length,
+      data: filtered,
+    });
+  } catch (err) {
+    console.error('Erro em /demanda-reprimida:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- DEMANDA RESUMO (agregado por colaborador+equipe) ---
+router.get('/demanda-resumo', requireAuth, async (req, res) => {
+  try {
+    const { equipe, produto } = req.query;
+    const colaboradorNome = await resolveColaboradorNome(req);
+
+    const [atualRows, reprimidaRows] = await Promise.all([
+      runDemandaQuery({ tipo: 'atual', equipe, produto }),
+      runDemandaQuery({ tipo: 'reprimida', equipe, produto }),
+    ]);
+
+    const agg = (rows) => {
+      const map = new Map();
+      for (const r of rows) {
+        const key = `${r.colaborador}||${r.equipe || ''}`;
+        const cur = map.get(key) || { colaborador: r.colaborador, equipe: r.equipe || '', total: 0 };
+        cur.total += 1;
+        map.set(key, cur);
+      }
+      return Array.from(map.values());
+    };
+
+    const atual = applyColaboradorFilter(agg(atualRows), colaboradorNome, ['colaborador']);
+    const reprimida = applyColaboradorFilter(agg(reprimidaRows), colaboradorNome, ['colaborador']);
+
+    res.json({
+      success: true,
+      data: {
+        atual,
+        reprimida,
+        totalAtual: atual.reduce((s, x) => s + x.total, 0),
+        totalReprimida: reprimida.reduce((s, x) => s + x.total, 0),
+      },
+    });
+  } catch (err) {
+    console.error('Erro em /demanda-resumo:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

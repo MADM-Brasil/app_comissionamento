@@ -587,8 +587,24 @@ const CustomTooltip = ({ active, payload, label, hideValues }: any) => {
 
 // ============================================================
 //  EXTRATO DIALOG
+// ------------------------------------------------------------
+// Recebe SEMPRE dados do MÊS INTEIRO (independente do filtro de
+// período aplicado na página). Isso garante que, mesmo com o filtro
+// em "Hoje" ou "Semana", o extrato mostre todos os dias do mês
+// com os valores corretos.
+//
+//   dailyMetrics         → todas as métricas diárias do mês (assinados/ganhos/protocolados)
+//   campaignDailyMetrics → ganhos do mês filtrados pela demanda atual (o que entra na CAMPGANHOS_2026)
 // ============================================================
-const ExtratoDialog = ({ dailyMetrics, campaignDailyMetrics, campaigns, isSupervisor, campGanhos2026, onClose }: any) => {
+const ExtratoDialog = ({
+  dailyMetrics,
+  campaignDailyMetrics,
+  campaigns,
+  isSupervisor,
+  campGanhos2026,
+  loading,
+  onClose,
+}: any) => {
   const allDates = new Set<string>();
   dailyMetrics.forEach((d: any) => allDates.add(d.date.slice(0, 10)));
   campaignDailyMetrics.forEach((d: any) => allDates.add(d.date.slice(0, 10)));
@@ -599,6 +615,19 @@ const ExtratoDialog = ({ dailyMetrics, campaignDailyMetrics, campaigns, isSuperv
   });
 
   const sortedDates = Array.from(allDates).sort();
+
+  const totalGanhosPeriodo = (dailyMetrics || []).reduce(
+    (sum: number, d: any) => sum + (Number(d.ganhos) || 0),
+    0
+  );
+  const totalGanhosDemandaAtual = (campaignDailyMetrics || []).reduce(
+    (sum: number, d: any) => sum + (Number(d.ganhos) || 0),
+    0
+  );
+  const totalGanhosReprimida = Math.max(0, totalGanhosPeriodo - totalGanhosDemandaAtual);
+  const pctDemandaAtual = totalGanhosPeriodo > 0
+    ? (totalGanhosDemandaAtual / totalGanhosPeriodo) * 100
+    : 0;
 
   const campGanhosDiaMap = new Map<string, number>(
     (campGanhos2026?.detalhes?.dias || []).map((d: CampGanhosDia) => [d.date, d.valor])
@@ -612,106 +641,181 @@ const ExtratoDialog = ({ dailyMetrics, campaignDailyMetrics, campaigns, isSuperv
           <div className="flex items-center gap-2">
             <CalendarDays className="w-5 h-5 text-[#2F6FED]" />
             <h3 className="text-lg font-bold text-[#0f172a]">Extrato de Campanhas e Métricas</h3>
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#eff6ff] text-[#2F6FED] font-medium">
+              Mês completo
+            </span>
           </div>
           <button onClick={onClose} className="p-1 rounded-lg text-[#94a3b8] hover:text-[#0f172a] hover:bg-[#f1f5f9]">
             <XCircle className="w-5 h-5" />
           </button>
         </div>
+
         <div className="p-6 overflow-y-auto flex-1">
-          {campGanhosAtivo && (
-            <div className="mb-4 p-3 rounded-xl border border-[#EA8C1D] bg-[#fff7ed] text-xs">
-              <p className="font-bold text-[#EA8C1D] mb-1">Campanha CAMPGANHOS_2026 ativa</p>
-              {isSupervisor ? (
-                <p className="text-[#475569]">
-                  Estimativa Semana: <b>{formatCurrency(campGanhos2026.estimativa_semana)}</b> · Comissão Mensal (soma no total):
-                  {' '}<b>{formatCurrency(campGanhos2026.comissao_mes_supervisor)}</b>
-                </p>
-              ) : (
-                <p className="text-[#475569]">
-                  Estimativa Dia: <b>{formatCurrency(campGanhos2026.estimativa_dia)}</b> · Comissão Mensal (soma no total):
-                  {' '}<b>{formatCurrency(campGanhos2026.comissao_mes_assessor)}</b>
-                </p>
-              )}
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-3">
+              <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
+              <p className="text-xs text-[#64748b]">Carregando dados do mês...</p>
             </div>
-          )}
+          ) : (
+            <>
+              <div className="mb-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="p-3 rounded-xl border border-[#e2e8f0] bg-[#f8fafc]">
+                  <p className="text-[10px] text-[#64748b] uppercase font-semibold tracking-wide">
+                    Ganhos totais no mês
+                  </p>
+                  <p className="text-2xl font-black text-[#0f172a] mt-1">{formatInt(totalGanhosPeriodo)}</p>
+                  <p className="text-[10px] text-[#94a3b8] mt-0.5">Inclui demanda reprimida</p>
+                </div>
 
-          <div className="space-y-4">
-            {sortedDates.length > 0 ? (
-              sortedDates.map((dateKey, idx) => {
-                const day = campaignDailyMetrics.find((d: any) => d.date.slice(0, 10) === dateKey)
-                  || dailyMetrics.find((d: any) => d.date.slice(0, 10) === dateKey) || {
-                  date: dateKey, assinados: 0, ganhos: 0, perdidos: 0, emitidos: 0, protocolados: 0,
-                };
+                <div className="p-3 rounded-xl border border-[#EA8C1D] bg-[#fff7ed]">
+                  <p className="text-[10px] text-[#EA8C1D] uppercase font-semibold tracking-wide">
+                    Ganhos na demanda do mês
+                  </p>
+                  <p className="text-2xl font-black text-[#EA8C1D] mt-1">{formatInt(totalGanhosDemandaAtual)}</p>
+                  <p className="text-[10px] text-[#94a3b8] mt-0.5">
+                    {pctDemandaAtual.toFixed(0)}% do total · Considerado pela CAMPGANHOS_2026
+                  </p>
+                </div>
 
-                const campanhasAprovadas = (campaigns || []).filter((c: any) => c.validacao_financeiro);
-                const campanhasGols = campanhasAprovadas.filter((c: any) =>
-                  c.tipo?.toUpperCase() === 'GOLS' && c.data_publicacao.split('T')[0] === dateKey
-                );
-                const campanhasAssinados = campanhasAprovadas.filter((c: any) =>
-                  c.tipo?.toUpperCase() === 'ASSINADOS' && c.data_publicacao.split('T')[0] === dateKey
-                );
-                const campanhasProgressivas = campanhasAprovadas.filter((c: any) =>
-                  c.tipo?.toUpperCase() === 'PROGRESSIVA' && c.data_publicacao.split('T')[0] === dateKey
-                );
-                const temCampanhas = campanhasGols.length > 0 || campanhasAssinados.length > 0 || campanhasProgressivas.length > 0;
+                <div className="p-3 rounded-xl border border-[#e2e8f0] bg-[#f8fafc]">
+                  <p className="text-[10px] text-[#64748b] uppercase font-semibold tracking-wide">
+                    Demanda reprimida
+                  </p>
+                  <p className="text-2xl font-black text-[#64748b] mt-1">{formatInt(totalGanhosReprimida)}</p>
+                  <p className="text-[10px] text-[#94a3b8] mt-0.5">Não entra na campanha</p>
+                </div>
+              </div>
 
-                const campGanhosDiaValor = campGanhosDiaMap.get(dateKey) ?? 0;
+              {campGanhosAtivo && (
+                <div className="mb-4 p-3 rounded-xl border border-[#EA8C1D] bg-[#fff7ed] text-xs">
+                  <p className="font-bold text-[#EA8C1D] mb-1">Campanha CAMPGANHOS_2026 ativa</p>
+                  {isSupervisor ? (
+                    <p className="text-[#475569]">
+                      Estimativa Semana: <b>{formatCurrency(campGanhos2026.estimativa_semana)}</b> · Comissão Mensal (soma no total):
+                      {' '}<b>{formatCurrency(campGanhos2026.comissao_mes_supervisor)}</b>
+                    </p>
+                  ) : (
+                    <p className="text-[#475569]">
+                      Estimativa Dia: <b>{formatCurrency(campGanhos2026.estimativa_dia)}</b> · Comissão Mensal (soma no total):
+                      {' '}<b>{formatCurrency(campGanhos2026.comissao_mes_assessor)}</b>
+                    </p>
+                  )}
+                </div>
+              )}
 
-                return (
-                  <div
-                    key={idx}
-                    className={`p-4 rounded-xl border ${temCampanhas || (campGanhosAtivo && campGanhosDiaValor > 0) ? 'border-[#2F6FED] bg-[#eff6ff]' : 'border-[#e2e8f0]'}`}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-semibold text-[#0f172a]">{dateKey}</span>
-                      {temCampanhas && <span className="badge success text-xs">Campanha ativa</span>}
-                    </div>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-xs">
-                      <div><p className="text-[#64748b]">Assinados</p><p className="font-bold">{formatInt(day.assinados || 0)}</p></div>
-                      <div><p className="text-[#64748b]">Ganhos</p><p className="font-bold">{formatInt(day.ganhos || 0)}</p></div>
-                      <div><p className="text-[#64748b]">Protocolados</p><p className="font-bold">{formatInt(day.protocolados || 0)}</p></div>
-                    </div>
+              <div className="space-y-4">
+                {sortedDates.length > 0 ? (
+                  sortedDates.map((dateKey, idx) => {
+                    const fullDay = dailyMetrics.find((d: any) => d.date.slice(0, 10) === dateKey) || {
+                      date: dateKey, assinados: 0, ganhos: 0, perdidos: 0, emitidos: 0, protocolados: 0,
+                    };
+                    const ganhosTotais = Number(fullDay.ganhos) || 0;
 
-                    {campGanhosAtivo && (
-                      <div className="mt-3 pt-3 border-t border-[#e2e8f0] flex justify-between items-center">
-                        <span className="text-xs font-semibold">Estimativa do dia (CAMPGANHOS_2026)</span>
-                        <span className={`text-lg font-black ${campGanhosDiaValor > 0 ? 'text-[#EA8C1D]' : 'text-[#94a3b8]'}`}>
-                          {formatCurrency(campGanhosDiaValor)}
-                        </span>
-                      </div>
-                    )}
+                    const campaignDay = campaignDailyMetrics.find((d: any) => d.date.slice(0, 10) === dateKey);
+                    const ganhosDemandaAtual = Number(campaignDay?.ganhos) || 0;
+                    const ganhosReprimidaDia = Math.max(0, ganhosTotais - ganhosDemandaAtual);
+                    const pctDemandaDia = ganhosTotais > 0
+                      ? (ganhosDemandaAtual / ganhosTotais) * 100
+                      : 0;
 
-                    {temCampanhas && (
-                      <div className="mt-3 pt-3 border-t border-[#e2e8f0]">
-                        <p className="text-xs font-semibold text-[#2F6FED] mb-2">Campanhas ativas</p>
-                        {campanhasGols.map((camp: any, cIdx: number) => (
-                          <div key={`g-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-[#EA8C1D]" />Multiplica Gols</span>
-                            <span className="font-bold text-[#EA8C1D]">×{camp.multiplicador}</span>
+                    const campanhasAprovadas = (campaigns || []).filter((c: any) => c.validacao_financeiro);
+                    const campanhasGols = campanhasAprovadas.filter((c: any) =>
+                      c.tipo?.toUpperCase() === 'GOLS' && c.data_publicacao.split('T')[0] === dateKey
+                    );
+                    const campanhasAssinados = campanhasAprovadas.filter((c: any) =>
+                      c.tipo?.toUpperCase() === 'ASSINADOS' && c.data_publicacao.split('T')[0] === dateKey
+                    );
+                    const campanhasProgressivas = campanhasAprovadas.filter((c: any) =>
+                      c.tipo?.toUpperCase() === 'PROGRESSIVA' && c.data_publicacao.split('T')[0] === dateKey
+                    );
+                    const temCampanhas = campanhasGols.length > 0 || campanhasAssinados.length > 0 || campanhasProgressivas.length > 0;
+
+                    const campGanhosDiaValor = campGanhosDiaMap.get(dateKey) ?? 0;
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`p-4 rounded-xl border ${temCampanhas || (campGanhosAtivo && campGanhosDiaValor > 0) ? 'border-[#2F6FED] bg-[#eff6ff]' : 'border-[#e2e8f0]'}`}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm font-semibold text-[#0f172a]">{dateKey}</span>
+                          {temCampanhas && <span className="badge success text-xs">Campanha ativa</span>}
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                          <div>
+                            <p className="text-[#64748b]">Assinados</p>
+                            <p className="font-bold">{formatInt(fullDay.assinados || 0)}</p>
                           </div>
-                        ))}
-                        {campanhasAssinados.map((camp: any, cIdx: number) => (
-                          <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />+1 gol a cada {camp.multiplicador || 3} assinados</span>
+
+                          <div>
+                            <p className="text-[#64748b]">Ganhos totais</p>
+                            <p className="font-bold">{formatInt(ganhosTotais)}</p>
+                            {ganhosReprimidaDia > 0 && (
+                              <p className="text-[10px] text-[#94a3b8] mt-0.5">
+                                Reprimida: {formatInt(ganhosReprimidaDia)}
+                              </p>
+                            )}
                           </div>
-                        ))}
-                        {campanhasProgressivas.map((camp: any, cIdx: number) => (
-                          <div key={`p-${cIdx}`} className="flex justify-between text-xs mb-1">
-                            <span className="flex items-center gap-1">
-                              <TrendingUp className="w-3 h-3 text-purple-500" />
-                              Progressiva (mín. {Number(camp.multiplicador) || 0} assinados)
+
+                          <div>
+                            <p className="text-[#EA8C1D] font-semibold">Na demanda do mês</p>
+                            <p className="font-bold text-[#EA8C1D]">{formatInt(ganhosDemandaAtual)}</p>
+                            {ganhosTotais > 0 && (
+                              <p className="text-[10px] text-[#94a3b8] mt-0.5">
+                                {pctDemandaDia.toFixed(0)}% do dia
+                              </p>
+                            )}
+                          </div>
+
+                          <div>
+                            <p className="text-[#64748b]">Protocolados</p>
+                            <p className="font-bold">{formatInt(fullDay.protocolados || 0)}</p>
+                          </div>
+                        </div>
+
+                        {campGanhosAtivo && (
+                          <div className="mt-3 pt-3 border-t border-[#e2e8f0] flex justify-between items-center">
+                            <span className="text-xs font-semibold">Estimativa do dia (CAMPGANHOS_2026)</span>
+                            <span className={`text-lg font-black ${campGanhosDiaValor > 0 ? 'text-[#EA8C1D]' : 'text-[#94a3b8]'}`}>
+                              {formatCurrency(campGanhosDiaValor)}
                             </span>
                           </div>
-                        ))}
+                        )}
+
+                        {temCampanhas && (
+                          <div className="mt-3 pt-3 border-t border-[#e2e8f0]">
+                            <p className="text-xs font-semibold text-[#2F6FED] mb-2">Campanhas ativas</p>
+                            {campanhasGols.map((camp: any, cIdx: number) => (
+                              <div key={`g-${cIdx}`} className="flex justify-between text-xs mb-1">
+                                <span className="flex items-center gap-1"><TrendingUp className="w-3 h-3 text-[#EA8C1D]" />Multiplica Gols</span>
+                                <span className="font-bold text-[#EA8C1D]">×{camp.multiplicador}</span>
+                              </div>
+                            ))}
+                            {campanhasAssinados.map((camp: any, cIdx: number) => (
+                              <div key={`a-${cIdx}`} className="flex justify-between text-xs mb-1">
+                                <span className="flex items-center gap-1"><FileCheck className="w-3 h-3 text-[#16A34A]" />+1 gol a cada {camp.multiplicador || 3} assinados</span>
+                              </div>
+                            ))}
+                            {campanhasProgressivas.map((camp: any, cIdx: number) => (
+                              <div key={`p-${cIdx}`} className="flex justify-between text-xs mb-1">
+                                <span className="flex items-center gap-1">
+                                  <TrendingUp className="w-3 h-3 text-purple-500" />
+                                  Progressiva (mín. {Number(camp.multiplicador) || 0} assinados)
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                );
-              })
-            ) : (
-              <div className="text-center text-[#94a3b8] py-8">Nenhum dado diário ou campanha disponível.</div>
-            )}
-          </div>
+                    );
+                  })
+                ) : (
+                  <div className="text-center text-[#94a3b8] py-8">Nenhum dado diário ou campanha disponível.</div>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -770,6 +874,11 @@ export default function Comissoes() {
   const [tempRecsForColab, setTempRecsForColab] = useState<TemporaryRecommendation[]>([]);
   const [allTabulations, setAllTabulations] = useState<CallTabulation[]>([]);
   const [loadingAllTabulations, setLoadingAllTabulations] = useState(false);
+
+  // Estado dedicado ao EXTRATO — sempre mensal, independente do filtro.
+  const [extratoDailyMetrics, setExtratoDailyMetrics] = useState<any[]>([]);
+  const [extratoLoading, setExtratoLoading] = useState(false);
+  const extratoRequest = useRef(0);
 
   const activeCampaigns = useMemo(() => getActiveCampaigns(campaigns), [campaigns]);
 
@@ -1134,6 +1243,78 @@ export default function Comissoes() {
     return 'assessor';
   }, [userColab]);
 
+  // ============================================================
+  // Loader do extrato — agora declarado DEPOIS de userColab/currentRole.
+  // Sempre busca o MÊS INTEIRO a partir de currentStartDate, ignorando
+  // o filtro de período aplicado na página.
+  // ============================================================
+  const loadExtratoData = useCallback(async () => {
+    if (!userColab || !currentStartDate) return;
+    const requestId = ++extratoRequest.current;
+    const { start, end } = getMonthDateRange(currentStartDate);
+    setExtratoLoading(true);
+    try {
+      if (currentRole === 'supervisor' || currentRole === 'coordenador') {
+        const teamMembers = storeColabs.filter(colaborador => {
+          if (normalizeName(colaborador.equipeNome) !== normalizeName(userColab.equipeNome)) return false;
+          const cargo = normalizeName(colaborador.cargo);
+          return !cargo.startsWith('supervisor') && cargo !== 'coordenador' && cargo !== 'administrativo';
+        });
+        const memberMetrics = await Promise.all(teamMembers.map(colaborador =>
+          fetchDailyMetrics({
+            start,
+            end,
+            colaborador: colaborador.name,
+          }).catch(() => [] as any[])
+        ));
+        if (requestId !== extratoRequest.current) return;
+        const byDate = new Map<string, any>();
+        memberMetrics.flat().forEach(day => {
+          const date = String(day.date || '').slice(0, 10);
+          if (!date) return;
+          const entry = byDate.get(date) || { date, assinados: 0, ganhos: 0, perdidos: 0, emitidos: 0, protocolados: 0 };
+          entry.assinados += Number(day.assinados) || 0;
+          entry.ganhos += Number(day.ganhos) || 0;
+          entry.perdidos += Number(day.perdidos) || 0;
+          entry.emitidos += Number(day.emitidos) || 0;
+          entry.protocolados += Number(day.protocolados) || 0;
+          byDate.set(date, entry);
+        });
+        setExtratoDailyMetrics(Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date)));
+      } else {
+        const daily = await fetchDailyMetrics({
+          start,
+          end,
+          colaborador: userColab.name,
+        }).catch(() => [] as any[]);
+        if (requestId !== extratoRequest.current) return;
+        setExtratoDailyMetrics(daily);
+      }
+    } catch (err) {
+      console.error('Erro ao carregar extrato:', err);
+      if (requestId === extratoRequest.current) setExtratoDailyMetrics([]);
+    } finally {
+      if (requestId === extratoRequest.current) setExtratoLoading(false);
+    }
+  }, [userColab, currentRole, currentStartDate, storeColabs]);
+
+  // Recarrega o extrato caso já esteja aberto quando o usuário/colaborador/mês mudar.
+  useEffect(() => {
+    if (showExtrato && userColab && currentStartDate) {
+      void loadExtratoData();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showExtrato, userColab?.id, currentStartDate, currentRole]);
+
+  const handleOpenExtrato = useCallback(() => {
+    if (!userColab) {
+      toast.error('Selecione um colaborador para ver o extrato.');
+      return;
+    }
+    setShowExtrato(true);
+    void loadExtratoData();
+  }, [userColab, loadExtratoData]);
+
   useEffect(() => {
     if (!userColab || !currentStartDate) {
       setCampaignDailyMetrics([]);
@@ -1151,7 +1332,14 @@ export default function Comissoes() {
             return !cargo.startsWith('supervisor') && cargo !== 'coordenador' && cargo !== 'administrativo';
           });
           const memberMetrics = await Promise.all(teamMembers.map(colaborador =>
-            fetchGanhos({ start, end, colaborador: colaborador.name, granularity: 'daily' })
+            fetchGanhos({
+              start,
+              end,
+              colaborador: colaborador.name,
+              granularity: 'daily',
+              // CAMPGANHOS_2026 considera apenas ganhos da demanda do mês
+              demanda: 'atual',
+            })
           ));
           const byDate = new Map<string, any>();
           memberMetrics.flat().forEach(row => {
@@ -1167,7 +1355,13 @@ export default function Comissoes() {
           return;
         }
 
-        const metrics = await fetchGanhos({ start, end, colaborador: userColab.name, granularity: 'daily' });
+        const metrics = await fetchGanhos({
+          start,
+          end,
+          colaborador: userColab.name,
+          granularity: 'daily',
+          demanda: 'atual',
+        });
         const dailyGains = metrics.map(row => ({
           date: String(row.periodo || '').slice(0, 10),
           ganhos: Number(row.total) || 0,
@@ -1372,7 +1566,9 @@ export default function Comissoes() {
         fetchAssinados(params),
         fetchGanhos(params),
         campGanhos2026Active ? fetchAssinados(campaignParams) : Promise.resolve([]),
-        campGanhos2026Active ? fetchGanhos(campaignParams) : Promise.resolve([]),
+        campGanhos2026Active
+          ? fetchGanhos({ ...campaignParams, demanda: 'atual' })
+          : Promise.resolve([]),
       ]);
       if (requestId !== commissionOverviewRequest.current) return;
 
@@ -1495,11 +1691,17 @@ export default function Comissoes() {
             .filter(c => getCommissionOverviewRole(c) === 'assessor')
             .filter(c => normalizeName(c.equipeNome) === normalizeName(item.team))
             .map(async (member) => {
-              const daily = await fetchDailyMetrics({
+              const rows = await fetchGanhos({
                 start: campaignRange.start,
                 end: campaignRange.end,
                 colaborador: member.name,
-              }).catch(() => [] as any[]);
+                granularity: 'daily',
+                demanda: 'atual',
+              }).catch(() => []);
+              const daily = rows.map(r => ({
+                date: String(r.periodo || '').slice(0, 10),
+                ganhos: Number(r.total) || 0,
+              })).filter(d => d.date);
               return [member, daily] as const;
             })
         );
@@ -1528,11 +1730,17 @@ export default function Comissoes() {
         commission = calculateAssessorCommission(item.collaborator, daily as any, tabelaComissoes, activeCampaigns);
 
         if (campGanhos2026Active) {
-          const campaignDaily = await fetchDailyMetrics({
+          const campaignRows = await fetchGanhos({
             start: campaignRange.start,
             end: campaignRange.end,
             colaborador: item.name,
+            granularity: 'daily',
+            demanda: 'atual',
           });
+          const campaignDaily = campaignRows.map(r => ({
+            date: String(r.periodo || '').slice(0, 10),
+            ganhos: Number(r.total) || 0,
+          })).filter(d => d.date);
           const campRes = calcularCampGanhos2026(campaignDaily, campaigns, tabelaComissoes);
           if (campRes.ativo) commission += campRes.comissao_mes_assessor;
         }
@@ -1930,6 +2138,20 @@ export default function Comissoes() {
     [activeCampaigns]
   );
 
+  const { firstDayLabel, lastDayLabel } = useMemo(() => {
+    const ref = currentStartDate || new Date().toISOString().slice(0, 10);
+    const [y, m] = ref.slice(0, 7).split('-').map(Number);
+    const first = new Date(y, m - 1, 1);
+    const last  = new Date(y, m, 0);
+    const fmt = (d: Date) => {
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const yy = d.getFullYear();
+      return `${dd}/${mm}/${yy}`;
+    };
+    return { firstDayLabel: fmt(first), lastDayLabel: fmt(last) };
+  }, [currentStartDate]);
+
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Suas comissões, calculadas com base nos ganhos e nas campanhas ativas">
       {canUseFilterBar && (
@@ -1944,11 +2166,12 @@ export default function Comissoes() {
 
       {showExtrato && (
         <ExtratoDialog
-          dailyMetrics={dailyMetrics}
+          dailyMetrics={extratoDailyMetrics}
           campaignDailyMetrics={campaignDailyMetrics}
           campaigns={campaigns}
           isSupervisor={currentRole !== 'assessor'}
           campGanhos2026={campGanhos2026}
+          loading={extratoLoading}
           onClose={() => setShowExtrato(false)}
         />
       )}
@@ -2145,17 +2368,11 @@ export default function Comissoes() {
                   )}
 
                   <button
-                    onClick={() => {
-                      if (dailyMetrics.length === 0) {
-                        toast.error('Nenhum dado diário disponível para exibir extrato.');
-                        return;
-                      }
-                      setShowExtrato(true);
-                    }}
+                    onClick={handleOpenExtrato}
                     className="mt-4 w-full py-2 px-4 inline-flex items-center justify-center gap-2 text-xs font-semibold rounded-lg border border-[#2F6FED] text-[#2F6FED] hover:bg-[#eff6ff] transition-colors"
                   >
                     <CalendarDays className="w-4 h-4" />
-                    Ver Extrato de Campanhas e Métricas
+                    Ver Extrato de Campanhas e Métricas (mês completo)
                   </button>
                 </div>
 
@@ -2605,7 +2822,7 @@ export default function Comissoes() {
                           </p>
                         </div>
                         <p className="text-xs text-[#475569] space-y-0.5 mt-2">
-                          <b>Demanda Reprimida:</b> Qualquer assinado fora do periodo de xx/xx/xxxx até xx/xx/xxxx, que não foi protocolado no periodo de xx/xx/xxxx até xx/xx/xxxx, está sendo considerado como demanda reprimida, e não será contabilizado para a campanha.
+                          <b>Demanda Reprimida:</b> Qualquer assinado fora do período de {firstDayLabel} até {lastDayLabel}, será considerado como demanda reprimida, e não é contabilizado para a campanha de ganhos.
                         </p>
                       </div>
                     )}
@@ -2640,9 +2857,6 @@ export default function Comissoes() {
                 )}
               </div>
 
-              {/* ============================================================
-                  COMO A COMISSÃO É CALCULADA
-                  ============================================================ */}
               <div className="card p-5 mb-6">
                 <h3 className="text-sm font-bold mb-3">Como a estimativa da comissão é calculada</h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs text-[#64748b]">

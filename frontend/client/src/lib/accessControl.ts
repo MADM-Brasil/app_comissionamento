@@ -72,7 +72,6 @@ interface UIConfig extends FullPermissions {
 const CARGO_LEVELS: Record<string, Level> = {
   // Nenhum acesso
   'desativado':              LEVELS.NONE,
-  'assistente':              LEVELS.NONE,
   'analista juridico':       LEVELS.NONE,
   'gestor de projetos':      LEVELS.NONE,
   'analista':                LEVELS.NONE,
@@ -84,6 +83,7 @@ const CARGO_LEVELS: Record<string, Level> = {
   // Supervisão
   'supervisor':              LEVELS.SUPERVISAO,
   'Supervisor':              LEVELS.SUPERVISAO,
+  'assistente':              LEVELS.SUPERVISAO,
 
   // Coordenador
   'coordenador':             LEVELS.COORDENADOR,

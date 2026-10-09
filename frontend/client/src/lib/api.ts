@@ -168,9 +168,31 @@ export async function fetchProtocolados(params: MetricParams): Promise<{ colabor
   return data.data || [];
 }
 
-export async function fetchGanhos(params: MetricParams): Promise<{ colaborador: string; equipe: string; total: number; periodo?: string }[]> {
-  const url = buildMetricUrl(`${API_BASE}/metrics/ganhos`, params);
-  const res = await fetch(url, { credentials: 'include', signal: params.signal });
+// ============================================================
+// GANHOS — suporta filtro de "demanda"
+// ------------------------------------------------------------
+// demanda = 'todos' (default) — comportamento antigo, retorna todos os ganhos.
+// demanda = 'atual'            — considera apenas ganhos cuja ASSINATURA
+//                                ocorreu no mês do `start` da consulta.
+//                                Exclui, portanto, ganhos originados de
+//                                "demanda reprimida" (assinaturas de meses
+//                                anteriores que só viraram ganho agora).
+//
+// Usado pela página de Comissões para que o cálculo da campanha
+// CAMPGANHOS_2026 contabilize somente a demanda do mês corrente.
+// ============================================================
+export type GanhosDemandaFilter = 'todos' | 'atual';
+
+export interface GanhosParams extends MetricParams {
+  demanda?: GanhosDemandaFilter;
+}
+
+export async function fetchGanhos(
+  params: GanhosParams
+): Promise<{ colaborador: string; equipe: string; total: number; periodo?: string }[]> {
+  const url = new URL(buildMetricUrl(`${API_BASE}/metrics/ganhos`, params), window.location.origin);
+  if (params.demanda) url.searchParams.append('demanda', params.demanda);
+  const res = await fetch(url.toString(), { credentials: 'include', signal: params.signal });
   const data = await handleResponse(res, 'Erro ao carregar ganhos');
   return data.data || [];
 }
@@ -247,6 +269,86 @@ export async function fetchWeeklyPerformance(params: { start: string; end: strin
   const res = await fetch(url.toString(), { credentials: 'include' });
   const data = await handleResponse(res, 'Erro ao carregar performance semanal');
   return data.data || [];
+}
+
+// ============================================================
+// DEMANDA ATUAL / REPRIMIDA
+// ------------------------------------------------------------
+// Tipos definidos localmente para evitar import circular com
+// dataStore.ts (que importa estas funções). São estruturalmente
+// compatíveis com DemandaItem / DemandaResumo de lá.
+// ============================================================
+export interface DemandaApiParams {
+  equipe?: string;
+  colaborador?: string;
+  colaboradorId?: string | number;
+  produto?: string;
+}
+
+export interface DemandaApiItem {
+  colaborador: string;
+  equipe: string;
+  lead_id: string | number | null;
+  deal_id: string | number | null;
+  data_emissao: string | null;
+  data_assinatura: string | null;
+  data_ganho: string | null;
+  pipeline: string | null;
+  etapa: string | null;
+}
+
+export interface DemandaApiResumoLinha {
+  colaborador: string;
+  equipe: string;
+  total: number;
+}
+
+export interface DemandaApiResumo {
+  atual: DemandaApiResumoLinha[];
+  reprimida: DemandaApiResumoLinha[];
+  totalAtual: number;
+  totalReprimida: number;
+}
+
+function buildDemandaQuery(p?: DemandaApiParams): string {
+  const qs = new URLSearchParams();
+  if (p?.equipe && p.equipe !== 'todas') qs.append('equipe', p.equipe);
+  if (p?.colaborador) qs.append('colaborador', p.colaborador);
+  if (p?.colaboradorId !== undefined && p?.colaboradorId !== null) {
+    qs.append('colaboradorId', String(p.colaboradorId));
+  }
+  if (p?.produto && p.produto !== 'Todos') qs.append('produto', p.produto);
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
+export async function fetchDemandaAtual(p?: DemandaApiParams): Promise<DemandaApiItem[]> {
+  const res = await fetch(`${API_BASE}/metrics/demanda-atual${buildDemandaQuery(p)}`, {
+    credentials: 'include',
+  });
+  const data = await handleResponse(res, 'Erro ao carregar demanda atual');
+  return (data?.data ?? []) as DemandaApiItem[];
+}
+
+export async function fetchDemandaReprimida(p?: DemandaApiParams): Promise<DemandaApiItem[]> {
+  const res = await fetch(`${API_BASE}/metrics/demanda-reprimida${buildDemandaQuery(p)}`, {
+    credentials: 'include',
+  });
+  const data = await handleResponse(res, 'Erro ao carregar demanda reprimida');
+  return (data?.data ?? []) as DemandaApiItem[];
+}
+
+export async function fetchDemandaResumo(p?: DemandaApiParams): Promise<DemandaApiResumo> {
+  const res = await fetch(`${API_BASE}/metrics/demanda-resumo${buildDemandaQuery(p)}`, {
+    credentials: 'include',
+  });
+  const data = await handleResponse(res, 'Erro ao carregar resumo de demanda');
+  return (data?.data ?? {
+    atual: [],
+    reprimida: [],
+    totalAtual: 0,
+    totalReprimida: 0,
+  }) as DemandaApiResumo;
 }
 
 // ============================================================
