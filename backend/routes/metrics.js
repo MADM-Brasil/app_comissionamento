@@ -103,6 +103,83 @@ function applyEquipeFilter(rows, equipeNome, keyCandidates = ['equipe']) {
   });
 }
 
+// ============================================================
+// Resolução de EQUIPE → lista de nomes de colaboradores
+// ------------------------------------------------------------
+// A view madm.view_base_olos_temp NÃO possui a coluna `equipe`
+// preenchida (é sempre null). Por isso, para filtrar ligações por
+// equipe, o backend:
+//   1) Consulta core.view_app_colaboradores para descobrir quais
+//      colaboradores pertencem à equipe solicitada.
+//   2) Filtra as linhas da OLOS por `agent_name` (match exato ou
+//      por token, absorvendo divergências de grafia).
+//
+// STOPWORDS removem palavras que não distinguem equipes ("equipe",
+// "time", "comercial", "-", etc.), permitindo que "Equipe Juliana"
+// case com "Time Juliana" ou "JULIANA (DISCADORA)".
+// ============================================================
+const STOPWORDS_EQUIPE = new Set([
+  'equipe', 'time', 'grupo', 'setor', 'area', 'área',
+  'comercial', 'discadora', 'judit', 'olos', 'crm',
+  '-', '–', '—', 'de', 'da', 'do', 'das', 'dos', 'e', '&',
+]);
+
+function tokenizeEquipe(str) {
+  return normalize(str)
+    .split(/\s+/)
+    .filter(t => t && !STOPWORDS_EQUIPE.has(t));
+}
+
+async function resolveNomesPorEquipe(equipeNome) {
+  if (!equipeNome || equipeNome === 'todas') return [];
+  try {
+    const r = await db.query(
+      `SELECT nome, nome_equipe
+         FROM core.view_app_colaboradores
+        WHERE nome IS NOT NULL`
+    );
+    const filtroTokens = tokenizeEquipe(equipeNome);
+    if (filtroTokens.length === 0) return [];
+
+    return r.rows
+      .filter(row => {
+        const normRow = normalize(row.nome_equipe || '');
+        if (normRow === normalize(equipeNome)) return true;
+        const rowTokens = new Set(tokenizeEquipe(row.nome_equipe || ''));
+        return filtroTokens.every(t => rowTokens.has(t));
+      })
+      .map(row => row.nome)
+      .filter(Boolean);
+  } catch (err) {
+    console.error('Erro ao resolver nomes por equipe:', err);
+    return [];
+  }
+}
+
+// Aplica o filtro de equipe por agent_name usando a lista de nomes.
+// Retorna as linhas cujo `colaborador`/`agent_name` casa com algum nome.
+function filterByNomesEquipe(rows, nomesEquipe, keyCandidates = ['colaborador', 'agent_name']) {
+  if (!Array.isArray(nomesEquipe) || nomesEquipe.length === 0) return [];
+  const normNomes = nomesEquipe.map(n => ({
+    full: normalize(n),
+    tokens: normalize(n).split(/\s+/).filter(Boolean),
+  }));
+
+  return rows.filter(row => {
+    for (const key of keyCandidates) {
+      const raw = row[key];
+      if (!raw) continue;
+      const normRow = normalize(raw);
+      const rowTokens = new Set(normRow.split(/\s+/).filter(Boolean));
+      for (const nome of normNomes) {
+        if (nome.full === normRow) return true;
+        if (nome.tokens.every(t => rowTokens.has(t))) return true;
+      }
+    }
+    return false;
+  });
+}
+
 const QUALIFICATIONS = {
   productive: [
     'Transferida a Outro Módulo',
@@ -182,7 +259,6 @@ router.get('/emitidos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      // ⚠️ GROUP BY repete EXATAMENTE a mesma expressão do SELECT
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'),
         e.equipe_responsavel_emissao,
@@ -420,9 +496,6 @@ router.get('/protocolados', requireAuth, async (req, res) => {
 //       ocorreu no mês do `start`. Exclui, portanto, ganhos originados
 //       de "demanda reprimida" (assinaturas de meses anteriores que só
 //       viraram ganho agora).
-//
-// Usado pela página de Comissões para que o cálculo da campanha
-// CAMPGANHOS_2026 contabilize somente a demanda do mês corrente.
 router.get('/ganhos', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity, demanda } = req.query;
@@ -455,8 +528,6 @@ router.get('/ganhos', requireAuth, async (req, res) => {
 
     // >>> FILTRO DE DEMANDA DO MÊS <<<
     // Fonte de verdade: core.assinaturas.data_assinatura (ligada por deal_id).
-    // Isso evita a divergência de `l.data_assinatura` da view, que não
-    // reflete a data real da assinatura para todos os deals.
     if (somenteDemandaAtual) {
       query += ` AND EXISTS (
         SELECT 1
@@ -491,7 +562,6 @@ router.get('/ganhos', requireAuth, async (req, res) => {
       }
     }
     if (gran) {
-      // ⚠️ GROUP BY repete EXATAMENTE a mesma expressão do SELECT
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
         c.nome_equipe,
@@ -617,7 +687,6 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       params.push(equipe); idx++;
     }
     if (gran) {
-      // Aqui o SELECT e o GROUP BY já usam a mesma expressão (sem AT TIME ZONE)
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
         c.nome_equipe,
@@ -637,11 +706,16 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
 });
 
 // --- METRICAS DE LIGACOES ---
-// O filtro de colaborador e equipe é aplicado NO NODE (fuzzy match),
-// não no SQL — mesmo padrão usado nas demais rotas.
-// Isso resolve a divergência de nomes entre view_base_olos_temp.agent_name
-// e view_app_colaboradores.nome (ex.: "Sara Cristina De Moura Lourenco" vs
-// "Sara Cristina de Moura Lourenço").
+// A view madm.view_base_olos_temp NÃO possui a coluna `equipe`
+// preenchida (é sempre null). Por isso, o filtro de equipe é
+// aplicado em DUAS ETAPAS:
+//   1) resolveNomesPorEquipe(equipe) → consulta
+//      core.view_app_colaboradores para obter os nomes dos
+//      colaboradores pertencentes à equipe.
+//   2) filterByNomesEquipe(rows, nomes) → filtra as linhas da OLOS
+//      por `agent_name` (match exato ou por token, absorvendo
+//      divergências de grafia).
+// O filtro de colaborador continua aplicado no Node (fuzzy).
 router.get('/ligacoes', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, colaborador, granularity } = req.query;
@@ -691,7 +765,6 @@ router.get('/ligacoes', requireAuth, async (req, res) => {
       QUALIFICATIONS.failures,
     ];
 
-    // Sem filtro de equipe/colaborador no SQL — aplicamos no Node.
     if (gran) {
       query += ` GROUP BY (DATE_TRUNC('${gran}', call_date) AT TIME ZONE 'UTC')::date, agent_name, equipe, campaign_name ORDER BY periodo, colaborador`;
     } else {
@@ -699,9 +772,15 @@ router.get('/ligacoes', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-
     let rows = result.rows;
-    rows = applyEquipeFilter(rows, equipe, ['equipe']);
+
+    // Filtro de equipe — resolvido por nomes de colaboradores.
+    if (equipe && equipe !== 'todas') {
+      const nomesEquipe = await resolveNomesPorEquipe(equipe);
+      rows = filterByNomesEquipe(rows, nomesEquipe, ['colaborador', 'agent_name']);
+    }
+
+    // Filtro de colaborador (fuzzy)
     rows = applyColaboradorFilter(rows, colaborador, ['colaborador', 'agent_name']);
 
     res.json({ success: true, data: rows });
@@ -725,9 +804,6 @@ router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
     const qualifications = typeof categoria === 'string' ? categories[categoria] : null;
     if (!qualifications) return res.status(400).json({ success: false, error: 'categoria inválida' });
 
-    // Busca todas as linhas relevantes do período + categoria, e filtra
-    // equipe/colaborador no Node (fuzzy match). Isso é necessário porque
-    // o agrupamento no SQL apaga a coluna agent_name/equipe.
     let query = `
       SELECT qualification_name AS tabulacao,
              agent_name AS colaborador,
@@ -743,9 +819,15 @@ router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
     query += ` GROUP BY qualification_name, agent_name, equipe ORDER BY total DESC, tabulacao`;
 
     const rawResult = await db.query(query, params);
-
     let filtered = rawResult.rows;
-    filtered = applyEquipeFilter(filtered, equipe, ['equipe']);
+
+    // Filtro de equipe — resolvido por nomes de colaboradores.
+    if (equipe && equipe !== 'todas') {
+      const nomesEquipe = await resolveNomesPorEquipe(equipe);
+      filtered = filterByNomesEquipe(filtered, nomesEquipe, ['colaborador', 'agent_name']);
+    }
+
+    // Filtro de colaborador (fuzzy)
     filtered = applyColaboradorFilter(filtered, colaborador, ['colaborador', 'agent_name']);
 
     // Reagrega por tabulacao após o filtro fuzzy.
@@ -767,6 +849,7 @@ router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
 });
 
 // --- LIGACOES PRODUTIVAS ---
+// Filtro de equipe resolvido por agent_name (a coluna `equipe` da OLOS é null).
 router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, colaborador } = req.query;
@@ -782,9 +865,14 @@ router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
     const params = [QUALIFICATIONS.productive, start, end];
     let idx = 4;
 
+    // Filtro de equipe — resolve para uma lista de nomes e filtra por agent_name.
     if (equipe && equipe !== 'todas') {
-      query += ` AND LOWER(TRIM(equipe)) = LOWER(TRIM($${idx}))`;
-      params.push(equipe);
+      const nomesEquipe = await resolveNomesPorEquipe(equipe);
+      if (nomesEquipe.length === 0) {
+        return res.json({ success: true, total: 0 });
+      }
+      query += ` AND agent_name = ANY($${idx}::text[])`;
+      params.push(nomesEquipe);
       idx++;
     }
     if (colaborador) {
@@ -793,7 +881,6 @@ router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
     }
 
     const result = await db.query(query, params);
-
     res.json({ success: true, total: Number(result.rows[0]?.total) || 0 });
   } catch (err) {
     console.error('Erro em /ligacoes-produtivas:', err);
