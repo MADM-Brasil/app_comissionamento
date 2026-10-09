@@ -18,6 +18,7 @@ import {
   Upload,
   Paperclip,
   Ban,
+  RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
@@ -467,38 +468,24 @@ function MovimentacaoTab() {
   const unidadeSupervisor = unidadeSupervisorRaw != null ? Number(unidadeSupervisorRaw) : null;
 
   // ---------- Regras de trava de destino ----------
-  // 1) Supervisor em unidade travada (2,3,4,5) → destino travado na própria equipe.
   const unidadeTravadaPorUnidade = isSupervisor
     && unidadeSupervisor != null
     && UNIDADES_TRAVADAS_EQUIPE.includes(unidadeSupervisor);
 
-  // 2) Supervisor pertencente a uma equipe reservada (Equipe Tatiane) →
-  //    destino travado na própria equipe, mesmo estando na unidade 1.
   const unidadeTravadaPorEquipe = isSupervisor
     && !!supervisorTeam
     && isEquipeTravadaDestino(supervisorTeam);
 
   const unidadeTravada = unidadeTravadaPorUnidade || unidadeTravadaPorEquipe;
 
-  // 3) Supervisor de unidade 1 que NÃO pertence à equipe reservada → esconde
-  //    a Equipe Tatiane da seleção de destino.
   const deveOcultarEquipesReservadas = isSupervisor
     && unidadeSupervisor === 1
     && !unidadeTravadaPorEquipe;
 
-  // Regra consolidada de destino:
-  //  - Link Hub: sempre trava a equipe do supervisor.
-  //  - CRM em unidade travada (2–5) OU quando o supervisor pertence a uma
-  //    equipe reservada: também trava.
-  //  - CRM em outras situações: comportamento antigo (pode escolher outras
-  //    equipes da unidade, exceto as reservadas ocultadas).
   const restringirDestinoAoTimeSupervisor = isSupervisor
     && !!supervisorTeam
     && (movimentacaoEmMassa || unidadeTravada);
 
-  // Equipes disponíveis: sempre do escopo (backend já filtrou por unidade).
-  // Quando a trava está ativa, restringe à própria equipe do supervisor.
-  // Unidade 1 fora da equipe reservada: oculta as equipes reservadas.
   const equipesDisponiveis = useMemo(() => {
     if (!escopo) return [];
     let lista = escopo.equipes.filter(nome => !isExcludedTeam(nome));
@@ -512,9 +499,6 @@ function MovimentacaoTab() {
     return lista;
   }, [escopo, restringirDestinoAoTimeSupervisor, supervisorTeam, deveOcultarEquipesReservadas]);
 
-  // Pré-seleciona / força a equipe do supervisor.
-  //  - Trava ativa (Link Hub, unidade 2–5, ou equipe reservada): força própria equipe.
-  //  - Caso contrário: só preenche se ainda estiver vazio.
   useEffect(() => {
     if (!isSupervisor || !supervisorTeam) return;
     if (movimentacaoEmMassa || unidadeTravada) {
@@ -527,9 +511,6 @@ function MovimentacaoTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSupervisor, supervisorTeam, movimentacaoEmMassa, unidadeTravada]);
 
-  // Assessores filtrados pela equipe selecionada.
-  // Quando a trava está ativa, também restringe à própria equipe.
-  // Unidade 1 fora da equipe reservada: oculta os assessores da equipe reservada.
   const assessoresDisponiveis = useMemo(() => {
     if (!escopo?.assessores?.length) return [];
     let filtered = escopo.assessores.filter(a => !isExcludedTeam(a.equipeNome));
@@ -552,7 +533,6 @@ function MovimentacaoTab() {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
   }, [assessoresDisponiveis, assessorId]);
 
-  // ---------- Produto: configuração por equipe ----------
   const produtoConfig: ProdutoConfig = useMemo(() => {
     const mapaBackend = escopo?.produtos?.porEquipe;
     const hit = findProdutoConfig(mapaBackend, equipe);
@@ -565,9 +545,6 @@ function MovimentacaoTab() {
     };
   }, [escopo, equipe]);
 
-  // Mantém `produto` coerente com a equipe atual:
-  //   - Equipe travada → força o default.
-  //   - Equipe que alterna → se o valor atual não é uma opção válida, cai no default.
   useEffect(() => {
     if (!equipe) return;
     if (!produtoConfig.allowChange) {
@@ -672,7 +649,6 @@ function MovimentacaoTab() {
 
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
 
-    // Resolve produto antes de qualquer envio e valida contra a equipe.
     const produtoSelecionado = produto || produtoConfig.default;
     if (!produtoConfig.options.includes(produtoSelecionado)) {
       setMessage({ text: "Selecione um produto válido para a equipe.", type: "error" });
@@ -1012,7 +988,6 @@ function MovimentacaoTab() {
               </select>
             </div>
 
-            {/* Produto — visível nos DOIS modos (individual e Link Hub) */}
             <div className="md:col-span-2">
               <label
                 htmlFor="mov-produto"
@@ -1655,6 +1630,7 @@ function EditModal({ isOpen, onClose, title, children, onSave, saving }: EditMod
 function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false); // ← NOVO
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
@@ -1674,6 +1650,18 @@ function MovimentacoesSuporteTab() {
       setMessage({ text: "Erro ao carregar tickets", type: "error" });
     } finally {
       setLoading(false);
+    }
+  };
+
+  // ← NOVO: handler do botão Atualizar
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    setMessage(null);
+    try {
+      await carregarTickets();
+      setMessage({ text: "Lista atualizada.", type: "success" });
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -1759,6 +1747,18 @@ function MovimentacoesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Movimentações (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
+            {/* ← NOVO: botão Atualizar */}
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="px-3 py-1 rounded text-sm flex items-center gap-1 transition-colors bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0] disabled:opacity-50"
+              title="Recarregar a lista do servidor"
+            >
+              <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} />
+              {refreshing ? "Atualizando..." : "Atualizar"}
+            </button>
+
             <button
               type="button"
               onClick={() => setShowConcluidos(!showConcluidos)}
@@ -1925,6 +1925,7 @@ function MovimentacoesSuporteTab() {
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false); // ← NOVO
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterAssunto, setFilterAssunto] = useState<string>("todos");
@@ -1944,6 +1945,18 @@ function ReportesSuporteTab() {
       setMessage({ text: "Erro ao carregar reportes", type: "error" });
     } finally {
       setLoading(false);
+    }
+  };
+
+  // ← NOVO: handler do botão Atualizar
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    setMessage(null);
+    try {
+      await carregarReportes();
+      setMessage({ text: "Lista atualizada.", type: "success" });
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -2008,6 +2021,18 @@ function ReportesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
+            {/* ← NOVO: botão Atualizar */}
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="px-3 py-1 rounded text-sm flex items-center gap-1 transition-colors bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0] disabled:opacity-50"
+              title="Recarregar a lista do servidor"
+            >
+              <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} />
+              {refreshing ? "Atualizando..." : "Atualizar"}
+            </button>
+
             <select
               value={filterAssunto}
               onChange={e => setFilterAssunto(e.target.value)}
