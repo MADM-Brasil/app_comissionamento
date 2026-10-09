@@ -28,7 +28,6 @@ class AccessControl {
     this.CARGO_LEVELS = {
       // Nenhum acesso
       'desativado':              this.LEVELS.NONE,
-      'assistente':              this.LEVELS.NONE,
       'analista juridico':       this.LEVELS.NONE,
       'gestor de projetos':      this.LEVELS.NONE,
       'analista':                this.LEVELS.NONE,
@@ -40,6 +39,7 @@ class AccessControl {
       // Supervisão (unidade-scoped no Link Hub)
       'supervisor':              this.LEVELS.SUPERVISAO,
       'Supervisor':              this.LEVELS.SUPERVISAO,
+      'assistente':              this.LEVELS.SUPERVISAO,
 
       // Coordenador
       'coordenador':             this.LEVELS.COORDENADOR,
