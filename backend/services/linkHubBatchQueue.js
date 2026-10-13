@@ -3,9 +3,18 @@
 // Opera sobre a MESMA tabela app_comissionamento.tickets_movimentacao_lead,
 // filtrando por crm_origem = 'HUBSPOT_LINK'.
 //
-// Produto: lido de observacao_sales_ops.produto (gravado pela rota) e
-// propagado para `reassignDealForLinkHubMovement`, que grava `produto` no
-// deal e `contact_produto` no contato.
+// ─── Correção do erro "Supervisores só podem reativar cards..." ───
+// 1) Diagnosticamos e logamos sempre o que o worker viu como "origem do
+//    card": ownerId do deal, e-mail do owner, linha correspondente na view.
+// 2) Se o owner do card não foi resolvido (deal sem proprietário, ou
+//    e-mail do proprietário não bate na view), lançamos um erro descritivo
+//    em vez de cair no `enforceSourceTeam` genérico.
+// 3) Passamos `sourceUnitId` para `validateHubSpotMovementAccess` — a
+//    unidade vem direto do registro do owner, sem depender da consulta
+//    por `nome_equipe` (ambígua quando a mesma equipe tem unidades mistas).
+//
+// O fluxo de reprocessamento continua o mesmo: a rota `/reprocessar`
+// reseta `_worker` e `processado`, e o worker aqui pega o ticket normalmente.
 import { pool } from './db.js';
 import {
   findOwnerIdByEmailStrict,
@@ -45,6 +54,8 @@ function isRetryableError(error) {
     'sem acesso', 'própria equipe', 'propria equipe', 'somente supervisores',
     'não corresponde', 'nao corresponde', 'portal hubspot', 'permitida somente',
     'múltiplos contatos', 'multiplos contatos',
+    'sem proprietário', 'sem proprietario',
+    'não existe como colaborador', 'nao existe como colaborador',
   ].some(fragment => normalizedMessage.includes(fragment));
 }
 
@@ -327,8 +338,56 @@ async function handleLinkHubTicket(ticket, client) {
 
   const context = await getDealMovementContext(dealId, portalId);
 
+  // ─────────────────────────────────────────────────────────────
+  // Resolução da origem do card (quem é o dono atual no HubSpot).
+  // Log de diagnóstico sempre, para facilitar a triagem do caso
+  // "dados corretos mas bloqueio dispara".
+  // ─────────────────────────────────────────────────────────────
   const sourceOwnerEmail = context.ownerId ? await getHubSpotOwnerEmail(context.ownerId) : null;
   const sourceOwner = sourceOwnerEmail ? await getActiveSupportUser(sourceOwnerEmail) : null;
+
+  console.log(
+    '[linkHubBatchQueue] origem do card',
+    JSON.stringify({
+      ticketId: ticket.id_ticket_movimentacao,
+      dealId,
+      dealOwnerId: context.ownerId || null,
+      sourceOwnerEmail: sourceOwnerEmail || null,
+      sourceOwnerNome: sourceOwner?.nome || null,
+      sourceOwnerEquipe: sourceOwner?.nome_equipe || null,
+      sourceOwnerUnidade: sourceOwner?.unidade_id ?? null,
+      sourceOwnerStatus: sourceOwner?.status || null,
+      solicitanteEmail,
+      destinationTeam,
+    })
+  );
+
+  // Owner do card não resolvido: separamos "sem proprietário" de
+  // "proprietário sem cadastro ativo". Ambos geram erro descritivo em vez
+  // de cair no enforceSourceTeam genérico.
+  if (context.ownerId && !sourceOwner) {
+    const error = new Error(
+      sourceOwnerEmail
+        ? `O proprietário atual do card (ownerId ${context.ownerId}, e-mail ${sourceOwnerEmail}) ` +
+          `não existe como colaborador(a) ativo(a) na view de colaboradores. ` +
+          `Revise o cadastro ou reatribua o card manualmente antes de usar o Link Hub.`
+        : `O proprietário atual do card (ownerId ${context.ownerId}) não tem e-mail ` +
+          `resolvido no HubSpot. Revise o cadastro do owner ou reatribua o card manualmente.`
+    );
+    error.retryable = false;
+    error.blocked = true;
+    throw error;
+  }
+
+  if (!context.ownerId) {
+    const error = new Error(
+      `O card não possui proprietário no HubSpot (hubspot_owner_id vazio). ` +
+      `Atribua um proprietário antes de movimentar por Link Hub.`
+    );
+    error.retryable = false;
+    error.blocked = true;
+    throw error;
+  }
 
   const access = await validateHubSpotMovementAccess({
     requesterEmail: solicitanteEmail,
@@ -336,6 +395,7 @@ async function handleLinkHubTicket(ticket, client) {
     destinationEmail: destinationEmail || undefined,
     destinationTeam,
     sourceTeam: sourceOwner?.nome_equipe || null,
+    sourceUnitId: sourceOwner?.unidade_id ?? null,   // <-- NÃO depende mais da consulta por nome
     enforceSourceTeam: true,
     enforceDestinationSameTeam: true,
   });

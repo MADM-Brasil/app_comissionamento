@@ -23,11 +23,11 @@ class AccessControl {
 
     // ─────────────────────────────────────────────────────────────
     // FONTE ÚNICA DE VERDADE: cargo (normalizado) → nível
-    // Chaves devem estar em minúsculo, sem acentos.
     // ─────────────────────────────────────────────────────────────
     this.CARGO_LEVELS = {
       // Nenhum acesso
       'desativado':              this.LEVELS.NONE,
+      'assistente':              this.LEVELS.NONE,
       'analista juridico':       this.LEVELS.NONE,
       'gestor de projetos':      this.LEVELS.NONE,
       'analista':                this.LEVELS.NONE,
@@ -36,10 +36,9 @@ class AccessControl {
       'assessor':                this.LEVELS.ASSESSOR,
       'analista de pastas':      this.LEVELS.ASSESSOR,
 
-      // Supervisão (unidade-scoped no Link Hub)
+      // Supervisão
       'supervisor':              this.LEVELS.SUPERVISAO,
       'Supervisor':              this.LEVELS.SUPERVISAO,
-      'assistente':              this.LEVELS.SUPERVISAO,
 
       // Coordenador
       'coordenador':             this.LEVELS.COORDENADOR,
@@ -54,145 +53,73 @@ class AccessControl {
       'administrativo':          this.LEVELS.ADMINISTRATIVO,
       'administrador':           this.LEVELS.ADMINISTRATIVO,
 
-      // Super Admin / visão liberada
+      // Super Admin
       'desenvolvedor':           this.LEVELS.SUPER_ADMIN,
       'diretora':                this.LEVELS.SUPER_ADMIN,
       'ceo':                     this.LEVELS.SUPER_ADMIN,
       'coordenador sales ops':   this.LEVELS.SUPER_ADMIN,
     };
 
-    // Snapshot para permitir reset (usado por resetCargoLevel)
     this.DEFAULT_CARGO_LEVELS = { ...this.CARGO_LEVELS };
 
-    // ─────────────────────────────────────────────────────────────
-    // Equipes "reservadas" — só supervisores da PRÓPRIA equipe podem
-    // direcionar movimentações para elas. Chaves normalizadas.
-    //
-    // Regra do produto:
-    //   - Unidades 2,3,4,5 → trava de destino por unidade (ver UNIDADES_TRAVADAS_EQUIPE
-    //     em backend/routes/suporte.js e no frontend).
-    //   - Unidade 1 → trava de destino APENAS para a Equipe Tatiane. Os
-    //     demais supervisores da unidade 1 NÃO veem a Equipe Tatiane na lista
-    //     de destino e não conseguem movimentar para ela.
-    // Coordenador (3+) e Admin (4+) não são afetados.
-    // ─────────────────────────────────────────────────────────────
+    // Equipes reservadas — só supervisores da própria equipe direcionam.
+    // (Chaves normalizadas.)
     this.RESERVED_DESTINATION_TEAMS = new Set([
-      'equipe tatiane', // normalizado
+      'equipe tatiane',
     ]);
 
-    // ─────────────────────────────────────────────────────────────
-    // Matriz de permissões por nível
-    // ─────────────────────────────────────────────────────────────
     this.PERMISSIONS = {
       [this.LEVELS.NONE]: {
-        canAccessDashboard: false,
-        canAccessComissoes: false,
-        canAccessRanking: false,
-        canAccessReports: false,
-        canAccessConfiguration: false,
-        canViewTeam: false,
-        canEditConfiguration: false,
-        canEditBonus: false,
-        canGenerateNextMonth: false,
-        canExportData: false,
-        filterLocked: true,
-        lockedTeam: true,
-        lockedCollaborator: true,
-        description: 'Sem acesso',
+        canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+        canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+        canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+        canExportData: false, filterLocked: true, lockedTeam: true,
+        lockedCollaborator: true, description: 'Sem acesso',
       },
       [this.LEVELS.ASSESSOR]: {
-        canAccessDashboard: true,
-        canAccessComissoes: true,
-        canAccessRanking: true,
-        canAccessReports: false,
-        canAccessConfiguration: false,
-        canViewTeam: false,
-        canEditConfiguration: false,
-        canEditBonus: false,
-        canGenerateNextMonth: false,
-        canExportData: false,
-        filterLocked: true,
-        lockedTeam: true,
-        lockedCollaborator: true,
-        description: 'Visualiza seus próprios dados',
+        canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
+        canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+        canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+        canExportData: false, filterLocked: true, lockedTeam: true,
+        lockedCollaborator: true, description: 'Visualiza seus próprios dados',
       },
       [this.LEVELS.SUPERVISAO]: {
-        canAccessDashboard: false,
-        canAccessComissoes: false,
-        canAccessRanking: false,
-        canAccessReports: false,
-        canAccessConfiguration: false,
-        canViewTeam: true,
-        canEditConfiguration: false,
-        canEditBonus: false,
-        canGenerateNextMonth: false,
-        canExportData: false,
-        filterLocked: true,
-        lockedTeam: true,
+        canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+        canAccessReports: false, canAccessConfiguration: false, canViewTeam: true,
+        canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+        canExportData: false, filterLocked: true, lockedTeam: true,
         lockedCollaborator: false,
         description: 'Visualiza dados da equipe; vê configurações sem editar',
       },
       [this.LEVELS.COORDENADOR]: {
-        canAccessDashboard: false,
-        canAccessComissoes: false,
-        canAccessRanking: false,
-        canAccessReports: false,
-        canAccessConfiguration: false,
-        canViewTeam: false,
-        canEditConfiguration: false,
-        canEditBonus: false,
-        canGenerateNextMonth: false,
-        canExportData: true,
-        filterLocked: false,
-        lockedTeam: false,
+        canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+        canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+        canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+        canExportData: true, filterLocked: false, lockedTeam: false,
         lockedCollaborator: false,
         description: 'Ajusta metas, não altera bônus, filtro livre',
       },
       [this.LEVELS.ADMINISTRATIVO]: {
-        canAccessDashboard: true,
-        canAccessComissoes: true,
-        canAccessRanking: true,
-        canAccessReports: true,
-        canAccessConfiguration: true,
-        canViewTeam: true,
-        canEditConfiguration: true,
-        canEditBonus: true,
-        canGenerateNextMonth: true,
-        canExportData: true,
-        filterLocked: false,
-        lockedTeam: false,
-        lockedCollaborator: false,
-        description: 'Acesso total',
+        canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
+        canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
+        canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
+        canExportData: true, filterLocked: false, lockedTeam: false,
+        lockedCollaborator: false, description: 'Acesso total',
       },
       [this.LEVELS.SUPER_ADMIN]: {
-        canAccessDashboard: true,
-        canAccessComissoes: true,
-        canAccessRanking: true,
-        canAccessReports: true,
-        canAccessConfiguration: true,
-        canViewTeam: true,
-        canEditConfiguration: true,
-        canEditBonus: true,
-        canGenerateNextMonth: true,
-        canExportData: true,
-        filterLocked: false,
-        lockedTeam: false,
-        lockedCollaborator: false,
-        description: 'Acesso total',
+        canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
+        canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
+        canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
+        canExportData: true, filterLocked: false, lockedTeam: false,
+        lockedCollaborator: false, description: 'Acesso total',
       },
     };
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Utilidades
-  // ─────────────────────────────────────────────────────────────
   normalize(str) {
     return String(str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Gerenciamento de níveis por cargo (override individual)
-  // ─────────────────────────────────────────────────────────────
   setCargoLevel(cargo, level) {
     if (typeof level !== 'number' || level < 0 || level > 5) {
       throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–5.`);
@@ -216,9 +143,6 @@ class AccessControl {
     return { ...this.CARGO_LEVELS };
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Resolução de nível
-  // ─────────────────────────────────────────────────────────────
   getAccessLevel(cargo, status) {
     if (status && this.normalize(status) === 'desativado') return this.LEVELS.NONE;
     if (!cargo) return this.LEVELS.NONE;
@@ -229,9 +153,6 @@ class AccessControl {
     return this.LEVELS.NONE;
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Predicados (usados pelas rotas de Suporte)
-  // ─────────────────────────────────────────────────────────────
   isSupervisor(cargo, status) {
     return this.getAccessLevel(cargo, status) === this.LEVELS.SUPERVISAO;
   }
@@ -248,9 +169,6 @@ class AccessControl {
     return this.getAccessLevel(cargo, status) >= this.LEVELS.SUPERVISAO;
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Permissões
-  // ─────────────────────────────────────────────────────────────
   hasPermission(user, permission) {
     if (!user) return false;
     const level = this.getAccessLevel(user.cargo, user.status);
@@ -301,20 +219,10 @@ class AccessControl {
     }
     const level = this.getAccessLevel(user.cargo, user.status);
     if (level === this.LEVELS.ASSESSOR) {
-      return {
-        lockTeam: true,
-        teamName: user.nome_equipe ?? null,
-        lockCollaborator: true,
-        collaboratorName: user.nome ?? null,
-      };
+      return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: true, collaboratorName: user.nome ?? null };
     }
     if (level === this.LEVELS.SUPERVISAO) {
-      return {
-        lockTeam: true,
-        teamName: user.nome_equipe ?? null,
-        lockCollaborator: false,
-        collaboratorName: null,
-      };
+      return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: false, collaboratorName: null };
     }
     return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
   }
@@ -345,9 +253,6 @@ class AccessControl {
     return items;
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Backend: banco de dados
-  // ─────────────────────────────────────────────────────────────
   async getActiveSupportUser(email, db = pool) {
     if (!email) return null;
     const result = await db.query(
@@ -364,18 +269,10 @@ class AccessControl {
   /**
    * Valida se o solicitante pode movimentar cards para um destino.
    *
-   * @param {object}  params
-   * @param {string}  params.requesterEmail
-   * @param {string}  params.destinationName
-   * @param {string} [params.destinationEmail]
-   * @param {string}  params.destinationTeam
-   * @param {string} [params.sourceTeam]                  - usado quando enforceSourceTeam = true
-   * @param {boolean} [params.enforceSourceTeam=false]    - exige que a origem pertença à unidade do supervisor
-   * @param {boolean} [params.enforceDestinationSameTeam=false]
-   *        - quando true, supervisores só podem direcionar para a PRÓPRIA equipe.
-   *          Usado pelo fluxo Link Hub e por unidades 2-5 no fluxo CRM.
-   *          Coordenador/Admin não são afetados.
-   * @param {object} [params.db=pool]
+   * CORREÇÃO: aceita `sourceUnitId` — a unidade do owner atual do card,
+   * já resolvida pelo worker a partir do próprio registro dele na view.
+   * Quando informado, evita a consulta por `nome_equipe` (que era ambígua
+   * quando a mesma equipe existia com unidades diferentes na view).
    */
   async validateHubSpotMovementAccess({
     requesterEmail,
@@ -383,6 +280,7 @@ class AccessControl {
     destinationEmail,
     destinationTeam,
     sourceTeam,
+    sourceUnitId = null,
     enforceSourceTeam = false,
     enforceDestinationSameTeam = false,
     db = pool,
@@ -417,8 +315,6 @@ class AccessControl {
       return { status: 400, error: 'Equipe destino não corresponde à equipe do assessor.' };
     }
 
-    // Regra específica de SUPERVISOR (nível 2). Coordenador (3+) e admin (4+)
-    // não passam por estas checagens.
     if (isSupervisor) {
       const requesterUnidade   = requester.unidade_id   != null ? Number(requester.unidade_id)   : null;
       const destinationUnidade = destination.unidade_id != null ? Number(destination.unidade_id) : null;
@@ -436,9 +332,6 @@ class AccessControl {
       const requesterTeamNorm   = this.normalize(requester.nome_equipe);
       const destinationTeamNorm = this.normalize(destination.nome_equipe);
 
-      // Equipes reservadas: mesmo dentro da mesma unidade, apenas membros da
-      // própria equipe reservada podem direcionar movimentações para ela.
-      // (Hoje: "Equipe Tatiane" na unidade 1.)
       if (this.RESERVED_DESTINATION_TEAMS.has(destinationTeamNorm)
           && requesterTeamNorm !== destinationTeamNorm) {
         return {
@@ -447,8 +340,6 @@ class AccessControl {
         };
       }
 
-      // Trava de destino na própria equipe (Link Hub sempre; CRM em unidades
-      // 2–5, ou quando o solicitante pertence a uma equipe reservada).
       if (enforceDestinationSameTeam) {
         if (destinationTeamNorm !== requesterTeamNorm) {
           return {
@@ -458,23 +349,51 @@ class AccessControl {
         }
       }
 
+      // ─── enforceSourceTeam ───
+      // Prioriza o `sourceUnitId` resolvido no worker (do owner atual do
+      // card). Só cai na consulta por `nome_equipe` quando ele não veio —
+      // e, nesse caso, com mensagens distintas para cada causa.
       if (enforceSourceTeam) {
-        if (!sourceTeam) {
-          return { status: 403, error: 'Supervisores só podem reatribuir cards atualmente pertencentes à própria unidade.' };
+        let sourceUnidade = sourceUnitId != null ? Number(sourceUnitId) : null;
+
+        if (sourceUnidade == null) {
+          if (!sourceTeam) {
+            return {
+              status: 403,
+              error:
+                'Owner atual do card não informado ao validar a origem. ' +
+                'Provável causa: o card está sem proprietário no HubSpot ou o e-mail do ' +
+                'proprietário não existe como colaborador(a) ativo(a) na view de colaboradores.',
+            };
+          }
+          const sourceResult = await db.query(
+            `SELECT DISTINCT unidade_id
+             FROM core.view_app_colaboradores
+             WHERE LOWER(TRIM(nome_equipe)) = LOWER(TRIM($1))
+               AND unidade_id IS NOT NULL
+             LIMIT 1`,
+            [sourceTeam]
+          );
+          sourceUnidade = sourceResult.rows[0]?.unidade_id != null
+            ? Number(sourceResult.rows[0].unidade_id)
+            : null;
+
+          if (sourceUnidade == null) {
+            return {
+              status: 403,
+              error:
+                `A equipe "${sourceTeam}" não tem unidade_id definido na view. ` +
+                `Ajuste o cadastro da equipe antes de movimentar.`,
+            };
+          }
         }
-        const sourceResult = await db.query(
-          `SELECT DISTINCT unidade_id
-           FROM core.view_app_colaboradores
-           WHERE LOWER(TRIM(nome_equipe)) = LOWER(TRIM($1))
-             AND unidade_id IS NOT NULL
-           LIMIT 1`,
-          [sourceTeam]
-        );
-        const sourceUnidade = sourceResult.rows[0]?.unidade_id != null
-          ? Number(sourceResult.rows[0].unidade_id)
-          : null;
-        if (sourceUnidade == null || sourceUnidade !== requesterUnidade) {
-          return { status: 403, error: 'Supervisores só podem reatribuir cards atualmente pertencentes à própria unidade.' };
+
+        if (sourceUnidade !== requesterUnidade) {
+          return {
+            status: 403,
+            error:
+              `Card pertence à unidade ${sourceUnidade}, mas o supervisor é da unidade ${requesterUnidade}.`,
+          };
         }
       }
     }
