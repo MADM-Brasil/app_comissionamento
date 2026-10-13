@@ -43,29 +43,55 @@ import {
   Cell,
 } from "recharts";
 import { fetchLeadsRecebidos, fetchLigacoesProdutivas } from "@/lib/api";
+import { useAccessControl } from "@/hooks/useAccessControl";
+import { getAccessLevel, LEVELS } from "@/lib/accessControl";
+
+// ========== BASE DE API ==========
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3007/api";
 
 // ========== CONSTANTES DE EXCLUSÃO ==========
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial',
-  'Equipe Gabriela Toledo','Equipe Treinamento', 'Equipe lucilene', 'Equipe Elizandra'
+  'Equipe Elizandra', 'Equipe Gabriela Toledo','Equipe Lucilene','Backoffice','Equipe Curitiba','Equipe Treinamento'
 ];
 const EXCLUDED_CARGOS = [
   "desativado", "assistente", "analista juridico", "gestor de projetos", "analista",
   "analista de discadora", "supervisor", "coordenador", "salesops", "ceo",
   "analista de crm", "desenvolvedor", "diretora", "analista de dados", "desenvolvedor make",
 ];
+
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+const normalizeKey = (str: string | undefined | null): string =>
+  String(str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+
+function isEquipeTravadaDestino(nome: string | undefined | null): boolean {
+  const n = normalizeKey(nome);
+  return EQUIPES_TRAVADAS_DESTINO.includes(n);
+}
+
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
 const isExcludedCargo = (cargo: string) =>
   EXCLUDED_CARGOS.some(g => normalize(g) === normalize(cargo));
 const isDesativado = (c: Collaborator) =>
   normalize(c.cargo) === 'desativado' || normalize(c.equipeNome).includes('desativado');
 
-// Função para identificar supervisores pelo cargo
+// ============================================================
+//  Identifica um COLABORADOR que é supervisor (função de módulo).
+//  Atenção: NÃO usar este nome para variáveis locais dentro do
+//  componente — o sombreamento faz `isSupervisor(c)` virar erro.
+// ============================================================
 const isSupervisor = (c: Collaborator) => {
   const cargo = normalize(c.cargo);
   return cargo === 'supervisor' || cargo === 'supervisora' || cargo.includes('supervisor');
@@ -82,12 +108,6 @@ const GLOBAL_META = {
 
 type PeriodKey = 'diario' | 'semanal' | 'mensal';
 
-/**
- * Lê a meta de ganhos do colaborador no PERÍODO informado.
- * Prefere os campos históricos do banco (`peso*Ganhos`) e cai para
- * `meta*Ganhos`. NÃO usa fallback fictício: se o campo não existir,
- * retorna 0 — assim a soma bate com o SQL.
- */
 function getMetaGanhosPeriodo(colab: any, periodKey: PeriodKey): number {
   const pesoKey =
     periodKey === 'diario' ? 'pesoDiarioGanhos'
@@ -110,8 +130,6 @@ function getMetaGanhosPeriodo(colab: any, periodKey: PeriodKey): number {
   return 0;
 }
 
-// Dedup por id (fallback name) — evita somar o mesmo colaborador N vezes
-// caso o backend traga linhas repetidas.
 function dedupeCollaborators(list: Collaborator[]): Collaborator[] {
   const seen = new Map<string, Collaborator>();
   for (const c of list) {
@@ -121,13 +139,11 @@ function dedupeCollaborators(list: Collaborator[]): Collaborator[] {
   return Array.from(seen.values());
 }
 
-// Leitura robusta da classificação operacional (aceita camelCase e snake_case).
 function getClassificacao(c: Collaborator): string {
   const raw = (c as any).classificacaoOperacional ?? (c as any).classificacao_operacional ?? '';
   return String(raw).trim().toLowerCase();
 }
 
-// Localiza o colaborador selecionado no filtro (id ou nome).
 function findSelectedCollaborator(
   collaborators: Collaborator[],
   filters: { colaboradorId?: string | number; colaborador?: string }
@@ -217,6 +233,76 @@ export default function VisaoGeral() {
     loadCollaborators,
   } = useAppStore();
 
+  // ============================================================
+  //  CONTROLE DE ACESSO
+  // ============================================================
+  const { currentUser } = useAccessControl();
+  const userLevel = getAccessLevel(currentUser?.cargo, currentUser?.status);
+  const isAssessor = userLevel === LEVELS.ASSESSOR;
+  const isCoordenador = userLevel === LEVELS.COORDENADOR;
+  const canSeeAll = userLevel >= LEVELS.COORDENADOR;
+
+  // ⚠️ Nome alterado de `isSupervisor` para `userIsSupervisor` para NÃO
+  //    sombrear a função de módulo `isSupervisor(c: Collaborator)`.
+  const userIsSupervisor = userLevel === LEVELS.SUPERVISAO;
+
+  const userUnidadeRaw = (currentUser as any)?.unidade_id
+    ?? (currentUser as any)?.unidadeId
+    ?? null;
+  const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
+
+  const userTeam = useMemo(() => {
+    if (!currentUser) return '';
+    const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
+    if (direct) return direct;
+    if (rawCollaborators.length > 0) {
+      const colab = rawCollaborators.find(c => c.email === currentUser.email || c.id === currentUser.id);
+      if (colab && colab.equipeNome) return colab.equipeNome.trim();
+    }
+    return '';
+  }, [currentUser, rawCollaborators]);
+
+  // ============================================================
+  //  ESCOPO DO COORDENADOR (whitelist via /suporte/escopo)
+  // ============================================================
+  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
+    equipes: Set<string>;
+    colaboradores: Set<string>;
+  } | null>(null);
+  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isCoordenador || !currentUser) {
+      setCoordenadorEscopo(null);
+      return;
+    }
+    let mounted = true;
+    (async () => {
+      setCoordenadorEscopoLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (!mounted) return;
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        const equipes = new Set<string>(
+          (data.data?.equipes || []).map((e: string) => normalize(e))
+        );
+        const colaboradores = new Set<string>(
+          (data.data?.assessores || []).map((a: any) => normalize(a.email))
+        );
+        setCoordenadorEscopo({ equipes, colaboradores });
+      } catch (err: any) {
+        console.error("[VisaoGeral] Falha ao carregar escopo do Coordenador:", err?.message);
+        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
+      } finally {
+        if (mounted) setCoordenadorEscopoLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [isCoordenador, currentUser]);
+
   const [filters, setFilters] = useState<{
     equipe: string;
     colaborador: string;
@@ -239,16 +325,52 @@ export default function VisaoGeral() {
   const isFetching = useRef(false);
 
   // ============================================================
-  //  DETECÇÃO DE SUPERVISOR SELECIONADO
+  //  BASE ÚNICA + FILTROS DE ACESSO
+  // ============================================================
+  const uniqueCollaborators = useMemo(() => {
+    let list = dedupeCollaborators(rawCollaborators);
+
+    if (isCoordenador) {
+      if (!coordenadorEscopo) return [];
+      list = list.filter(c => coordenadorEscopo.colaboradores.has(normalize(c.email)));
+    }
+
+    const ocultarEquipesReservadas = userIsSupervisor
+      && userUnidade === 1
+      && !!userTeam
+      && !isEquipeTravadaDestino(userTeam);
+    if (ocultarEquipesReservadas) {
+      list = list.filter(c => !isEquipeTravadaDestino(c.equipeNome));
+    }
+
+    if (isAssessor) {
+      list = list.filter(c => c.email === currentUser?.email);
+    } else if (userIsSupervisor && userTeam) {
+      list = list.filter(c => normalize(c.equipeNome) === normalize(userTeam));
+    }
+
+    return list;
+  }, [
+    rawCollaborators,
+    isCoordenador,
+    coordenadorEscopo,
+    userIsSupervisor,
+    isAssessor,
+    userUnidade,
+    userTeam,
+    currentUser?.email,
+  ]);
+
+  // ============================================================
+  //  DETECÇÃO DE SUPERVISOR SELECIONADO (usa a função de módulo)
   // ============================================================
   const selectedCollaborator = useMemo(
-    () => findSelectedCollaborator(rawCollaborators, filters),
-    [rawCollaborators, filters.colaborador, filters.colaboradorId]
+    () => findSelectedCollaborator(uniqueCollaborators, filters),
+    [uniqueCollaborators, filters.colaborador, filters.colaboradorId]
   );
   const isSupervisorSelected = !!selectedCollaborator && isSupervisor(selectedCollaborator);
   const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
 
-  // Monta os parâmetros de API aplicando a regra do supervisor
   const getEffectiveFilterParams = useCallback(() => {
     let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
     let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
@@ -264,16 +386,12 @@ export default function VisaoGeral() {
     return { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi };
   }, [filters, isSupervisorSelected, selectedCollaborator]);
 
-  // -----------------------------------------------------------
-  //  RESETAR cache de leads sempre que período ou filtros mudarem
-  // -----------------------------------------------------------
   useEffect(() => {
     setTotalLeads(0);
     setTotalLigacoesProdutivas(0);
     lastFetchLeads.current = 0;
   }, [currentStartDate, currentEndDate, filters]);
 
-  // Busca leads totais do período
   const fetchLeadsData = useCallback(async () => {
     if (!currentStartDate || !currentEndDate) return;
     const now = Date.now();
@@ -301,7 +419,6 @@ export default function VisaoGeral() {
     }
   }, [currentStartDate, currentEndDate, getEffectiveFilterParams]);
 
-  // Função principal de carregamento
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate) return;
     if (showRefreshing) setRefreshing(true);
@@ -350,18 +467,7 @@ export default function VisaoGeral() {
   };
 
   // ============================================================
-  //  BASE ÚNICA (SEM DUPLICATAS)
-  // ============================================================
-  const uniqueCollaborators = useMemo(
-    () => dedupeCollaborators(rawCollaborators),
-    [rawCollaborators]
-  );
-
-  // ============================================================
-  //  FILTRO DE COLABORADORES
-  //  - Supervisor selecionado → equipe dele.
-  //  - Produto = "Auxilio Acidente" → classificacao_operacional = 'Discador'
-  //    (alinhado ao SQL).
+  //  FILTRO DE COLABORADORES (sobre a base restrita por perfil)
   // ============================================================
   const collaborators = useMemo(() => {
     let list = uniqueCollaborators.filter(c => !isDesativado(c));
@@ -370,7 +476,6 @@ export default function VisaoGeral() {
       return list.filter(c => normalize(c.equipeNome) === normalize(supervisorSelectedTeam));
     }
 
-    // Se uma equipe específica for selecionada, NÃO aplica exclusões globais
     if (filters.equipe === "todas") {
       list = list.filter(
         c => !isExcludedTeam(c.equipeNome) && !isExcludedCargo(c.cargo)
@@ -387,7 +492,6 @@ export default function VisaoGeral() {
       list = list.filter(c => normalize(c.name) === colaboradorNormalizado);
     }
 
-    // Filtro de produto alinhado ao SQL (classificacao_operacional)
     if (filters.produto !== "Todos") {
       if (filters.produto === "Auxilio Acidente") {
         list = list.filter(c => getClassificacao(c) === 'discador');
@@ -401,7 +505,6 @@ export default function VisaoGeral() {
     return list;
   }, [uniqueCollaborators, filters, isSupervisorSelected, supervisorSelectedTeam]);
 
-  // Segmentação estrita por classificação (bate com o SQL)
   const collaboratorsDiscador = useMemo(
     () => collaborators.filter(c => getClassificacao(c) === 'discador'),
     [collaborators]
@@ -411,26 +514,22 @@ export default function VisaoGeral() {
     [collaborators]
   );
 
-  // Totais Discador — ganhos
   const totalGanhosDiscador = useMemo(
     () => collaboratorsDiscador.reduce((sum, c) => sum + (c.ganhos || 0), 0),
     [collaboratorsDiscador]
   );
 
-  // Totais Judit — ganhos
   const totalGanhosJudit = useMemo(
     () => collaboratorsJudit.reduce((sum, c) => sum + (c.ganhos || 0), 0),
     [collaboratorsJudit]
   );
 
-  // Totais gerais
   const totalAssinados = rawMetrics.assinados;
   const totalProtocolados = rawMetrics.protocolados;
   const totalGanhos = rawMetrics.ganhos;
   const totalEmitidos = rawMetrics.emitidos;
   const totalPerdidos = rawMetrics.perdidos;
 
-  // Conversão geral: Assinados / (ligações produtivas + recebidos)
   const totalContatosConversao = totalLigacoesProdutivas + totalLeads;
   const conversaoGeral = totalContatosConversao > 0 ? (totalAssinados / totalContatosConversao) * 100 : 0;
 
@@ -441,19 +540,17 @@ export default function VisaoGeral() {
   const hoje = new Date().toISOString().slice(0, 10);
   const diasUteisDecorridos = useMemo(() => contarDiasUteis({ inicio: mesPeriodo.inicio, fim: hoje }), [mesPeriodo, hoje]);
 
-  // ============================================================
-  //  PERÍODO, VISÃO GLOBAL E METAS
-  // ============================================================
   const periodKey: PeriodKey =
     period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
 
+  // Só é "visão global" se o perfil puder ver todas as equipes e não houver filtro ativo.
   const isGlobalView =
     filters.equipe === "todas" &&
     filters.colaborador === "todos" &&
     filters.produto === "Todos" &&
-    !isSupervisorSelected;
+    !isSupervisorSelected &&
+    canSeeAll;
 
-  // Metas por canal — period-aware, sem fallback fictício
   const metaGanhosDiscador = useMemo(
     () => collaboratorsDiscador.reduce((sum, c) => sum + getMetaGanhosPeriodo(c, periodKey), 0),
     [collaboratorsDiscador, periodKey]
@@ -463,13 +560,11 @@ export default function VisaoGeral() {
     [collaboratorsJudit, periodKey]
   );
 
-  // Meta EFETIVA — GLOBAL_META quando sem filtro, senão soma filtrada
   const metaGanhosEfetiva = useMemo(() => {
     if (isGlobalView) return GLOBAL_META[periodKey].ganhos;
     return metaGanhosDiscador + metaGanhosJudit;
   }, [isGlobalView, periodKey, metaGanhosDiscador, metaGanhosJudit]);
 
-  // ← DIAGNÓSTICO (só em dev): bate o front com o SQL.
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     const somaPesoMensalDiscador = collaboratorsDiscador.reduce(
@@ -491,18 +586,15 @@ export default function VisaoGeral() {
     });
   }, [period, periodKey, isGlobalView, collaboratorsDiscador, collaboratorsJudit, metaGanhosDiscador, metaGanhosJudit, metaGanhosEfetiva]);
 
-  // Pace agora calculado sobre GANHOS e meta por canal
   const paceDiscador = calcularPaceProjecao(totalGanhosDiscador, metaGanhosDiscador, diasUteisDecorridos, diasUteisTotaisMes);
   const paceJudit = calcularPaceProjecao(totalGanhosJudit, metaGanhosJudit, diasUteisDecorridos, diasUteisTotaisMes);
 
-  // Produtividade agora sobre GANHOS
   const produtividadeMedia = useMemo(() => {
     const ativos = collaborators.filter(c => !ehSupervisor(c.name) && c.status === 'ativo');
     if (ativos.length === 0 || diasUteisPeriodoSelecionado === 0) return 0;
     return totalGanhos / ativos.length / diasUteisPeriodoSelecionado;
   }, [collaborators, totalGanhos, diasUteisPeriodoSelecionado]);
 
-  // Melhor / precisa atenção
   const melhor = useMemo(() => {
     let best: Collaborator | null = null;
     let maxGanhos = -1;
@@ -521,7 +613,6 @@ export default function VisaoGeral() {
     return pior;
   }, [collaborators]);
 
-  // Dados para o gráfico de equipes
   const times = useMemo(() => Array.from(new Set(collaborators.map(c => c.equipeNome))), [collaborators]);
   const porTime = useMemo(() =>
     times.map(time => {
@@ -539,12 +630,10 @@ export default function VisaoGeral() {
   const equipeSelecionada = filters.equipe !== "todas";
   const isIndividualFilter = filters.colaborador !== "todos" && !isSupervisorSelected;
 
-  // Atingimento usa a meta efetiva (global ou somada) sobre os ganhos totais
   const atingimentoMetaPeriodo = metaGanhosEfetiva > 0
     ? (totalGanhos / metaGanhosEfetiva) * 100
     : 0;
 
-  // Funil
   const funnelStages = useMemo(() => [
     { stage: "Leads", count: totalLeads, color: "#3b82f6", icon: Users },
     { stage: "Emitidos", count: rawMetrics.emitidos, color: "#09175b", icon: FileText },
@@ -558,6 +647,18 @@ export default function VisaoGeral() {
     filters.equipe !== "todas" ||
     filters.colaborador !== "todos" ||
     filters.produto !== "Todos";
+
+  // Bloqueia o render enquanto o escopo do Coordenador carrega.
+  if (isCoordenador && coordenadorEscopoLoading) {
+    return (
+      <DashboardLayout title="Visão Geral" subtitle={`Panorama executivo — Período ${period}`}>
+        <div className="flex justify-center items-center py-12">
+          <Loader2 className="w-5 h-5 animate-spin text-[#09175b]" />
+          <span className="ml-2 text-sm text-gray-500">Carregando escopo...</span>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout title="Visão Geral" subtitle={`Panorama executivo da operação comercial — Período ${period}`}>
@@ -575,13 +676,13 @@ export default function VisaoGeral() {
         </div>
       )}
 
-      {!loading && rawCollaborators.length === 0 && (
+      {!loading && uniqueCollaborators.length === 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
           Nenhum colaborador disponível no momento.
         </div>
       )}
 
-      {!loading && rawCollaborators.length > 0 && (
+      {!loading && uniqueCollaborators.length > 0 && (
         <>
           {hasActiveFilters && (
             <div className="mb-4 px-4 py-2 bg-blue-50 rounded-lg text-xs text-blue-700 flex items-center gap-2 flex-wrap">
@@ -598,7 +699,6 @@ export default function VisaoGeral() {
             </div>
           )}
 
-          {/* Cards de resumo: Discador e Judit — metas period-aware */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
             <ResumoMesCard
               titulo="Discador · Ganhos"
@@ -620,7 +720,6 @@ export default function VisaoGeral() {
             )}
           </div>
 
-          {/* Modais */}
           {modalAberto === 'discador' && (
             <DetalheAssinadosModal
               titulo="Discador · Ganhos"
@@ -638,7 +737,6 @@ export default function VisaoGeral() {
             />
           )}
 
-          {/* KPIs principais */}
           <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-4 mb-6">
             <KpiCard titulo="Leads" valor={formatNumero(totalLeads)} icon={Users} accent="info" />
             <KpiCard titulo="Venda Ganha" valor={formatNumero(totalGanhos)} icon={Award} accent="brand" />
@@ -647,7 +745,6 @@ export default function VisaoGeral() {
             <KpiCard titulo="Perdidos" valor={formatNumero(totalPerdidos)} icon={XCircle} accent="danger" />
           </div>
 
-          {/* Resumo textual + meta efetiva */}
           <Card className="mb-6 p-4">
             <p className="text-sm font-semibold text-slate-900">
               {isSupervisorSelected && supervisorSelectedTeam
@@ -664,7 +761,6 @@ export default function VisaoGeral() {
             </p>
           </Card>
 
-          {/* Desempenho: radar individual ou gráfico de equipes */}
           <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
             <Card className="xl:col-span-2">
               <h3 className="text-sm font-semibold text-slate-700 mb-3">
@@ -686,7 +782,6 @@ export default function VisaoGeral() {
             </Card>
           </div>
 
-          {/* Melhor, pior, produtividade */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
             <Card className="flex items-center gap-3">
               <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400"><Trophy size={18} /></div>
@@ -711,7 +806,6 @@ export default function VisaoGeral() {
             </Card>
           </div>
 
-          {/* Comparativo por time */}
           {!isIndividualFilter && (
             <div className="mt-6">
               <Card className="xl:col-span-2">
