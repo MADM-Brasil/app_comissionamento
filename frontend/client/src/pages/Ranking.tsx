@@ -1,7 +1,9 @@
-// src/pages/Ranking.tsx (novo layout)
+// src/pages/Ranking.tsx
 import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { useAppStore } from "@/lib/dataStore";
+import { useAccessControl } from "@/hooks/useAccessControl";
+import { getAccessLevel, LEVELS } from "@/lib/accessControl";
 import {
   Trophy, Star, Crown, Medal,
   FileText, CheckCircle, Award, Users, User, Package, Briefcase, Loader2, RefreshCw, TrendingUp,
@@ -13,7 +15,8 @@ import {
   fetchAssinados,
   fetchProtocolados,
   fetchGanhos,
-  fetchPerdidos
+  fetchPerdidos,
+  API_BASE,
 } from "@/lib/api";
 import madm_dashboard_growth from "@/components/img/madm-dashboard-growth.png";
 
@@ -30,7 +33,7 @@ const WEIGHTS: Record<SortMetric, number> = {
 };
 
 // ============================================================
-// CONSTANTES DE EXCLUSÃO – baseadas em cargo
+// CONSTANTES DE EXCLUSÃO
 // ============================================================
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
@@ -45,6 +48,11 @@ const EXCLUDED_CARGOS = [
   "analista de discadora","supervisor","coordenador","salesops","ceo",
   "analista de crm","desenvolvedor","diretora","analista de dados","desenvolvedor make",
 ];
+
+// Equipes reservadas — mesma regra da página de Suporte/Equipe/Visão Geral.
+// Precisa ficar em sincronia com backend/services/access-control.js
+// (RESERVED_DESTINATION_TEAMS).
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 type RankingType = "colaborador" | "equipe";
 type SortMetric = "emitidos" | "assinados" | "protocolados" | "ganhos";
@@ -79,6 +87,19 @@ interface TeamRankingItem {
 
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+const normalizeKey = (str: string | undefined | null): string =>
+  String(str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+
+function isEquipeTravadaDestino(nome: string | undefined | null): boolean {
+  const n = normalizeKey(nome);
+  return EQUIPES_TRAVADAS_DESTINO.includes(n);
+}
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
 const isExcludedCargo = (cargo: string) =>
@@ -153,7 +174,11 @@ function compareByScore(
 
 const formatInt = (num: number) => num?.toLocaleString('pt-BR') ?? '0';
 
-const MAX_DISPLAY_ITEMS = 20;
+// Ranking de colaboradores exibe até 20. Ranking de equipes exibe até 5.
+const MAX_DISPLAY_ITEMS = {
+  colaborador: 20,
+  equipe: 5,
+} as const;
 
 export default function Ranking() {
   const {
@@ -162,6 +187,27 @@ export default function Ranking() {
     equipeConfigs,
     currentUser,
   } = useAppStore();
+
+  const { currentUser: accessUser } = useAccessControl();
+  const userLevel = getAccessLevel(accessUser?.cargo, accessUser?.status);
+  const isAssessor = userLevel === LEVELS.ASSESSOR;
+  const isSupervisor = userLevel === LEVELS.SUPERVISAO;
+  const isCoordenador = userLevel === LEVELS.COORDENADOR;
+
+  // Unidade do usuário — aceita unidade_id ou unidadeId.
+  const userUnidadeRaw = (accessUser as any)?.unidade_id
+    ?? (accessUser as any)?.unidadeId
+    ?? null;
+  const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
+
+  const userTeam = useMemo(() => {
+    if (!accessUser) return '';
+    const direct = (accessUser as any)?.equipe
+      || (accessUser as any)?.equipeNome
+      || (accessUser as any)?.nome_equipe
+      || '';
+    return String(direct).trim();
+  }, [accessUser]);
 
   const [allCollaborators, setAllCollaborators] = useState<any[]>([]);
   const [metricsData, setMetricsData] = useState<Record<string, { emitidos: number; assinados: number; protocolados: number; ganhos: number; perdidos: number }>>({});
@@ -173,6 +219,47 @@ export default function Ranking() {
   ]);
   const [selectedProduct, setSelectedProduct] = useState<string>("Todos");
   const [selectedTeam, setSelectedTeam] = useState<string>("todas");
+
+  // ============================================================
+  //  ESCOPO DO COORDENADOR (whitelist via /suporte/escopo)
+  // ============================================================
+  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
+    equipes: Set<string>;
+    colaboradores: Set<string>;
+  } | null>(null);
+  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isCoordenador || !accessUser) {
+      setCoordenadorEscopo(null);
+      return;
+    }
+    let mounted = true;
+    (async () => {
+      setCoordenadorEscopoLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (!mounted) return;
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        const equipes = new Set<string>(
+          (data.data?.equipes || []).map((e: string) => normalize(e))
+        );
+        const colaboradores = new Set<string>(
+          (data.data?.assessores || []).map((a: any) => normalize(a.email))
+        );
+        setCoordenadorEscopo({ equipes, colaboradores });
+      } catch (err: any) {
+        console.error("[Ranking] Falha ao carregar escopo do Coordenador:", err?.message);
+        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
+      } finally {
+        if (mounted) setCoordenadorEscopoLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [isCoordenador, accessUser]);
 
   const initialLoadDone = useRef(false);
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
@@ -306,11 +393,32 @@ export default function Ranking() {
   const productOptions = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante"];
 
   const equipeOptions = useMemo(() => {
-    const equipeNomes = equipeConfigs
+    let equipeNomes = equipeConfigs
       .map((eq) => eq.nome)
       .filter((nome) => !isExcludedTeam(nome));
+
+    // Coordenador: apenas equipes da própria unidade.
+    if (isCoordenador) {
+      if (!coordenadorEscopo) equipeNomes = [];
+      else equipeNomes = equipeNomes.filter((nome) => coordenadorEscopo.equipes.has(normalize(nome)));
+    }
+
+    // Regra da Tatiane: supervisor unidade 1 fora da Tatiane não vê a Tatiane.
+    const ocultarEquipesReservadas = isSupervisor
+      && userUnidade === 1
+      && !!userTeam
+      && !isEquipeTravadaDestino(userTeam);
+    if (ocultarEquipesReservadas) {
+      equipeNomes = equipeNomes.filter((nome) => !isEquipeTravadaDestino(nome));
+    }
+
+    // Supervisor: travado na própria equipe.
+    if (isSupervisor && userTeam) {
+      equipeNomes = equipeNomes.filter((nome) => normalize(nome) === normalize(userTeam));
+    }
+
     return ["todas", ...equipeNomes];
-  }, [equipeConfigs]);
+  }, [equipeConfigs, isCoordenador, coordenadorEscopo, isSupervisor, userUnidade, userTeam]);
 
   useEffect(() => {
     if (selectedTeam === "todas") return;
@@ -324,7 +432,9 @@ export default function Ranking() {
     }
   }, [selectedTeam]);
 
-  // ========== COLABORADORES ELEGÍVEIS ==========
+  // ============================================================
+  //  COLABORADORES ELEGÍVEIS (com restrição de unidade)
+  // ============================================================
   const rankingCollaborators = useMemo(() => {
     let filtered = allCollaborators.filter(c => {
       if (isDesativado(c)) return false;
@@ -333,6 +443,32 @@ export default function Ranking() {
       return true;
     });
 
+    // Coordenador: whitelist de e-mails da própria unidade.
+    if (isCoordenador) {
+      if (!coordenadorEscopo) return [];
+      filtered = filtered.filter(c => coordenadorEscopo.colaboradores.has(normalize(c.email)));
+    }
+
+    // Regra da Tatiane: ocultar para supervisor de unidade 1 fora dela.
+    const ocultarEquipesReservadas = isSupervisor
+      && userUnidade === 1
+      && !!userTeam
+      && !isEquipeTravadaDestino(userTeam);
+    if (ocultarEquipesReservadas) {
+      filtered = filtered.filter(c => !isEquipeTravadaDestino(c.equipeNome));
+    }
+
+    // Assessor: apenas ele mesmo.
+    if (isAssessor && accessUser?.email) {
+      filtered = filtered.filter(c => normalize(c.email) === normalize(accessUser.email));
+    }
+
+    // Supervisor: apenas a própria equipe.
+    if (isSupervisor && userTeam) {
+      filtered = filtered.filter(c => normalize(c.equipeNome) === normalize(userTeam));
+    }
+
+    // Filtro por produto.
     if (selectedProduct !== "Todos") {
       const group = productToGroup[selectedProduct];
       if (group) {
@@ -344,12 +480,25 @@ export default function Ranking() {
       }
     }
 
+    // Filtro por equipe (só para ranking individual; equipe já está no próprio eixo).
     if (rankingType === "colaborador" && selectedTeam !== "todas") {
       filtered = filtered.filter(c => c.equipeNome === selectedTeam);
     }
 
     return filtered;
-  }, [allCollaborators, selectedProduct, rankingType, selectedTeam]);
+  }, [
+    allCollaborators,
+    selectedProduct,
+    rankingType,
+    selectedTeam,
+    isAssessor,
+    isSupervisor,
+    isCoordenador,
+    coordenadorEscopo,
+    userUnidade,
+    userTeam,
+    accessUser,
+  ]);
 
   // ========== RANKING INDIVIDUAL ==========
   const individualRanking = useMemo(() => {
@@ -413,7 +562,13 @@ export default function Ranking() {
   }, [rankingCollaborators, metricsData, activeSortMetrics]);
 
   const fullRanking = rankingType === "colaborador" ? individualRanking : teamRanking;
-  const displayRanking = fullRanking.slice(0, MAX_DISPLAY_ITEMS);
+
+  // ═══════════════════════════════════════════════════════════
+  //  AJUSTE: ranking de equipes limitado ao TOP 5.
+  //  Colaboradores mantêm 20 para preservar a experiência original.
+  // ═══════════════════════════════════════════════════════════
+  const maxDisplayItems = MAX_DISPLAY_ITEMS[rankingType];
+  const displayRanking = fullRanking.slice(0, maxDisplayItems);
   const top3 = fullRanking.slice(0, 3);
 
   const myIndividualRank = useMemo(
@@ -457,7 +612,8 @@ export default function Ranking() {
     ganhos: "Ganhos",
   };
 
-  if (loading && allCollaborators.length === 0) {
+  // Bloqueio de render enquanto o escopo do Coordenador ainda carrega.
+  if ((loading && allCollaborators.length === 0) || (isCoordenador && coordenadorEscopoLoading)) {
     return (
       <DashboardLayout title="Ranking" subtitle="Carregando dados...">
         <div className="flex items-center justify-center h-64">
@@ -623,6 +779,7 @@ export default function Ranking() {
                 onChange={(e) => setSelectedTeam(e.target.value)}
                 className="bg-transparent text-xs font-semibold text-[#0f172a] focus:outline-none"
                 aria-label="Filtrar ranking por equipe"
+                disabled={isSupervisor && equipeOptions.length <= 2}
               >
                 {equipeOptions.map((equipe) => (<option key={equipe} value={equipe}>{equipe === "todas" ? "Todas as equipes" : equipe}</option>))}
               </select>
@@ -673,11 +830,11 @@ export default function Ranking() {
         </div>
       )}
 
-      {/* Tabela com os 20 melhores */}
+      {/* Tabela — Top 20 para colaboradores, Top 5 para equipes */}
       <div className="card animate-fade-in-up">
         <div className="p-5 border-b border-[#e2e8f0]">
           <h3 className="text-sm font-bold text-[#0f172a]">
-            Top {Math.min(displayRanking.length, MAX_DISPLAY_ITEMS)} — {rankingType === "colaborador" ? "Melhores Colaboradores" : "Melhores Equipes"}
+            Top {Math.min(displayRanking.length, maxDisplayItems)} — {rankingType === "colaborador" ? "Melhores Colaboradores" : "Melhores Equipes"}
           </h3>
           <p className="text-xs text-[#64748b] mt-1">
             {displayRanking.length} {rankingType === "colaborador" ? "consultores" : "equipes"} exibidos (de {fullRanking.length} no total)
@@ -686,7 +843,6 @@ export default function Ranking() {
         </div>
 
         <div className="overflow-x-auto">
-          {/* Colunas ajustadas: sem a coluna Gols */}
           <div className="px-5 py-2 border-b border-[#e2e8f0] hidden md:grid" style={{ gridTemplateColumns: "60px 56px minmax(180px, 1fr) 90px 90px 90px 90px 90px", gap: "0.75rem" }}>
             <div className="text-[10px] font-semibold text-[#94a3b8] uppercase tracking-wider text-center">Pos</div>
             <div></div>
@@ -734,8 +890,8 @@ export default function Ranking() {
 
         <div className="px-5 py-4 border-t border-[#e2e8f0] text-center">
           <p className="text-xs text-[#94a3b8]">
-            Exibindo os {MAX_DISPLAY_ITEMS} melhores de {fullRanking.length} {rankingType === "colaborador" ? "consultores" : "equipes"}.
-            {fullRanking.length > MAX_DISPLAY_ITEMS && " Para ver a lista completa, ajuste os filtros."}
+            Exibindo os {maxDisplayItems} melhores de {fullRanking.length} {rankingType === "colaborador" ? "consultores" : "equipes"}.
+            {fullRanking.length > maxDisplayItems && " Para ver a lista completa, ajuste os filtros."}
             <br />
             Pontuação = Σ (valor da métrica × peso). Pesos atuais: {activeSortMetrics.map(m => `${metricLabels[m]} (${WEIGHTS[m]})`).join(' + ')}
             {activeSortMetrics.length === 0 && " (nenhuma métrica selecionada)"}

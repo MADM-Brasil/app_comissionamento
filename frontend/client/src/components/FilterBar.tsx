@@ -23,8 +23,7 @@ interface FilterBarProps {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
-// Normalização agressiva — mesma usada em Suporte.tsx e no backend
-// (access-control.js / teamProducts.js).
+// Normalização agressiva — mesma usada em Suporte.tsx / Equipe.tsx.
 const normalizeKey = (str: string): string =>
   String(str || '')
     .trim()
@@ -47,18 +46,87 @@ const isExcludedTeam = (teamName: string): boolean => {
   return EXCLUDED_TEAMS.some((t) => normalize(t) === n);
 };
 
-const TEAM_TO_PRODUCT: Record<string, string> = {
-  "Equipe Concomitante": "Concomitante",
-  "Equipe Tatiane": "QUINQUENIO",
-  "Equipe Quinquênio": "QUINQUENIO",
+// =====================================================================
+// PRODUTO — espelha backend/config/teamProducts.js
+// ---------------------------------------------------------------------
+// Nomes internos (usados pelo HubSpot) → rótulos visíveis na UI.
+// A regra do frontend aceita os rótulos como valor selecionado para
+// manter compatibilidade com o resto do app (Visao_geral).
+// =====================================================================
+const PRODUCT = Object.freeze({
+  QUINQUENIO:       'quinquenio',
+  AUXILIO_ACIDENTE: 'auxilio_acidente',
+  FATOR_K:          'Fator K',
+  CONCOMITANTE:     'Concomitante',
+  BPC_LOAS:         'BPC/LOAS',
+});
+
+const PRODUCT_LABELS: Record<string, string> = {
+  [PRODUCT.QUINQUENIO]:       'Quinquenio',
+  [PRODUCT.AUXILIO_ACIDENTE]: 'Auxilio Acidente',
+  [PRODUCT.FATOR_K]:          'Fator K',
+  [PRODUCT.CONCOMITANTE]:     'Concomitante',
+  [PRODUCT.BPC_LOAS]:         'BPC/LOAS',
 };
 
-const PRODUCT_OPTIONS = ["Todos", "AUXILIO ACIDENTE", "QUINQUENIO", "Concomitante"];
+function maskProduct(value?: string | null): string {
+  if (!value) return '';
+  const key = String(value);
+  if (PRODUCT_LABELS[key]) return PRODUCT_LABELS[key];
+  return key
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
 
-// Equipes reservadas — mesma regra da página de Suporte: em unidades
-// fora do conjunto travado (2–5), a Equipe Tatiane só é vista/roteada por
-// membros dela mesma. Precisa ficar em sincronia com
-// backend/services/access-control.js (RESERVED_DESTINATION_TEAMS).
+interface ProdutoConfig {
+  default: string;
+  options: string[];
+  allowChange: boolean;
+}
+
+const FALLBACK_PRODUTO_DEFAULT = PRODUCT.AUXILIO_ACIDENTE;
+
+// Fallback local — espelha o que está em backend/config/teamProducts.js.
+// Mantém o funcionamento mesmo quando o usuário não pode acessar
+// /suporte/escopo (ex.: Assessor).
+const FALLBACK_PRODUTOS_POR_EQUIPE: Record<string, ProdutoConfig> = {
+  [normalizeKey('Equipe Tatiane')]: {
+    default: PRODUCT.QUINQUENIO,
+    options: [PRODUCT.QUINQUENIO, PRODUCT.CONCOMITANTE],
+    allowChange: true,
+  },
+};
+
+function findProdutoConfig(
+  mapa: Record<string, ProdutoConfig> | undefined,
+  equipe: string,
+): ProdutoConfig | null {
+  if (!equipe) return null;
+  const key = normalizeKey(equipe);
+
+  if (mapa) {
+    for (const [k, v] of Object.entries(mapa)) {
+      if (normalizeKey(k) === key) {
+        return {
+          default: v.default,
+          options: Array.isArray(v.options) ? [...v.options] : [v.default],
+          allowChange: Boolean(v.allowChange),
+        };
+      }
+    }
+  }
+
+  const hit = FALLBACK_PRODUTOS_POR_EQUIPE[key];
+  return hit ? { ...hit, options: [...hit.options] } : null;
+}
+
+// Opções gerais exibidas quando NENHUMA equipe específica está selecionada.
+// Os valores são os rótulos visíveis (compatível com o filtro do Visao_geral).
+const GENERAL_PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante"];
+
+// Equipes reservadas — mesma regra da página de Suporte.
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 function isEquipeTravadaDestino(nome: string): boolean {
@@ -119,28 +187,22 @@ export default function FilterBar({
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
-  // Dados filtrados por unidade para Coordenador — vêm do /suporte/escopo,
-  // que já aplica o mesmo filtro de unidade usado na página de Suporte.
-  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
-    equipes: Set<string>;
-    colaboradores: Set<string>;
-  } | null>(null);
-  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
-
   const userLevel = getAccessLevel();
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
 
-  // Unidade do usuário — o backend expõe como `unidade_id`; alguns pontos
-  // do frontend consomem como `unidadeId`. Aceitamos ambos.
+  // Quem pode chamar /suporte/escopo (backend exige supervisor+).
+  const canFetchEscopo = userLevel >= LEVELS.SUPERVISAO;
+
+  // Unidade do usuário (aceita unidade_id ou unidadeId).
   const userUnidadeRaw = (currentUser as any)?.unidade_id
     ?? (currentUser as any)?.unidadeId
     ?? null;
   const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
 
   // ============================================================
-  // EQUIPE DO USUÁRIO (com fallback em collaborators)
+  // EQUIPE DO USUÁRIO
   // ============================================================
   const userTeam = useMemo(() => {
     if (!currentUser) return '';
@@ -153,14 +215,80 @@ export default function FilterBar({
     return '';
   }, [currentUser, collaborators]);
 
-  // Regra da Equipe Tatiane — espelha a regra do Suporte:
-  // supervisor de unidade 1 que NÃO pertence à equipe reservada não vê a
-  // Tatiane. Supervisores de outras unidades já estão travados na própria
-  // equipe (isSupervisor), então a regra adicional é redundante para eles.
+  // Regra da Equipe Tatiane — supervisor unidade 1 fora dela não vê a Tatiane.
   const deveOcultarEquipesReservadas = isSupervisor
     && userUnidade === 1
     && !!userTeam
     && !isEquipeTravadaDestino(userTeam);
+
+  // ============================================================
+  // ESCOPO (whitelist do Coordenador + produtos para todos que podem ver)
+  // ------------------------------------------------------------
+  // O backend devolve, para supervisor+:
+  //   - equipes e assessores da própria unidade (usado pelo Coordenador)
+  //   - produtos.porEquipe (usado aqui e no Suporte)
+  // ============================================================
+  const [escopoData, setEscopoData] = useState<{
+    equipes: Set<string>;
+    colaboradores: Set<string>;
+    produtosPorEquipe: Record<string, ProdutoConfig>;
+    produtoDefault: string;
+  } | null>(null);
+  const [escopoLoading, setEscopoLoading] = useState(false);
+
+  useEffect(() => {
+    if (!canFetchEscopo || !currentUser) {
+      setEscopoData(null);
+      return;
+    }
+    let mounted = true;
+    (async () => {
+      setEscopoLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: 'include' });
+        const data = await res.json().catch(() => ({}));
+        if (!mounted) return;
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        const equipes = new Set<string>(
+          (data.data?.equipes || []).map((e: string) => normalize(e))
+        );
+        const colaboradores = new Set<string>(
+          (data.data?.assessores || []).map((a: any) => normalize(a.email))
+        );
+        const produtosPorEquipe: Record<string, ProdutoConfig> =
+          data.data?.produtos?.porEquipe || {};
+        const produtoDefault = data.data?.produtos?.default || FALLBACK_PRODUTO_DEFAULT;
+        setEscopoData({ equipes, colaboradores, produtosPorEquipe, produtoDefault });
+      } catch (err: any) {
+        console.error('[FilterBar] Falha ao carregar escopo:', err?.message);
+        if (mounted) {
+          setEscopoData({
+            equipes: new Set(),
+            colaboradores: new Set(),
+            produtosPorEquipe: {},
+            produtoDefault: FALLBACK_PRODUTO_DEFAULT,
+          });
+        }
+      } finally {
+        if (mounted) setEscopoLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [canFetchEscopo, currentUser]);
+
+  // ============================================================
+  // CONFIGURAÇÃO DE PRODUTO DA EQUIPE SELECIONADA
+  // ------------------------------------------------------------
+  // - Equipe específica com config: usa allowChange/options/default.
+  // - Sem equipe específica ("todas") ou sem config: null → cai nas
+  //   opções gerais.
+  // ============================================================
+  const produtoConfigEquipeAtual = useMemo(
+    () => findProdutoConfig(escopoData?.produtosPorEquipe, selectedEquipe),
+    [escopoData, selectedEquipe]
+  );
 
   // ============================================================
   // SINCRONIZA E-MAIL DO COLABORADOR SELECIONADO NA STORE
@@ -262,48 +390,6 @@ export default function FilterBar({
   }, [collaborators.length, setCollaborators]);
 
   // ============================================================
-  // CARREGA ESCOPO PARA COORDENADOR
-  // ------------------------------------------------------------
-  // O backend já retorna apenas equipes e assessores da própria unidade
-  // para o Coordenador (mesmo endpoint usado pela página de Suporte).
-  // Usamos esse retorno como whitelist para filtrar equipeConfigs e
-  // collaborators no cliente.
-  // ============================================================
-  useEffect(() => {
-    if (!isCoordenador || !currentUser) {
-      setCoordenadorEscopo(null);
-      return;
-    }
-    let mounted = true;
-    (async () => {
-      setCoordenadorEscopoLoading(true);
-      try {
-        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: 'include' });
-        const data = await res.json().catch(() => ({}));
-        if (!mounted) return;
-        if (!res.ok || !data?.success) {
-          throw new Error(data?.error || `Erro HTTP ${res.status}`);
-        }
-        const equipes = new Set<string>(
-          (data.data?.equipes || []).map((e: string) => normalize(e))
-        );
-        const colaboradores = new Set<string>(
-          (data.data?.assessores || []).map((a: any) => normalize(a.email))
-        );
-        setCoordenadorEscopo({ equipes, colaboradores });
-      } catch (err: any) {
-        console.error('[FilterBar] Falha ao carregar escopo do Coordenador:', err?.message);
-        // Em caso de falha, aplicamos um filtro vazio (nada do escopo passa)
-        // para não expor dados indevidos. A página continua utilizável.
-        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
-      } finally {
-        if (mounted) setCoordenadorEscopoLoading(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [isCoordenador, currentUser]);
-
-  // ============================================================
   // APLICA RESTRIÇÕES DE ACESSO (UMA ÚNICA VEZ)
   // ============================================================
   useEffect(() => {
@@ -324,7 +410,6 @@ export default function FilterBar({
       if (userTeam) setSelectedEquipe(userTeam);
       setSelectedColaborador("todos");
     } else {
-      // Administrador, SuperAdmin, Coordenador e demais: mantêm valores persistidos.
       setSelectedEquipe(initialStored.equipe);
       setSelectedColaborador(initialStored.colaborador);
       setSelectedProduto(initialStored.produto);
@@ -346,15 +431,12 @@ export default function FilterBar({
 
   // ============================================================
   // COORDENADOR: revalida os valores persistidos contra o escopo
-  // ------------------------------------------------------------
-  // Se a equipe/colaborador salvos no localStorage não pertencem à unidade
-  // do Coordenador, reseta para "todas"/"todos" assim que o escopo chega.
   // ============================================================
   useEffect(() => {
-    if (!isCoordenador || !coordenadorEscopo) return;
+    if (!isCoordenador || !escopoData) return;
 
     if (selectedEquipe !== 'todas'
-        && !coordenadorEscopo.equipes.has(normalize(selectedEquipe))) {
+        && !escopoData.equipes.has(normalize(selectedEquipe))) {
       setSelectedEquipe('todas');
       setSelectedColaborador('todos');
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
@@ -363,25 +445,42 @@ export default function FilterBar({
 
     if (selectedColaborador !== 'todos') {
       const colab = collaborators.find(c => c.name === selectedColaborador);
-      if (!colab || !coordenadorEscopo.colaboradores.has(normalize(colab.email))) {
+      if (!colab || !escopoData.colaboradores.has(normalize(colab.email))) {
         setSelectedColaborador('todos');
         if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
       }
     }
-  }, [isCoordenador, coordenadorEscopo, selectedEquipe, selectedColaborador, collaborators, setSelectedCollaboratorEmail]);
+  }, [isCoordenador, escopoData, selectedEquipe, selectedColaborador, collaborators, setSelectedCollaboratorEmail]);
 
   // ============================================================
-  // SINCRONIA EQUIPE ⇄ PRODUTO
+  // SINCRONIA EQUIPE ⇄ PRODUTO (mesma lógica do Suporte)
+  // ------------------------------------------------------------
+  //   - Equipe com allowChange=false → força default mascarado.
+  //   - Equipe com allowChange=true  → se o valor atual não está nas
+  //     opções, cai no default mascarado.
+  //   - Sem equipe selecionada → sem override.
   // ============================================================
   useEffect(() => {
     if (!isReady || !hasAppliedRestrictions) return;
-    if (selectedEquipe && TEAM_TO_PRODUCT[selectedEquipe]) {
-      const mapped = TEAM_TO_PRODUCT[selectedEquipe];
-      if (selectedProduto !== mapped) {
-        setSelectedProduto(mapped);
+    if (!selectedEquipe || selectedEquipe === 'todas') return;
+
+    const config = findProdutoConfig(escopoData?.produtosPorEquipe, selectedEquipe);
+    if (!config) return;
+
+    if (!config.allowChange) {
+      const defMasked = maskProduct(config.default);
+      if (selectedProduto !== defMasked) {
+        setSelectedProduto(defMasked);
       }
+      return;
     }
-  }, [selectedEquipe, isReady, hasAppliedRestrictions]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    const allowedMasked = config.options.map(maskProduct);
+    if (!allowedMasked.includes(selectedProduto)) {
+      setSelectedProduto(maskProduct(config.default));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEquipe, escopoData, isReady, hasAppliedRestrictions]);
 
   // ============================================================
   // LISTA DE EQUIPES DISPONÍVEIS
@@ -389,24 +488,18 @@ export default function FilterBar({
   const equipesDisponiveis = useMemo(() => {
     let nomes = equipeConfigs.map((eq) => eq.nome).filter((nome) => !isExcludedTeam(nome));
 
-    // Coordenador: somente equipes que o backend devolveu no escopo da
-    // própria unidade. Enquanto o escopo carrega, filtra para vazio para
-    // não vazar dados de outras unidades.
     if (isCoordenador) {
-      if (!coordenadorEscopo) {
+      if (!escopoData) {
         nomes = [];
       } else {
-        nomes = nomes.filter((nome) => coordenadorEscopo.equipes.has(normalize(nome)));
+        nomes = nomes.filter((nome) => escopoData.equipes.has(normalize(nome)));
       }
     }
 
-    // Regra da Equipe Tatiane (mesma do Suporte): oculta para supervisor
-    // de unidade 1 que não pertence à equipe reservada.
     if (deveOcultarEquipesReservadas) {
       nomes = nomes.filter((nome) => !isEquipeTravadaDestino(nome));
     }
 
-    // Assessor/Supervisor: travado na própria equipe.
     if ((isAssessor || isSupervisor) && currentUser) {
       nomes = nomes.filter((nome) => normalize(nome) === normalize(userTeam));
     }
@@ -419,7 +512,7 @@ export default function FilterBar({
     isCoordenador,
     currentUser,
     userTeam,
-    coordenadorEscopo,
+    escopoData,
     deveOcultarEquipesReservadas,
   ]);
 
@@ -432,19 +525,16 @@ export default function FilterBar({
     filtered = filtered.filter((c) => !isExcludedTeam(c.equipeNome));
     filtered = filtered.filter((c) => normalize(c.cargo) !== 'administrativo');
 
-    // Coordenador: somente colaboradores da própria unidade (whitelist do
-    // escopo). Antes do escopo carregar, filtra para vazio.
     if (isCoordenador) {
-      if (!coordenadorEscopo) {
+      if (!escopoData) {
         filtered = [];
       } else {
         filtered = filtered.filter((c) =>
-          coordenadorEscopo.colaboradores.has(normalize(c.email))
+          escopoData.colaboradores.has(normalize(c.email))
         );
       }
     }
 
-    // Regra da Equipe Tatiane (mesma do Suporte).
     if (deveOcultarEquipesReservadas) {
       filtered = filtered.filter((c) => !isEquipeTravadaDestino(c.equipeNome));
     }
@@ -479,13 +569,10 @@ export default function FilterBar({
     searchTerm,
     isReady,
     userTeam,
-    coordenadorEscopo,
+    escopoData,
     deveOcultarEquipesReservadas,
   ]);
 
-  // ============================================================
-  // GARANTE QUE O COLABORADOR SELECIONADO ESTEJA NA LISTA
-  // ============================================================
   const colaboradoresParaSelect = useMemo(() => {
     if (selectedColaborador === "todos") return filteredColaboradores;
     const exists = filteredColaboradores.some(c => c.name === selectedColaborador);
@@ -536,7 +623,7 @@ export default function FilterBar({
   };
 
   // ============================================================
-  // PERSISTÊNCIA NO LOCALSTORAGE
+  // PERSISTÊNCIA
   // ============================================================
   useEffect(() => {
     const state: StoredFilters = {
@@ -565,11 +652,32 @@ export default function FilterBar({
   const handleEquipeChange = (novaEquipe: string) => {
     setSelectedEquipe(novaEquipe);
 
-    const produtoMapeado = TEAM_TO_PRODUCT[novaEquipe] || selectedProduto;
-    if (TEAM_TO_PRODUCT[novaEquipe]) {
-      setSelectedProduto(produtoMapeado);
+    // ---- Sync do produto com a nova equipe (mesma lógica do Suporte) ----
+    const newConfig = findProdutoConfig(escopoData?.produtosPorEquipe, novaEquipe);
+    let produtoFinal = selectedProduto;
+
+    if (newConfig) {
+      if (!newConfig.allowChange) {
+        produtoFinal = maskProduct(newConfig.default);
+      } else {
+        const allowedMasked = newConfig.options.map(maskProduct);
+        if (!allowedMasked.includes(selectedProduto)) {
+          produtoFinal = maskProduct(newConfig.default);
+        }
+      }
+    } else if (novaEquipe === 'todas') {
+      // Se voltou para "todas" e o valor atual não está nas opções gerais,
+      // reseta para "Todos".
+      if (!GENERAL_PRODUCT_OPTIONS.includes(selectedProduto)) {
+        produtoFinal = 'Todos';
+      }
     }
 
+    if (produtoFinal !== selectedProduto) {
+      setSelectedProduto(produtoFinal);
+    }
+
+    // ---- Reset do colaborador se ele não pertence à nova equipe ----
     let nextColaborador = selectedColaborador;
     if (selectedColaborador !== "todos" && novaEquipe !== "todas") {
       const stillInTeam = collaborators.some(
@@ -582,7 +690,7 @@ export default function FilterBar({
       }
     }
 
-    notifyParent(novaEquipe, nextColaborador, produtoMapeado);
+    notifyParent(novaEquipe, nextColaborador, produtoFinal);
   };
 
   const handleColaboradorChange = (novoColaborador: string) => {
@@ -644,7 +752,6 @@ export default function FilterBar({
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
       notifyParent(selectedEquipe, "todos", "Todos");
     } else {
-      // Admin, SuperAdmin, Coordenador: limpa seleção para "todas"/"todos".
       setSelectedEquipe("todas");
       setSelectedColaborador("todos");
       setSearchTerm("");
@@ -682,19 +789,21 @@ export default function FilterBar({
 
   const isEquipeDisabled = isAssessor || isSupervisor || loadingEquipes || !isReady;
   const isColaboradorDisabled = isAssessor || loadingCollaborators || !isReady;
-  const isProdutoDisabled = !!selectedEquipe && TEAM_TO_PRODUCT[selectedEquipe] !== undefined;
+  const isProdutoDisabled =
+    isAssessor ||
+    (!!produtoConfigEquipeAtual && !produtoConfigEquipeAtual.allowChange);
 
   // ============================================================
   // RENDER: LOADING
   // ------------------------------------------------------------
-  // Bloqueia o render enquanto o escopo do Coordenador estiver carregando,
-  // evitando expor momentaneamente equipes de outras unidades.
+  // Bloqueia enquanto o escopo do Supervisor/Coordenador estiver
+  // carregando (evita mostrar filtros errados por um frame).
   // ============================================================
   if (
     !isReady ||
     loadingEquipes ||
     loadingCollaborators ||
-    (isCoordenador && coordenadorEscopoLoading)
+    (canFetchEscopo && escopoLoading)
   ) {
     return (
       <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
@@ -811,27 +920,57 @@ export default function FilterBar({
             </div>
           )}
 
-          {/* Select Produto */}
+          {/* Select Produto — segue a mesma regra do Suporte */}
           <div className="flex-1">
             <label htmlFor="filterProduto" className="block text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
               <Package className="w-3 h-3" /> Produto
             </label>
-            <select
-              id="filterProduto"
-              value={selectedProduto}
-              onChange={(e) => handleProdutoChange(e.target.value)}
-              disabled={isProdutoDisabled}
-              className={cn(
-                "w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20",
-                isProdutoDisabled && "bg-gray-100 cursor-not-allowed"
-              )}
-              aria-label="Filtrar por produto"
-              title="Selecione um produto para filtrar os dados"
-            >
-              {PRODUCT_OPTIONS.map((prod) => (
-                <option key={prod} value={prod}>{prod}</option>
-              ))}
-            </select>
+
+            {produtoConfigEquipeAtual && !produtoConfigEquipeAtual.allowChange ? (
+              // Equipe trava o produto no próprio default → readOnly (como no Suporte).
+              <input
+                id="filterProduto"
+                type="text"
+                value={maskProduct(produtoConfigEquipeAtual.default)}
+                readOnly
+                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-gray-100 text-slate-500 cursor-not-allowed"
+                aria-label="Produto definido pela equipe"
+                title="O produto é definido automaticamente pela equipe selecionada."
+              />
+            ) : produtoConfigEquipeAtual && produtoConfigEquipeAtual.allowChange ? (
+              // Equipe permite alternar → select apenas com as opções permitidas.
+              <select
+                id="filterProduto"
+                value={selectedProduto}
+                onChange={(e) => handleProdutoChange(e.target.value)}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20"
+                aria-label="Filtrar por produto"
+                title="Selecione um produto para filtrar os dados"
+              >
+                {produtoConfigEquipeAtual.options.map((opt) => {
+                  const masked = maskProduct(opt);
+                  return <option key={masked} value={masked}>{masked}</option>;
+                })}
+              </select>
+            ) : (
+              // Sem equipe específica (ou equipe sem config) → opções gerais.
+              <select
+                id="filterProduto"
+                value={selectedProduto}
+                onChange={(e) => handleProdutoChange(e.target.value)}
+                disabled={isProdutoDisabled}
+                className={cn(
+                  "w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20",
+                  isProdutoDisabled && "bg-gray-100 cursor-not-allowed"
+                )}
+                aria-label="Filtrar por produto"
+                title="Selecione um produto para filtrar os dados"
+              >
+                {GENERAL_PRODUCT_OPTIONS.map((prod) => (
+                  <option key={prod} value={prod}>{prod}</option>
+                ))}
+              </select>
+            )}
           </div>
 
           {/* Botão Limpar */}
