@@ -53,7 +53,7 @@ function formatMoeda(valor: number): string {
 const formatInt = formatNumero;
 
 // ============================================================
-//  META DE GANHOS DO PERÍODO
+//  META DE GANHOS DO PERÍODO (banca em peso_meta_ganho_*)
 // ============================================================
 function getMetaGanhosPeriodo(colab: any, period: string, diasUteisPeriodo = 0): number {
   const pesoDiario = pickNumber(colab?.pesoDiarioGanhos, colab?.metaDiarioGanhos, 3);
@@ -74,7 +74,7 @@ function pickNumber(...values: Array<unknown>): number {
 }
 
 // ============================================================
-//  MEDALHAS
+//  MEDALHAS (pódio)
 // ============================================================
 type Medalha = "ouro" | "prata" | "bronze" | "destaque";
 const MEDALHA_ICON: Record<Medalha, LucideIcon> = {
@@ -85,7 +85,7 @@ const MEDALHA_COR: Record<Medalha, string> = {
 };
 
 // ============================================================
-//  KpiCard
+//  KpiCard LOCAL
 // ============================================================
 interface KpiCardProps {
   titulo: string;
@@ -133,9 +133,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Elizandra', 'Equipe Gabriela Toledo','Equipe Lucilene','Backoffice','Equipe Curitiba','Equipe Treinamento'
 ];
 
-// Equipes reservadas — precisa ficar em sincronia com
-// backend/services/access-control.js (RESERVED_DESTINATION_TEAMS) e
-// backend/routes/suporte.js (EQUIPES_TRAVADAS_DESTINO).
+// ========== EQUIPES RESERVADAS (mesma regra das demais telas) ==========
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 const normalize = (str: string | undefined | null): string =>
@@ -179,10 +177,11 @@ function Avatar({ nome, size = 40 }: { nome: string; size?: number }) {
 }
 
 // ============================================================
-//  API DIÁRIA
+//  API DIÁRIA + LEADS POR COLABORADOR
 // ============================================================
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3007/api";
 interface AssinadosDiarioLinha { time?: string; nome?: string; dia: string; total: number; }
+
 async function fetchAssinadosDiarioPorTime(inicio: string, fim: string): Promise<AssinadosDiarioLinha[]> {
   const url = `${API_BASE}/metrics/assinados-diario-por-equipe?inicio=${inicio}&fim=${fim}`;
   const res = await fetch(url, { credentials: "include" });
@@ -192,6 +191,36 @@ async function fetchAssinadosDiarioPorTime(inicio: string, fim: string): Promise
   return rows.map((item: any) => ({
     time: item.equipe || item.time, dia: item.dia, total: Number(item.total) || 0,
   }));
+}
+
+// ============================================================
+//  LEADS RECEBIDOS POR COLABORADOR
+// ------------------------------------------------------------
+//  Fonte: mesmo endpoint usado pelo Funil (/metrics/leads/stages).
+//  Agrega o total por colaborador e devolve um Map nome → total.
+//  Usado para alimentar a métrica "Recebidos" da página de Equipe
+//  com o número correto de leads recebidos, em vez de `emitidos`.
+// ============================================================
+async function fetchLeadsRecebidosPorColaborador(inicio: string, fim: string): Promise<Map<string, number>> {
+  const url = `${API_BASE}/metrics/leads/stages?start=${inicio}&end=${fim}`;
+  try {
+    const res = await fetch(url, { credentials: "include" });
+    if (!res.ok) return new Map();
+    const data = await res.json();
+    if (!data?.success || !Array.isArray(data.data)) return new Map();
+
+    const map = new Map<string, number>();
+    for (const row of data.data) {
+      const nome = String(row?.colaborador || "").trim();
+      if (!nome) continue;
+      const total = Number(row?.total) || 0;
+      map.set(nome, (map.get(nome) || 0) + total);
+    }
+    return map;
+  } catch (err) {
+    console.warn("[Equipe] Falha ao carregar leads por colaborador:", err);
+    return new Map();
+  }
 }
 
 // ============================================================
@@ -290,7 +319,7 @@ export default function Equipe() {
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
   const canSeeAll = userLevel >= LEVELS.COORDENADOR;
 
-  // Unidade do usuário (mesmo padrão de acesso das outras telas).
+  // Unidade do usuário (mesmo padrão das demais telas).
   const userUnidadeRaw = (currentUser as any)?.unidade_id
     ?? (currentUser as any)?.unidadeId
     ?? null;
@@ -301,10 +330,7 @@ export default function Equipe() {
   const [loadingError, setLoadingError] = useState<string | null>(null);
 
   // ============================================================
-  //  ESCOPO DO COORDENADOR
-  //  O backend /suporte/escopo já devolve apenas equipes e
-  //  colaboradores da própria unidade para o Coordenador. Usamos
-  //  esse retorno como whitelist para filtrar o que é exibido.
+  //  ESCOPO DO COORDENADOR (whitelist via /suporte/escopo)
   // ============================================================
   const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
     equipes: Set<string>;
@@ -336,7 +362,6 @@ export default function Equipe() {
         setCoordenadorEscopo({ equipes, colaboradores });
       } catch (err: any) {
         console.error("[Equipe] Falha ao carregar escopo do Coordenador:", err?.message);
-        // Em caso de falha, aplicamos whitelist vazia para não expor dados.
         if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
       } finally {
         if (mounted) setCoordenadorEscopoLoading(false);
@@ -344,6 +369,29 @@ export default function Equipe() {
     })();
     return () => { mounted = false; };
   }, [isCoordenador, currentUser]);
+
+  // ============================================================
+  //  LEADS RECEBIDOS POR COLABORADOR
+  // ------------------------------------------------------------
+  //  Necessário para que o KPI "Recebidos" reflita leads recebidos,
+  //  não propostas emitidas. Consumimos o MESMO endpoint do Funil
+  //  (/metrics/leads/stages) e agregamos por nome do colaborador.
+  // ============================================================
+  const [leadsPorColaborador, setLeadsPorColaborador] = useState<Map<string, number>>(new Map());
+  const [leadsFetching, setLeadsFetching] = useState(false);
+
+  const carregarLeads = useCallback(async () => {
+    if (!currentStartDate || !currentEndDate) return;
+    setLeadsFetching(true);
+    try {
+      const map = await fetchLeadsRecebidosPorColaborador(currentStartDate, currentEndDate);
+      setLeadsPorColaborador(map);
+    } finally {
+      setLeadsFetching(false);
+    }
+  }, [currentStartDate, currentEndDate]);
+
+  useEffect(() => { void carregarLeads(); }, [carregarLeads]);
 
   useEffect(() => {
     updateCurrentDates();
@@ -409,21 +457,22 @@ export default function Equipe() {
   }, [currentUser, isSupervisor, isAssessor, supervisor, rawCollaborators, userTeam]);
 
   // ============================================================
-  //  LISTA DE COLABORADORES VISÍVEIS
+  //  LISTA DE COLABORADORES VISÍVEIS + enriquecimento com leads
   // ------------------------------------------------------------
-  //  Regras:
+  //  Regras de unidade:
   //    - Admin/SuperAdmin: todos.
-  //    - Coordenador: apenas da própria unidade (whitelist).
-  //    - Supervisor: apenas da própria equipe; se unidade 1 e fora
-  //      da Tatiane, a própria Tatiane é ocultada (redundante,
-  //      pois já está travado na própria equipe).
+  //    - Coordenador: whitelist da própria unidade.
+  //    - Supervisor: travado na própria equipe; unidade 1 fora da
+  //      Tatiane oculta a Tatiane.
   //    - Assessor: apenas ele mesmo.
+  //
+  //  Depois do filtro por perfil, injetamos `leadsRecebidos` em cada
+  //  colaborador, para que os componentes abaixo usem esse valor
+  //  no lugar de `emitidos` no KPI "Recebidos".
   // ============================================================
   const colaboradores = useMemo(() => {
     let filtered = rawCollaborators.filter((c) => !isExcludedTeam(c.equipeNome));
 
-    // Coordenador: aplica whitelist. Enquanto o escopo carrega,
-    // retorna vazio para não expor dados de outras unidades.
     if (isCoordenador) {
       if (!coordenadorEscopo) return [];
       filtered = filtered.filter((c) =>
@@ -431,7 +480,6 @@ export default function Equipe() {
       );
     }
 
-    // Supervisor de unidade 1 fora da Tatiane: oculta a equipe reservada.
     const ocultarEquipesReservadas = isSupervisor
       && userUnidade === 1
       && !!userTeam
@@ -445,16 +493,22 @@ export default function Equipe() {
     } else if (isSupervisor) {
       filtered = userTeam ? filtered.filter(c => normalize(c.equipeNome) === normalize(userTeam)) : [];
     }
-    return filtered;
+
+    // Enriquece cada colaborador com `leadsRecebidos`.
+    return filtered.map((c) => ({
+      ...c,
+      leadsRecebidos: leadsPorColaborador.get(c.name) || 0,
+    })) as Array<Collaborator & { leadsRecebidos: number }>;
   }, [
     rawCollaborators,
-    currentUser,
     isAssessor,
     isSupervisor,
     isCoordenador,
     userTeam,
     coordenadorEscopo,
     userUnidade,
+    currentUser?.email,
+    leadsPorColaborador,
   ]);
 
   const labelPeriodo = useMemo(
@@ -468,8 +522,8 @@ export default function Equipe() {
     : isAssessor ? "Seus indicadores de desempenho."
     : `Visão geral das equipes. Ganhos de ${labelPeriodo}.`;
 
-  // Bloqueia também enquanto o escopo do Coordenador ainda não chegou,
-  // evitando que apareça momentaneamente tudo o que não pode.
+  // Bloqueio também enquanto o escopo do Coordenador carrega,
+  // evitando expor dados de outras unidades por um frame.
   if (initialLoading || (isCoordenador && coordenadorEscopoLoading)) {
     return (
       <DashboardLayout title={titulo} subtitle="Carregando...">
@@ -495,8 +549,16 @@ export default function Equipe() {
   return (
     <DashboardLayout title={titulo} subtitle={subtitulo}>
       {!supervisor && !colaboradorId && canSeeAll ? (
-        <ListaEquipes colaboradores={colaboradores} busca={busca} setBusca={setBusca}
-          currentStartDate={currentStartDate} currentEndDate={currentEndDate} period={period} />
+        <ListaEquipes
+          colaboradores={colaboradores}
+          busca={busca}
+          setBusca={setBusca}
+          currentStartDate={currentStartDate}
+          currentEndDate={currentEndDate}
+          period={period}
+          onRefreshLeads={carregarLeads}
+          leadsFetching={leadsFetching}
+        />
       ) : supervisor ? (
         <ColaboradoresDaEquipe equipe={supervisor} colaboradores={colaboradores} period={period}
           currentStartDate={currentStartDate} currentEndDate={currentEndDate} />
@@ -508,8 +570,16 @@ export default function Equipe() {
         <ColaboradoresDaEquipe equipe={userTeam} colaboradores={colaboradores} period={period}
           currentStartDate={currentStartDate} currentEndDate={currentEndDate} />
       ) : (
-        <ListaEquipes colaboradores={colaboradores} busca={busca} setBusca={setBusca}
-          currentStartDate={currentStartDate} currentEndDate={currentEndDate} period={period} />
+        <ListaEquipes
+          colaboradores={colaboradores}
+          busca={busca}
+          setBusca={setBusca}
+          currentStartDate={currentStartDate}
+          currentEndDate={currentEndDate}
+          period={period}
+          onRefreshLeads={carregarLeads}
+          leadsFetching={leadsFetching}
+        />
       )}
     </DashboardLayout>
   );
@@ -532,9 +602,16 @@ type OrdenarPor = "desempenho" | "recebidos" | "assinados" | "protocolados" | "c
 
 function ListaEquipes({
   colaboradores, busca, setBusca, currentStartDate, currentEndDate, period,
+  onRefreshLeads, leadsFetching,
 }: {
-  colaboradores: Collaborator[]; busca: string; setBusca: (v: string) => void;
-  currentStartDate: string; currentEndDate: string; period: string;
+  colaboradores: Array<Collaborator & { leadsRecebidos?: number }>;
+  busca: string;
+  setBusca: (v: string) => void;
+  currentStartDate: string;
+  currentEndDate: string;
+  period: string;
+  onRefreshLeads?: () => Promise<void> | void;
+  leadsFetching?: boolean;
 }) {
   const [visualizacao, setVisualizacao] = useState<"cards" | "tabela">("cards");
   const [ordenarPor, setOrdenarPor] = useState<OrdenarPor>("desempenho");
@@ -575,8 +652,14 @@ function ListaEquipes({
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    try { await Promise.allSettled([loadCollaborators(), loadMetricsForPeriod(), carregarDiario()]); }
-    finally { setRefreshing(false); }
+    try {
+      await Promise.allSettled([
+        loadCollaborators(),
+        loadMetricsForPeriod(),
+        carregarDiario(),
+        onRefreshLeads ? Promise.resolve(onRefreshLeads()) : Promise.resolve(),
+      ]);
+    } finally { setRefreshing(false); }
   };
 
   const times = Array.from(new Set(colaboradores.map((c) => c.equipeNome))).sort();
@@ -594,7 +677,9 @@ function ListaEquipes({
   const dadosPorTime = times.map((nome, indice) => {
     const membros = colaboradores.filter((c) => c.equipeNome === nome);
     const membrosFolha = membros.filter((c) => !isAggregatedRole(c.cargo));
-    const recebidos = membrosFolha.reduce((s, c) => s + (c.emitidos || 0), 0);
+    // ⚠️ "Recebidos" agora é a soma de `leadsRecebidos` (leads recebidos),
+    // não `emitidos` (propostas emitidas). Mantém alinhamento com o Funil.
+    const recebidos = membrosFolha.reduce((s, c) => s + ((c as any).leadsRecebidos || 0), 0);
     const assinados = membrosFolha.reduce((s, c) => s + (c.assinados || 0), 0);
     const protocolados = membrosFolha.reduce((s, c) => s + (c.protocolados || 0), 0);
     const ganhos = membrosFolha.reduce((s, c) => s + (c.ganhos || 0), 0);
@@ -710,9 +795,9 @@ function ListaEquipes({
                       <p className="text-[11px] text-slate-500 mt-0.5">{t.pessoas} colaborador(es)</p>
                     </div>
                     <div className="grid grid-cols-3 gap-2 mb-3">
-                      <div><p className="text-[11px] text-slate-500">Ganhos</p><p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.ganhos)}</p></div>
+                      <div><p className="text-[11px] text-slate-500">Recebidos</p><p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.recebidos)}</p></div>
                       <div><p className="text-[11px] text-slate-500 text-center">Meta</p><p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.metaGanhos)}</p></div>
-                      <div><p className="text-[11px] text-slate-500">Protocolados</p><p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.protocolados)}</p></div>
+                      <div><p className="text-[11px] text-slate-500">Ganhos</p><p className="text-sm font-semibold text-slate-700 text-center">{formatNumero(t.ganhos)}</p></div>
                     </div>
                     <div className="mb-3">
                       <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1">
@@ -751,9 +836,10 @@ function ListaEquipes({
                     <tr className="text-slate-500 border-b border-slate-200">
                       <th className="py-2 pr-4 font-medium w-10">#</th>
                       <th className="py-2 pr-4 font-medium">Equipe</th>
+                      <th className="py-2 pr-4 font-medium">Recebidos</th>
+                      <th className="py-2 pr-4 font-medium">Assinados</th>
                       <th className="py-2 pr-4 font-medium">Ganhos</th>
                       <th className="py-2 pr-4 font-medium">Meta</th>
-                      <th className="py-2 pr-4 font-medium">Comissão</th>
                       <th className="py-2 pr-4 font-medium">Tx. Ganhos/Recebidos</th>
                     </tr>
                   </thead>
@@ -764,9 +850,10 @@ function ListaEquipes({
                         <td className="py-2.5 pr-4">
                           <Link to={`/equipe/${encodeURIComponent(t.nome)}`} className="font-medium text-slate-800 hover:underline">{t.nome}</Link>
                         </td>
+                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.recebidos)}</td>
+                        <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.assinados)}</td>
                         <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.ganhos)}</td>
                         <td className="py-2.5 pr-4 text-slate-600">{formatNumero(t.metaGanhos)}</td>
-                        <td className="py-2.5 pr-4 text-slate-600">{formatMoeda(t.ganhos)}</td>
                         <td className="py-2.5 pr-4 text-slate-700 font-semibold">{formatPct(t.taxaConversao, 1)}</td>
                       </tr>
                     ))}
@@ -821,10 +908,16 @@ function ListaEquipes({
 function ColaboradorCard({
   c, period, diasUteisPeriodo, teamMembersCount,
 }: {
-  c: Collaborator; period: string; diasUteisPeriodo: number; teamMembersCount: number;
+  c: Collaborator & { leadsRecebidos?: number };
+  period: string;
+  diasUteisPeriodo: number;
+  teamMembersCount: number;
 }) {
   const agregado = isAggregatedRole(c.cargo);
-  const recebidos = c.emitidos || 0;
+  // ⚠️ "Recebidos" agora usa `leadsRecebidos`, alinhado com a página de Funil.
+  // `emitidos` (propostas emitidas) continua disponível em `c.emitidos`,
+  // mas não é mais o valor exibido no card.
+  const recebidos = (c as any).leadsRecebidos || 0;
   const assinados = c.assinados || 0;
   const ganhos = c.ganhos || 0;
   const metaGanhos = getMetaGanhosPeriodo(c, period, diasUteisPeriodo);
@@ -870,8 +963,11 @@ function ColaboradorCard({
 function ColaboradoresDaEquipe({
   equipe, colaboradores, period, currentStartDate, currentEndDate,
 }: {
-  equipe: string; colaboradores: Collaborator[]; period: string;
-  currentStartDate: string; currentEndDate: string;
+  equipe: string;
+  colaboradores: Array<Collaborator & { leadsRecebidos?: number }>;
+  period: string;
+  currentStartDate: string;
+  currentEndDate: string;
 }) {
   const membros = useMemo(() => {
     if (!equipe) return [];
@@ -911,7 +1007,9 @@ function ColaboradoresDaEquipe({
 function DetalhesColaborador({
   colaboradorId, colaboradores, period,
 }: {
-  colaboradorId?: string; colaboradores: Collaborator[]; period: string;
+  colaboradorId?: string;
+  colaboradores: Array<Collaborator & { leadsRecebidos?: number }>;
+  period: string;
 }) {
   const colaborador = colaboradores.find((c) => c.id === colaboradorId);
   const { currentUser } = useAccessControl();
@@ -1068,7 +1166,10 @@ function DetalhesColaborador({
     return () => { cancelado = true; };
   }, [colaborador?.name, currentStartDate, currentEndDate, periodoAnterior.inicio, periodoAnterior.fim]);
 
-  const recebidos = colaborador?.emitidos || 0;
+  // ⚠️ "Recebidos" agora usa `leadsRecebidos` (vindo do endpoint de leads),
+  // alinhado com o Funil. `emitidos` continua acessível via colaborador.emitidos
+  // se precisar ser mostrado em outro lugar.
+  const recebidos = (colaborador as any)?.leadsRecebidos || 0;
   const assinados = colaborador?.assinados || 0;
   const protocolados = colaborador?.protocolados || 0;
   const ganhos = colaborador?.ganhos || 0;
@@ -1092,11 +1193,11 @@ function DetalhesColaborador({
     if (equipe.length === 0) return null;
     const total = equipe.length;
     return {
-      recebidos: equipe.reduce((s, c) => s + (c.emitidos || 0), 0) / total,
+      recebidos: equipe.reduce((s, c) => s + ((c as any).leadsRecebidos || 0), 0) / total,
       assinados: equipe.reduce((s, c) => s + (c.assinados || 0), 0) / total,
       protocolados: equipe.reduce((s, c) => s + (c.protocolados || 0), 0) / total,
       ganhos: equipe.reduce((s, c) => s + (c.ganhos || 0), 0) / total,
-      taxaConversao: equipe.reduce((s, c) => s + ((c.assinados || 0) / Math.max(1, c.emitidos || 1)) * 100, 0) / total,
+      taxaConversao: equipe.reduce((s, c) => s + ((c.assinados || 0) / Math.max(1, (c as any).leadsRecebidos || 1)) * 100, 0) / total,
     };
   }, [equipe]);
 
@@ -1327,7 +1428,7 @@ function DetalhesColaborador({
                   <span className="text-lg font-bold" style={{ color: corConversaoGeral }}>{formatPct(taxaConversaoGeral, 0)}</span>
                 </div>
               </div>
-              <p className="text-xs text-slate-400 mt-1">Assinados / Emitidos</p>
+              <p className="text-xs text-slate-400 mt-1">Assinados / Recebidos</p>
             </div>
             <div className="flex flex-col items-center">
               <p className="text-[11px] text-slate-500 mb-1">Conv. Protocolados</p>
