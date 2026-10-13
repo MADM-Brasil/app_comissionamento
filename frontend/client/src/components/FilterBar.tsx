@@ -4,7 +4,7 @@ import { Filter, Users, Briefcase, Search, X, Package, Loader2, AlertCircle, Ref
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { cn } from "@/lib/utils";
-import { fetchCollaborators, fetchEquipes } from "@/lib/api";
+import { fetchCollaborators, fetchEquipes, API_BASE } from "@/lib/api";
 
 interface FilterBarProps {
   onFilterChange: (filters: {
@@ -23,12 +23,22 @@ interface FilterBarProps {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
+// Normalização agressiva — mesma usada em Suporte.tsx e no backend
+// (access-control.js / teamProducts.js).
+const normalizeKey = (str: string): string =>
+  String(str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial',
-  'Equipe Elizandra', 'Equipe Gabriela Toledo','Equipe Vinicius ','Equipe Yan'
+  'Equipe Elizandra', 'Equipe Gabriela Toledo','Equipe Lucilene','Backoffice','Equipe Curitiba','Equipe Treinamento'
 ];
 
 const isExcludedTeam = (teamName: string): boolean => {
@@ -44,6 +54,17 @@ const TEAM_TO_PRODUCT: Record<string, string> = {
 };
 
 const PRODUCT_OPTIONS = ["Todos", "AUXILIO ACIDENTE", "QUINQUENIO", "Concomitante"];
+
+// Equipes reservadas — mesma regra da página de Suporte: em unidades
+// fora do conjunto travado (2–5), a Equipe Tatiane só é vista/roteada por
+// membros dela mesma. Precisa ficar em sincronia com
+// backend/services/access-control.js (RESERVED_DESTINATION_TEAMS).
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+
+function isEquipeTravadaDestino(nome: string): boolean {
+  const n = normalizeKey(nome);
+  return EQUIPES_TRAVADAS_DESTINO.includes(n);
+}
 
 const STORAGE_KEY = "madm_filterBar_state_v1";
 
@@ -82,10 +103,8 @@ export default function FilterBar({
   const { collaborators, equipeConfigs, setCollaborators, setEquipeConfigs } = useAppStore();
   const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
 
-  // Necessário na store (dataStore.ts): setSelectedCollaboratorEmail
   const setSelectedCollaboratorEmail = useAppStore((state) => (state as any).setSelectedCollaboratorEmail);
 
-  // Inicializa estados com valores persistidos (uma única vez por mount)
   const [initialStored] = useState<StoredFilters>(getStoredFilters);
 
   const [selectedEquipe, setSelectedEquipe] = useState(initialStored.equipe);
@@ -100,9 +119,25 @@ export default function FilterBar({
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
+  // Dados filtrados por unidade para Coordenador — vêm do /suporte/escopo,
+  // que já aplica o mesmo filtro de unidade usado na página de Suporte.
+  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
+    equipes: Set<string>;
+    colaboradores: Set<string>;
+  } | null>(null);
+  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
+
   const userLevel = getAccessLevel();
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
+  const isCoordenador = userLevel === LEVELS.COORDENADOR;
+
+  // Unidade do usuário — o backend expõe como `unidade_id`; alguns pontos
+  // do frontend consomem como `unidadeId`. Aceitamos ambos.
+  const userUnidadeRaw = (currentUser as any)?.unidade_id
+    ?? (currentUser as any)?.unidadeId
+    ?? null;
+  const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
 
   // ============================================================
   // EQUIPE DO USUÁRIO (com fallback em collaborators)
@@ -117,6 +152,15 @@ export default function FilterBar({
     }
     return '';
   }, [currentUser, collaborators]);
+
+  // Regra da Equipe Tatiane — espelha a regra do Suporte:
+  // supervisor de unidade 1 que NÃO pertence à equipe reservada não vê a
+  // Tatiane. Supervisores de outras unidades já estão travados na própria
+  // equipe (isSupervisor), então a regra adicional é redundante para eles.
+  const deveOcultarEquipesReservadas = isSupervisor
+    && userUnidade === 1
+    && !!userTeam
+    && !isEquipeTravadaDestino(userTeam);
 
   // ============================================================
   // SINCRONIZA E-MAIL DO COLABORADOR SELECIONADO NA STORE
@@ -135,14 +179,12 @@ export default function FilterBar({
     }
   }, [selectedColaborador, collaborators, isReady, setSelectedCollaboratorEmail]);
 
-  // Atualiza o horário quando os dados ficam prontos
   useEffect(() => {
     if (isReady) {
       setLastUpdated(new Date().toLocaleTimeString());
     }
   }, [isReady]);
 
-  // Timeout de segurança
   useEffect(() => {
     const timeout = setTimeout(() => {
       if (!isReady) {
@@ -220,17 +262,55 @@ export default function FilterBar({
   }, [collaborators.length, setCollaborators]);
 
   // ============================================================
+  // CARREGA ESCOPO PARA COORDENADOR
+  // ------------------------------------------------------------
+  // O backend já retorna apenas equipes e assessores da própria unidade
+  // para o Coordenador (mesmo endpoint usado pela página de Suporte).
+  // Usamos esse retorno como whitelist para filtrar equipeConfigs e
+  // collaborators no cliente.
+  // ============================================================
+  useEffect(() => {
+    if (!isCoordenador || !currentUser) {
+      setCoordenadorEscopo(null);
+      return;
+    }
+    let mounted = true;
+    (async () => {
+      setCoordenadorEscopoLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: 'include' });
+        const data = await res.json().catch(() => ({}));
+        if (!mounted) return;
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        const equipes = new Set<string>(
+          (data.data?.equipes || []).map((e: string) => normalize(e))
+        );
+        const colaboradores = new Set<string>(
+          (data.data?.assessores || []).map((a: any) => normalize(a.email))
+        );
+        setCoordenadorEscopo({ equipes, colaboradores });
+      } catch (err: any) {
+        console.error('[FilterBar] Falha ao carregar escopo do Coordenador:', err?.message);
+        // Em caso de falha, aplicamos um filtro vazio (nada do escopo passa)
+        // para não expor dados indevidos. A página continua utilizável.
+        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
+      } finally {
+        if (mounted) setCoordenadorEscopoLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [isCoordenador, currentUser]);
+
+  // ============================================================
   // APLICA RESTRIÇÕES DE ACESSO (UMA ÚNICA VEZ)
-  // CORREÇÃO: só roda quando há usuário logado; caso contrário,
-  // já marca restrictions como aplicadas após ready para que
-  // o notify inicial possa disparar.
   // ============================================================
   useEffect(() => {
     if (!isReady) return;
     if (hasAppliedRestrictions) return;
 
     if (!currentUser) {
-      // Sem usuário, nada a restringir — libera o fluxo inicial.
       setHasAppliedRestrictions(true);
       return;
     }
@@ -244,7 +324,7 @@ export default function FilterBar({
       if (userTeam) setSelectedEquipe(userTeam);
       setSelectedColaborador("todos");
     } else {
-      // Administrador: mantém valores persistidos
+      // Administrador, SuperAdmin, Coordenador e demais: mantêm valores persistidos.
       setSelectedEquipe(initialStored.equipe);
       setSelectedColaborador(initialStored.colaborador);
       setSelectedProduto(initialStored.produto);
@@ -265,9 +345,33 @@ export default function FilterBar({
   }, [currentUser, isAssessor, isSupervisor, userTeam, selectedEquipe]);
 
   // ============================================================
+  // COORDENADOR: revalida os valores persistidos contra o escopo
+  // ------------------------------------------------------------
+  // Se a equipe/colaborador salvos no localStorage não pertencem à unidade
+  // do Coordenador, reseta para "todas"/"todos" assim que o escopo chega.
+  // ============================================================
+  useEffect(() => {
+    if (!isCoordenador || !coordenadorEscopo) return;
+
+    if (selectedEquipe !== 'todas'
+        && !coordenadorEscopo.equipes.has(normalize(selectedEquipe))) {
+      setSelectedEquipe('todas');
+      setSelectedColaborador('todos');
+      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+      return;
+    }
+
+    if (selectedColaborador !== 'todos') {
+      const colab = collaborators.find(c => c.name === selectedColaborador);
+      if (!colab || !coordenadorEscopo.colaboradores.has(normalize(colab.email))) {
+        setSelectedColaborador('todos');
+        if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+      }
+    }
+  }, [isCoordenador, coordenadorEscopo, selectedEquipe, selectedColaborador, collaborators, setSelectedCollaboratorEmail]);
+
+  // ============================================================
   // SINCRONIA EQUIPE ⇄ PRODUTO
-  // CORREÇÃO: agora também notifica o pai quando o produto
-  // é ajustado automaticamente pela equipe.
   // ============================================================
   useEffect(() => {
     if (!isReady || !hasAppliedRestrictions) return;
@@ -284,11 +388,40 @@ export default function FilterBar({
   // ============================================================
   const equipesDisponiveis = useMemo(() => {
     let nomes = equipeConfigs.map((eq) => eq.nome).filter((nome) => !isExcludedTeam(nome));
+
+    // Coordenador: somente equipes que o backend devolveu no escopo da
+    // própria unidade. Enquanto o escopo carrega, filtra para vazio para
+    // não vazar dados de outras unidades.
+    if (isCoordenador) {
+      if (!coordenadorEscopo) {
+        nomes = [];
+      } else {
+        nomes = nomes.filter((nome) => coordenadorEscopo.equipes.has(normalize(nome)));
+      }
+    }
+
+    // Regra da Equipe Tatiane (mesma do Suporte): oculta para supervisor
+    // de unidade 1 que não pertence à equipe reservada.
+    if (deveOcultarEquipesReservadas) {
+      nomes = nomes.filter((nome) => !isEquipeTravadaDestino(nome));
+    }
+
+    // Assessor/Supervisor: travado na própria equipe.
     if ((isAssessor || isSupervisor) && currentUser) {
       nomes = nomes.filter((nome) => normalize(nome) === normalize(userTeam));
     }
+
     return ["todas", ...nomes];
-  }, [equipeConfigs, isAssessor, isSupervisor, currentUser, userTeam]);
+  }, [
+    equipeConfigs,
+    isAssessor,
+    isSupervisor,
+    isCoordenador,
+    currentUser,
+    userTeam,
+    coordenadorEscopo,
+    deveOcultarEquipesReservadas,
+  ]);
 
   // ============================================================
   // COLABORADORES FILTRADOS (para o dropdown)
@@ -298,6 +431,23 @@ export default function FilterBar({
     let filtered = [...collaborators];
     filtered = filtered.filter((c) => !isExcludedTeam(c.equipeNome));
     filtered = filtered.filter((c) => normalize(c.cargo) !== 'administrativo');
+
+    // Coordenador: somente colaboradores da própria unidade (whitelist do
+    // escopo). Antes do escopo carregar, filtra para vazio.
+    if (isCoordenador) {
+      if (!coordenadorEscopo) {
+        filtered = [];
+      } else {
+        filtered = filtered.filter((c) =>
+          coordenadorEscopo.colaboradores.has(normalize(c.email))
+        );
+      }
+    }
+
+    // Regra da Equipe Tatiane (mesma do Suporte).
+    if (deveOcultarEquipesReservadas) {
+      filtered = filtered.filter((c) => !isEquipeTravadaDestino(c.equipeNome));
+    }
 
     let effectiveEquipe = selectedEquipe;
     if ((isAssessor || isSupervisor) && currentUser) {
@@ -319,12 +469,22 @@ export default function FilterBar({
       );
     }
     return filtered;
-  }, [collaborators, selectedEquipe, isAssessor, isSupervisor, currentUser, searchTerm, isReady, userTeam]);
+  }, [
+    collaborators,
+    selectedEquipe,
+    isAssessor,
+    isSupervisor,
+    isCoordenador,
+    currentUser,
+    searchTerm,
+    isReady,
+    userTeam,
+    coordenadorEscopo,
+    deveOcultarEquipesReservadas,
+  ]);
 
   // ============================================================
   // GARANTE QUE O COLABORADOR SELECIONADO ESTEJA NA LISTA
-  // CORREÇÃO: se o selecionado não existir na lista filtrada,
-  // adiciona ele como fallback (evita select mostrando vazio).
   // ============================================================
   const colaboradoresParaSelect = useMemo(() => {
     if (selectedColaborador === "todos") return filteredColaboradores;
@@ -336,7 +496,7 @@ export default function FilterBar({
   }, [filteredColaboradores, selectedColaborador, collaborators]);
 
   // ============================================================
-  // NOTIFICA O PAI (referência estável)
+  // NOTIFICA O PAI
   // ============================================================
   const onFilterChangeRef = useRef(onFilterChange);
   useEffect(() => {
@@ -390,8 +550,6 @@ export default function FilterBar({
 
   // ============================================================
   // NOTIFICA O PAI APÓS READY + RESTRIÇÕES
-  // CORREÇÃO: dispara mesmo sem currentUser (após ready),
-  // evitando que o pai fique sem os filtros iniciais.
   // ============================================================
   const initialNotifyDone = useRef(false);
   useEffect(() => {
@@ -412,8 +570,6 @@ export default function FilterBar({
       setSelectedProduto(produtoMapeado);
     }
 
-    // CORREÇÃO: se o colaborador selecionado não pertence à nova
-    // equipe, reseta para "todos" para manter consistência.
     let nextColaborador = selectedColaborador;
     if (selectedColaborador !== "todos" && novaEquipe !== "todas") {
       const stillInTeam = collaborators.some(
@@ -488,6 +644,7 @@ export default function FilterBar({
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
       notifyParent(selectedEquipe, "todos", "Todos");
     } else {
+      // Admin, SuperAdmin, Coordenador: limpa seleção para "todas"/"todos".
       setSelectedEquipe("todas");
       setSelectedColaborador("todos");
       setSearchTerm("");
@@ -529,8 +686,16 @@ export default function FilterBar({
 
   // ============================================================
   // RENDER: LOADING
+  // ------------------------------------------------------------
+  // Bloqueia o render enquanto o escopo do Coordenador estiver carregando,
+  // evitando expor momentaneamente equipes de outras unidades.
   // ============================================================
-  if (!isReady || loadingEquipes || loadingCollaborators) {
+  if (
+    !isReady ||
+    loadingEquipes ||
+    loadingCollaborators ||
+    (isCoordenador && coordenadorEscopoLoading)
+  ) {
     return (
       <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
         <div className="flex items-center justify-center gap-2 text-gray-500">

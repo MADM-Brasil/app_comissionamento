@@ -37,6 +37,13 @@ const STATUS_MAP = Object.freeze({
 });
 const SUPPORT_STATUSES = new Set(Object.values(STATUS_MAP));
 
+// Status de tickets_movimentacao_lead que podem ser reprocessados pelo SalesOps.
+// Exclui "processando" (worker está com o lock), "pendente" (já na fila) e
+// "concluido" (não deve voltar atrás sem revisão manual do HubSpot).
+const STATUS_REPROCESSAVEIS = new Set([
+  'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
+]);
+
 // Mapeamento de unidade_id para nome legível.
 // 4 (HO) é tratado como "vê todas as unidades".
 const UNIDADES_MAP = Object.freeze({
@@ -977,6 +984,127 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
     mensagem: `Sua solicitação "${result.rows[0].titulo}" foi atualizada.\nStatus: ${hasStatus ? status : 'inalterado'}.\nObservação: ${hasObservation ? observation : 'inalterada'}`,
     data: new Date().toISOString() });
   res.json({ success: true, message: 'Ticket de suporte atualizado com sucesso.' });
+}));
+
+// ---------------------- Reprocessamento (SalesOps) ----------------------
+// Reenfileira um ticket para o worker. NÃO reativa sem controle:
+//   - Só aceita status elegíveis (STATUS_REPROCESSAVEIS).
+//   - Se o JSON de observação indicar escrita parcial no HubSpot
+//     (resultadoParcial/requiresReconciliation), exige `force: true`
+//     e registra a ação no histórico, sinalizando o risco.
+//   - Preserva produto/idempotency_key; apenas marca processado=false.
+//   - Limpa o estado interno do worker (_worker) para o Link Hub.
+router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
+  requireAdmin(req);
+  const id = recordId(req.params.id);
+  const force = req.body?.force === true;
+  const observacaoOperador = text(req.body?.observacao, 'Observação', { max: 2000 });
+
+  const result = await transaction(async client => {
+    const current = await client.query(
+      `SELECT id_ticket_movimentacao, ticket_id, crm_origem, status_mapeamento,
+              observacao_sales_ops
+         FROM app_comissionamento.tickets_movimentacao_lead
+        WHERE id_ticket_movimentacao = $1
+        FOR UPDATE`,
+      [id]
+    );
+    if (!current.rowCount) throw fail(404, 'Ticket de movimentação não encontrado.');
+    const movement = current.rows[0];
+
+    const statusAtual = String(movement.status_mapeamento || '').trim().toLowerCase();
+    if (!STATUS_REPROCESSAVEIS.has(statusAtual)) {
+      throw fail(
+        409,
+        `Ticket em status "${movement.status_mapeamento}" não pode ser reprocessado. ` +
+        `Status elegíveis: ${[...STATUS_REPROCESSAVEIS].join(', ')}.`
+      );
+    }
+
+    const metadata = parseJsonObject(movement.observacao_sales_ops);
+
+    const houveEscritaParcial = Boolean(
+      metadata?.hubspot?.resultadoParcial || metadata?.resultadoParcial ||
+      metadata?.requiresReconciliation || metadata?.hubspot?.requiresReconciliation
+    );
+    if (houveEscritaParcial && !force) {
+      const detalhe = metadata?.hubspot?.resultadoParcial || metadata?.resultadoParcial || {};
+      throw fail(
+        409,
+        'Este ticket registrou gravação parcial no HubSpot. ' +
+        'Confirme o estado atual do card/contato no CRM antes de reprocessar. ' +
+        'Reenvie com { "force": true } para prosseguir mesmo assim.' +
+        (detalhe?.dealId ? ` Deal ID: ${detalhe.dealId}.` : '')
+      );
+    }
+
+    const novoMetadata = {
+      ...metadata,
+      processado: false,
+      reprocessamentos: [
+        ...(Array.isArray(metadata.reprocessamentos) ? metadata.reprocessamentos : []),
+        {
+          em: new Date().toISOString(),
+          operador: req.supportActor.email,
+          statusAnterior: movement.status_mapeamento,
+          houveEscritaParcial,
+          force,
+          ...(observacaoOperador ? { observacao: observacaoOperador } : {}),
+        },
+      ],
+    };
+
+    // Apenas para HUBSPOT_LINK: remove marcadores do worker (lease/tentativas).
+    if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT) {
+      novoMetadata._worker = {
+        processando_desde: null,
+        tentativas: 0,
+        erro_lease: null,
+        ultima_falha_em: null,
+      };
+    }
+
+    await client.query(
+      `UPDATE app_comissionamento.tickets_movimentacao_lead
+          SET observacao_sales_ops = $1,
+              status_mapeamento = 'pendente',
+              analisado_em = NULL,
+              atualizado_em = NOW()
+        WHERE id_ticket_movimentacao = $2`,
+      [JSON.stringify(novoMetadata), id]
+    );
+
+    await client.query(
+      `UPDATE app_comissionamento.tickets_suporte
+          SET status = 'Aberto',
+              concluido_em = NULL,
+              atualizado_em = NOW()
+        WHERE id_ticket = $1`,
+      [movement.ticket_id]
+    );
+
+    return {
+      id: movement.id_ticket_movimentacao,
+      ticketId: movement.ticket_id,
+      crmOrigem: movement.crm_origem,
+      statusAnterior: movement.status_mapeamento,
+      houveEscritaParcial,
+      force,
+    };
+  });
+
+  res.status(202).json({
+    success: true,
+    id: result.id,
+    ticket_id: result.ticketId,
+    crm_origem: result.crmOrigem,
+    status_anterior: result.statusAnterior,
+    houve_escrita_parcial: result.houveEscritaParcial,
+    force_aplicado: result.force,
+    message: result.houveEscritaParcial && result.force
+      ? 'Ticket reenfileirado com override. O worker irá reprocessar; revise o resultado no HubSpot.'
+      : 'Ticket reenfileirado. O worker irá reprocessar em até 5s.',
+  });
 }));
 
 router.use((error, req, res, next) => {

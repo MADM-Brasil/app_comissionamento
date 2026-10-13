@@ -18,7 +18,7 @@ import {
   Upload,
   Paperclip,
   Ban,
-  RefreshCw,
+  RotateCcw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
@@ -238,10 +238,10 @@ const getStatusInfo = (status: string) => {
 
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo',
-  'Equipe Lucilene','Equipe Elizandra','Backoffice'
+  'Equipe Lucilene','Equipe Elizandra'
 ];
 
 // Unidades em que o supervisor fica travado à própria equipe também no CRM
@@ -454,14 +454,12 @@ function MovimentacaoTab() {
     return () => { cancelled = true; };
   }, []);
 
-  // Equipe do próprio supervisor — usada apenas para pré-seleção inicial.
   const supervisorTeam =
     (accessUser as any)?.equipe
     || (accessUser as any)?.nome_equipe
     || currentUser?.equipe
     || "";
 
-  // Unidade do supervisor (preferindo a que veio do escopo autenticado).
   const unidadeSupervisorRaw = escopo?.usuario?.unidadeId != null
     ? escopo.usuario.unidadeId
     : (accessUser as any)?.unidade_id;
@@ -533,6 +531,7 @@ function MovimentacaoTab() {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
   }, [assessoresDisponiveis, assessorId]);
 
+  // ---------- Produto: configuração por equipe ----------
   const produtoConfig: ProdutoConfig = useMemo(() => {
     const mapaBackend = escopo?.produtos?.porEquipe;
     const hit = findProdutoConfig(mapaBackend, equipe);
@@ -649,6 +648,7 @@ function MovimentacaoTab() {
 
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
 
+    // Resolve produto antes de qualquer envio e valida contra a equipe.
     const produtoSelecionado = produto || produtoConfig.default;
     if (!produtoConfig.options.includes(produtoSelecionado)) {
       setMessage({ text: "Selecione um produto válido para a equipe.", type: "error" });
@@ -860,6 +860,12 @@ function MovimentacaoTab() {
             </div>
           )}
 
+          {deveOcultarEquipesReservadas && !movimentacaoEmMassa && (
+            <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
+              A equipe <strong>Equipe Tatiane</strong> não está disponível para o seu perfil.
+            </div>
+          )}
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {movimentacaoEmMassa && (
               <div className="md:col-span-2">
@@ -988,6 +994,7 @@ function MovimentacaoTab() {
               </select>
             </div>
 
+            {/* Produto — visível nos DOIS modos (individual e Link Hub) */}
             <div className="md:col-span-2">
               <label
                 htmlFor="mov-produto"
@@ -1626,11 +1633,129 @@ function EditModal({ isOpen, onClose, title, children, onSave, saving }: EditMod
   );
 }
 
+// ---------------------- Modal de Reprocessamento ----------------------
+interface ReprocessModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  ticket: TicketMovimentacao | null;
+  onConfirm: (params: { force: boolean; observacao: string }) => void;
+  saving: boolean;
+}
+
+function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: ReprocessModalProps) {
+  const [force, setForce] = useState(false);
+  const [observacao, setObservacao] = useState("");
+
+  useEffect(() => {
+    if (isOpen) { setForce(false); setObservacao(""); }
+  }, [isOpen]);
+
+  if (!isOpen || !ticket) return null;
+
+  const escritaParcial = (() => {
+    try {
+      const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
+      return Boolean(
+        parsed?.hubspot?.resultadoParcial || parsed?.resultadoParcial ||
+        parsed?.requiresReconciliation || parsed?.hubspot?.requiresReconciliation
+      );
+    } catch { return false; }
+  })();
+
+  const motivoAtual = (() => {
+    try {
+      const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
+      return parsed?.hubspot?.mensagem || parsed?.observacao || '—';
+    } catch {
+      return ticket.observacao_sales_ops || '—';
+    }
+  })();
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-bold text-[#0f172a]">
+            Reprocessar Movimentação #{ticket.id_ticket_movimentacao}
+          </h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="space-y-4">
+          <div className="text-sm text-[#475569]">
+            <div><strong>Status atual:</strong> {ticket.status_mapeamento}</div>
+            <div><strong>Cliente:</strong> {`${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`.trim() || '—'}</div>
+            <div><strong>Destino:</strong> {ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</div>
+          </div>
+
+          <div className="rounded-md bg-gray-50 border border-[#e2e8f0] px-3 py-2 text-xs text-[#475569]">
+            <strong>Motivo atual:</strong>
+            <p className="mt-1 whitespace-pre-wrap break-words">{motivoAtual}</p>
+          </div>
+
+          {escritaParcial && (
+            <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800">
+              <strong>Atenção:</strong> este ticket registrou gravação parcial no HubSpot.
+              Verifique o estado atual do card e do contato no CRM antes de prosseguir.
+              Ao continuar, marque a caixa abaixo para confirmar.
+            </div>
+          )}
+
+          {escritaParcial && (
+            <label className="flex items-center gap-2 text-sm text-[#0f172a]">
+              <input
+                type="checkbox"
+                checked={force}
+                onChange={e => setForce(e.target.checked)}
+                className="h-4 w-4 rounded border-[#cbd5e1] text-[#2F6FED] focus:ring-[#2F6FED]"
+              />
+              Confirmo que revisei o HubSpot e quero reprocessar mesmo assim
+            </label>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-[#0f172a] mb-1">
+              Observação (opcional)
+            </label>
+            <textarea
+              value={observacao}
+              onChange={e => setObservacao(e.target.value)}
+              rows={3}
+              placeholder="Ex.: ajustei o cadastro da colaboradora; pode reprocessar."
+              className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-3 mt-6">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm font-medium text-[#475569] hover:bg-[#f1f5f9]"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={() => onConfirm({ force, observacao })}
+            disabled={saving || (escritaParcial && !force)}
+            className="px-4 py-2 bg-[#2F6FED] text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-[#2F6FED]/90 disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+            {saving ? 'Reprocessando...' : 'Reprocessar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------- Tabela de movimentações com edição via modal ----------------------
 function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false); // ← NOVO
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
@@ -1639,6 +1764,13 @@ function MovimentacoesSuporteTab() {
   const [editForm, setEditForm] = useState<{ status_mapeamento: string; observacao_sales_ops: string }>({ status_mapeamento: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
   const [showConcluidos, setShowConcluidos] = useState(false);
+  const [reprocessingTicket, setReprocessingTicket] = useState<TicketMovimentacao | null>(null);
+  const [reprocessing, setReprocessing] = useState(false);
+
+  // Status que podem ser reprocessados. Espelha o Set do backend.
+  const STATUS_REPROCESSAVEIS = new Set([
+    'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
+  ]);
 
   const carregarTickets = async () => {
     try {
@@ -1650,18 +1782,6 @@ function MovimentacoesSuporteTab() {
       setMessage({ text: "Erro ao carregar tickets", type: "error" });
     } finally {
       setLoading(false);
-    }
-  };
-
-  // ← NOVO: handler do botão Atualizar
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    setMessage(null);
-    try {
-      await carregarTickets();
-      setMessage({ text: "Lista atualizada.", type: "success" });
-    } finally {
-      setRefreshing(false);
     }
   };
 
@@ -1731,6 +1851,51 @@ function MovimentacoesSuporteTab() {
     }
   };
 
+  const openReprocessModal = (ticket: TicketMovimentacao) => {
+    setReprocessingTicket(ticket);
+  };
+
+  const closeReprocessModal = () => {
+    setReprocessingTicket(null);
+  };
+
+  const reprocessarTicket = async ({ force, observacao }: { force: boolean; observacao: string }) => {
+    if (!reprocessingTicket) return;
+    setReprocessing(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/suporte/tickets-movimentacao/${reprocessingTicket.id_ticket_movimentacao}/reprocessar`,
+        {
+          method: 'POST',
+          headers: getCsrfHeaders(),
+          credentials: 'include',
+          body: JSON.stringify({ force, observacao }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao reprocessar');
+
+      // Atualiza a linha local sem nova requisição completa.
+      setTickets(prev => prev.map(t =>
+        t.id_ticket_movimentacao === reprocessingTicket.id_ticket_movimentacao
+          ? { ...t, status_mapeamento: 'pendente' }
+          : t
+      ));
+
+      setMessage({
+        text: data.message || 'Ticket reenfileirado para reprocessamento.',
+        type: 'success',
+      });
+      closeReprocessModal();
+      // Revalida em segundo plano para pegar o resultado do worker.
+      setTimeout(() => { carregarTickets(); }, 5000);
+    } catch (err: any) {
+      setMessage({ text: err.message, type: 'error' });
+    } finally {
+      setReprocessing(false);
+    }
+  };
+
   const filteredTickets = tickets.filter(t => {
     const statusMatch = filterStatus === "todos" || t.status_mapeamento === filterStatus;
     if (!statusMatch) return false;
@@ -1747,18 +1912,6 @@ function MovimentacoesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Movimentações (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
-            {/* ← NOVO: botão Atualizar */}
-            <button
-              type="button"
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="px-3 py-1 rounded text-sm flex items-center gap-1 transition-colors bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0] disabled:opacity-50"
-              title="Recarregar a lista do servidor"
-            >
-              <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} />
-              {refreshing ? "Atualizando..." : "Atualizar"}
-            </button>
-
             <button
               type="button"
               onClick={() => setShowConcluidos(!showConcluidos)}
@@ -1818,7 +1971,7 @@ function MovimentacoesSuporteTab() {
                   <th>Produto</th>
                   <th>Status</th>
                   <th>Obs.</th>
-                  <th className="w-20">Ações</th>
+                  <th className="w-24">Ações</th>
                 </tr>
               </thead>
               <tbody>
@@ -1833,6 +1986,9 @@ function MovimentacoesSuporteTab() {
                       return null;
                     }
                   })();
+                  const podeReprocessar = STATUS_REPROCESSAVEIS.has(
+                    String(ticket.status_mapeamento || '').toLowerCase()
+                  );
                   return (
                     <tr key={ticket.id_ticket_movimentacao}>
                       <td>{ticket.id_ticket_movimentacao}</td>
@@ -1867,13 +2023,24 @@ function MovimentacoesSuporteTab() {
                         </span>
                       </td>
                       <td>
-                        <button
-                          onClick={() => openEditModal(ticket)}
-                          className="p-2 rounded-lg hover:bg-[#f1f5f9] text-[#64748b] hover:text-[#2F6FED] transition-colors"
-                          title="Editar"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => openEditModal(ticket)}
+                            className="p-2 rounded-lg hover:bg-[#f1f5f9] text-[#64748b] hover:text-[#2F6FED] transition-colors"
+                            title="Editar"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          {podeReprocessar && (
+                            <button
+                              onClick={() => openReprocessModal(ticket)}
+                              className="p-2 rounded-lg hover:bg-amber-50 text-[#64748b] hover:text-amber-600 transition-colors"
+                              title="Reprocessar este caso"
+                            >
+                              <RotateCcw className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1917,6 +2084,14 @@ function MovimentacoesSuporteTab() {
           />
         </div>
       </EditModal>
+
+      <ReprocessModal
+        isOpen={reprocessingTicket !== null}
+        onClose={closeReprocessModal}
+        ticket={reprocessingTicket}
+        onConfirm={reprocessarTicket}
+        saving={reprocessing}
+      />
     </div>
   );
 }
@@ -1925,7 +2100,6 @@ function MovimentacoesSuporteTab() {
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false); // ← NOVO
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterAssunto, setFilterAssunto] = useState<string>("todos");
@@ -1945,18 +2119,6 @@ function ReportesSuporteTab() {
       setMessage({ text: "Erro ao carregar reportes", type: "error" });
     } finally {
       setLoading(false);
-    }
-  };
-
-  // ← NOVO: handler do botão Atualizar
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    setMessage(null);
-    try {
-      await carregarReportes();
-      setMessage({ text: "Lista atualizada.", type: "success" });
-    } finally {
-      setRefreshing(false);
     }
   };
 
@@ -2021,18 +2183,6 @@ function ReportesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
-            {/* ← NOVO: botão Atualizar */}
-            <button
-              type="button"
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="px-3 py-1 rounded text-sm flex items-center gap-1 transition-colors bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0] disabled:opacity-50"
-              title="Recarregar a lista do servidor"
-            >
-              <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} />
-              {refreshing ? "Atualizando..." : "Atualizar"}
-            </button>
-
             <select
               value={filterAssunto}
               onChange={e => setFilterAssunto(e.target.value)}
