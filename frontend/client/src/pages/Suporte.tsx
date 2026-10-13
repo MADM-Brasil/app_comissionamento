@@ -19,6 +19,7 @@ import {
   Paperclip,
   Ban,
   RotateCcw,
+  RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
@@ -179,9 +180,6 @@ const formatCPF = (cpf: string): string => {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
-// Normalização agressiva para casar nomes de equipe e chaves do mapa de produto:
-// trim + colapso de espaços + lowercase + remoção de acentos.
-// Precisa ficar idêntica à `normalizeKey` de backend/config/teamProducts.js.
 const normalizeKey = (str: string): string =>
   String(str || '')
     .trim()
@@ -244,17 +242,8 @@ const EXCLUDED_TEAMS = [
   'Equipe Lucilene','Equipe Elizandra'
 ];
 
-// Unidades em que o supervisor fica travado à própria equipe também no CRM
-// (aba "Movimentar" individual). Precisa ficar em sincronia com
-// backend/routes/suporte.js (UNIDADES_TRAVADAS_EQUIPE).
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
 
-// Equipes que impõem trava de destino para supervisores que PERTENCEM a elas,
-// mesmo fora das unidades 2–5. Hoje: Equipe Tatiane (unidade 1).
-// Nomes normalizados (lowercase, sem acento).
-// Precisa ficar em sincronia com backend/services/access-control.js
-// (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
-// (EQUIPES_TRAVADAS_DESTINO).
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 function isEquipeTravadaDestino(nome: string): boolean {
@@ -269,7 +258,7 @@ const isExcludedTeam = (teamName: string): boolean => {
 };
 
 // =====================================================================
-// PRODUTO — nomes internos (espelham backend/config/teamProducts.js).
+// PRODUTO
 // =====================================================================
 const PRODUCT = Object.freeze({
   QUINQUENIO:       'quinquenio',
@@ -411,7 +400,6 @@ function MovimentacaoTab() {
   const [loadingEscopo, setLoadingEscopo] = useState(true);
   const [escopoError, setEscopoError] = useState<string | null>(null);
 
-  // ---------- Refresh da sessão ao entrar na página ----------
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -428,7 +416,6 @@ function MovimentacaoTab() {
     return () => { cancelled = true; };
   }, [setCurrentUser]);
 
-  // ---------- Carrega o escopo filtrado por unidade ----------
   useEffect(() => {
     let cancelled = false;
     const carregarEscopo = async () => {
@@ -465,7 +452,6 @@ function MovimentacaoTab() {
     : (accessUser as any)?.unidade_id;
   const unidadeSupervisor = unidadeSupervisorRaw != null ? Number(unidadeSupervisorRaw) : null;
 
-  // ---------- Regras de trava de destino ----------
   const unidadeTravadaPorUnidade = isSupervisor
     && unidadeSupervisor != null
     && UNIDADES_TRAVADAS_EQUIPE.includes(unidadeSupervisor);
@@ -531,7 +517,6 @@ function MovimentacaoTab() {
     if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
   }, [assessoresDisponiveis, assessorId]);
 
-  // ---------- Produto: configuração por equipe ----------
   const produtoConfig: ProdutoConfig = useMemo(() => {
     const mapaBackend = escopo?.produtos?.porEquipe;
     const hit = findProdutoConfig(mapaBackend, equipe);
@@ -648,7 +633,6 @@ function MovimentacaoTab() {
 
     if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
 
-    // Resolve produto antes de qualquer envio e valida contra a equipe.
     const produtoSelecionado = produto || produtoConfig.default;
     if (!produtoConfig.options.includes(produtoSelecionado)) {
       setMessage({ text: "Selecione um produto válido para a equipe.", type: "error" });
@@ -994,7 +978,6 @@ function MovimentacaoTab() {
               </select>
             </div>
 
-            {/* Produto — visível nos DOIS modos (individual e Link Hub) */}
             <div className="md:col-span-2">
               <label
                 htmlFor="mov-produto"
@@ -1080,6 +1063,15 @@ function MovimentacaoTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={loadUserHistory}
+              disabled={loadingHistory}
+              className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0] disabled:opacity-50"
+              title="Recarregar o histórico"
+            >
+              <RefreshCw className={cn("w-3 h-3", loadingHistory && "animate-spin")} /> Atualizar
+            </button>
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
               {statusOptions.map(s => (
                 <option key={s} value={s}>
@@ -1478,6 +1470,15 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={loadUserReports}
+              disabled={loadingReports}
+              className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0] disabled:opacity-50"
+              title="Recarregar os reportes"
+            >
+              <RefreshCw className={cn("w-3 h-3", loadingReports && "animate-spin")} /> Atualizar
+            </button>
             <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
               {statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}
             </select>
@@ -1752,7 +1753,7 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
   );
 }
 
-// ---------------------- Tabela de movimentações com edição via modal ----------------------
+// ---------------------- Tabela de movimentações (SalesOps) ----------------------
 function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1766,8 +1767,8 @@ function MovimentacoesSuporteTab() {
   const [showConcluidos, setShowConcluidos] = useState(false);
   const [reprocessingTicket, setReprocessingTicket] = useState<TicketMovimentacao | null>(null);
   const [reprocessing, setReprocessing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Status que podem ser reprocessados. Espelha o Set do backend.
   const STATUS_REPROCESSAVEIS = new Set([
     'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
   ]);
@@ -1782,6 +1783,15 @@ function MovimentacoesSuporteTab() {
       setMessage({ text: "Erro ao carregar tickets", type: "error" });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await carregarTickets();
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -1875,7 +1885,6 @@ function MovimentacoesSuporteTab() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erro ao reprocessar');
 
-      // Atualiza a linha local sem nova requisição completa.
       setTickets(prev => prev.map(t =>
         t.id_ticket_movimentacao === reprocessingTicket.id_ticket_movimentacao
           ? { ...t, status_mapeamento: 'pendente' }
@@ -1887,7 +1896,6 @@ function MovimentacoesSuporteTab() {
         type: 'success',
       });
       closeReprocessModal();
-      // Revalida em segundo plano para pegar o resultado do worker.
       setTimeout(() => { carregarTickets(); }, 5000);
     } catch (err: any) {
       setMessage({ text: err.message, type: 'error' });
@@ -1912,6 +1920,16 @@ function MovimentacoesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Movimentações (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="px-3 py-1 rounded text-sm flex items-center gap-1 bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0] transition-colors disabled:opacity-50"
+              title="Recarregar a lista de movimentações"
+            >
+              <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} /> Atualizar
+            </button>
+
             <button
               type="button"
               onClick={() => setShowConcluidos(!showConcluidos)}
@@ -2096,7 +2114,7 @@ function MovimentacoesSuporteTab() {
   );
 }
 
-// ---------------------- Tabela de reportes com edição via modal (SalesOps) ----------------------
+// ---------------------- Tabela de reportes (SalesOps) ----------------------
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
@@ -2108,6 +2126,7 @@ function ReportesSuporteTab() {
   const [editingTicket, setEditingTicket] = useState<TicketSuporte | null>(null);
   const [editForm, setEditForm] = useState<{ status: string; observacao_sales_ops: string }>({ status: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const carregarReportes = async () => {
     try {
@@ -2119,6 +2138,15 @@ function ReportesSuporteTab() {
       setMessage({ text: "Erro ao carregar reportes", type: "error" });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await carregarReportes();
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -2183,6 +2211,16 @@ function ReportesSuporteTab() {
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="px-3 py-1 rounded text-sm flex items-center gap-1 bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0] transition-colors disabled:opacity-50"
+              title="Recarregar a lista de reportes"
+            >
+              <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} /> Atualizar
+            </button>
+
             <select
               value={filterAssunto}
               onChange={e => setFilterAssunto(e.target.value)}
