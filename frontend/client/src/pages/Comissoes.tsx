@@ -3745,9 +3745,9 @@ export default function Comissoes() {
                 </div>
 
                 {isSupervisorUser && (
-                  <div className="card p-5 order-1">
+                  <div className="card p-5 order-1 lg:row-span-2 flex flex-col">
                     <h3 className="text-sm font-bold mb-4">Equipe (Assinados / Ganhos)</h3>
-                    <div className="space-y-2 max-h-[420px] overflow-y-auto pr-2 custom-scrollbar">
+                    <div className="space-y-2 flex-1 min-h-0 overflow-y-auto pr-2 custom-scrollbar">
                       {teamAssessorMembers.length > 0 ? (
                         teamAssessorMembers.map((member) => {
                           const isExpanded = expandedTeamMemberId === String(member.id);
