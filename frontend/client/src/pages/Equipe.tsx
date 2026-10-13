@@ -47,18 +47,13 @@ function formatPct(valor: number, casasDecimais = 1): string {
 }
 function formatMoeda(valor: number): string {
   return new Intl.NumberFormat("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-    maximumFractionDigits: 0,
+    style: "currency", currency: "BRL", maximumFractionDigits: 0,
   }).format(valor);
 }
-
-// ← CORRIGIDO: alias para manter compatibilidade com o nome usado em Comissoes.tsx
-// (evita o erro TS2304 "Cannot find name 'formatInt'")
 const formatInt = formatNumero;
 
 // ============================================================
-//  META DE GANHOS DO PERÍODO (banca em peso_meta_ganho_*)
+//  META DE GANHOS DO PERÍODO
 // ============================================================
 function getMetaGanhosPeriodo(colab: any, period: string, diasUteisPeriodo = 0): number {
   const pesoDiario = pickNumber(colab?.pesoDiarioGanhos, colab?.metaDiarioGanhos, 3);
@@ -79,7 +74,7 @@ function pickNumber(...values: Array<unknown>): number {
 }
 
 // ============================================================
-//  MEDALHAS (pódio)
+//  MEDALHAS
 // ============================================================
 type Medalha = "ouro" | "prata" | "bronze" | "destaque";
 const MEDALHA_ICON: Record<Medalha, LucideIcon> = {
@@ -90,7 +85,7 @@ const MEDALHA_COR: Record<Medalha, string> = {
 };
 
 // ============================================================
-//  KpiCard LOCAL
+//  KpiCard
 // ============================================================
 interface KpiCardProps {
   titulo: string;
@@ -131,19 +126,38 @@ function KpiCard({ titulo, valor, icon: Icon, accent = "brand", subtitulo, varia
 //  CONSTANTES DE EXCLUSÃO
 // ============================================================
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing', 'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial',
-  'Equipe Gabriela Toledo','Equipe Treinamento', 'Equipe lucilene', 'Equipe Elizandra'
+  'Equipe Elizandra', 'Equipe Gabriela Toledo','Equipe Lucilene','Backoffice','Equipe Curitiba','Equipe Treinamento'
 ];
+
+// Equipes reservadas — precisa ficar em sincronia com
+// backend/services/access-control.js (RESERVED_DESTINATION_TEAMS) e
+// backend/routes/suporte.js (EQUIPES_TRAVADAS_DESTINO).
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+
 const normalize = (str: string | undefined | null): string =>
   (str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const normalizeKey = (str: string | undefined | null): string =>
+  String(str || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+
 const isExcludedTeam = (teamName: string) =>
   EXCLUDED_TEAMS.some((t) => normalize(t) === normalize(teamName));
 const normalizarNome = (nome: string) => normalize(nome);
-// Alias adicionado para manter consistência com o restante do sistema
-// (evita TS2304 em helpers portados de outros arquivos).
 const normalizeName = (text: string | undefined | null) => normalize(text);
+
+function isEquipeTravadaDestino(nome: string | undefined | null): boolean {
+  const n = normalizeKey(nome);
+  return EQUIPES_TRAVADAS_DESTINO.includes(n);
+}
+
 function isAggregatedRole(cargo: string | undefined): boolean {
   const c = normalize(cargo);
   if (c.includes("supervisor")) return true;
@@ -273,11 +287,63 @@ export default function Equipe() {
   const userLevel = getAccessLevel(currentUser?.cargo, currentUser?.status);
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
+  const isCoordenador = userLevel === LEVELS.COORDENADOR;
   const canSeeAll = userLevel >= LEVELS.COORDENADOR;
+
+  // Unidade do usuário (mesmo padrão de acesso das outras telas).
+  const userUnidadeRaw = (currentUser as any)?.unidade_id
+    ?? (currentUser as any)?.unidadeId
+    ?? null;
+  const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
 
   const [busca, setBusca] = useState("");
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadingError, setLoadingError] = useState<string | null>(null);
+
+  // ============================================================
+  //  ESCOPO DO COORDENADOR
+  //  O backend /suporte/escopo já devolve apenas equipes e
+  //  colaboradores da própria unidade para o Coordenador. Usamos
+  //  esse retorno como whitelist para filtrar o que é exibido.
+  // ============================================================
+  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
+    equipes: Set<string>;
+    colaboradores: Set<string>;
+  } | null>(null);
+  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isCoordenador || !currentUser) {
+      setCoordenadorEscopo(null);
+      return;
+    }
+    let mounted = true;
+    (async () => {
+      setCoordenadorEscopoLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (!mounted) return;
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        const equipes = new Set<string>(
+          (data.data?.equipes || []).map((e: string) => normalize(e))
+        );
+        const colaboradores = new Set<string>(
+          (data.data?.assessores || []).map((a: any) => normalize(a.email))
+        );
+        setCoordenadorEscopo({ equipes, colaboradores });
+      } catch (err: any) {
+        console.error("[Equipe] Falha ao carregar escopo do Coordenador:", err?.message);
+        // Em caso de falha, aplicamos whitelist vazia para não expor dados.
+        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
+      } finally {
+        if (mounted) setCoordenadorEscopoLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [isCoordenador, currentUser]);
 
   useEffect(() => {
     updateCurrentDates();
@@ -342,15 +408,54 @@ export default function Equipe() {
     }
   }, [currentUser, isSupervisor, isAssessor, supervisor, rawCollaborators, userTeam]);
 
+  // ============================================================
+  //  LISTA DE COLABORADORES VISÍVEIS
+  // ------------------------------------------------------------
+  //  Regras:
+  //    - Admin/SuperAdmin: todos.
+  //    - Coordenador: apenas da própria unidade (whitelist).
+  //    - Supervisor: apenas da própria equipe; se unidade 1 e fora
+  //      da Tatiane, a própria Tatiane é ocultada (redundante,
+  //      pois já está travado na própria equipe).
+  //    - Assessor: apenas ele mesmo.
+  // ============================================================
   const colaboradores = useMemo(() => {
     let filtered = rawCollaborators.filter((c) => !isExcludedTeam(c.equipeNome));
+
+    // Coordenador: aplica whitelist. Enquanto o escopo carrega,
+    // retorna vazio para não expor dados de outras unidades.
+    if (isCoordenador) {
+      if (!coordenadorEscopo) return [];
+      filtered = filtered.filter((c) =>
+        coordenadorEscopo.colaboradores.has(normalize(c.email))
+      );
+    }
+
+    // Supervisor de unidade 1 fora da Tatiane: oculta a equipe reservada.
+    const ocultarEquipesReservadas = isSupervisor
+      && userUnidade === 1
+      && !!userTeam
+      && !isEquipeTravadaDestino(userTeam);
+    if (ocultarEquipesReservadas) {
+      filtered = filtered.filter((c) => !isEquipeTravadaDestino(c.equipeNome));
+    }
+
     if (isAssessor) {
       filtered = filtered.filter(c => c.email === currentUser?.email);
     } else if (isSupervisor) {
       filtered = userTeam ? filtered.filter(c => normalize(c.equipeNome) === normalize(userTeam)) : [];
     }
     return filtered;
-  }, [rawCollaborators, currentUser, isAssessor, isSupervisor, userTeam]);
+  }, [
+    rawCollaborators,
+    currentUser,
+    isAssessor,
+    isSupervisor,
+    isCoordenador,
+    userTeam,
+    coordenadorEscopo,
+    userUnidade,
+  ]);
 
   const labelPeriodo = useMemo(
     () => (period === "Custom" ? `${currentStartDate} a ${currentEndDate}` : period),
@@ -363,7 +468,9 @@ export default function Equipe() {
     : isAssessor ? "Seus indicadores de desempenho."
     : `Visão geral das equipes. Ganhos de ${labelPeriodo}.`;
 
-  if (initialLoading) {
+  // Bloqueia também enquanto o escopo do Coordenador ainda não chegou,
+  // evitando que apareça momentaneamente tudo o que não pode.
+  if (initialLoading || (isCoordenador && coordenadorEscopoLoading)) {
     return (
       <DashboardLayout title={titulo} subtitle="Carregando...">
         <div className="flex justify-center items-center h-64">
@@ -818,17 +925,11 @@ function DetalhesColaborador({
   >([]);
   const [carregandoEvolucao, setCarregandoEvolucao] = useState(false);
 
-  // ============================================================
-  //  RECOMENDAÇÕES TEMPORÁRIAS
-  // ============================================================
   const [tempRecs, setTempRecs] = useState<TemporaryRecommendation[]>([]);
   const [newRecText, setNewRecText] = useState("");
   const [newRecPriority, setNewRecPriority] = useState<RecommendationPriority>("info");
   const [sendingRec, setSendingRec] = useState(false);
 
-  // ============================================================
-  //  DADOS DE LIGAÇÕES E TABULAÇÕES PARA AS RECOMENDAÇÕES
-  // ============================================================
   const [callMetrics, setCallMetrics] = useState<CallMetrics[]>([]);
   const [allTabulations, setAllTabulations] = useState<CallTabulation[]>([]);
   const [loadingCallData, setLoadingCallData] = useState(false);
@@ -1010,12 +1111,8 @@ function DetalhesColaborador({
     ];
   }, [recebidos, assinados, protocolados, ganhos, taxaConversaoGeral, mediaEquipe]);
 
-  // ============================================================
-  // RECOMENDAÇÕES AUTOMÁTICAS
-  // ============================================================
   const recomendacoes: string[] = [];
 
-  // ---- 1) Comissão / metas ----
   if (metaGanhosPeriodo > 0 && ganhos < metaGanhosPeriodo * 0.7) {
     recomendacoes.push("Ganhos abaixo de 70% da meta do período. Redefinir plano de recuperação com acompanhamento semanal.");
   }
@@ -1027,7 +1124,6 @@ function DetalhesColaborador({
   if (taxaConversaoProtocolados < 60) recomendacoes.push("Revisar imediatamente a carteira de assinados sem protocolo.");
   if (taxaConversaoGeral < 70) recomendacoes.push("Reforçar técnicas de fechamento comercial (etapa emissão → assinatura).");
 
-  // ---- 2) Ligações e tabulações ----
   const callTotals = callMetrics.reduce((sum, row) => ({
     total: sum.total + (Number(row.total_ligacoes) || 0),
     productive: sum.productive + (Number(row.produtivas) || 0),
@@ -1036,7 +1132,6 @@ function DetalhesColaborador({
   const totalLigacoes = callTotals.total;
   const ligacoesProdutivas = callTotals.productive;
 
-  // Helper: soma tabulações por padrões de nome (normalizado, case-insensitive)
   const sumTabulationsByName = (patterns: string[]): number => {
     return allTabulations.reduce((sum, t) => {
       const nome = normalizeName(t.tabulacao);
@@ -1069,7 +1164,6 @@ function DetalhesColaborador({
     const totalNaoTabulada = sumTabulationsByName(['nao tabulada', 'não tabulada', 'tempo excedido']);
     if (totalNaoTabulada > 3) {
       recomendacoes.push(
-        // ← CORRIGIDO: formatInt agora existe como alias de formatNumero
         `Foram registradas ${formatInt(totalNaoTabulada)} ocorrências de "Não Tabulada - Tempo Excedido" no período. Evite deixar atendimentos sem a devida tabulação.`
       );
     }
@@ -1087,7 +1181,6 @@ function DetalhesColaborador({
     const taxaMuda = (totalMuda / totalLigacoes) * 100;
     if (taxaMuda > 10) {
       recomendacoes.push(
-        // ← CORRIGIDO: typos "tabulção" → "tabulação" e "Ligaçoes" → "Ligações"
         `${taxaMuda.toFixed(1)}% das ligações foram tabuladas como "Mudas". Recomendamos que verifique o funcionamento dos equipamentos e separe os casos para serem avaliados por nossa equipe.\n` +
         `OBS: A tabulação de Ligações mudas deve ser utilizada quando não houver comunicação/áudio do cliente.`
       );
@@ -1253,7 +1346,6 @@ function DetalhesColaborador({
         </Card>
       </div>
 
-      {/* Recomendações temporárias — visível somente para supervisor+ */}
       {canAuthorRecommendations && (
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 mb-6">
           <Card className="xl:col-span-1">
@@ -1280,7 +1372,6 @@ function DetalhesColaborador({
               </span>
             </div>
 
-            {/* Form de criação */}
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 mb-4">
               <p className="text-[11px] font-semibold text-slate-700 mb-2">
                 Nova recomendação para {colaborador.name}
@@ -1330,7 +1421,6 @@ function DetalhesColaborador({
               </div>
             </div>
 
-            {/* Lista de recomendações ativas criadas */}
             {tempRecs.length > 0 ? (
               <div className="space-y-2 mb-4">
                 <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
@@ -1374,7 +1464,6 @@ function DetalhesColaborador({
               </p>
             )}
 
-            {/* Recomendações automáticas */}
             <div className="flex items-center justify-between mb-2">
               <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
                 Recomendações
@@ -1390,8 +1479,6 @@ function DetalhesColaborador({
                 {recomendacoes.map((r, i) => (
                   <li key={i} className="flex gap-2 text-[13px] text-slate-600 rounded-lg bg-slate-50 border border-slate-200 p-3">
                     <span className="text-blue-600 shrink-0">→</span>
-                    {/* ← CORRIGIDO: whitespace-pre-line faz o "\n" virar quebra de linha real
-                        (necessário para o "OBS:" aparecer na linha de baixo) */}
                     <span className="whitespace-pre-line">{r}</span>
                   </li>
                 ))}
