@@ -63,6 +63,10 @@ const EXCLUDED_CARGOS = [
   "analista de crm", "desenvolvedor", "diretora", "analista de dados", "desenvolvedor make",
 ];
 
+// Equipes reservadas — mesma regra de Suporte/Equipe/Ranking.
+// Precisa ficar em sincronia com backend/services/access-control.js
+// (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
+// (EQUIPES_TRAVADAS_DESTINO).
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 const normalize = (str: string): string =>

@@ -45,7 +45,7 @@ const EXCLUDED_CARGOS_FOR_DISPLAY = [
 ];
 
 // ============================================================
-// FUNÇÕES AUXILIARES (mesmas da Comissões)
+// FUNÇÕES AUXILIARES
 // ============================================================
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -113,13 +113,9 @@ const isDesativado = (c: any) => {
   return cargo === 'desativado' || equipe.includes('desativado');
 };
 
-// ← AJUSTADO: helper reutilizável para detectar cargo de supervisor de forma
-// consistente com a página Comissões (aceita "supervisor", "supervisor sr" etc).
 const isSupervisorCargo = (cargo?: string | null): boolean =>
   (cargo || '').toLowerCase().trim().startsWith('supervisor');
 
-// ← AJUSTADO: localiza o colaborador selecionado — primeiro por id (comparando
-// como string para evitar mismatch number/string), depois por nome.
 function findSelectedCollaborator(
   collaborators: any[],
   filters: { colaboradorId?: string | number; colaborador?: string }
@@ -329,8 +325,6 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [dailyMetrics, setDailyMetrics] = useState<any[]>([]);
 
-  // ← AJUSTADO: movidos para cima do reloadData (antes ficavam declarados
-  // depois, o que funcionava mas era confuso).
   const [totalLeads, setTotalLeads] = useState(0);
   const [totalLigacoesProdutivas, setTotalLigacoesProdutivas] = useState(0);
 
@@ -365,11 +359,7 @@ export default function Home() {
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
 
   // ============================================================
-  // ← AJUSTADO: DETECÇÃO DE SUPERVISOR SELECIONADO
-  //
-  // Sempre que o filtro de colaborador aponta para um supervisor,
-  // devolvemos a equipe dele e limpamos o colaborador — mesma regra
-  // da página Comissões. Isso faz o backend agregar a equipe.
+  // DETECÇÃO DE SUPERVISOR SELECIONADO
   // ============================================================
   const selectedCollaborator = useMemo(
     () => findSelectedCollaborator(collaborators, filters),
@@ -386,8 +376,6 @@ export default function Home() {
     let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
     let colaboradorIdApi = filters.colaboradorId;
 
-    // ← AJUSTADO: se o colaborador selecionado for supervisor, a página
-    // passa a se comportar como "visão da equipe" — igual à Comissões.
     if (isSupervisorSelected && selectedCollaborator) {
       equipeApi = selectedCollaborator.equipeNome || equipeApi;
       colaboradorApi = undefined;
@@ -469,7 +457,6 @@ export default function Home() {
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
       if (datesChanged) await loadRankingData();
 
-      // Carregar dados diários somente para assessores comuns
       if (currentUser) {
         const allColabs = useAppStore.getState().collaborators;
         const userColab = allColabs.find(c => c.id === currentUser.id);
@@ -579,14 +566,7 @@ export default function Home() {
   }, [filters.produto, currentUserData]);
 
   // ============================================================
-  // ← AJUSTADO: FILTRO DE COLABORADORES
-  //
-  // 1) Se um supervisor está selecionado no filtro de colaborador,
-  //    expandimos a lista para TODA a equipe dele. Isso é necessário
-  //    para que o cálculo de meta somada (totalTargetGanhos) reflita
-  //    a equipe, e não apenas o supervisor.
-  // 2) Caso contrário, mantemos o comportamento original (filtro por
-  //    equipe e/ou por nome do colaborador).
+  // FILTRO DE COLABORADORES
   // ============================================================
   const filteredCollaborators = useMemo(() => {
     if (isSupervisorSelected && supervisorSelectedTeam) {
@@ -607,6 +587,20 @@ export default function Home() {
   }), [filteredCollaborators]);
 
   const totals = rawMetrics;
+
+  // ============================================================
+  // ← AJUSTE: para Quinquenio/Concomitante, ganhos = assinados
+  // ------------------------------------------------------------
+  //  Quando o filtro de produto é Quinquenio ou Concomitante, a
+  //  métrica de ganhos passa a espelhar os assinados. Isso alinha
+  //  os KPIs, a meta e o card lateral à regra de negócio desses
+  //  produtos (o "ganho" é a assinatura).
+  // ============================================================
+  const effectiveTotals = useMemo(() => {
+    if (!isSpecialGroup) return totals;
+    return { ...totals, ganhos: totals.assinados };
+  }, [totals, isSpecialGroup]);
+
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
   const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos" && !isSupervisorSelected;
 
@@ -657,7 +651,7 @@ export default function Home() {
   const { totalTargetGanhos, totalMetasBatidas } = useMemo(() => {
     if (isGlobalView) {
       const meta = GLOBAL_META[periodKey as keyof typeof GLOBAL_META] || GLOBAL_META.mensal;
-      const ganhos = rawMetrics.ganhos;
+      const ganhos = effectiveTotals.ganhos;
       const metasBatidas = Math.floor(ganhos / (meta.ganhos || 1));
       return { totalTargetGanhos: meta.ganhos, totalMetasBatidas: metasBatidas };
     }
@@ -669,18 +663,20 @@ export default function Home() {
       const pesoGan = Number(c[pesoGanKey]) || 0;
       sumGan += pesoGan;
 
-      const ganhos = isSpecialGroup ? 0 : (c.ganhos || 0);
+      // ← AJUSTE: em Quinquenio/Concomitante, o "ganho" considerado é o
+      // assinado do colaborador, espelhando a regra do card/KPIs.
+      const ganhos = isSpecialGroup ? (c.assinados || 0) : (c.ganhos || 0);
       if (pesoGan === 0) return;
       metas += Math.floor(ganhos / pesoGan);
     });
 
     return { totalTargetGanhos: sumGan, totalMetasBatidas: metas };
-  }, [isGlobalView, displayCollaborators, rawMetrics, isSpecialGroup, periodKey]);
+  }, [isGlobalView, displayCollaborators, effectiveTotals, isSpecialGroup, periodKey]);
 
   const goalProgress = useMemo(() => {
     if (totalTargetGanhos === 0) return 100;
-    return Math.min((totals.ganhos / totalTargetGanhos) * 100, 100);
-  }, [totalTargetGanhos, totals.ganhos]);
+    return Math.min((effectiveTotals.ganhos / totalTargetGanhos) * 100, 100);
+  }, [totalTargetGanhos, effectiveTotals.ganhos]);
 
   // ============================================================
   // GRÁFICOS DE PERFORMANCE
@@ -782,7 +778,7 @@ export default function Home() {
   }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
 
   // ============================================================
-  // STATS DA SEMANA — apenas ganhos
+  // STATS DA SEMANA
   // ============================================================
   const stats = useMemo(() => {
     if (isSpecialGroup || weeklyDetailed.length === 0) {
@@ -826,9 +822,16 @@ export default function Home() {
     return maxFaixa.valor_comissao || 5000;
   }, [currentUserData, tabelaComissoes]);
 
+  // ============================================================
+  // KPI CARDS
+  // ------------------------------------------------------------
+  //  Em Quinquenio/Concomitante, "Ganhos" recebe effectiveTotals.ganhos
+  //  (que é igual ao total de assinados no período). Os demais KPIs
+  //  permanecem inalterados.
+  // ============================================================
   const kpiCards = [
     { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
-    { label: "Ganhos", value: totals.ganhos, target: totalTargetGanhos, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
+    { label: "Ganhos", value: effectiveTotals.ganhos, target: totalTargetGanhos, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
     { label: "Protocolados", value: totals.protocolados, target: 1200, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
   ];
@@ -867,8 +870,6 @@ export default function Home() {
                 Mostrando dados de:
                 {filters.equipe !== "todas" && ` ${filters.equipe}`}
                 {filters.colaborador !== "todos" && !isSupervisorSelected && ` - ${filters.colaborador}`}
-                {/* ← AJUSTADO: quando um supervisor é selecionado, sinaliza
-                    que a visão virou agregação da equipe dele. */}
                 {isSupervisorSelected && supervisorSelectedTeam && (
                   <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
                 )}
@@ -909,7 +910,7 @@ export default function Home() {
                 <div className="text-center">
                   <div className="eyebrow mb-1">🏆 Ganhos</div>
                   <div className="kpi-value text-[#16A34A]">
-                    {formatInt(totals.ganhos)}
+                    {formatInt(effectiveTotals.ganhos)}
                     <span className="text-sm font-normal text-[#64748b]">/{formatInt(totalTargetGanhos)}</span>
                   </div>
                 </div>
@@ -925,7 +926,7 @@ export default function Home() {
                   <p className="text-xs font-semibold" style={{ color: goalProgress >= 70 ? "#16A34A" : "#2F6FED" }}>
                     {goalProgress >= 100
                       ? "🎯 Meta de ganhos atingida! Parabéns!"
-                      : `💪 Faltam ${formatInt(Math.max(0, totalTargetGanhos - totals.ganhos))} ganho(s) para atingir a meta`}
+                      : `💪 Faltam ${formatInt(Math.max(0, totalTargetGanhos - effectiveTotals.ganhos))} ganho(s) para atingir a meta`}
                   </p>
                 </div>
               </div>

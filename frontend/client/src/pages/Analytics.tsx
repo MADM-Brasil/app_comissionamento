@@ -5,6 +5,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, formatCurrency } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
+import { getAccessLevel, LEVELS } from "@/lib/accessControl";
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -45,14 +46,37 @@ const EXCLUDED_GROUPS = [
   "administrativo"
 ];
 
+// ========== EQUIPES RESERVADAS (mesma regra de Suporte/Equipe/Visão Geral/Ranking/Comissões) ==========
+// Precisa ficar em sincronia com backend/services/access-control.js
+// (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
+// (EQUIPES_TRAVADAS_DESTINO).
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+
 function isExcludedTeam(teamName: string): boolean { return EXCLUDED_TEAMS.includes(teamName); }
 function isExcludedGroup(group: string): boolean {
   const normalized = (group || '').trim().toLowerCase();
   return EXCLUDED_GROUPS.some(g => g.toLowerCase() === normalized);
 }
 
-// ← AJUSTADO: helpers para detectar cargo supervisor e localizar o
-// colaborador selecionado no filtro (mesma lógica da página Comissões).
+// Normalização agressiva (mesma usada nas outras telas).
+const normalize = (str: string | undefined | null): string =>
+  String(str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+const normalizeKey = (str: string | undefined | null): string =>
+  String(str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+
+function isEquipeTravadaDestino(nome: string | undefined | null): boolean {
+  const n = normalizeKey(nome);
+  return EQUIPES_TRAVADAS_DESTINO.includes(n);
+}
+
+// ← Mantido: helpers para detectar cargo supervisor e localizar o
+// colaborador selecionado no filtro.
 const isSupervisorCargo = (cargo?: string | null): boolean =>
   (cargo || '').toLowerCase().trim().startsWith('supervisor');
 
@@ -134,12 +158,89 @@ export default function Analytics() {
   const [, navigate] = useLocation();
   const {
     currentStartDate, currentEndDate, period,
-    collaborators, currentUser,
+    collaborators,
+    currentUser: storeUser,
     loadCollaboratorsAndMetrics, loadWeeklyPerformanceData,
     rawMetrics, loadRawMetrics,
     hideValues,
   } = useAppStore();
-  const { hasPermission } = useAccessControl();
+  const { currentUser: accessUser, hasPermission } = useAccessControl();
+
+  // ============================================================
+  //  CONTROLE DE ACESSO
+  // ============================================================
+  const userLevel = getAccessLevel(accessUser?.cargo, accessUser?.status);
+  const isAssessor = userLevel === LEVELS.ASSESSOR;
+  const isCoordenador = userLevel === LEVELS.COORDENADOR;
+
+  // ⚠️ Nome com "User" para NÃO sombrear funções de módulo.
+  const userIsSupervisor = userLevel === LEVELS.SUPERVISAO;
+
+  const userUnidadeRaw = (accessUser as any)?.unidade_id
+    ?? (accessUser as any)?.unidadeId
+    ?? null;
+  const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
+
+  const userTeam = useMemo(() => {
+    if (!accessUser) return '';
+    const direct = (accessUser as any)?.equipe
+      || (accessUser as any)?.equipeNome
+      || (accessUser as any)?.nome_equipe
+      || '';
+    if (direct) return String(direct).trim();
+    if (collaborators.length > 0) {
+      const colab = collaborators.find(c =>
+        c.email === (accessUser as any)?.email || c.id === (accessUser as any)?.id
+      );
+      if (colab && colab.equipeNome) return colab.equipeNome.trim();
+    }
+    return '';
+  }, [accessUser, collaborators]);
+
+  // ============================================================
+  //  ESCOPO DO COORDENADOR (whitelist via /suporte/escopo)
+  // ============================================================
+  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
+    equipes: Set<string>;
+    colaboradores: Set<string>;
+  } | null>(null);
+  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isCoordenador || !accessUser) {
+      setCoordenadorEscopo(null);
+      return;
+    }
+    let mounted = true;
+    (async () => {
+      setCoordenadorEscopoLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (!mounted) return;
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        const equipes = new Set<string>(
+          (data.data?.equipes || []).map((e: string) => normalize(e))
+        );
+        const colaboradores = new Set<string>(
+          (data.data?.assessores || []).map((a: any) => normalize(a.email))
+        );
+        setCoordenadorEscopo({ equipes, colaboradores });
+      } catch (err: any) {
+        console.error("[Analytics] Falha ao carregar escopo do Coordenador:", err?.message);
+        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
+      } finally {
+        if (mounted) setCoordenadorEscopoLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [isCoordenador, accessUser]);
+
+  // Mantém a mesma referência de `currentUser` da store para o resto do
+  // componente (compatibilidade com o código existente).
+  const currentUser = storeUser;
 
   useEffect(() => { if (!hasPermission("canAccessReports")) navigate("/"); }, [hasPermission, navigate]);
 
@@ -167,26 +268,69 @@ export default function Analytics() {
 
   const equipe = filters.equipe, colaborador = filters.colaborador, colaboradorId = filters.colaboradorId, produto = filters.produto;
 
-  const currentUserData = useMemo(() => currentUser?.id ? collaborators.find(c => c.id === currentUser.id) : null, [collaborators, currentUser]);
+  // ============================================================
+  //  BASE RESTRITA POR PERFIL
+  // ------------------------------------------------------------
+  //  Aplica whitelist (Coordenador), ocultação da Tatiane
+  //  (Supervisor u.1 fora dela), travamento por equipe
+  //  (Supervisor) e travamento por e-mail (Assessor) antes de
+  //  qualquer filtro de UI.
+  // ============================================================
+  const scopedCollaborators = useMemo(() => {
+    let list = [...collaborators];
+
+    if (isCoordenador) {
+      if (!coordenadorEscopo) return [];
+      list = list.filter(c => coordenadorEscopo.colaboradores.has(normalize(c.email)));
+    }
+
+    const ocultarEquipesReservadas = userIsSupervisor
+      && userUnidade === 1
+      && !!userTeam
+      && !isEquipeTravadaDestino(userTeam);
+    if (ocultarEquipesReservadas) {
+      list = list.filter(c => !isEquipeTravadaDestino(c.equipeNome));
+    }
+
+    if (isAssessor && accessUser?.email) {
+      list = list.filter(c => normalize(c.email) === normalize(accessUser.email));
+    } else if (userIsSupervisor && userTeam) {
+      list = list.filter(c => normalize(c.equipeNome) === normalize(userTeam));
+    }
+
+    return list;
+  }, [
+    collaborators,
+    isCoordenador,
+    coordenadorEscopo,
+    userIsSupervisor,
+    isAssessor,
+    userUnidade,
+    userTeam,
+    accessUser,
+  ]);
+
+  const currentUserData = useMemo(
+    () => currentUser?.id ? scopedCollaborators.find(c => c.id === currentUser.id) : null,
+    [scopedCollaborators, currentUser]
+  );
   useEffect(() => {
     if (!currentUserData) return;
     setIsExcluded(isExcludedTeam(currentUserData.equipeNome) || isExcludedGroup(currentUserData.cargo));
   }, [currentUserData]);
 
   // ============================================================
-  // ← AJUSTADO: DETECÇÃO DO SUPERVISOR SELECIONADO
-  // Sempre que o filtro de colaborador aponta para um supervisor,
-  // trocamos o escopo para a equipe dele — mesma regra da Comissões.
+  //  DETECÇÃO DO SUPERVISOR SELECIONADO
   // ============================================================
   const selectedCollaborator = useMemo(
-    () => findSelectedCollaborator(collaborators, filters),
-    [collaborators, filters.colaborador, filters.colaboradorId]
+    () => findSelectedCollaborator(scopedCollaborators, filters),
+    [scopedCollaborators, filters.colaborador, filters.colaboradorId]
   );
   const isSupervisorSelected = !!selectedCollaborator && isSupervisorCargo(selectedCollaborator.cargo);
   const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
 
-  // ← AJUSTADO: centraliza a montagem dos parâmetros de API, aplicando
-  // a regra "supervisor selecionado => visão da equipe".
+  // Centraliza a montagem dos parâmetros de API, aplicando a regra
+  // "supervisor selecionado => visão da equipe".
   const getEffectiveFilterParams = useCallback(() => {
     let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
     let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
@@ -210,7 +354,6 @@ export default function Analytics() {
     setError(null);
 
     try {
-      // ← AJUSTADO: usa os parâmetros efetivos (que já consideram o supervisor)
       const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
 
       await Promise.all([
@@ -291,7 +434,6 @@ export default function Analytics() {
       const now = Date.now(); const shouldFetch = (now - lastFetchChartTime.current) > CHART_CACHE_TTL || dailyChartData.length === 0;
       if (!shouldFetch && dailyChartData.length > 0) { isFetchingRef.current = false; return; }
       try {
-        // ← AJUSTADO: usa os parâmetros efetivos (supervisor → equipe)
         const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
         const baseParams = { start: chartDateRange.start, end: chartDateRange.end, equipe: equipeApi, colaborador: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi, granularity: 'daily' as const };
         const [leadsData, assinadosData, ganhosData, protocoladosData, perdidosData, ligacoesProdutivas] = await Promise.all([
@@ -340,16 +482,18 @@ export default function Analytics() {
   const isSpecialGroup = produto === 'Quinquenio' || produto === 'Concomitante';
 
   // ============================================================
-  // ← AJUSTADO: FILTRO DE COLABORADORES
-  // Se um supervisor está selecionado, a base vira a equipe dele.
-  // Isso é essencial para o cálculo de metas somadas abaixo.
+  //  FILTRO DE COLABORADORES (sobre a base restrita por perfil)
   // ============================================================
   const filteredCollaborators = useMemo(() => {
     if (isSupervisorSelected && supervisorSelectedTeam) {
-      return collaborators.filter(c => !isExcludedTeam(c.equipeNome) && c.equipeNome === supervisorSelectedTeam);
+      return scopedCollaborators.filter(c => !isExcludedTeam(c.equipeNome) && c.equipeNome === supervisorSelectedTeam);
     }
-    return collaborators.filter(c => !isExcludedTeam(c.equipeNome) && (equipe==="todas"||c.equipeNome===equipe) && (colaborador==="todos"||c.name===colaborador));
-  }, [collaborators, equipe, colaborador, isSupervisorSelected, supervisorSelectedTeam]);
+    return scopedCollaborators.filter(c =>
+      !isExcludedTeam(c.equipeNome)
+      && (equipe === "todas" || c.equipeNome === equipe)
+      && (colaborador === "todos" || c.name === colaborador)
+    );
+  }, [scopedCollaborators, equipe, colaborador, isSupervisorSelected, supervisorSelectedTeam]);
 
   const baseCollaborators = useMemo(() => filteredCollaborators.filter(c => { const g = (c.grupo||'').trim().toLowerCase(); return g!=='supervisor' && g!=='coordenador' && g!=='administrativo' && g!=='desativado'; }), [filteredCollaborators]);
 
@@ -416,6 +560,18 @@ export default function Analytics() {
     return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-2xl font-black text-[#0f172a]">{displayCurrency(userBonusCiclo)}</div><div className="text-xs text-[#64748b]">{bonusError||"valor do banco"}</div></div>);
   };
 
+  // Bloqueio de render enquanto o escopo do Coordenador ainda carrega.
+  if (isCoordenador && coordenadorEscopoLoading) {
+    return (
+      <DashboardLayout title="Analytics" subtitle="Carregando escopo...">
+        <div className="flex justify-center items-center py-12">
+          <Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" />
+          <span className="ml-2 text-sm text-gray-500">Carregando escopo...</span>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout title="Analytics" subtitle="Métricas avançadas, comissões e indicadores de performance">
       <FilterBar
@@ -441,13 +597,13 @@ export default function Analytics() {
         </div>
       )}
 
-      {!loading && collaborators.length === 0 && !error && (
+      {!loading && scopedCollaborators.length === 0 && !error && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
           Nenhum colaborador disponível para os filtros atuais.
         </div>
       )}
 
-      {!loading && collaborators.length > 0 && (
+      {!loading && scopedCollaborators.length > 0 && (
         <>
           {hasActiveFilters && (
             <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
@@ -455,8 +611,6 @@ export default function Analytics() {
               <span>
                 Mostrando dados de:
                 {filters.equipe !== "todas" && ` ${filters.equipe}`}
-                {/* ← AJUSTADO: esconde o nome do supervisor e sinaliza
-                    que a visão virou agregação da equipe dele. */}
                 {filters.colaborador !== "todos" && !isSupervisorSelected && ` - ${filters.colaborador}`}
                 {isSupervisorSelected && supervisorSelectedTeam && (
                   <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
@@ -584,7 +738,7 @@ export default function Analytics() {
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Award className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">emitidos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.emitidos)}</div><div className="text-xs text-[#94a3b8]">Seus Gols</div></div>
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><TrendingUp className="w-4 h-4 text-[#16A34A] mx-auto mb-1" /><div className="eyebrow">Assinados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.assinados)}</div></div>
               <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><Trophy className="w-4 h-4 text-[#ffcc00] mx-auto mb-1" /><div className="eyebrow">Ganhos</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.ganhos)}</div><div className="text-xs text-[#94a3b8]">{isSpecialGroup ? "Meta não se aplica" : `meta: ${formatInt(targetGanhos)}`}</div></div>
-              <div className="bg-[#f8fafc] rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Protocolados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.protocolados)}</div></div>
+              <div className="bg-slate-50 rounded-xl p-4 text-center"><FileCheck className="w-4 h-4 text-[#8B5CF6] mx-auto mb-1" /><div className="eyebrow">Protocolados</div><div className="kpi-value text-[#0f172a]">{formatInt(totals.protocolados)}</div></div>
             </div>
           </div>
         </>

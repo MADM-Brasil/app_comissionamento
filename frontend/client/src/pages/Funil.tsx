@@ -4,6 +4,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, Collaborator } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
+import { getAccessLevel, LEVELS } from "@/lib/accessControl";
 import { API_BASE } from "@/lib/api";
 import {
   FileText,
@@ -59,8 +60,27 @@ const EXCLUDED_CARGOS = [
   "desenvolvedor make",
 ];
 
+// ========== EQUIPES RESERVADAS (mesma regra das demais telas) ==========
+// Precisa ficar em sincronia com backend/services/access-control.js
+// (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
+// (EQUIPES_TRAVADAS_DESTINO).
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+const normalizeKey = (str: string | undefined | null): string =>
+  String(str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+
+function isEquipeTravadaDestino(nome: string | undefined | null): boolean {
+  const n = normalizeKey(nome);
+  return EQUIPES_TRAVADAS_DESTINO.includes(n);
+}
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);
 const isExcludedCargo = (cargo: string) =>
@@ -72,8 +92,6 @@ const isDesativado = (c: Collaborator) => {
   return cargo === 'desativado' || equipe.includes('desativado');
 };
 
-// ← AJUSTADO: helpers para detectar cargo supervisor e localizar
-// o colaborador selecionado (mesma lógica das demais páginas).
 const isSupervisorCargo = (cargo?: string | null): boolean =>
   (cargo || '').toLowerCase().trim().startsWith('supervisor');
 
@@ -284,7 +302,79 @@ export default function Funil() {
     loadWeeklyPerformanceData,
   } = useAppStore();
 
-  const { hasPermission } = useAccessControl();
+  const { currentUser: accessUser, hasPermission } = useAccessControl();
+
+  // ============================================================
+  //  CONTROLE DE ACESSO
+  // ============================================================
+  const userLevel = getAccessLevel(accessUser?.cargo, accessUser?.status);
+  const isAssessor = userLevel === LEVELS.ASSESSOR;
+  const isCoordenador = userLevel === LEVELS.COORDENADOR;
+
+  // ⚠️ Nome com "User" para NÃO sombrear funções de módulo.
+  const userIsSupervisor = userLevel === LEVELS.SUPERVISAO;
+
+  const userUnidadeRaw = (accessUser as any)?.unidade_id
+    ?? (accessUser as any)?.unidadeId
+    ?? null;
+  const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
+
+  const userTeam = useMemo(() => {
+    if (!accessUser) return '';
+    const direct = (accessUser as any)?.equipe
+      || (accessUser as any)?.equipeNome
+      || (accessUser as any)?.nome_equipe
+      || '';
+    if (direct) return String(direct).trim();
+    if (rawCollaborators.length > 0) {
+      const colab = rawCollaborators.find(c =>
+        c.email === (accessUser as any)?.email || c.id === (accessUser as any)?.id
+      );
+      if (colab && colab.equipeNome) return colab.equipeNome.trim();
+    }
+    return '';
+  }, [accessUser, rawCollaborators]);
+
+  // ============================================================
+  //  ESCOPO DO COORDENADOR (whitelist via /suporte/escopo)
+  // ============================================================
+  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
+    equipes: Set<string>;
+    colaboradores: Set<string>;
+  } | null>(null);
+  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
+
+  useEffect(() => {
+    if (!isCoordenador || !accessUser) {
+      setCoordenadorEscopo(null);
+      return;
+    }
+    let mounted = true;
+    (async () => {
+      setCoordenadorEscopoLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (!mounted) return;
+        if (!res.ok || !data?.success) {
+          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+        }
+        const equipes = new Set<string>(
+          (data.data?.equipes || []).map((e: string) => normalize(e))
+        );
+        const colaboradores = new Set<string>(
+          (data.data?.assessores || []).map((a: any) => normalize(a.email))
+        );
+        setCoordenadorEscopo({ equipes, colaboradores });
+      } catch (err: any) {
+        console.error("[Funil] Falha ao carregar escopo do Coordenador:", err?.message);
+        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
+      } finally {
+        if (mounted) setCoordenadorEscopoLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [isCoordenador, accessUser]);
 
   const [filters, setFilters] = useState<{
     equipe: string;
@@ -305,17 +395,54 @@ export default function Funil() {
   const LEADS_CACHE_TTL = 60000;
 
   // ============================================================
-  // ← AJUSTADO: DETECÇÃO DO SUPERVISOR SELECIONADO
+  //  BASE RESTRITA POR PERFIL
+  // ============================================================
+  const scopedCollaborators = useMemo(() => {
+    let list = [...rawCollaborators];
+
+    if (isCoordenador) {
+      if (!coordenadorEscopo) return [];
+      list = list.filter(c => coordenadorEscopo.colaboradores.has(normalize(c.email)));
+    }
+
+    const ocultarEquipesReservadas = userIsSupervisor
+      && userUnidade === 1
+      && !!userTeam
+      && !isEquipeTravadaDestino(userTeam);
+    if (ocultarEquipesReservadas) {
+      list = list.filter(c => !isEquipeTravadaDestino(c.equipeNome));
+    }
+
+    if (isAssessor && accessUser?.email) {
+      list = list.filter(c => normalize(c.email) === normalize(accessUser.email));
+    } else if (userIsSupervisor && userTeam) {
+      list = list.filter(c => normalize(c.equipeNome) === normalize(userTeam));
+    }
+
+    return list;
+  }, [
+    rawCollaborators,
+    isCoordenador,
+    coordenadorEscopo,
+    userIsSupervisor,
+    isAssessor,
+    userUnidade,
+    userTeam,
+    accessUser,
+  ]);
+
+  // ============================================================
+  //  DETECÇÃO DO SUPERVISOR SELECIONADO
   // ============================================================
   const selectedCollaborator = useMemo(
-    () => findSelectedCollaborator(rawCollaborators, filters),
-    [rawCollaborators, filters.colaborador, filters.colaboradorId]
+    () => findSelectedCollaborator(scopedCollaborators, filters),
+    [scopedCollaborators, filters.colaborador, filters.colaboradorId]
   );
   const isSupervisorSelected = !!selectedCollaborator && isSupervisorCargo(selectedCollaborator.cargo);
   const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
 
-  // ← AJUSTADO: centraliza a montagem dos parâmetros de API aplicando
-  // a regra "supervisor selecionado => visão da equipe".
+  // Centraliza a montagem dos parâmetros de API aplicando a regra
+  // "supervisor selecionado => visão da equipe".
   const getEffectiveFilterParams = useCallback(() => {
     let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
     let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
@@ -341,7 +468,6 @@ export default function Funil() {
     setError(null);
 
     try {
-      // ← AJUSTADO: usa os parâmetros efetivos (supervisor → equipe)
       const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
 
       await Promise.all([
@@ -360,7 +486,6 @@ export default function Funil() {
         loadWeeklyPerformanceData(),
       ]);
 
-      // Busca leads por etapa (com cache)
       const dateRange = getChartDateRange(period, currentStartDate, currentEndDate);
       const now = Date.now();
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
@@ -427,15 +552,14 @@ export default function Funil() {
   }, [leadsStageData]);
 
   // ============================================================
-  // ← AJUSTADO: COLABORADORES FILTRADOS (exibição)
-  // Se um supervisor está selecionado, base = equipe dele.
+  //  COLABORADORES FILTRADOS (exibição)
   // ============================================================
   const filteredCollaborators = useMemo(() => {
     if (isSupervisorSelected && supervisorSelectedTeam) {
-      return rawCollaborators.filter(c => c.equipeNome === supervisorSelectedTeam);
+      return scopedCollaborators.filter(c => c.equipeNome === supervisorSelectedTeam);
     }
 
-    let filtered = [...rawCollaborators];
+    let filtered = [...scopedCollaborators];
     if (filters.equipe !== "todas") {
       filtered = filtered.filter(c => c.equipeNome === filters.equipe);
     }
@@ -453,7 +577,7 @@ export default function Funil() {
       }
     }
     return filtered;
-  }, [rawCollaborators, filters, isSupervisorSelected, supervisorSelectedTeam]);
+  }, [scopedCollaborators, filters, isSupervisorSelected, supervisorSelectedTeam]);
 
   const totalsForCards = rawMetrics;
 
@@ -534,10 +658,10 @@ export default function Funil() {
   }, [leadsStageData]);
 
   const activeCollaboratorNames = useMemo(() => {
-    return rawCollaborators
+    return scopedCollaborators
       .filter(c => !isDesativado(c) && !isExcludedTeam(c.equipeNome) && !isExcludedCargo(c.cargo))
       .map(c => c.name);
-  }, [rawCollaborators]);
+  }, [scopedCollaborators]);
 
   // ============================================================
   // DETALHAMENTO POR COLABORADOR (AGRUPADO POR COLUNAS DEFINIDAS)
@@ -589,6 +713,18 @@ export default function Funil() {
     return colors[stage] || "#6b7280";
   };
 
+  // Bloqueio de render enquanto o escopo do Coordenador ainda carrega.
+  if (isCoordenador && coordenadorEscopoLoading) {
+    return (
+      <DashboardLayout title="Funil de Vendas" subtitle="Carregando escopo...">
+        <div className="flex justify-center items-center py-12">
+          <Loader2 className="w-5 h-5 animate-spin text-[#09175b]" />
+          <span className="ml-2 text-sm text-gray-500">Carregando escopo...</span>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   // ========== RENDER ==========
   return (
     <DashboardLayout title="Funil de Vendas" subtitle="Acompanhe a jornada das oportunidades — do lead ao resultado final">
@@ -616,13 +752,13 @@ export default function Funil() {
         </div>
       )}
 
-      {!loading && rawCollaborators.length === 0 && !error && (
+      {!loading && scopedCollaborators.length === 0 && !error && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-center text-amber-800 text-sm">
           Nenhum colaborador disponível no momento.
         </div>
       )}
 
-      {!loading && rawCollaborators.length > 0 && (
+      {!loading && scopedCollaborators.length > 0 && (
         <>
           {hasActiveFilters && (
             <div className="mb-4 px-4 py-2 bg-blue-50 rounded-lg text-xs text-blue-700 flex items-center gap-2 flex-wrap">
@@ -630,8 +766,6 @@ export default function Funil() {
               <span>
                 Mostrando dados para:
                 {filters.equipe !== "todas" && ` Equipe ${filters.equipe}`}
-                {/* ← AJUSTADO: esconde o nome do supervisor e sinaliza
-                    que a visão virou agregação da equipe dele. */}
                 {filters.colaborador !== "todos" && !isSupervisorSelected && ` - ${filters.colaborador}`}
                 {isSupervisorSelected && supervisorSelectedTeam && (
                   <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
@@ -641,7 +775,7 @@ export default function Funil() {
             </div>
           )}
 
-          {/* Cards das etapas (agora com Ganhos antes de Protocolados) */}
+          {/* Cards das etapas */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
             {funnelData.map((stage, i) => {
               const Icon = stage.icon;
@@ -663,7 +797,7 @@ export default function Funil() {
             })}
           </div>
 
-          {/* Pipeline Visual + Taxas (ordem invertida) */}
+          {/* Pipeline Visual + Taxas */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
             <div className="madm-card p-6 animate-fade-in-up" style={{ animationDelay: "360ms" }}>
               <h3 className="text-sm font-bold text-[#09175b] mb-5">Pipeline Visual (Evolução Etapas)</h3>
@@ -722,7 +856,7 @@ export default function Funil() {
             </div>
           </div>
 
-          {/* Distribuição de Leads por Etapa (COM AGRUPAMENTO) */}
+          {/* Distribuição de Leads por Etapa */}
           <div className="madm-card p-6 mb-6 animate-fade-in-up">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-bold text-[#09175b] flex items-center gap-2">

@@ -272,16 +272,6 @@ function isCampGanhos2026Active(campaigns: Campaign[]): boolean {
   );
 }
 
-// ============================================================
-//  parseFaixaDescricao (permissivo)
-// ------------------------------------------------------------
-// Aceita, em ordem:
-//   1) JSON: {"valor": 500, "max": 79}
-//   2) "X|Y" : "500|79"
-//   3) Número puro: "500"
-//   4) Regex fallback: qualquer texto com números — primeiro é `valor`,
-//      segundo (se houver) é `max`.
-// ============================================================
 function parseFaixaDescricao(descricao: string): { valor: number; max: number | null } | null {
   const raw = String(descricao || '').trim();
   if (!raw) return null;
@@ -358,15 +348,6 @@ function extractFaixas(
   return faixas;
 }
 
-// ============================================================
-//  Faixa mensal do SUPERVISOR
-// ------------------------------------------------------------
-// Sempre usa CAMPGANHOS_MEN_2026_SUPER.
-// Não cai mais para CAMPGANHOS_MEN_2026 (faixa do assessor).
-// Se a faixa SUPER não estiver em `campaigns` nem em `tabelaComissoes`,
-// retorna vazio (comissão de campanha = 0) e emite um console.warn com
-// os tipos realmente disponíveis — para facilitar o diagnóstico.
-// ============================================================
 function extractSupervisorMonthlyCampaignBands(
   campaigns: Campaign[],
   commissionBands: TabelaComissaoItem[],
@@ -641,11 +622,6 @@ const CustomTooltip = ({ active, payload, label, hideValues }: any) => {
 
 // ============================================================
 //  EXTRATO DIALOG
-// ------------------------------------------------------------
-// Layout adaptativo:
-//   - ASSESSOR → cartões DIÁRIOS + "Estimativa do dia (CAMPGANHOS_DIA_2026)"
-//   - SUPERVISOR/COORDENADOR → cartões SEMANAIS (Seg–Dom) +
-//     "Estimativa da semana (CAMPGANHOS_SEM_2026_SUPER)"
 // ============================================================
 const ExtratoDialog = ({
   dailyMetrics,
@@ -1655,11 +1631,12 @@ export default function Comissoes() {
     };
   }, [userColab, campaignDailyMetrics, currentRole, tabelaComissoes, isSpecialUser, activeCampaigns]);
 
-  const isOverviewVisible =
-    canViewCommissionOverview &&
-    !loading &&
-    filters.equipe === 'todas' &&
-    filters.colaborador === 'todos';
+  // ═══════════════════════════════════════════════════════════
+  //  AJUSTE: Visão Geral das Comissões fica sempre visível para
+  //  Admin/SuperAdmin. O filtro da FilterBar é aplicado DENTRO
+  //  da tabela, em vez de esconder o bloco inteiro.
+  // ═══════════════════════════════════════════════════════════
+  const isOverviewVisible = canViewCommissionOverview && !loading;
 
   const commissionData = useMemo(() => {
     if (!userColab) return [];
@@ -1941,13 +1918,32 @@ export default function Comissoes() {
     }
   };
 
+  // ═══════════════════════════════════════════════════════════
+  //  AJUSTE: agora também filtra pelos filtros ativos da FilterBar
+  //  (equipe / colaborador) além da busca livre.
+  // ═══════════════════════════════════════════════════════════
   const filteredCommissionOverview = useMemo(() => {
+    let rows = commissionOverview;
+
+    // Filtros da FilterBar aplicados DENTRO da visão geral
+    if (filters.equipe !== 'todas') {
+      const equipeNorm = normalizeName(filters.equipe);
+      rows = rows.filter(item => normalizeName(item.team) === equipeNorm);
+    }
+    if (filters.colaborador !== 'todos') {
+      const colabNorm = normalizeName(filters.colaborador);
+      rows = rows.filter(item => normalizeName(item.name) === colabNorm);
+    }
+
+    // Busca livre
     const query = normalizeName(commissionOverviewSearch);
-    if (!query) return commissionOverview;
-    return commissionOverview.filter(item =>
-      normalizeName(item.name).includes(query) || normalizeName(item.team).includes(query)
-    );
-  }, [commissionOverview, commissionOverviewSearch]);
+    if (query) {
+      rows = rows.filter(item =>
+        normalizeName(item.name).includes(query) || normalizeName(item.team).includes(query)
+      );
+    }
+    return rows;
+  }, [commissionOverview, commissionOverviewSearch, filters.equipe, filters.colaborador]);
 
   const commissionChartData = useMemo(() => {
     if (!commissionData.length) return [];
@@ -2337,6 +2333,14 @@ export default function Comissoes() {
     return { firstDayLabel: fmt(first), lastDayLabel: fmt(last) };
   }, [currentStartDate]);
 
+  // Rótulo dos filtros ativos (usado no cabeçalho da Visão Geral)
+  const filtrosAtivosLabel = useMemo(() => {
+    const partes: string[] = [];
+    if (filters.equipe !== 'todas') partes.push(filters.equipe);
+    if (filters.colaborador !== 'todos') partes.push(filters.colaborador);
+    return partes.join(' · ');
+  }, [filters.equipe, filters.colaborador]);
+
   return (
     <DashboardLayout title="Painel de Comissões" subtitle="Suas comissões, calculadas com base nos ganhos e nas campanhas ativas">
       {canUseFilterBar && (
@@ -2375,25 +2379,28 @@ export default function Comissoes() {
         </div>
       )}
 
-      {canViewCommissionOverview && !loading && !isOverviewVisible && (
-        <div className="mb-6 flex items-center gap-2 text-xs text-[#64748b] bg-[#f8fafc] border border-[#e2e8f0] rounded-lg px-3 py-2">
-          <Users className="w-3.5 h-3.5 text-[#2F6FED]" />
-          <span>A Visão Geral das Comissões fica disponível quando nenhum filtro de equipe ou colaborador está aplicado.</span>
-        </div>
-      )}
-
+      {/* ═══════════════════════════════════════════════════════════
+          AJUSTE: Visão Geral sempre visível para Admin/SuperAdmin.
+          O filtro da FilterBar apenas restringe as linhas exibidas.
+         ═══════════════════════════════════════════════════════════ */}
       {isOverviewVisible && (
         <div className="card p-5 mb-6 animate-fade-in-up">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Users className="w-4 h-4 text-[#2F6FED]" />
               <h3 className="text-sm font-bold text-[#0f172a]">Visão Geral das Comissões</h3>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#eff6ff] text-[#2F6FED] font-medium">
-                {filteredCommissionOverview.length} colaboradores
+                {filteredCommissionOverview.length}
+                {filteredCommissionOverview.length !== commissionOverview.length ? ` de ${commissionOverview.length}` : ''} colaboradores
               </span>
               {campGanhos2026.ativo && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#fff7ed] text-[#EA8C1D] font-medium">
                   CAMPGANHOS_2026 ativa
+                </span>
+              )}
+              {filtrosAtivosLabel && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#f1f5f9] text-[#475569] font-medium" title="Filtros ativos da FilterBar">
+                  Filtrado: {filtrosAtivosLabel}
                 </span>
               )}
             </div>
@@ -2417,7 +2424,9 @@ export default function Comissoes() {
             <div className="bg-red-50 text-red-700 p-3 rounded-lg text-xs">{commissionOverviewError}</div>
           ) : filteredCommissionOverview.length === 0 ? (
             <div className="text-center text-[#94a3b8] py-6 text-xs">
-              {commissionOverviewSearch ? "Nenhum resultado encontrado." : "Nenhum dado disponível."}
+              {commissionOverviewSearch || filtrosAtivosLabel
+                ? "Nenhum resultado encontrado com os filtros atuais."
+                : "Nenhum dado disponível."}
             </div>
           ) : (
             <div className="overflow-x-auto max-h-[420px] overflow-y-auto custom-scrollbar">
