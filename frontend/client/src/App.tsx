@@ -101,7 +101,7 @@ function Router() {
       <Route path="/home">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessDashboard">
-            <Home />
+            <Suporte /> {/* home */}
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
