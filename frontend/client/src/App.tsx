@@ -93,15 +93,15 @@ function Router() {
       {/* Home – requer permissão canAccessDashboard */}
       <Route path="/">
         <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canAccessDashboard">
+          {/*<ProtectedRouteWithPermission permission="canAccessDashboard">*/}
             <Suporte /> {/* home */}
-          </ProtectedRouteWithPermission>
+         {/* </ProtectedRouteWithPermission>*/}
         </PeriodProvider>
       </Route>
       <Route path="/home">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessDashboard">
-            <Suporte /> {/* home */}
+            <Home />
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
