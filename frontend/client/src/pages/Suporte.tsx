@@ -4,6 +4,9 @@ import { Redirect } from "wouter";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
   Send,
+  Search,
+  ClipboardList,
+  ChartNoAxesCombined,
   X,
   Download,
   Eye,
@@ -234,6 +237,19 @@ const getStatusInfo = (status: string) => {
   return map[status] || { label: status, icon: <FileText className="w-3 h-3" />, className: "bg-gray-100 text-gray-600" };
 };
 
+// Todos os status possíveis de uma movimentação (não removido do sistema,
+// só não aparecem todos como coluna no quadro — ver MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS).
+const MOVIMENTACOES_STATUS_COLUMNS = [
+  'pendente', 'processando', 'suporte', 'aviso', 'bloqueado', 'erro', 'fora_pipeline', 'no_pipeline', 'concluido',
+];
+
+// Colunas exibidas no quadro de funis de Movimentações (Visão SalesOps).
+// Pendente/Processando/Fora do Pipeline/No Pipeline ficam ocultos, mas um
+// ticket que esteja num desses status continua existindo normalmente.
+const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
+  'suporte', 'aviso', 'bloqueado', 'erro', 'concluido',
+];
+
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
@@ -345,9 +361,9 @@ export default function Suporte() {
       <div className="mb-6 border-b border-[#e2e8f0]">
         <div className="flex gap-2">
           {[
-            { id: "reportar", label: "🔍 Reportar" },
-            { id: "movimentacao", label: "📋 Movimentar" },
-            ...(isAdmin ? [{ id: "salesops", label: "📊 Visão SalesOps" }] : []),
+            { id: "reportar", label: "Reportar", icon: Search },
+            { id: "movimentacao", label: "Movimentar", icon: ClipboardList },
+            ...(isAdmin ? [{ id: "salesops", label: "Visão SalesOps", icon: ChartNoAxesCombined }] : []),
           ].map(tab => (
             <button
               key={tab.id}
@@ -358,7 +374,10 @@ export default function Suporte() {
                 activeTab === tab.id && "active"
               )}
             >
-              {tab.label}
+              <span className="inline-flex items-center gap-2">
+                <tab.icon className="w-4 h-4 shrink-0" aria-hidden="true" />
+                <span>{tab.label}</span>
+              </span>
             </button>
           ))}
         </div>
@@ -1758,16 +1777,16 @@ function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
-  const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
   const [editForm, setEditForm] = useState<{ status_mapeamento: string; observacao_sales_ops: string }>({ status_mapeamento: '', observacao_sales_ops: '' });
   const [saving, setSaving] = useState(false);
-  const [showConcluidos, setShowConcluidos] = useState(false);
   const [reprocessingTicket, setReprocessingTicket] = useState<TicketMovimentacao | null>(null);
   const [reprocessing, setReprocessing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [draggingTicketId, setDraggingTicketId] = useState<number | null>(null);
+  const [dragOverColuna, setDragOverColuna] = useState<string | null>(null);
 
   const STATUS_REPROCESSAVEIS = new Set([
     'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
@@ -1861,6 +1880,33 @@ function MovimentacoesSuporteTab() {
     }
   };
 
+  const moverTicketParaStatus = async (ticketId: number, novoStatus: string) => {
+    const ticketAtual = tickets.find(t => t.id_ticket_movimentacao === ticketId);
+    if (!ticketAtual || ticketAtual.status_mapeamento === novoStatus) return;
+
+    const statusAnterior = ticketAtual.status_mapeamento;
+    setTickets(prev => prev.map(t =>
+      t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: novoStatus } : t
+    ));
+
+    try {
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${ticketId}`, {
+        method: 'PATCH',
+        headers: getCsrfHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({ status_mapeamento: novoStatus }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao mover ticket');
+    } catch (err: any) {
+      // Reverte em caso de falha
+      setTickets(prev => prev.map(t =>
+        t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: statusAnterior } : t
+      ));
+      setMessage({ text: err.message || 'Erro ao mover ticket', type: 'error' });
+    }
+  };
+
   const openReprocessModal = (ticket: TicketMovimentacao) => {
     setReprocessingTicket(ticket);
   };
@@ -1905,11 +1951,25 @@ function MovimentacoesSuporteTab() {
   };
 
   const filteredTickets = tickets.filter(t => {
-    const statusMatch = filterStatus === "todos" || t.status_mapeamento === filterStatus;
-    if (!statusMatch) return false;
-    if (!showConcluidos && t.status_mapeamento === 'concluido') return false;
     return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
   });
+
+  const ticketsPorColuna = useMemo(() => {
+    const grupos: Record<string, TicketMovimentacao[]> = {};
+    for (const coluna of MOVIMENTACOES_STATUS_COLUMNS) grupos[coluna] = [];
+    for (const ticket of filteredTickets) {
+      const status = ticket.status_mapeamento || 'pendente';
+      if (!grupos[status]) grupos[status] = [];
+      grupos[status].push(ticket);
+    }
+    return grupos;
+  }, [filteredTickets]);
+
+  // Colunas ocultas (ver MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS) voltam a aparecer
+  // sozinhas assim que algum ticket cai nelas, e somem de novo quando esvaziam.
+  const colunasExibidas = MOVIMENTACOES_STATUS_COLUMNS.filter(coluna =>
+    MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS.includes(coluna) || (ticketsPorColuna[coluna]?.length || 0) > 0
+  );
 
   if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>;
 
@@ -1930,42 +1990,6 @@ function MovimentacoesSuporteTab() {
               <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} /> Atualizar
             </button>
 
-            <button
-              type="button"
-              onClick={() => setShowConcluidos(!showConcluidos)}
-              className={cn(
-                "px-3 py-1 rounded text-sm flex items-center gap-1 transition-colors",
-                showConcluidos
-                  ? "bg-[#2F6FED] text-white hover:bg-[#2F6FED]/90"
-                  : "bg-[#f1f5f9] text-[#475569] hover:bg-[#e2e8f0]"
-              )}
-            >
-              {showConcluidos ? (
-                <>
-                  <Eye className="w-3 h-3" /> Ocultar concluídos
-                </>
-              ) : (
-                <>
-                  <Eye className="w-3 h-3" /> Mostrar concluídos
-                </>
-              )}
-            </button>
-
-            <select
-              value={filterStatus}
-              onChange={e => setFilterStatus(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Filtrar por status"
-            >
-              <option value="todos">Todos</option>
-              <option value="pendente">Pendente</option>
-              <option value="processando">Processando</option>
-              <option value="concluido">Concluído</option>
-              <option value="suporte">Suporte</option>
-              <option value="aviso">Aviso</option>
-              <option value="erro">Erro</option>
-            </select>
-
             <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
             <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
@@ -1975,96 +1999,69 @@ function MovimentacoesSuporteTab() {
         {filteredTickets.length === 0 ? (
           <div className="text-center py-8 text-[#64748b]">Nenhum ticket de movimentação encontrado</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="simple-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Data</th>
-                  <th>Solicitante</th>
-                  <th>Cliente</th>
-                  <th>Contato</th>
-                  <th>Origem</th>
-                  <th>Destino</th>
-                  <th>Produto</th>
-                  <th>Status</th>
-                  <th>Obs.</th>
-                  <th className="w-24">Ações</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTickets.map(ticket => {
-                  const statusInfo = getStatusInfo(ticket.status_mapeamento || 'pendente');
-                  const produtoInterno = (() => {
-                    if (ticket.produto) return ticket.produto;
-                    try {
-                      const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
-                      return parsed.produto || null;
-                    } catch {
-                      return null;
-                    }
-                  })();
-                  const podeReprocessar = STATUS_REPROCESSAVEIS.has(
-                    String(ticket.status_mapeamento || '').toLowerCase()
-                  );
-                  return (
-                    <tr key={ticket.id_ticket_movimentacao}>
-                      <td>{ticket.id_ticket_movimentacao}</td>
-                      <td className="whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
-                      <td>{ticket.colaborador_origem_nome}</td>
-                      <td>{`${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`}</td>
-                      <td>
-                        <div>{ticket.telefone_cliente_informado || "—"}</div>
-                        <div className="text-[#64748b]">{ticket.email_cliente_informado || "—"}</div>
-                        <small className="text-[#94a3b8]">{ticket.cpf_cliente_informado || "—"}</small>
-                      </td>
-                      <td>{ticket.origem_cliente_informada || "—"}</td>
-                      <td>{ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</td>
-                      <td className="text-[#475569]" title={produtoInterno || ''}>
-                        {produtoInterno ? maskProduct(produtoInterno) : '—'}
-                      </td>
-                      <td>
-                        <span className={cn("badge", statusInfo.className)}>
-                          {statusInfo.icon} {statusInfo.label}
-                        </span>
-                      </td>
-                      <td className="max-w-[200px]">
-                        <span className="block whitespace-pre-wrap break-words" title={ticket.observacao_sales_ops}>
-                          {(() => {
-                            try {
-                              const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
-                              return parsed.observacao || ticket.observacao_sales_ops || '—';
-                            } catch {
-                              return ticket.observacao_sales_ops || '—';
-                            }
-                          })()}
-                        </span>
-                      </td>
-                      <td>
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => openEditModal(ticket)}
-                            className="p-2 rounded-lg hover:bg-[#f1f5f9] text-[#64748b] hover:text-[#2F6FED] transition-colors"
-                            title="Editar"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-                          {podeReprocessar && (
-                            <button
-                              onClick={() => openReprocessModal(ticket)}
-                              className="p-2 rounded-lg hover:bg-amber-50 text-[#64748b] hover:text-amber-600 transition-colors"
-                              title="Reprocessar este caso"
-                            >
-                              <RotateCcw className="w-4 h-4" />
-                            </button>
+          <div className="kanban-scroll flex gap-3 overflow-x-auto pb-3">
+            {colunasExibidas.map(coluna => {
+              const statusInfo = getStatusInfo(coluna);
+              const ticketsColuna = ticketsPorColuna[coluna] || [];
+              const isDragOver = dragOverColuna === coluna;
+              return (
+                <div
+                  key={coluna}
+                  className={cn(
+                    "flex-shrink-0 w-64 h-[65vh] flex flex-col bg-[#f8fafc] rounded-lg border-2 transition-colors",
+                    isDragOver ? "border-[#2F6FED] bg-blue-50" : "border-[#e2e8f0]"
+                  )}
+                  onDragOver={(e) => { e.preventDefault(); setDragOverColuna(coluna); }}
+                  onDragLeave={() => setDragOverColuna(prev => prev === coluna ? null : prev)}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverColuna(null);
+                    const ticketId = Number(e.dataTransfer.getData('text/plain'));
+                    if (ticketId) moverTicketParaStatus(ticketId, coluna);
+                    setDraggingTicketId(null);
+                  }}
+                >
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-[#e2e8f0]">
+                    <span className={cn("badge", statusInfo.className)}>
+                      {statusInfo.icon} {statusInfo.label}
+                    </span>
+                    <span className="text-xs text-[#94a3b8] font-medium">{ticketsColuna.length}</span>
+                  </div>
+                  <div className="flex-1 p-2 space-y-2 overflow-y-auto">
+                    {ticketsColuna.length === 0 ? (
+                      <div className="text-center py-6 text-xs text-[#94a3b8]">Nenhum ticket</div>
+                    ) : (
+                      ticketsColuna.map(ticket => (
+                        <div
+                          key={ticket.id_ticket_movimentacao}
+                          draggable
+                          onDragStart={(e) => {
+                            e.dataTransfer.setData('text/plain', String(ticket.id_ticket_movimentacao));
+                            e.dataTransfer.effectAllowed = 'move';
+                            setDraggingTicketId(ticket.id_ticket_movimentacao);
+                          }}
+                          onDragEnd={() => { setDraggingTicketId(null); setDragOverColuna(null); }}
+                          onClick={() => openEditModal(ticket)}
+                          className={cn(
+                            "w-full text-left bg-white border border-[#e2e8f0] rounded-lg p-3 cursor-grab active:cursor-grabbing hover:border-[#2F6FED] hover:shadow-sm transition-colors",
+                            draggingTicketId === ticket.id_ticket_movimentacao && "opacity-40"
                           )}
+                        >
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-xs text-[#94a3b8]">#{ticket.id_ticket_movimentacao}</span>
+                            <span className="text-xs text-[#94a3b8] whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</span>
+                          </div>
+                          <div className="text-sm font-medium text-[#0f172a]">
+                            {ticket.nome_cliente_informado} {ticket.sobrenome_cliente_informado}
+                          </div>
+                          <div className="text-xs text-[#64748b]">{ticket.equipe_destino_nome}</div>
                         </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                      ))
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -2072,10 +2069,80 @@ function MovimentacoesSuporteTab() {
       <EditModal
         isOpen={editingTicket !== null}
         onClose={closeEditModal}
-        title={`Editar Movimentação #${editingTicket?.id_ticket_movimentacao || ''}`}
+        title={`Movimentação #${editingTicket?.id_ticket_movimentacao || ''}`}
         onSave={saveEdit}
         saving={saving}
       >
+        {editingTicket && (() => {
+          const produtoInterno = (() => {
+            if (editingTicket.produto) return editingTicket.produto;
+            try {
+              const parsed = JSON.parse(editingTicket.observacao_sales_ops || '{}');
+              return parsed.produto || null;
+            } catch {
+              return null;
+            }
+          })();
+          const podeReprocessar = STATUS_REPROCESSAVEIS.has(
+            String(editingTicket.status_mapeamento || '').toLowerCase()
+          );
+          return (
+            <div className="space-y-3 mb-4 pb-4 border-b border-[#e2e8f0] text-sm">
+              <div>
+                <div className="text-xs text-[#94a3b8] mb-0.5">Cliente</div>
+                <div className="text-[#0f172a] font-medium">
+                  {editingTicket.nome_cliente_informado} {editingTicket.sobrenome_cliente_informado}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Telefone</div>
+                  <div className="text-[#0f172a]">{editingTicket.telefone_cliente_informado || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">E-mail</div>
+                  <div className="text-[#0f172a] break-all">{editingTicket.email_cliente_informado || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">CPF</div>
+                  <div className="text-[#0f172a]">{editingTicket.cpf_cliente_informado || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Origem</div>
+                  <div className="text-[#0f172a]">{editingTicket.origem_cliente_informada || "—"}</div>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-[#94a3b8] mb-0.5">Equipe que precisa cadastrar</div>
+                <div className="text-[#0f172a] font-medium">
+                  {editingTicket.equipe_destino_nome}
+                  {editingTicket.colaborador_destino_nome ? ` / ${editingTicket.colaborador_destino_nome}` : ''}
+                </div>
+              </div>
+              {produtoInterno && (
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Produto</div>
+                  <div className="text-[#0f172a]">{maskProduct(produtoInterno)}</div>
+                </div>
+              )}
+              {editingTicket.motivo_solicitacao && (
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Motivo</div>
+                  <div className="text-[#0f172a] whitespace-pre-wrap break-words">{editingTicket.motivo_solicitacao}</div>
+                </div>
+              )}
+              {podeReprocessar && (
+                <button
+                  type="button"
+                  onClick={() => openReprocessModal(editingTicket)}
+                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors"
+                >
+                  <RotateCcw className="w-3 h-3" /> Reprocessar este caso
+                </button>
+              )}
+            </div>
+          );
+        })()}
         <div>
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
           <select
