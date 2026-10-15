@@ -5,34 +5,39 @@
 // default é usado — evitando o erro "HUBSPOT_STAGE_*_ID inválido" em runtime.
 // Autorização de usuário/equipe continua sendo responsabilidade dos workers.
 // Locks locais não substituem reserva exclusiva e locks distribuídos.
+//
+// Roteamento por produto:
+//   - Produto explicitamente Quinquênio / Quinquenio / Quinqueino /
+//     Concomitante(s) → pipeline Quinquênio, etapa "Em contato".
+//   - Demais produtos (incl. Auxílio) → Closer, "Em Contato" (fluxo anterior).
+//   - Produto é passado pelo worker; não é inferido do nome do cliente.
+//
+// Busca orientada por produto (garantirLeadNoCloser):
+//   - Auxílio e demais produtos comuns → considera apenas cards no Closer
+//     e na Base de Leads.
+//   - Quinquênio/Quinqueino/Concomitante(s) → considera apenas cards no
+//     pipeline Quinquênio e na Base de Leads.
+//   - Cards em outros pipelines são ignorados nesta movimentação.
 
 const API_ORIGIN = 'https://api.hubapi.com';
 
 // ---------------------------------------------------------------------------
 // Leitura de configuração
 // ---------------------------------------------------------------------------
-// `setting` continua aceitando qualquer string (usado para token e texto).
 const setting = (name, fallback = '') => String(process.env[name] || fallback).trim();
 
-// `settingNumeric` é usado para IDs. Diferente de `setting`:
-//   - descarta espaços em branco nas pontas;
-//   - se o valor não for uma sequência puramente numérica (ex.: "", "abc",
-//     "123 ", "12\n", "null"), cai automaticamente no default.
-// Isso evita que um valor inválido no .env (ou uma linha em branco
-// acidental) quebre `temporalCheck` no momento da movimentação.
 const settingNumeric = (name, fallback = '') => {
   const raw = String(process.env[name] ?? '').trim();
   if (/^\d+$/.test(raw)) return raw;
   return String(fallback ?? '').trim();
 };
 
-// IDs de pipeline (numéricos, com defaults confirmados no Closer desta conta)
+// IDs de pipeline (numéricos, com defaults confirmados nesta conta)
 const PIPELINE_BASE_LEADS_ID             = settingNumeric('HUBSPOT_PIPELINE_BASE_LEADS_ID', '905901447');
 const PIPELINE_CLOSER_ID                 = settingNumeric('HUBSPOT_PIPELINE_CLOSER_ID', '904458124');
 const PIPELINE_JURIDICO_AUDITORIA_ID     = settingNumeric('HUBSPOT_PIPELINE_JURIDICO_AUDITORIA_ID', '905179189');
 
-// Portal ID — não tem default (precisa existir no ambiente), mas é lido como
-// string pura porque `verifyHubSpotPortalConfiguration` já faz a validação.
+// Portal ID — sem default (precisa existir no ambiente).
 const HUBSPOT_PORTAL_ID = setting('HUBSPOT_PORTAL_ID');
 
 // IDs de etapa no Closer (numéricos, com defaults confirmados)
@@ -41,40 +46,96 @@ const STAGE_DESQUALIFICADO_ID         = settingNumeric('HUBSPOT_STAGE_DESQUALIFI
 const STAGE_COLETA_DOCUMENTACAO_ID    = settingNumeric('HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID', '1368997802');
 const STAGE_ENTRADA_ID                = settingNumeric('HUBSPOT_STAGE_ENTRADA_ID', '1368997800');
 
+// Pipeline/etapa de Quinquênio/Concomitante (novos).
+const PIPELINE_QUINQUENIO_ID = settingNumeric(
+  'HUBSPOT_PIPELINE_QUINQUENIO_ID', '925690734'
+);
+const STAGE_QUINQUENIO_EM_CONTATO_ID = settingNumeric(
+  'HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID', '1419898635'
+);
+
 export const HUBSPOT_PIPELINE_BASE_LEADS_ID = PIPELINE_BASE_LEADS_ID;
 export const HUBSPOT_PIPELINE_CLOSER_ID = PIPELINE_CLOSER_ID;
 export const HUBSPOT_PIPELINE_JURIDICO_AUDITORIA_ID = PIPELINE_JURIDICO_AUDITORIA_ID;
+export const HUBSPOT_PIPELINE_QUINQUENIO_ID = PIPELINE_QUINQUENIO_ID;
 export const HUBSPOT_PORTAL_ID_CONFIGURED = HUBSPOT_PORTAL_ID;
 export const HUBSPOT_STAGE_EM_CONTATO_ID = STAGE_EM_CONTATO_ID;
 export const HUBSPOT_STAGE_DESQUALIFICADO_ID = STAGE_DESQUALIFICADO_ID;
 export const HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID = STAGE_COLETA_DOCUMENTACAO_ID;
 export const HUBSPOT_STAGE_ENTRADA_ID = STAGE_ENTRADA_ID;
+export const HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID = STAGE_QUINQUENIO_EM_CONTATO_ID;
 
 const CONTACT_PROPERTIES = ['email','firstname','lastname','phone','hs_whatsapp_phone_number','contact_cpf','contact_fonte','contact_produto','hubspot_owner_id'];
 const DEAL_PROPERTIES = ['dealname','pipeline','dealstage','hubspot_owner_id','notes_last_updated','motivo_da_perda','hs_lastmodifieddate','produto'];
 
+// ---------------------------------------------------------------------------
+// Roteamento por produto
+// ---------------------------------------------------------------------------
+function isQuinquenioOuConcomitante(produto) {
+  const normalized = optionalText(produto)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /\b(?:quinquenio|quinqueino|concomitantes?)\b/.test(normalized);
+}
+
+function movementDestination(produto) {
+  return isQuinquenioOuConcomitante(produto)
+    ? {
+        pipeline: PIPELINE_QUINQUENIO_ID,
+        stage: STAGE_QUINQUENIO_EM_CONTATO_ID,
+        name: 'Quinquenio/concomitante',
+      }
+    : {
+        pipeline: PIPELINE_CLOSER_ID,
+        stage: STAGE_EM_CONTATO_ID,
+        name: 'Closer',
+      };
+}
+
+function isAllowedMovementPipeline(pipeline) {
+  return [PIPELINE_BASE_LEADS_ID, PIPELINE_CLOSER_ID, PIPELINE_QUINQUENIO_ID]
+    .includes(String(pipeline));
+}
+
+function movementMessage(rule, destination) {
+  const target = `${destination.name} (Em contato)`;
+  switch (rule) {
+    case 'created_and_moved': return `Card criado na Base de Leads e movido para ${target}.`;
+    case 'base_to_closer': return `Card movido da Base de Leads para ${target}.`;
+    case 'desqualificado_to_em_contato': return `Card reativado e movido para ${target}.`;
+    default: return `Card atribuído e movido para ${target}.`;
+  }
+}
+
 const PIPELINE_NAMES = {
-  [PIPELINE_BASE_LEADS_ID]: 'Base de Leads', [PIPELINE_CLOSER_ID]: 'Closer',
+  [PIPELINE_BASE_LEADS_ID]: 'Base de Leads',
+  [PIPELINE_CLOSER_ID]: 'Closer',
   [PIPELINE_JURIDICO_AUDITORIA_ID]: 'Jurídico Auditoria de Ganho',
-  '905179471': 'PRO', '926561825': 'Fator K', '925690734': 'Quinquenio/concomitante',
+  [PIPELINE_QUINQUENIO_ID]: 'Quinquenio/concomitante',
+  '905179471': 'PRO',
+  '926561825': 'Fator K',
 };
 
 const STAGE_NAMES = {
-  [STAGE_EM_CONTATO_ID]: 'Em Contato', [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
-  [STAGE_COLETA_DOCUMENTACAO_ID]: 'Coleta de documentação', [STAGE_ENTRADA_ID]: 'Entrada',
+  [STAGE_EM_CONTATO_ID]: 'Em Contato',
+  [STAGE_DESQUALIFICADO_ID]: 'Desqualificado',
+  [STAGE_COLETA_DOCUMENTACAO_ID]: 'Coleta de documentação',
+  [STAGE_ENTRADA_ID]: 'Entrada',
+  [STAGE_QUINQUENIO_EM_CONTATO_ID]: 'Em contato',
 };
 
 const RULE_MESSAGES = Object.freeze({
-  created_and_moved: 'Card criado na Base de Leads e movido para o Closer (Em Contato).',
-  base_to_closer: 'Card movido da Base de Leads para o Closer (Em Contato).',
-  desqualificado_to_em_contato: 'Card desqualificado reativado no Closer (Em Contato).',
-  closer_without_owner: 'Card estava no Closer sem responsável; atribuído agora.',
+  created_and_moved: 'Card criado na Base de Leads e movido para o destino (Em Contato).',
+  base_to_closer: 'Card movido da Base de Leads para o destino (Em Contato).',
+  desqualificado_to_em_contato: 'Card desqualificado reativado no destino (Em Contato).',
+  closer_without_owner: 'Card estava sem responsável; atribuído agora.',
   reassigned_by_last_modified_date: 'Card reatribuído com base na última modificação.',
   already_assigned: 'Card já está com o responsável informado; contato alinhado.',
   ambiguous_deals: 'Contato associado a vários cards. Use o link do card correto.',
   fallback_block: 'Card fora dos pipelines permitidos.',
   owned_by_another_recent_activity: 'Card pertence a outro responsável e a última modificação está dentro do prazo mínimo.',
   owner_missing: 'Responsável destino não informado.',
+  product_pipeline_routing: 'Produto exige pipeline dedicado; movimentação executada.',
 });
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -423,13 +484,25 @@ export async function createDealForContact(contactId, dealName, pipelineId, stag
   } });
 }
 
+// ---------------------------------------------------------------------------
+// moveDealToCloserEmContato — nome público preservado por compatibilidade,
+// mas o destino agora depende do produto (Closer OU Quinquênio/Concomitante).
+// ---------------------------------------------------------------------------
 export async function moveDealToCloserEmContato(dealId, ownerId = null, produto = null) {
-  await accountReady(); await validateStage(PIPELINE_CLOSER_ID, STAGE_EM_CONTATO_ID);
+  await accountReady();
+  const destination = movementDestination(produto);
+  await validateStage(destination.pipeline, destination.stage);
   if (ownerId) await activeOwner(ownerId);
-  const deal = await request(`/crm/v3/objects/deals/${id(dealId)}`, { method: 'PATCH', body: {
-    properties: { pipeline: PIPELINE_CLOSER_ID, dealstage: STAGE_EM_CONTATO_ID, motivo_da_perda: '',
-      ...(produto ? { produto: optionalText(produto) } : {}), ...(ownerId ? { hubspot_owner_id: id(ownerId) } : {}) },
-  } });
+  const deal = await request(`/crm/v3/objects/deals/${id(dealId)}`, {
+    method: 'PATCH',
+    body: { properties: {
+      pipeline: destination.pipeline,
+      dealstage: destination.stage,
+      motivo_da_perda: '',
+      ...(produto ? { produto: optionalText(produto) } : {}),
+      ...(ownerId ? { hubspot_owner_id: id(ownerId) } : {}),
+    } },
+  });
   return { deal, lastUpdatedAt: deal.properties?.hs_lastmodifieddate || null };
 }
 
@@ -450,20 +523,9 @@ function hoursSince(value) {
 
 // ---------------------------------------------------------------------------
 // temporalCheck — regra de prazo por etapa.
-//
-// CORREÇÃO:
-//   Antes, a função validava `STAGE_COLETA_DOCUMENTACAO_ID` e
-//   `STAGE_ENTRADA_ID` **incondicionalmente** no topo, mesmo quando o card
-//   estava em outra etapa (ex.: "Em Contato"). Isso fazia qualquer
-//   movimentação falhar com "HUBSPOT_STAGE_*_ID inválido" se a variável
-//   correspondente não estivesse bem configurada — mesmo que aquela etapa
-//   não fosse usada para o card em questão.
-//
-//   Agora a validação do ID só ocorre para a etapa **efetivamente
-//   aplicável** ao card. Como os defaults já foram garantidos pelo
-//   `settingNumeric`, este `id(...)` funciona como dupla proteção:
-//   se algo extremamente raro quebrar o default, o erro aponta a etapa
-//   específica em vez de bloquear qualquer movimentação.
+// Mantida como está: as regras de 24/72h não se estendem automaticamente ao
+// pipeline de Quinquênio/Concomitante. Se o negócio definir prazo para o
+// novo pipeline, ele deve ser adicionado aqui de forma explícita.
 // ---------------------------------------------------------------------------
 function temporalCheck(deal) {
   const required = {
@@ -475,7 +537,6 @@ function temporalCheck(deal) {
   const currentStage = String(deal.stage ?? '');
   const requiredHours = required[currentStage];
 
-  // Só valida o ID da etapa aplicável ao card corrente.
   if (currentStage === STAGE_COLETA_DOCUMENTACAO_ID) {
     id(STAGE_COLETA_DOCUMENTACAO_ID, 'HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID');
   } else if (currentStage === STAGE_ENTRADA_ID) {
@@ -503,36 +564,73 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
   if (!ownerId) return assignmentResult(null, { blocked: true, ruleApplied: 'owner_missing', message: RULE_MESSAGES.owner_missing });
   await accountReady(); await activeOwner(ownerId);
   return withLocks([`contact:${id(contactId)}`], async () => {
-    const deals = await getContactDeals(contactId);
-    if (deals.length > 1) return assignmentResult(null, { blocked: true, ruleApplied: 'ambiguous_deals', message: RULE_MESSAGES.ambiguous_deals });
-    let deal = deals[0], rule;
+    const destination = movementDestination(produto);
+
+    // ─────────────────────────────────────────────────────────────
+    // Busca orientada pelo produto:
+    //   - Auxílio (e demais produtos comuns):
+    //       considera apenas cards no pipeline Closer e na Base de Leads.
+    //   - Quinquênio / Quinquenio / Quinqueino / Concomitante(s):
+    //       considera apenas cards no pipeline Quinquênio e na Base de Leads.
+    // Cards em outros pipelines são ignorados nesta movimentação.
+    // ─────────────────────────────────────────────────────────────
+    const allDeals = await getContactDeals(contactId);
+    const relevantPipelines = [String(PIPELINE_BASE_LEADS_ID), String(destination.pipeline)];
+    const deals = allDeals.filter(d => relevantPipelines.includes(String(d.pipeline)));
+
+    if (deals.length > 1) {
+      return assignmentResult(null, {
+        blocked: true,
+        ruleApplied: 'ambiguous_deals',
+        message: RULE_MESSAGES.ambiguous_deals,
+      });
+    }
+
+    let deal = deals[0] || null, rule;
+
     if (!deal) rule = 'created_and_moved';
     else if (String(deal.pipeline) === PIPELINE_BASE_LEADS_ID) rule = 'base_to_closer';
-    else if (String(deal.pipeline) !== PIPELINE_CLOSER_ID) return assignmentResult(deal, { blocked: true, ruleApplied: 'fallback_block', message: RULE_MESSAGES.fallback_block });
     else if (String(deal.stage) === STAGE_DESQUALIFICADO_ID) rule = 'desqualificado_to_em_contato';
     else if (!deal.ownerId) rule = 'closer_without_owner';
     else if (String(deal.ownerId) === String(ownerId)) {
       try {
-        await updateContactOwner(contactId, ownerId, produto);
-        await syncMovementProduct(deal.id, contactId, produto);
-        return assignmentResult(mapDeal(await getDeal(deal.id)), { alreadyAssigned: true, ruleApplied: 'already_assigned', message: RULE_MESSAGES.already_assigned });
+        // Atalho "já atribuído" só vale se o card já está no pipeline de
+        // destino. Caso contrário, cai no fluxo comum (rota de produto).
+        if (String(deal.pipeline) !== String(destination.pipeline)) {
+          rule = 'product_pipeline_routing';
+        } else {
+          await updateContactOwner(contactId, ownerId, produto);
+          await syncMovementProduct(deal.id, contactId, produto);
+          return assignmentResult(mapDeal(await getDeal(deal.id)), {
+            alreadyAssigned: true,
+            ruleApplied: 'already_assigned',
+            message: RULE_MESSAGES.already_assigned,
+          });
+        }
       } catch (error) {
         error.partialResult = { dealId: deal.id, contactId: String(contactId), produto };
         error.requiresReconciliation = true; error.retryable = false; throw error;
       }
     } else {
       const check = temporalCheck(deal);
-      if (!check.allowed) return assignmentResult(deal, { blocked: true, ruleApplied: 'owned_by_another_recent_activity',
-        message: `${RULE_MESSAGES.owned_by_another_recent_activity} ${check.reason}.`, requiredHours: check.requiredHours,
-        hoursSinceNote: check.hoursSinceNote, notesLastUpdated: check.lastUpdated });
+      if (!check.allowed) return assignmentResult(deal, {
+        blocked: true,
+        ruleApplied: 'owned_by_another_recent_activity',
+        message: `${RULE_MESSAGES.owned_by_another_recent_activity} ${check.reason}.`,
+        requiredHours: check.requiredHours,
+        hoursSinceNote: check.hoursSinceNote,
+        notesLastUpdated: check.lastUpdated,
+      });
       rule = 'reassigned_by_last_modified_date';
     }
+
     const previousContact = await getContact(contactId, ['hubspot_owner_id']);
     let writeAttempted = false, createdDealId = null;
     try {
       if (deal) {
         const fresh = mapDeal(await getDeal(deal.id));
-        if (['pipeline','stage','ownerId','lastModifiedDate'].some(k => String(fresh[k] || '') !== String(deal[k] || ''))) throw hubError('Card mudou durante a validação.', { blocked: true, code: 'CONTEXT_CHANGED' });
+        if (['pipeline','stage','ownerId','lastModifiedDate'].some(k => String(fresh[k] || '') !== String(deal[k] || '')))
+          throw hubError('Card mudou durante a validação.', { blocked: true, code: 'CONTEXT_CHANGED' });
       } else {
         writeAttempted = true;
         const created = await createDealForContact(contactId, dealName, PIPELINE_BASE_LEADS_ID, null, ownerId, produto);
@@ -542,12 +640,22 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
       await moveDealToCloserEmContato(deal.id, ownerId, produto);
       await updateContactOwner(contactId, ownerId, produto);
       await syncMovementProduct(deal.id, contactId, produto);
-      const confirmedDeal = mapDeal(await getDeal(deal.id)), confirmedContact = await getContact(contactId, ['hubspot_owner_id']);
-      if (String(confirmedDeal.ownerId) !== String(ownerId) || confirmedDeal.pipeline !== PIPELINE_CLOSER_ID || confirmedDeal.stage !== STAGE_EM_CONTATO_ID || String(confirmedContact.properties?.hubspot_owner_id) !== String(ownerId)) throw hubError('Atribuição final não confirmada.', { code: 'CONFIRMATION_FAILED' });
-      return assignmentResult(confirmedDeal, { ruleApplied: rule, message: RULE_MESSAGES[rule] || 'Movimentação concluída com sucesso.' });
+      const confirmedDeal = mapDeal(await getDeal(deal.id));
+      const confirmedContact = await getContact(contactId, ['hubspot_owner_id']);
+      if (String(confirmedDeal.ownerId) !== String(ownerId) ||
+          String(confirmedDeal.pipeline) !== String(destination.pipeline) ||
+          String(confirmedDeal.stage) !== String(destination.stage) ||
+          String(confirmedContact.properties?.hubspot_owner_id) !== String(ownerId)) {
+        throw hubError('Atribuição final não confirmada.', { code: 'CONFIRMATION_FAILED' });
+      }
+      return assignmentResult(confirmedDeal, { ruleApplied: rule, message: movementMessage(rule, destination) });
     } catch (error) {
       if (writeAttempted) {
-        error.partialResult = { dealId: deal?.id || null, createdDealId, contactId: String(contactId), previousContactOwnerId: previousContact.properties?.hubspot_owner_id || '', writeAttempted: true, produto };
+        error.partialResult = {
+          dealId: deal?.id || null, createdDealId, contactId: String(contactId),
+          previousContactOwnerId: previousContact.properties?.hubspot_owner_id || '',
+          writeAttempted: true, produto,
+        };
         error.requiresReconciliation = true; error.retryable = false;
       }
       throw error;
@@ -577,9 +685,15 @@ export async function validateFinalAssignment(contactId, expectedOwnerId, expect
   if (!target) return { ok: false, error: expectedDealId ? 'Card esperado não associado ao contato.' : 'Card ausente ou ambíguo.', resolvedBy: null };
   const contact = await getContact(contactId, ['hubspot_owner_id']);
   const contactOwnerId = contact.properties?.hubspot_owner_id || '';
-  const expectedPipeline = String(options.expectedPipeline || PIPELINE_CLOSER_ID);
-  const expectedStage = options.expectedStage === null ? null : String(options.expectedStage || STAGE_EM_CONTATO_ID);
-  const ok = String(target.ownerId) === String(expectedOwnerId) && String(contactOwnerId) === String(expectedOwnerId) && String(target.pipeline) === expectedPipeline && (expectedStage === null || String(target.stage) === expectedStage);
+  const destination = movementDestination(options.produto);
+  const expectedPipeline = String(options.expectedPipeline || destination.pipeline);
+  const expectedStage = options.expectedStage === null
+    ? null
+    : String(options.expectedStage || destination.stage);
+  const ok = String(target.ownerId) === String(expectedOwnerId) &&
+    String(contactOwnerId) === String(expectedOwnerId) &&
+    String(target.pipeline) === expectedPipeline &&
+    (expectedStage === null || String(target.stage) === expectedStage);
   return { ok, resolvedBy: expectedDealId ? 'expected_deal_id' : 'unique_associated_deal', contactOwnerId, deal: target, lastUpdatedAt: target.lastModifiedDate,
     details: { dealPipeline: target.pipeline, dealStage: target.stage, dealOwnerId: target.ownerId, contactOwnerId, associatedDeals: deals } };
 }
@@ -588,13 +702,22 @@ export async function getDealMovementContext(dealId, portalId) {
   id(dealId, 'Card');
   if (String(portalId) !== id(HUBSPOT_PORTAL_ID, 'HUBSPOT_PORTAL_ID')) throw hubError('Link pertence a outra conta.', { blocked: true });
   await accountReady(); const deal = mapDeal(await getDeal(dealId));
-  if (![PIPELINE_BASE_LEADS_ID, PIPELINE_CLOSER_ID].includes(String(deal.pipeline))) throw hubError('Link Hub permitido somente na Base de Leads e no Closer.', { blocked: true, code: 'PIPELINE_NOT_ALLOWED' });
+  if (!isAllowedMovementPipeline(deal.pipeline)) {
+    throw hubError('Link Hub permitido somente na Base de Leads, no Closer e em Quinquenio/concomitante.', {
+      blocked: true,
+      code: 'PIPELINE_NOT_ALLOWED',
+    });
+  }
   return { dealId: deal.id, dealName: deal.dealName || '', pipeline: String(deal.pipeline), stage: String(deal.stage || ''), ownerId: String(deal.ownerId || ''), lastModifiedDate: deal.lastModifiedDate };
 }
 
 function assertContext(expected, actual) {
   if (!expected || ['ownerId','pipeline','stage'].some(k => !Object.prototype.hasOwnProperty.call(expected, k))) throw hubError('Contexto validado de origem é obrigatório.', { blocked: true, code: 'EXPECTED_CONTEXT_REQUIRED' });
-  if ((expected.dealId !== undefined && String(expected.dealId) !== actual.dealId) || ['ownerId','pipeline','stage'].some(k => String(expected[k] || '') !== String(actual[k] || '')) || (expected.lastModifiedDate !== undefined && String(expected.lastModifiedDate || '') !== String(actual.lastModifiedDate || ''))) throw hubError('Card mudou após a validação. Revalide a autorização antes de executar.', { blocked: true, code: 'CONTEXT_CHANGED' });
+  if ((expected.dealId !== undefined && String(expected.dealId) !== actual.dealId) ||
+      ['ownerId','pipeline','stage'].some(k => String(expected[k] || '') !== String(actual[k] || '')) ||
+      (expected.lastModifiedDate !== undefined && String(expected.lastModifiedDate || '') !== String(actual.lastModifiedDate || ''))) {
+    throw hubError('Card mudou após a validação. Revalide a autorização antes de executar.', { blocked: true, code: 'CONTEXT_CHANGED' });
+  }
 }
 
 // Implementação comum mantém as regras específicas de cada fluxo.
@@ -613,8 +736,15 @@ async function reassignWithContext(dealId, ownerId, portalId, expectedCurrentCon
       const previousContactOwners = [{ contactId, ownerId: String(previousContact.properties?.hubspot_owner_id || '') }];
       const context = await getDealMovementContext(dealId, portalId);
       assertContext(expectedCurrentContext, context); assertContext(initial, context);
+
+      const destination = movementDestination(produto);
       const moveFromBase = linkHub && context.pipeline === PIPELINE_BASE_LEADS_ID;
-      if (moveFromBase) await validateStage(PIPELINE_CLOSER_ID, STAGE_EM_CONTATO_ID);
+      const routeSpecialProduct = linkHub && isQuinquenioOuConcomitante(produto);
+      const shouldMove = moveFromBase || routeSpecialProduct;
+      const expectedPipeline = shouldMove ? destination.pipeline : context.pipeline;
+      const expectedStage = shouldMove ? destination.stage : context.stage;
+      if (shouldMove) await validateStage(expectedPipeline, expectedStage);
+
       if (!linkHub) {
         const latest = await associationIds('deals', dealId, 'contacts');
         if (latest.length !== 1 || latest[0] !== contactId) throw hubError('Associação mudou durante a validação.', { blocked: true });
@@ -625,7 +755,11 @@ async function reassignWithContext(dealId, ownerId, portalId, expectedCurrentCon
         dealWriteAttempted = true;
         await request(`/crm/v3/objects/deals/${dealId}`, { method: 'PATCH', body: { properties: {
           hubspot_owner_id: String(ownerId),
-          ...(moveFromBase ? { pipeline: PIPELINE_CLOSER_ID, dealstage: STAGE_EM_CONTATO_ID, motivo_da_perda: '' } : {}),
+          ...(shouldMove ? {
+            pipeline: expectedPipeline,
+            dealstage: expectedStage,
+            motivo_da_perda: '',
+          } : {}),
           ...(linkHub && produto ? { produto: optionalText(produto) } : {}),
         } } });
         dealUpdated = true; attemptedContactIds.push(contactId);
@@ -636,9 +770,13 @@ async function reassignWithContext(dealId, ownerId, portalId, expectedCurrentCon
         completedContactIds.push(contactId);
         const finalContext = await getDealMovementContext(dealId, portalId);
         if (finalContext.ownerId !== String(ownerId)) throw hubError('Proprietário final divergente.', { code: 'CONFIRMATION_FAILED' });
-        const expectedPipeline = moveFromBase ? PIPELINE_CLOSER_ID : context.pipeline;
-        const expectedStage = moveFromBase ? STAGE_EM_CONTATO_ID : context.stage;
-        if (finalContext.pipeline !== expectedPipeline || finalContext.stage !== expectedStage) throw hubError(moveFromBase ? 'Pipeline/etapa final divergente após movimentação.' : 'Pipeline/etapa alterados indevidamente.', { code: 'CONFIRMATION_FAILED' });
+        if (finalContext.pipeline !== expectedPipeline || finalContext.stage !== expectedStage) {
+          throw hubError(
+            shouldMove ? 'Pipeline/etapa final divergente após movimentação.'
+              : 'Pipeline/etapa alterados indevidamente.',
+            { code: 'CONFIRMATION_FAILED' }
+          );
+        }
         const finalContacts = await associationIds('deals', dealId, 'contacts');
         if (finalContacts.length !== 1 || finalContacts[0] !== contactId) throw hubError('Associação final divergente.');
         return { dealId: String(dealId), dealName: finalContext.dealName, pipeline: finalContext.pipeline, stage: finalContext.stage,

@@ -3,6 +3,22 @@
 // compartilham a mesma tabela app_comissionamento.tickets_movimentacao_lead.
 // Nenhuma tabela adicional é necessária.
 // Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
+//
+// ─── Produto e roteamento de pipeline ───────────────────────────────
+// Esta camada é responsável APENAS por resolver e persistir o produto:
+//   - O produto é resolvido por equipe via resolveTeamProduct, respeitando
+//     `allowChange` do mapa de equipes.
+//   - O valor resolvido é gravado em DOIS lugares:
+//       * tickets_suporte.metadados.produto
+//       * tickets_movimentacao_lead.observacao_sales_ops.produto
+//   - Os workers (ticketQueue.js / linkHubBatchQueue.js) leem o produto
+//     dessas fontes e delegam ao hubspot.js, que decide o pipeline/etapa:
+//       * Auxílio e demais produtos comuns → Closer / Em Contato.
+//       * Quinquênio/Quinqueino/Concomitante(s) → Quinquênio / Em contato.
+//   - Esta camada NÃO decide pipeline. Não adiciona, remove ou infere
+//     produto fora do resolveTeamProduct.
+//
+// Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
 
 import express from 'express';
 import { createHash, randomUUID } from 'crypto';
@@ -593,6 +609,11 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
   // - Equipes com allowChange=false: ignora o que veio, usa o default.
   // - Equipes com allowChange=true:  valida contra as opções permitidas.
   // - Lança erro 400 se o valor enviado não for permitido.
+  //
+  // O produto resolvido é a única fonte de verdade para o worker. Ele será
+  // persistido em `tickets_suporte.metadados.produto` e em
+  // `tickets_movimentacao_lead.observacao_sales_ops.produto`, e é a partir
+  // dele que o hubspot.js decide entre Closer e Quinquênio/Concomitante.
   const produto = resolveTeamProduct(destination.team, body.produto);
 
   const requestHash = hashRequest({ firstName, lastName, phone, customerEmail, cpf, origin,
@@ -700,6 +721,9 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
   const actor = req.supportActor;
 
   // Produto resolvido para o lote inteiro (mesma equipe destino).
+  // Persistido em `metadados.produto` e em `observacao_sales_ops.produto`
+  // de cada item. É a fonte única para o worker decidir entre Closer e
+  // Quinquênio/Concomitante no hubspot.js.
   const produto = resolveTeamProduct(destination.team, req.body.produto);
 
   // Assinatura do lote: deals + destino + produto. Garante que reaproveitar
@@ -994,6 +1018,13 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
 //     e registra a ação no histórico, sinalizando o risco.
 //   - Preserva produto/idempotency_key; apenas marca processado=false.
 //   - Limpa o estado interno do worker (_worker) para o Link Hub.
+//
+// Observação importante sobre o roteamento por produto:
+//   - O reprocessamento NÃO relê o produto da equipe. Ele reaproveita o
+//     produto já persistido no ticket (metadados.produto / observacao.produto).
+//   - Se for necessário trocar o produto de um ticket já criado, faça uma
+//     solicitação nova; a troca de produto em um ticket existente não é
+//     suportada por esta rota.
 router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
