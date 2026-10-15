@@ -399,8 +399,8 @@ router.post('/generate-next-month', async (req, res) => {
         peso_meta_ganho_mensal,
         peso_meta_protocolados_mensal,
         classificacao_operacional,
-        meta_gols_assinados,      -- ✅ adicionado
-        meta_gols_ganhos,         -- ✅ adicionado
+        meta_gols_assinados,      
+        meta_gols_ganhos,         
         data_metrica,
         updated_at
       )

@@ -650,54 +650,129 @@ router.get('/perdidos', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================
 // --- LEADS RECEBIDOS ---
+// ------------------------------------------------------------
+// Fonte de verdade: core.deals.data_distribuicao_comercial
+// (convertida para America/Sao_Paulo) — representa quando o lead
+// efetivamente chegou ao colaborador (closer_id ?? responsavel_id).
+//
+// Retorna, por colaborador+equipe:
+//   leads_recebidos, assinados, ganhos, protocolados
+//   + conversao_assinatura_pct, conversao_ganho_pct, conversao_protocolo_pct
+//
+// Regras:
+//   - Assinatura: apenas core.assinaturas com status_assinatura = 'ASSINADO'.
+//   - Protocolo : apenas core.processos com numero_processo OU
+//                 numero_protocolo preenchido.
+//   - Considera somente deals não deletados (is_deleted = FALSE).
+//   - Filtro de equipe aplicado em SQL (c.nome_equipe).
+//   - Filtro de colaborador aplicado no Node (fuzzy), mesmo padrão
+//     das demais rotas.
+// ============================================================
 router.get('/leads-recebidos', requireAuth, async (req, res) => {
   try {
-    let { start, end, equipe, produto, granularity } = req.query;
-    if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+    const { start, end, equipe } = req.query;
+    if (!start || !end) {
+      return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+    }
     const colaboradorNome = await resolveColaboradorNome(req);
-    const gran = mapGranularity(granularity);
 
     let query = `
-      SELECT 
-        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
-        COALESCE(c.nome_equipe, '') as equipe,
-        COUNT(*)::int as total
+      WITH assinatura_por_deal AS (
+        SELECT
+          deal_id,
+          MIN(data_assinatura) FILTER (
+            WHERE data_assinatura IS NOT NULL
+              AND UPPER(COALESCE(status_assinatura, '')) = 'ASSINADO'
+          ) AS data_assinatura
+        FROM core.assinaturas
+        WHERE deal_id IS NOT NULL
+        GROUP BY deal_id
+      ),
+      protocolo_por_deal AS (
+        SELECT
+          deal_id,
+          MIN(data_protocolo) FILTER (
+            WHERE data_protocolo IS NOT NULL
+              AND (
+                NULLIF(BTRIM(numero_processo), '') IS NOT NULL
+                OR NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
+              )
+          ) AS data_protocolo
+        FROM core.processos
+        WHERE deal_id IS NOT NULL
+        GROUP BY deal_id
+      ),
+      base AS (
+        SELECT
+          d.deal_id,
+          (d.data_distribuicao_comercial AT TIME ZONE 'America/Sao_Paulo')::date AS data_recebimento,
+          COALESCE(d.closer_id, d.responsavel_id) AS colaborador_id,
+          c.nome AS colaborador,
+          c.nome_equipe,
+          c.unidade_id,
+          a.data_assinatura,
+          d.data_ganho,
+          p.data_protocolo
+        FROM core.deals d
+        LEFT JOIN core.colaboradores c
+          ON c.colaborador_id = COALESCE(d.closer_id, d.responsavel_id)
+        LEFT JOIN assinatura_por_deal a
+          ON a.deal_id = d.deal_id
+        LEFT JOIN protocolo_por_deal p
+          ON p.deal_id = d.deal_id
+        WHERE d.data_distribuicao_comercial IS NOT NULL
+          AND COALESCE(d.is_deleted, FALSE) = FALSE
+          AND (d.data_distribuicao_comercial AT TIME ZONE 'America/Sao_Paulo')::date >= $1::date
+          AND (d.data_distribuicao_comercial AT TIME ZONE 'America/Sao_Paulo')::date <  $2::date
     `;
-    if (gran) {
-      query = `
-        SELECT 
-          COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
-          COALESCE(c.nome_equipe, '') as equipe,
-          DATE_TRUNC('${gran}', l.data_qualificacao::timestamp)::date as periodo,
-          COUNT(*)::int as total
-      `;
-    }
-    query += `
-      FROM core.view_qualificados l
-      LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
-      WHERE l.data_qualificacao::date >= $1::date
-        AND l.data_qualificacao::date < $2::date
-    `;
+
     const params = [start, end];
     let idx = 3;
 
     if (equipe && equipe !== 'todas') {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
-      params.push(equipe); idx++;
-    }
-    if (gran) {
-      query += ` GROUP BY 
-        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
-        c.nome_equipe,
-        DATE_TRUNC('${gran}', l.data_qualificacao::timestamp)::date
-        ORDER BY periodo, colaborador`;
-    } else {
-      query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), c.nome_equipe ORDER BY colaborador`;
+      params.push(equipe);
+      idx++;
     }
 
+    query += `
+      )
+      SELECT
+        colaborador_id,
+        COALESCE(NULLIF(TRIM(colaborador), ''), 'Sem responsável') AS colaborador,
+        COALESCE(nome_equipe, '') AS equipe,
+        unidade_id,
+        COUNT(DISTINCT deal_id)::int AS leads_recebidos,
+        COUNT(DISTINCT deal_id) FILTER (WHERE data_assinatura IS NOT NULL)::int AS assinados,
+        COUNT(DISTINCT deal_id) FILTER (WHERE data_ganho      IS NOT NULL)::int AS ganhos,
+        COUNT(DISTINCT deal_id) FILTER (WHERE data_protocolo  IS NOT NULL)::int AS protocolados,
+        ROUND(
+          100.0 * COUNT(DISTINCT deal_id) FILTER (WHERE data_assinatura IS NOT NULL)
+          / NULLIF(COUNT(DISTINCT deal_id), 0),
+          2
+        ) AS conversao_assinatura_pct,
+        ROUND(
+          100.0 * COUNT(DISTINCT deal_id) FILTER (WHERE data_ganho IS NOT NULL)
+          / NULLIF(COUNT(DISTINCT deal_id), 0),
+          2
+        ) AS conversao_ganho_pct,
+        ROUND(
+          100.0 * COUNT(DISTINCT deal_id) FILTER (WHERE data_protocolo IS NOT NULL)
+          / NULLIF(COUNT(DISTINCT deal_id), 0),
+          2
+        ) AS conversao_protocolo_pct
+      FROM base
+      GROUP BY colaborador_id, colaborador, nome_equipe, unidade_id
+      ORDER BY leads_recebidos DESC
+    `;
+
     const result = await db.query(query, params);
+
+    // Filtro fuzzy de colaborador no Node (mesmo padrão das demais rotas).
     const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
+
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /leads-recebidos:', err);
