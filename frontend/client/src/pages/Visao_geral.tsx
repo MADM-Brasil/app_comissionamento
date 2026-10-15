@@ -64,9 +64,6 @@ const EXCLUDED_CARGOS = [
 ];
 
 // Equipes reservadas — mesma regra de Suporte/Equipe/Ranking.
-// Precisa ficar em sincronia com backend/services/access-control.js
-// (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
-// (EQUIPES_TRAVADAS_DESTINO).
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 const normalize = (str: string): string =>
@@ -93,8 +90,8 @@ const isDesativado = (c: Collaborator) =>
 
 // ============================================================
 //  Identifica um COLABORADOR que é supervisor (função de módulo).
-//  Atenção: NÃO usar este nome para variáveis locais dentro do
-//  componente — o sombreamento faz `isSupervisor(c)` virar erro.
+//  NÃO usar este nome para variáveis locais dentro do componente —
+//  o sombreamento faz `isSupervisor(c)` virar erro.
 // ============================================================
 const isSupervisor = (c: Collaborator) => {
   const cargo = normalize(c.cargo);
@@ -161,6 +158,13 @@ function findSelectedCollaborator(
   }
   return null;
 }
+
+// ============================================================
+//  Extração defensiva de total dos endpoints de leads.
+//  Aceita `total` (formato atual) ou `leads_recebidos` (novo).
+// ============================================================
+const extractLeadsTotal = (item: any): number =>
+  Number(item?.total ?? item?.leads_recebidos ?? 0) || 0;
 
 // ========== RADAR DE CONVERSÃO (colaboradores individuais) ==========
 function RadarConversaoLigacoes({ colaboradores }: { colaboradores: Collaborator[] }) {
@@ -246,8 +250,6 @@ export default function VisaoGeral() {
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
   const canSeeAll = userLevel >= LEVELS.COORDENADOR;
 
-  // ⚠️ Nome alterado de `isSupervisor` para `userIsSupervisor` para NÃO
-  //    sombrear a função de módulo `isSupervisor(c: Collaborator)`.
   const userIsSupervisor = userLevel === LEVELS.SUPERVISAO;
 
   const userUnidadeRaw = (currentUser as any)?.unidade_id
@@ -414,9 +416,13 @@ export default function VisaoGeral() {
         fetchLeadsRecebidos(params),
         fetchLigacoesProdutivas(params),
       ]);
-      const total = leadsData.reduce((sum: number, item: any) => sum + (Number(item.total) || 0), 0);
+      // Extração defensiva: aceita `total` (atual) ou `leads_recebidos` (novo).
+      const total = (leadsData || []).reduce(
+        (sum: number, item: any) => sum + extractLeadsTotal(item),
+        0
+      );
       setTotalLeads(total);
-      setTotalLigacoesProdutivas(ligacoesProdutivas);
+      setTotalLigacoesProdutivas(Number(ligacoesProdutivas) || 0);
       lastFetchLeads.current = Date.now();
     } catch (err) {
       console.error("Erro ao buscar leads:", err);
@@ -547,7 +553,6 @@ export default function VisaoGeral() {
   const periodKey: PeriodKey =
     period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
 
-  // Só é "visão global" se o perfil puder ver todas as equipes e não houver filtro ativo.
   const isGlobalView =
     filters.equipe === "todas" &&
     filters.colaborador === "todos" &&

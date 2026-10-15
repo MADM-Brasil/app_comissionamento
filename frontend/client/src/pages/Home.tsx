@@ -19,13 +19,50 @@ import { Link } from "wouter";
 import {
   fetchEmitidos,
   fetchAssinados,
-  fetchLeadsRecebidos,
   fetchGanhos,
   fetchPerdidos,
   fetchCollaborators,
   fetchProtocolados,
   fetchLigacoesProdutivas,
+  API_BASE,
 } from "@/lib/api";
+
+// ============================================================
+// FETCH LOCAL — LEADS RECEBIDOS (modo série temporal)
+// ------------------------------------------------------------
+// Bypassa o wrapper do api.ts e constrói a URL explicitamente.
+// Garante que:
+//   • `granularity=daily` sempre chega ao backend.
+//   • Parâmetros opcionais (equipe/colaborador/produto) só são
+//     enviados quando têm valor real (nunca "undefined"/"todas").
+// Isso evita cair no modo agregado sem `periodo`, que fazia os
+// gráficos ficarem zerados.
+// ============================================================
+async function fetchLeadsRecebidosDaily(params: {
+  start: string;
+  end: string;
+  equipe?: string;
+  colaborador?: string;
+  produto?: string;
+}): Promise<Array<{ colaborador: string; equipe: string; periodo: string; total: number }>> {
+  const searchParams = new URLSearchParams();
+  searchParams.append('start', params.start);
+  searchParams.append('end', params.end);
+  searchParams.append('granularity', 'daily');
+  if (params.equipe && params.equipe !== 'todas') searchParams.append('equipe', params.equipe);
+  if (params.colaborador && params.colaborador !== 'todos') searchParams.append('colaborador', params.colaborador);
+  if (params.produto && params.produto !== 'Todos') searchParams.append('produto', params.produto);
+
+  const url = `${API_BASE}/metrics/leads-recebidos?${searchParams.toString()}`;
+  console.log('[Home] fetchLeadsRecebidosDaily →', url);
+
+  const res = await fetch(url, { credentials: 'include' });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ao buscar leads`);
+  const json = await res.json();
+  if (!json?.success) throw new Error(json?.error || 'Erro ao carregar leads');
+  console.log('[Home] fetchLeadsRecebidosDaily ←', (json.data || []).length, 'linhas');
+  return Array.isArray(json.data) ? json.data : [];
+}
 
 // ============================================================
 // CONSTANTES DE EXCLUSÃO
@@ -50,6 +87,9 @@ const EXCLUDED_CARGOS_FOR_DISPLAY = [
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+const extractLeadsTotal = (item: any): number =>
+  Number(item?.total ?? item?.leads_recebidos ?? 0) || 0;
+
 function isSpecialGroupColaborador(colaborador: any): boolean {
   const produto = (colaborador.produto || '').toLowerCase();
   const cargo = (colaborador.cargo || '').toLowerCase();
@@ -65,36 +105,25 @@ function isSpecialGroupColaborador(colaborador: any): boolean {
 
 function getFaixaProductType(colab: any): string {
   const rawProduct = (colab?.produto || '').toUpperCase().trim();
-  if (rawProduct === 'JUDIT' || rawProduct === 'DISCADORA') {
-    return 'AUXILIO ACIDENTE';
-  }
-  if (rawProduct === 'QUINQUENIO' || rawProduct === 'CONCOMITANTE') {
-    return rawProduct;
-  }
+  if (rawProduct === 'JUDIT' || rawProduct === 'DISCADORA') return 'AUXILIO ACIDENTE';
+  if (rawProduct === 'QUINQUENIO' || rawProduct === 'CONCOMITANTE') return rawProduct;
 
   const cargoNormalizado = (colab?.cargo || '').toLowerCase().trim();
   if (cargoNormalizado === 'quinquenio') return 'QUINQUENIO';
   if (cargoNormalizado === 'concomitante') return 'CONCOMITANTE';
 
   const equipeNormalizada = (colab?.equipeNome || '').toLowerCase().trim();
-  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiana')) {
-    return 'QUINQUENIO';
-  }
-  if (equipeNormalizada.includes('concomitante')) {
-    return 'CONCOMITANTE';
-  }
+  if (equipeNormalizada.includes('quinquenio') || equipeNormalizada.includes('quinquênio') || equipeNormalizada.includes('tatiana')) return 'QUINQUENIO';
+  if (equipeNormalizada.includes('concomitante')) return 'CONCOMITANTE';
 
   return 'AUXILIO ACIDENTE';
 }
 
 // ============================================================
-// CONFIGURAÇÃO DE PESOS (ranking/score)
+// PESOS (ranking/score) E METAS
 // ============================================================
 const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', number> = {
-  ganhos: 4,
-  assinados: 3,
-  protocolados: 1,
-  emitidos: 2,
+  ganhos: 4, assinados: 3, protocolados: 1, emitidos: 2,
 };
 
 const GLOBAL_META = {
@@ -434,23 +463,30 @@ export default function Home() {
       await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
       await loadWeeklyPerformanceData();
 
-      const metricParams = {
-        start: currentStartDate,
-        end: currentEndDate,
-        equipe: equipeApi,
-        colaborador: colaboradorApi,
-        produto: produtoApi,
-      };
+      // KPI "Leads Recebidos": usa o modo diário e soma tudo (mesma
+      // fonte dos gráficos).
       const [leadsData, ligacoesProdutivas] = await Promise.all([
-        fetchLeadsRecebidos(metricParams),
-        fetchLigacoesProdutivas(metricParams),
+        fetchLeadsRecebidosDaily({
+          start: currentStartDate,
+          end: currentEndDate,
+          equipe: equipeApi,
+          colaborador: colaboradorApi,
+          produto: produtoApi,
+        }).catch((e) => { console.warn('[Home] reloadData leads falhou:', e?.message); return []; }),
+        fetchLigacoesProdutivas({
+          start: currentStartDate,
+          end: currentEndDate,
+          equipe: equipeApi,
+          colaborador: colaboradorApi,
+          produto: produtoApi,
+        }).catch(() => 0),
       ]);
       const totalLeadsRecebidos = (leadsData || []).reduce(
-        (acc, item) => acc + (Number(item.total) || 0),
+        (acc, item) => acc + extractLeadsTotal(item),
         0
       );
       setTotalLeads(totalLeadsRecebidos);
-      setTotalLigacoesProdutivas(ligacoesProdutivas);
+      setTotalLigacoesProdutivas(Number(ligacoesProdutivas) || 0);
 
       await loadWeeklyPerformanceData();
 
@@ -559,7 +595,6 @@ export default function Home() {
     return aboveUser.score - (globalRanking[currentIndex]?.score || 0);
   }, [aboveUser, currentIndex, globalRanking]);
 
-  // Grupo especial baseado no colaborador logado ou filtro
   const isSpecialGroup = useMemo(() => {
     if (filters.produto === 'Quinquenio' || filters.produto === 'Concomitante') return true;
     return currentUserData ? isSpecialGroupColaborador(currentUserData) : false;
@@ -572,7 +607,6 @@ export default function Home() {
     if (isSupervisorSelected && supervisorSelectedTeam) {
       return collaborators.filter(c => c.equipeNome === supervisorSelectedTeam);
     }
-
     return collaborators.filter(c => {
       if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
@@ -588,14 +622,6 @@ export default function Home() {
 
   const totals = rawMetrics;
 
-  // ============================================================
-  // ← AJUSTE: para Quinquenio/Concomitante, ganhos = assinados
-  // ------------------------------------------------------------
-  //  Quando o filtro de produto é Quinquenio ou Concomitante, a
-  //  métrica de ganhos passa a espelhar os assinados. Isso alinha
-  //  os KPIs, a meta e o card lateral à regra de negócio desses
-  //  produtos (o "ganho" é a assinatura).
-  // ============================================================
   const effectiveTotals = useMemo(() => {
     if (!isSpecialGroup) return totals;
     return { ...totals, ganhos: totals.assinados };
@@ -611,7 +637,6 @@ export default function Home() {
     if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) {
       return 0;
     }
-
     const isSupervisor = (currentUserData.cargo || '').toLowerCase() === 'supervisor';
     const isSR = Boolean(currentUserData.isSupervisorSR) || calculator.isSupervisorSR(currentUserData.email);
     const isEspecial = isSpecialGroupColaborador(currentUserData);
@@ -620,28 +645,20 @@ export default function Home() {
       const totalAssEquipe = currentUserData.assinados || 0;
       return calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
     }
-
     if (isEspecial) {
       const productType = getFaixaProductType(currentUserData);
       return calculator.calculateProductCommission(currentUserData.assinados || 0, productType, tabelaComissoes);
     }
-
     if (dailyMetrics.length > 0) {
       const metaGolsAss = currentUserData.metaGolsAssinados ?? 3;
       const metaGolsGan = currentUserData.metaGolsGanhos ?? 3;
       const assinados = currentUserData.assinados || 0;
       const productType = getFaixaProductType(currentUserData);
       const result = calculator.calculateTotalCommission(
-        dailyMetrics,
-        metaGolsAss,
-        metaGolsGan,
-        assinados,
-        productType,
-        tabelaComissoes
+        dailyMetrics, metaGolsAss, metaGolsGan, assinados, productType, tabelaComissoes
       );
       return result.totalCommission;
     }
-
     return 0;
   }, [currentUserData, tabelaComissoes, dailyMetrics]);
 
@@ -655,21 +672,16 @@ export default function Home() {
       const metasBatidas = Math.floor(ganhos / (meta.ganhos || 1));
       return { totalTargetGanhos: meta.ganhos, totalMetasBatidas: metasBatidas };
     }
-
     let sumGan = 0;
     let metas = 0;
     displayCollaborators.forEach(c => {
       const pesoGanKey = `meta${periodKey.charAt(0).toUpperCase() + periodKey.slice(1)}Ganhos` as keyof Collaborator;
       const pesoGan = Number(c[pesoGanKey]) || 0;
       sumGan += pesoGan;
-
-      // ← AJUSTE: em Quinquenio/Concomitante, o "ganho" considerado é o
-      // assinado do colaborador, espelhando a regra do card/KPIs.
       const ganhos = isSpecialGroup ? (c.assinados || 0) : (c.ganhos || 0);
       if (pesoGan === 0) return;
       metas += Math.floor(ganhos / pesoGan);
     });
-
     return { totalTargetGanhos: sumGan, totalMetasBatidas: metas };
   }, [isGlobalView, displayCollaborators, effectiveTotals, isSpecialGroup, periodKey]);
 
@@ -679,7 +691,7 @@ export default function Home() {
   }, [totalTargetGanhos, effectiveTotals.ganhos]);
 
   // ============================================================
-  // GRÁFICOS DE PERFORMANCE
+  // GRÁFICO: Emitidos vs Assinados (apenas grupo especial)
   // ============================================================
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
@@ -694,7 +706,7 @@ export default function Home() {
         const dayNames = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
         const emitidosMap = new Map<string, number>(), assinadosMap = new Map<string, number>();
         const aggregateEA = (data: any[], map: Map<string, number>) => {
-          data.forEach((item: any) => {
+          (data || []).forEach((item: any) => {
             const dateStr = item.data || item.periodo; if (!dateStr) return;
             const date = parseUTCDate(dateStr); if (isNaN(date.getTime())) return;
             const dayName = dayNames[date.getUTCDay()]; map.set(dayName, (map.get(dayName) || 0) + (Number(item.total) || 0));
@@ -708,58 +720,116 @@ export default function Home() {
     fetchWeeklyData();
   }, [isSpecialGroup, currentStartDate, currentEndDate, filters, getChartFilterParams]);
 
+  // ============================================================
+  // GRÁFICO: Performance semanal (Leads vs Assinados vs Ganhos)
+  // ============================================================
   useEffect(() => {
     if (isSpecialGroup) return;
+    let cancelled = false;
     const { equipeApi, colaboradorApi } = getChartFilterParams();
     const fetchWeeklyDetailed = async () => {
       try {
         const { start, end } = getCurrentWeekDatesUTC();
         const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
-        const commonParams = { start, end, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' as const };
-        const [leadsData, assinadosData, ganhosData] = await Promise.all([fetchLeadsRecebidos(commonParams), fetchAssinados(commonParams), fetchGanhos(commonParams)]);
+
+        const [leadsData, assinadosData, ganhosData] = await Promise.all([
+          fetchLeadsRecebidosDaily({
+            start, end,
+            equipe: equipeApi,
+            colaborador: colaboradorApi,
+            produto: produtoApi,
+          }).catch((e) => { console.warn('[Home] weekly leads falhou:', e?.message); return []; }),
+          fetchAssinados({ start, end, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' }).catch(() => []),
+          fetchGanhos({ start, end, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' }).catch(() => []),
+        ]);
+        if (cancelled) return;
+
         const weekdays = ['Seg','Ter','Qua','Qui','Sex'];
         const leadsMap = new Map<string, number>(), assinadosMap = new Map<string, number>(), ganhosMap = new Map<string, number>(), dateMap = new Map<string, string>();
-        const aggregate = (data: any[], map: Map<string, number>) => {
-          data.forEach(item => {
-            let dateStr = item.data || item.periodo; if (!dateStr) return;
+
+        const aggregate = (data: any[], map: Map<string, number>, useLeadsTotal = false) => {
+          (data || []).forEach(item => {
+            const dateStr = item.data || item.periodo; if (!dateStr) return;
             const date = parseUTCDate(dateStr); if (isNaN(date.getTime())) return;
             const dayIndex = date.getUTCDay(); if (dayIndex === 0 || dayIndex === 6) return;
             const dayName = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][dayIndex];
-            map.set(dayName, (map.get(dayName) || 0) + (Number(item.total) || 0));
-            if (!dateMap.has(dayName)) { const day = String(date.getUTCDate()).padStart(2,'0'), month = String(date.getUTCMonth()+1).padStart(2,'0'); dateMap.set(dayName, `${day}/${month}`); }
+            const value = useLeadsTotal ? extractLeadsTotal(item) : (Number(item.total) || 0);
+            map.set(dayName, (map.get(dayName) || 0) + value);
+            if (!dateMap.has(dayName)) {
+              const day = String(date.getUTCDate()).padStart(2,'0');
+              const month = String(date.getUTCMonth()+1).padStart(2,'0');
+              dateMap.set(dayName, `${day}/${month}`);
+            }
           });
         };
-        aggregate(leadsData, leadsMap); aggregate(assinadosData, assinadosMap); aggregate(ganhosData, ganhosMap);
-        const result = weekdays.map(day => ({ day, dateExample: dateMap.get(day) || '', leads: leadsMap.get(day) || 0, assinados: assinadosMap.get(day) || 0, ganhos: ganhosMap.get(day) || 0 }));
+        aggregate(leadsData, leadsMap, true);
+        aggregate(assinadosData, assinadosMap);
+        aggregate(ganhosData, ganhosMap);
+
+        const result = weekdays.map(day => ({
+          day,
+          dateExample: dateMap.get(day) || '',
+          leads: leadsMap.get(day) || 0,
+          assinados: assinadosMap.get(day) || 0,
+          ganhos: ganhosMap.get(day) || 0,
+        }));
         setWeeklyDetailed(result);
-      } catch (err) { console.error('Erro ao carregar dados semanais detalhados:', err); }
+      } catch (err) {
+        console.error('Erro ao carregar dados semanais detalhados:', err);
+        if (!cancelled) setWeeklyDetailed([]);
+      }
     };
     fetchWeeklyDetailed();
+    return () => { cancelled = true; };
   }, [isSpecialGroup, filters, getChartFilterParams]);
 
+  // ============================================================
+  // GRÁFICO: Produção Diária (Leads vs Assinados)
+  // ============================================================
   useEffect(() => {
     if (isSpecialGroup) return;
+    let cancelled = false;
     const { equipeApi, colaboradorApi } = getChartFilterParams();
     const fetchDailyData = async () => {
       try {
         const range = getDailyChartDateRangeUTC(period, currentStartDate, currentEndDate);
-        const start = range.start, end = range.end; if (!start || !end) return;
+        const start = range.start, end = range.end;
+        if (!start || !end) {
+          if (!cancelled) setDailyChartData([]);
+          return;
+        }
         const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
-        const commonParams = { start, end, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' as const };
-        const [leadsData, assinadosData] = await Promise.all([fetchLeadsRecebidos(commonParams), fetchAssinados(commonParams)]);
+
+        const [leadsData, assinadosData] = await Promise.all([
+          fetchLeadsRecebidosDaily({
+            start, end,
+            equipe: equipeApi,
+            colaborador: colaboradorApi,
+            produto: produtoApi,
+          }).catch((e) => { console.warn('[Home] daily leads falhou:', e?.message); return []; }),
+          fetchAssinados({ start, end, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' }).catch(() => []),
+        ]);
+        if (cancelled) return;
+
         const leadsMap = new Map<string, number>(), assinadosMap = new Map<string, number>();
-        const process = (data: any[], map: Map<string, number>) => {
-          data.forEach(item => {
+        const process = (data: any[], map: Map<string, number>, useLeadsTotal = false) => {
+          (data || []).forEach(item => {
             const dateStr = item.data || item.periodo; if (!dateStr) return;
             const date = parseUTCDate(dateStr); if (isNaN(date.getTime())) return;
             const formatted = date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
-            map.set(formatted, (map.get(formatted) || 0) + (Number(item.total) || 0));
+            const value = useLeadsTotal ? extractLeadsTotal(item) : (Number(item.total) || 0);
+            map.set(formatted, (map.get(formatted) || 0) + value);
           });
         };
-        process(leadsData, leadsMap); process(assinadosData, assinadosMap);
+        process(leadsData, leadsMap, true);
+        process(assinadosData, assinadosMap);
+
         const allDates: string[] = [];
         const currentDate = parseUTCDate(start), endDate = parseUTCDate(end);
-        if (isNaN(currentDate.getTime()) || isNaN(endDate.getTime())) return;
+        if (isNaN(currentDate.getTime()) || isNaN(endDate.getTime())) {
+          if (!cancelled) setDailyChartData([]);
+          return;
+        }
         const filterWeekend = period === "Semana";
         while (currentDate < endDate) {
           const dateStr = formatUTCDate(currentDate);
@@ -772,9 +842,13 @@ export default function Home() {
           return { date: formatted, leads: leadsMap.get(formatted) || 0, assinados: assinadosMap.get(formatted) || 0 };
         });
         setDailyChartData(chartData);
-      } catch (err) { console.error('Erro ao carregar dados diários:', err); }
+      } catch (err) {
+        console.error('Erro ao carregar dados diários:', err);
+        if (!cancelled) setDailyChartData([]);
+      }
     };
     fetchDailyData();
+    return () => { cancelled = true; };
   }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
 
   // ============================================================
@@ -782,20 +856,12 @@ export default function Home() {
   // ============================================================
   const stats = useMemo(() => {
     if (isSpecialGroup || weeklyDetailed.length === 0) {
-      return {
-        totalGanhos: 0,
-        performanceGanhos: 0,
-        bestDay: { day: '', value: 0 },
-        avgGanhos: 0,
-        daysWithMeta: 0,
-        totalDays: 0,
-      };
+      return { totalGanhos: 0, performanceGanhos: 0, bestDay: { day: '', value: 0 }, avgGanhos: 0, daysWithMeta: 0, totalDays: 0 };
     }
     const totalGanhos = weeklyDetailed.reduce((a, d) => a + d.ganhos, 0);
     const totalDays = weeklyDetailed.length;
     const performanceGanhos = totalTargetGanhos > 0 ? (totalGanhos / totalTargetGanhos) * 100 : 0;
     const avgGanhos = totalDays > 0 ? totalGanhos / totalDays : 0;
-
     const dailyTarget = displayCollaborators.reduce((sum, c) => sum + (c.metaDiarioGanhos || 0), 0);
 
     let best = { day: '', value: 0 };
@@ -823,14 +889,11 @@ export default function Home() {
   }, [currentUserData, tabelaComissoes]);
 
   // ============================================================
-  // KPI CARDS
-  // ------------------------------------------------------------
-  //  Em Quinquenio/Concomitante, "Ganhos" recebe effectiveTotals.ganhos
-  //  (que é igual ao total de assinados no período). Os demais KPIs
-  //  permanecem inalterados.
+  // KPI CARDS (5 cards — inclui "Leads Recebidos")
   // ============================================================
   const kpiCards = [
     { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
+    { label: "Leads Recebidos", value: totalLeads, target: 0, unit: "", icon: Users, color: "#3B82F6", simple: true },
     { label: "Ganhos", value: effectiveTotals.ganhos, target: totalTargetGanhos, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
     { label: "Protocolados", value: totals.protocolados, target: 1200, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
@@ -893,7 +956,7 @@ export default function Home() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
             {kpiCards.map((kpi, i) => <KpiCard key={kpi.label} {...kpi} delay={i * 80} hideValues={hideValues} />)}
           </div>
 
@@ -989,7 +1052,7 @@ export default function Home() {
                 <div><h3 className="text-sm font-bold text-[#0f172a]">Produção Diária</h3><p className="text-xs text-[#64748b] mt-0.5">Leads recebidos vs Assinados</p></div>
                 {canAccessReports && <Link href="/analytics"><button className="text-xs text-[#2F6FED] font-semibold flex items-center gap-1 hover:gap-2 transition-all">Ver mais <ArrowRight className="w-3 h-3" /></button></Link>}
               </div>
-              {dailyChartData.length === 0 ? <div className="flex items-center justify-center h-[200px] text-[#94a3b8] text-sm">Carregando dados...</div> : (
+              {dailyChartData.length === 0 ? <div className="flex items-center justify-center h-[200px] text-[#94a3b8] text-sm">Nenhum dado disponível para o período</div> : (
                 <ResponsiveContainer width="100%" height={200}>
                   <AreaChart data={dailyChartData}>
                     <defs>
