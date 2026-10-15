@@ -6,7 +6,12 @@
 //
 // Produto: lido de `observacao_sales_ops.produto` (fonte principal) ou, em
 // tickets legados, de `metadados.produto`. É propagado via garantirLeadNoCloser,
-// que grava `produto` no deal e `contact_produto` no contato.
+// que decide o pipeline de destino:
+//   - Auxílio e demais produtos comuns → Closer / Em Contato.
+//   - Quinquênio/Quinqueino/Concomitante(s) → Quinquênio / Em contato.
+//
+// A busca do card no contato também é orientada pelo produto (ver
+// garantirLeadNoCloser em hubspot.js).
 //
 // Não chamamos updateContactOwner direto aqui — deixamos que
 // garantirLeadNoCloser sincronize proprietário + produto apenas depois de
@@ -26,7 +31,9 @@ import {
   findOwnerIdByEmail,
   validateFinalAssignment,
   HUBSPOT_PIPELINE_CLOSER_ID,
+  HUBSPOT_PIPELINE_QUINQUENIO_ID,
   HUBSPOT_STAGE_EM_CONTATO_ID,
+  HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID,
 } from './hubspot.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 
@@ -52,10 +59,10 @@ console.log(
 );
 
 const RULE_LABELS = Object.freeze({
-  created_and_moved: 'Card criado na Base de Leads e movido para o Closer.',
-  base_to_closer: 'Card movido da Base de Leads para o Closer.',
-  desqualificado_to_em_contato: 'Card desqualificado reativado no Closer.',
-  closer_without_owner: 'Card estava no Closer sem responsável; atribuído agora.',
+  created_and_moved: 'Card criado na Base de Leads e movido para o destino.',
+  base_to_closer: 'Card movido da Base de Leads para o destino.',
+  desqualificado_to_em_contato: 'Card desqualificado reativado no destino.',
+  closer_without_owner: 'Card estava sem responsável; atribuído agora.',
   reassigned_by_last_modified_date: 'Card reatribuído com base na última modificação.',
   already_assigned: 'Card já estava com o responsável informado; contato alinhado.',
   ambiguous_deals: 'Contato associado a vários cards.',
@@ -65,7 +72,23 @@ const RULE_LABELS = Object.freeze({
   missing_email: 'Campos pendentes: preencha e-mail para tentar novamente.',
   invalid_email: 'E-mail inválido. Corrija e reenvie.',
   contact_data_mismatch: 'Dados divergentes do cadastro. Aguardando suporte.',
+  product_pipeline_routing: 'Produto exige pipeline dedicado; movimentação executada.',
 });
+
+// Normaliza o produto para casar com a lógica do hubspot.js.
+function isQuinquenioOuConcomitante(produto) {
+  const normalized = String(produto ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /\b(?:quinquenio|quinqueino|concomitantes?)\b/.test(normalized);
+}
+
+// Destino esperado, dado o produto. Fonte única para o worker CRM.
+function expectedDestination(produto) {
+  return isQuinquenioOuConcomitante(produto)
+    ? { pipeline: HUBSPOT_PIPELINE_QUINQUENIO_ID, stage: HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID, name: 'Quinquenio/concomitante' }
+    : { pipeline: HUBSPOT_PIPELINE_CLOSER_ID, stage: HUBSPOT_STAGE_EM_CONTATO_ID, name: 'Closer' };
+}
 
 function describeBlockedReason(hubspotData) {
   const parts = [];
@@ -199,6 +222,9 @@ async function handleTicket(ticket, client) {
     ticket.metadados?.produto ||
     null;
 
+  // Destino esperado pelo produto (Auxílio → Closer; Quinquênio → Quinquênio).
+  const destination = expectedDestination(produto);
+
   const nomeCompleto = `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim();
 
   const hubspotData = {
@@ -217,6 +243,7 @@ async function handleTicket(ticket, client) {
     hoursSinceNote: null,
     notesLastUpdated: null,
     produto,
+    destinoEsperado: destination.name,
   };
 
   let contactId = null;
@@ -330,10 +357,25 @@ async function handleTicket(ticket, client) {
       }
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // Pipeline/etapa esperados após a movimentação.
+    // Preferimos o que o próprio hubspot.js confirmou (resultado.pipeline /
+    // resultado.stage). Se por algum motivo não vier, usamos o destino
+    // padrão calculado a partir do produto.
+    // ─────────────────────────────────────────────────────────────
+    const expectedPipeline = String(resultado?.pipeline || destination.pipeline);
+    const expectedStage = String(resultado?.stage || destination.stage);
+
     if (resultado && !resultado.blocked && contactId && dealId && ownerId) {
       const validateOptions = {
-        expectedPipeline: HUBSPOT_PIPELINE_CLOSER_ID,
-        expectedStage: ENFORCE_EXACT_STAGE ? HUBSPOT_STAGE_EM_CONTATO_ID : null,
+        produto,
+        expectedPipeline,
+        // Em modo estrito exigimos a etapa exata do destino. Fora dele,
+        // aceitamos qualquer etapa entre as aceitas do Closer quando o
+        // destino é o Closer — mesmo comportamento anterior para Auxílio.
+        expectedStage: ENFORCE_EXACT_STAGE
+          ? expectedStage
+          : (String(expectedPipeline) === HUBSPOT_PIPELINE_CLOSER_ID ? null : expectedStage),
       };
 
       let finalCheck = null;
@@ -345,7 +387,7 @@ async function handleTicket(ticket, client) {
         attempts++;
         finalCheck = await validateFinalAssignment(contactId, ownerId, dealId, validateOptions);
         if (finalCheck.ok) {
-          console.log(`✅ Validação final OK (tentativa ${attempts})`);
+          console.log(`✅ Validação final OK (tentativa ${attempts}) — destino ${destination.name}`);
           break;
         }
         console.log(`⏳ Aguardando associação do deal (tentativa ${attempts}/${maxAttempts})...`);
@@ -356,15 +398,22 @@ async function handleTicket(ticket, client) {
         const d = finalCheck?.details || {};
         const ownerOk = String(d.dealOwnerId) === String(ownerId)
           && String(d.contactOwnerId) === String(ownerId);
-        const pipelineOk = String(d.dealPipeline) === HUBSPOT_PIPELINE_CLOSER_ID;
+        const pipelineOk = String(d.dealPipeline) === expectedPipeline;
+
+        // Aceitação de etapa:
+        //   - Modo estrito: precisa ser exatamente expectedStage.
+        //   - Não estrito + destino Closer: qualquer etapa entre as aceitas.
+        //   - Não estrito + destino Quinquênio: exige a etapa do pipeline.
         const stageOk = ENFORCE_EXACT_STAGE
-          ? String(d.dealStage) === HUBSPOT_STAGE_EM_CONTATO_ID
-          : ACCEPTED_CLOSER_STAGES.has(String(d.dealStage));
+          ? String(d.dealStage) === expectedStage
+          : (String(expectedPipeline) === HUBSPOT_PIPELINE_CLOSER_ID
+              ? ACCEPTED_CLOSER_STAGES.has(String(d.dealStage))
+              : String(d.dealStage) === expectedStage);
 
         if (ownerOk && pipelineOk && stageOk) {
           console.log(
             `ℹ️ Validação estrita retornou não-ok, mas owner/pipeline/etapa válidos. ` +
-            `Etapa atual: ${d.dealStage}. Aceitando como sucesso.`
+            `Pipeline: ${d.dealPipeline}, etapa atual: ${d.dealStage}. Aceitando como sucesso.`
           );
         } else {
           throw new Error(
@@ -398,8 +447,16 @@ async function handleTicket(ticket, client) {
       statusFinal = hubspotData.status;
       hubspotData.ruleApplied = resultado?.ruleApplied || hubspotData.ruleApplied || null;
     } else if (
-      resultado?.pipeline === HUBSPOT_PIPELINE_CLOSER_ID &&
-      ACCEPTED_CLOSER_STAGES.has(String(resultado.stage))
+      resultado &&
+      !resultado.blocked &&
+      resultado.dealId &&
+      String(resultado.pipeline) === expectedPipeline &&
+      (
+        String(resultado.stage) === expectedStage ||
+        (String(expectedPipeline) === HUBSPOT_PIPELINE_CLOSER_ID &&
+          !ENFORCE_EXACT_STAGE &&
+          ACCEPTED_CLOSER_STAGES.has(String(resultado.stage)))
+      )
     ) {
       statusFinal = 'concluido';
       hubspotData.status = 'concluido';
@@ -424,8 +481,9 @@ async function handleTicket(ticket, client) {
       hubspotData.lastUpdatedAt = resultado.lastUpdatedAt || null;
       hubspotData.mensagem =
         `Card foi atribuído mas está no pipeline "${hubspotData.pipelineNome}" ` +
-        `na etapa "${hubspotData.stageNome}", fora das etapas aceitas do Closer ` +
-        `(${[...ACCEPTED_CLOSER_STAGES].join(', ')}). Verifique manualmente.`;
+        `na etapa "${hubspotData.stageNome}", fora do destino esperado ` +
+        `("${destination.name}": pipeline ${expectedPipeline} / etapa ${expectedStage}). ` +
+        `Verifique manualmente.`;
     } else {
       statusFinal = 'pendente';
       hubspotData.status = 'pendente';
@@ -449,6 +507,7 @@ async function handleTicket(ticket, client) {
       colaboradorDestinoEmail: colaboradorEmail,
       validacaoFinal: true,
       produto: observacaoAtual.produto || produto || null,
+      destinoEsperado: destination.name,
     };
 
     await client.query(
@@ -494,6 +553,7 @@ async function handleTicket(ticket, client) {
             `Tel: ${ticket.telefone_cliente_informado || 'N/A'} | ` +
             `Equipe destino: ${ticket.equipe_destino_nome || 'N/A'} | ` +
             `Produto: ${produto || 'N/A'} | ` +
+            `Destino esperado: ${destination.name} | ` +
             `Status: ${statusFinal}`,
           solicitante: ticket.colaborador_origem_nome || 'N/A',
           equipe: ticket.equipe_origem_nome || 'N/A',

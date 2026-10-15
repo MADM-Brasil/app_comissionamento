@@ -306,10 +306,6 @@ class AccessControl {
       return { status: 400, error: 'Assessor destino não encontrado ou inativo.' };
     }
 
-    if (!['assessor', 'analista de pastas'].includes(this.normalize(destination.cargo))) {
-      return { status: 400, error: 'O destino selecionado não é um assessor.' };
-    }
-
     const team = this.normalize(destinationTeam);
     if (!team || team !== this.normalize(destination.nome_equipe)) {
       return { status: 400, error: 'Equipe destino não corresponde à equipe do assessor.' };

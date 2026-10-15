@@ -13,14 +13,26 @@
 //    unidade vem direto do registro do owner, sem depender da consulta
 //    por `nome_equipe` (ambígua quando a mesma equipe tem unidades mistas).
 //
+// ─── Roteamento por produto ───
+// O produto do ticket é repassado a `reassignDealForLinkHubMovement`, que:
+//   - Auxílio e demais produtos comuns → Closer / Em Contato.
+//   - Quinquênio/Quinqueino/Concomitante(s) → pipeline Quinquênio / Em contato,
+//     tanto vindo da Base de Leads quanto do próprio Closer ou já dentro
+//     do pipeline Quinquênio.
+// A regra gravada em `observacao_sales_ops.regra` reflete o pipeline final
+// confirmado, não apenas "veio da Base".
+//
 // O fluxo de reprocessamento continua o mesmo: a rota `/reprocessar`
 // reseta `_worker` e `processado`, e o worker aqui pega o ticket normalmente.
+
 import { pool } from './db.js';
 import {
   findOwnerIdByEmailStrict,
   getDealMovementContext,
   getHubSpotOwnerEmail,
   reassignDealForLinkHubMovement,
+  HUBSPOT_PIPELINE_CLOSER_ID,
+  HUBSPOT_PIPELINE_QUINQUENIO_ID,
 } from './hubspot.js';
 import { getActiveSupportUser, validateHubSpotMovementAccess } from './access-control.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
@@ -32,9 +44,11 @@ let isProcessing = false;
 
 const RULE_LABELS = Object.freeze({
   moved_from_base_leads:
-    'Card movido da Base de Leads para o Closer (Em Contato), motivo da perda limpo.',
+    'Card movido da Base de Leads para o destino, motivo da perda limpo.',
   reassigned_in_closer:
     'Responsável alterado no Closer, pipeline e etapa preservados.',
+  reassigned_in_quinquenio:
+    'Card posicionado em Quinquenio/concomitante (Em contato).',
 });
 
 const NOTIFY_STATUSES = new Set(['erro', 'bloqueado']);
@@ -79,6 +93,23 @@ function describeFailure(error, attempts) {
   if (partial?.previousStage) parts.push(`Etapa de origem: ${partial.previousStage}.`);
   if (error.blocked) parts.push('Bloqueio definitivo — requer revisão manual.');
   return parts.filter(Boolean).join(' ');
+}
+
+// Escolhe a regra a ser gravada em observacao_sales_ops.regra, com base no
+// pipeline final confirmado pela movimentação:
+//   - Quinquênio → reassigned_in_quinquenio (pipeline dedicado foi o destino)
+//   - Closer vindo da Base → moved_from_base_leads (fluxo original)
+//   - Closer sem origem Base → reassigned_in_closer (só responsável mudou)
+function resolveRuleLabel(resultData) {
+  const pipelineFinal = String(resultData?.pipeline || '');
+  const movedFromBase = Boolean(resultData?.movedFromBaseLeads);
+  if (pipelineFinal === String(HUBSPOT_PIPELINE_QUINQUENIO_ID)) {
+    return { regra: 'reassigned_in_quinquenio', mensagem: RULE_LABELS.reassigned_in_quinquenio };
+  }
+  if (movedFromBase) {
+    return { regra: 'moved_from_base_leads', mensagem: RULE_LABELS.moved_from_base_leads };
+  }
+  return { regra: 'reassigned_in_closer', mensagem: RULE_LABELS.reassigned_in_closer };
 }
 
 async function reclaimStaleLeases(client) {
@@ -163,9 +194,8 @@ async function claimNextTicket(client) {
 
 async function markSuccess(client, ticket, resultData) {
   const observacao = safeParse(ticket.observacao_sales_ops);
+  const { regra, mensagem } = resolveRuleLabel(resultData);
   const movedFromBase = Boolean(resultData.movedFromBaseLeads);
-  const regra = movedFromBase ? 'moved_from_base_leads' : 'reassigned_in_closer';
-  const mensagem = RULE_LABELS[regra];
   const agora = new Date().toISOString();
 
   const nova = {
@@ -351,6 +381,7 @@ async function handleLinkHubTicket(ticket, client) {
     JSON.stringify({
       ticketId: ticket.id_ticket_movimentacao,
       dealId,
+      produto,
       dealOwnerId: context.ownerId || null,
       sourceOwnerEmail: sourceOwnerEmail || null,
       sourceOwnerNome: sourceOwner?.nome || null,
@@ -414,6 +445,10 @@ async function handleLinkHubTicket(ticket, client) {
     throw error;
   }
 
+  // O destino (pipeline/etapa) é decidido pelo hubspot.js a partir do produto.
+  // Quando o produto é especial, o card é movido para Quinquênio mesmo se já
+  // estiver no Closer ou no próprio Quinquênio. Quando é Auxílio/comum, o
+  // comportamento anterior (mover da Base; preservar Closer) é mantido.
   const assignment = await reassignDealForLinkHubMovement(
     dealId,
     ownerId,
