@@ -237,6 +237,10 @@ function getDateRangeFromPeriod(period: Period, customStart?: string, customEnd?
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
+// Normalização usada para casar nomes entre o back e o front (acentos/caixa).
+const normalizeNameKey = (str: string | undefined | null): string =>
+  String(str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
 // ============================================================
 // ESTADOS INICIAIS
 // ============================================================
@@ -505,12 +509,8 @@ export const useAppStore = create<AppStore>()(
       setDailyData: (data) => set({ dailyData: data }),
 
       // ============================================================
-      // CORREÇÃO CRÍTICA:
-      // O backend retorna `nome_equipe`, NÃO `equipe`.
-      // Antes, essa função lia só `user.equipe`, o que fazia `equipe`
-      // ficar sempre vazia no frontend e, para supervisores, zerava
-      // o dropdown de "Equipe Destino" na página de Suporte.
-      // Agora aceitamos ambos os nomes e preservamos `unidade_id`.
+      // setCurrentUser — preserva equipe + unidade_id.
+      // Aceita tanto `nome_equipe` (padrão do backend) quanto `equipe`.
       // ============================================================
       setCurrentUser: (user) => {
         if (!user) {
@@ -697,7 +697,6 @@ export const useAppStore = create<AppStore>()(
             name: c.name,
             email: c.email,
             equipeId: c.equipeId ?? '',
-            // Compatibilidade: aceita equipeNome (padrão novo) e nome_equipe (retorno do backend)
             equipeNome: c.equipeNome || c.nome_equipe || '',
             avatar: c.avatar || (c.name || '?').charAt(0).toUpperCase(),
             emitidos: 0,
@@ -732,7 +731,6 @@ export const useAppStore = create<AppStore>()(
             pesoMensalGanhos: c.pesoMensalGanhos ?? 60,
             classificacaoOperacional: c.classificacaoOperacional || c.classificacao_operacional || '',
             canal: c.canal || (c.classificacaoOperacional || c.classificacao_operacional || '').toLowerCase() === 'judit' ? 'Judit' : 'Discadora',
-            // Campos de unidade (1=Osasco, 2=Ribeirão Preto, 3=Curitiba, 4=HO → nome null)
             unidadeId: c.unidadeId ?? null,
             unidadeNome: c.unidadeNome ?? null,
           }));
@@ -804,6 +802,16 @@ export const useAppStore = create<AppStore>()(
         await get().loadWeeklyPerformanceData();
       },
 
+      // ============================================================
+      // loadMetricsForPeriod
+      // ------------------------------------------------------------
+      // Ajustes:
+      //  • Chama fetchLeadsRecebidos com `granularity: 'daily'` para obter
+      //    a série temporal (o modo agregado devolve só por colaborador,
+      //    sem `data`/`periodo`).
+      //  • Extração defensiva: `total ?? leads_recebidos`.
+      //  • Chave da série: `periodo ?? data`.
+      // ============================================================
       loadMetricsForPeriod: async (params = {}) => {
         try {
           const { currentStartDate, currentEndDate, collaborators } = get();
@@ -823,12 +831,11 @@ export const useAppStore = create<AppStore>()(
             fetchPerdidos(apiParams),
           ]);
 
-          const normalize = (str: string): string => (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
           const mapToNum = (arr: any[], key: string) => {
             const m = new Map<string, number>();
-            arr.forEach((e: any) => {
+            (arr || []).forEach((e: any) => {
               const raw = e[key];
-              if (raw) m.set(normalize(raw), (m.get(normalize(raw)) || 0) + (Number(e.total) || 0));
+              if (raw) m.set(normalizeNameKey(raw), (m.get(normalizeNameKey(raw)) || 0) + (Number(e.total) || 0));
             });
             return m;
           };
@@ -840,11 +847,11 @@ export const useAppStore = create<AppStore>()(
 
           let updated = get().collaborators.map(c => ({
             ...c,
-            emitidos: eMap.get(normalize(c.name)) ?? 0,
-            assinados: aMap.get(normalize(c.name)) ?? 0,
-            protocolados: pMap.get(normalize(c.name)) ?? 0,
-            ganhos: gMap.get(normalize(c.name)) ?? 0,
-            perdidos: peMap.get(normalize(c.name)) ?? 0,
+            emitidos: eMap.get(normalizeNameKey(c.name)) ?? 0,
+            assinados: aMap.get(normalizeNameKey(c.name)) ?? 0,
+            protocolados: pMap.get(normalizeNameKey(c.name)) ?? 0,
+            ganhos: gMap.get(normalizeNameKey(c.name)) ?? 0,
+            perdidos: peMap.get(normalizeNameKey(c.name)) ?? 0,
           }));
 
           updated.forEach(c => {
@@ -857,7 +864,7 @@ export const useAppStore = create<AppStore>()(
           set({ collaborators: hierarchical });
           get().updateKpiFromMetrics();
 
-          const sumTotal = (data: any[]) => data.reduce((acc, item) => acc + (Number(item.total) || 0), 0);
+          const sumTotal = (data: any[]) => (data || []).reduce((acc, item) => acc + (Number(item.total) || 0), 0);
           const rawMetrics = {
             emitidos: sumTotal(emitidos),
             assinados: sumTotal(assinados),
@@ -867,10 +874,19 @@ export const useAppStore = create<AppStore>()(
           };
           set({ rawMetrics });
 
-          const leadsData = await fetchLeadsRecebidos(apiParams);
+          // --- Série diária de leads (granularity='daily') ---
+          // Sem granularity o endpoint devolve agregado por colaborador, sem
+          // `periodo`/`data`. Por isso pedimos explicitamente o modo diário.
+          const leadsData = await fetchLeadsRecebidos({ ...apiParams, granularity: 'daily' });
           const leadsByDate = new Map<string, number>();
-          leadsData.forEach((l: any) => leadsByDate.set(l.data, (leadsByDate.get(l.data) || 0) + l.total));
-          const dailyProd: DailyProduction[] = Array.from(leadsByDate.entries()).map(([date, leads]) => ({ date, vendas: 0, leads }));
+          (leadsData || []).forEach((l: any) => {
+            const dateKey = String(l?.periodo || l?.data || '').slice(0, 10);
+            if (!dateKey) return;
+            const totalVal = Number(l?.total ?? l?.leads_recebidos ?? 0) || 0;
+            leadsByDate.set(dateKey, (leadsByDate.get(dateKey) || 0) + totalVal);
+          });
+          const dailyProd: DailyProduction[] = Array.from(leadsByDate.entries())
+            .map(([date, leads]) => ({ date, vendas: 0, leads }));
           if (dailyProd.length) set({ dailyProduction: dailyProd.sort((a, b) => a.date.localeCompare(b.date)) });
 
           // Demanda atual / reprimida acompanham o filtro ativo (fuzzy no backend).
@@ -901,7 +917,7 @@ export const useAppStore = create<AppStore>()(
             fetchPerdidos(apiParams),
           ]);
 
-          const sumTotal = (data: any[]) => data.reduce((acc, item) => acc + (Number(item.total) || 0), 0);
+          const sumTotal = (data: any[]) => (data || []).reduce((acc, item) => acc + (Number(item.total) || 0), 0);
           const rawMetrics = {
             emitidos: sumTotal(emitidos),
             assinados: sumTotal(assinados),
@@ -964,18 +980,22 @@ export const useAppStore = create<AppStore>()(
         } catch { /* mock */ }
       },
 
+      // ============================================================
+      // loadLeadsByStage — corrigido: envia `equipe` (não `equipeNome`).
+      // O backend lê req.query.equipe.
+      // ============================================================
       loadLeadsByStage: async (equipeNome, colaboradorNome, produto) => {
         try {
           const { currentStartDate, currentEndDate } = get();
           if (!currentStartDate || !currentEndDate) return [];
           const params = new URLSearchParams({ start: currentStartDate, end: currentEndDate });
           if (colaboradorNome) params.append('colaborador', colaboradorNome);
-          if (equipeNome) params.append('equipeNome', equipeNome);
+          if (equipeNome && equipeNome !== 'todas') params.append('equipe', equipeNome);
           if (produto && produto !== 'Todos') params.append('produto', produto);
           const res = await fetch(`${API_BASE}/metrics/leads/stages?${params}`, { credentials: 'include' });
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || 'Erro ao carregar leads por etapa');
-          return data.data.map((item: any) => ({ ...item, total: Number(item.total) || 0 }));
+          return (data.data || []).map((item: any) => ({ ...item, total: Number(item.total) || 0 }));
         } catch { return []; }
       },
 
@@ -1027,7 +1047,6 @@ export const useAppStore = create<AppStore>()(
         }
       },
 
-      // Conveniência: carrega tudo de uma vez (detalhado + resumo)
       loadDemandaCompleta: async (params = {}) => {
         await Promise.all([
           get().loadDemandaAtual(params),

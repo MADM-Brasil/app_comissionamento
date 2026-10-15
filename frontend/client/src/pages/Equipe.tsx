@@ -196,10 +196,12 @@ async function fetchAssinadosDiarioPorTime(inicio: string, fim: string): Promise
 // ============================================================
 //  LEADS RECEBIDOS POR COLABORADOR
 // ------------------------------------------------------------
-//  Fonte: mesmo endpoint usado pelo Funil (/metrics/leads/stages).
+//  Fonte: /metrics/leads/stages (mesmo endpoint do Funil).
 //  Agrega o total por colaborador e devolve um Map nome → total.
-//  Usado para alimentar a métrica "Recebidos" da página de Equipe
-//  com o número correto de leads recebidos, em vez de `emitidos`.
+//
+//  Extração defensiva: aceita `total` (formato atual do endpoint)
+//  ou `leads_recebidos` (caso o backend evolua para expor o campo
+//  novo já adotado em /leads-recebidos).
 // ============================================================
 async function fetchLeadsRecebidosPorColaborador(inicio: string, fim: string): Promise<Map<string, number>> {
   const url = `${API_BASE}/metrics/leads/stages?start=${inicio}&end=${fim}`;
@@ -213,7 +215,8 @@ async function fetchLeadsRecebidosPorColaborador(inicio: string, fim: string): P
     for (const row of data.data) {
       const nome = String(row?.colaborador || "").trim();
       if (!nome) continue;
-      const total = Number(row?.total) || 0;
+      // Aceita `total` (atual) ou `leads_recebidos` (futuro).
+      const total = Number(row?.total ?? row?.leads_recebidos ?? 0) || 0;
       map.set(nome, (map.get(nome) || 0) + total);
     }
     return map;
@@ -319,7 +322,6 @@ export default function Equipe() {
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
   const canSeeAll = userLevel >= LEVELS.COORDENADOR;
 
-  // Unidade do usuário (mesmo padrão das demais telas).
   const userUnidadeRaw = (currentUser as any)?.unidade_id
     ?? (currentUser as any)?.unidadeId
     ?? null;
@@ -372,10 +374,6 @@ export default function Equipe() {
 
   // ============================================================
   //  LEADS RECEBIDOS POR COLABORADOR
-  // ------------------------------------------------------------
-  //  Necessário para que o KPI "Recebidos" reflita leads recebidos,
-  //  não propostas emitidas. Consumimos o MESMO endpoint do Funil
-  //  (/metrics/leads/stages) e agregamos por nome do colaborador.
   // ============================================================
   const [leadsPorColaborador, setLeadsPorColaborador] = useState<Map<string, number>>(new Map());
   const [leadsFetching, setLeadsFetching] = useState(false);
@@ -458,17 +456,6 @@ export default function Equipe() {
 
   // ============================================================
   //  LISTA DE COLABORADORES VISÍVEIS + enriquecimento com leads
-  // ------------------------------------------------------------
-  //  Regras de unidade:
-  //    - Admin/SuperAdmin: todos.
-  //    - Coordenador: whitelist da própria unidade.
-  //    - Supervisor: travado na própria equipe; unidade 1 fora da
-  //      Tatiane oculta a Tatiane.
-  //    - Assessor: apenas ele mesmo.
-  //
-  //  Depois do filtro por perfil, injetamos `leadsRecebidos` em cada
-  //  colaborador, para que os componentes abaixo usem esse valor
-  //  no lugar de `emitidos` no KPI "Recebidos".
   // ============================================================
   const colaboradores = useMemo(() => {
     let filtered = rawCollaborators.filter((c) => !isExcludedTeam(c.equipeNome));
@@ -494,7 +481,6 @@ export default function Equipe() {
       filtered = userTeam ? filtered.filter(c => normalize(c.equipeNome) === normalize(userTeam)) : [];
     }
 
-    // Enriquece cada colaborador com `leadsRecebidos`.
     return filtered.map((c) => ({
       ...c,
       leadsRecebidos: leadsPorColaborador.get(c.name) || 0,
@@ -522,8 +508,6 @@ export default function Equipe() {
     : isAssessor ? "Seus indicadores de desempenho."
     : `Visão geral das equipes. Ganhos de ${labelPeriodo}.`;
 
-  // Bloqueio também enquanto o escopo do Coordenador carrega,
-  // evitando expor dados de outras unidades por um frame.
   if (initialLoading || (isCoordenador && coordenadorEscopoLoading)) {
     return (
       <DashboardLayout title={titulo} subtitle="Carregando...">
@@ -677,8 +661,6 @@ function ListaEquipes({
   const dadosPorTime = times.map((nome, indice) => {
     const membros = colaboradores.filter((c) => c.equipeNome === nome);
     const membrosFolha = membros.filter((c) => !isAggregatedRole(c.cargo));
-    // ⚠️ "Recebidos" agora é a soma de `leadsRecebidos` (leads recebidos),
-    // não `emitidos` (propostas emitidas). Mantém alinhamento com o Funil.
     const recebidos = membrosFolha.reduce((s, c) => s + ((c as any).leadsRecebidos || 0), 0);
     const assinados = membrosFolha.reduce((s, c) => s + (c.assinados || 0), 0);
     const protocolados = membrosFolha.reduce((s, c) => s + (c.protocolados || 0), 0);
@@ -914,9 +896,6 @@ function ColaboradorCard({
   teamMembersCount: number;
 }) {
   const agregado = isAggregatedRole(c.cargo);
-  // ⚠️ "Recebidos" agora usa `leadsRecebidos`, alinhado com a página de Funil.
-  // `emitidos` (propostas emitidas) continua disponível em `c.emitidos`,
-  // mas não é mais o valor exibido no card.
   const recebidos = (c as any).leadsRecebidos || 0;
   const assinados = c.assinados || 0;
   const ganhos = c.ganhos || 0;
@@ -1166,9 +1145,6 @@ function DetalhesColaborador({
     return () => { cancelado = true; };
   }, [colaborador?.name, currentStartDate, currentEndDate, periodoAnterior.inicio, periodoAnterior.fim]);
 
-  // ⚠️ "Recebidos" agora usa `leadsRecebidos` (vindo do endpoint de leads),
-  // alinhado com o Funil. `emitidos` continua acessível via colaborador.emitidos
-  // se precisar ser mostrado em outro lugar.
   const recebidos = (colaborador as any)?.leadsRecebidos || 0;
   const assinados = colaborador?.assinados || 0;
   const protocolados = colaborador?.protocolados || 0;

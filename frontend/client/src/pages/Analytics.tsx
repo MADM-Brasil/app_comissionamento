@@ -47,9 +47,6 @@ const EXCLUDED_GROUPS = [
 ];
 
 // ========== EQUIPES RESERVADAS (mesma regra de Suporte/Equipe/Visão Geral/Ranking/Comissões) ==========
-// Precisa ficar em sincronia com backend/services/access-control.js
-// (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
-// (EQUIPES_TRAVADAS_DESTINO).
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 function isExcludedTeam(teamName: string): boolean { return EXCLUDED_TEAMS.includes(teamName); }
@@ -58,7 +55,6 @@ function isExcludedGroup(group: string): boolean {
   return EXCLUDED_GROUPS.some(g => g.toLowerCase() === normalized);
 }
 
-// Normalização agressiva (mesma usada nas outras telas).
 const normalize = (str: string | undefined | null): string =>
   String(str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
@@ -75,8 +71,6 @@ function isEquipeTravadaDestino(nome: string | undefined | null): boolean {
   return EQUIPES_TRAVADAS_DESTINO.includes(n);
 }
 
-// ← Mantido: helpers para detectar cargo supervisor e localizar o
-// colaborador selecionado no filtro.
 const isSupervisorCargo = (cargo?: string | null): boolean =>
   (cargo || '').toLowerCase().trim().startsWith('supervisor');
 
@@ -173,7 +167,6 @@ export default function Analytics() {
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
 
-  // ⚠️ Nome com "User" para NÃO sombrear funções de módulo.
   const userIsSupervisor = userLevel === LEVELS.SUPERVISAO;
 
   const userUnidadeRaw = (accessUser as any)?.unidade_id
@@ -238,8 +231,6 @@ export default function Analytics() {
     return () => { mounted = false; };
   }, [isCoordenador, accessUser]);
 
-  // Mantém a mesma referência de `currentUser` da store para o resto do
-  // componente (compatibilidade com o código existente).
   const currentUser = storeUser;
 
   useEffect(() => { if (!hasPermission("canAccessReports")) navigate("/"); }, [hasPermission, navigate]);
@@ -270,11 +261,6 @@ export default function Analytics() {
 
   // ============================================================
   //  BASE RESTRITA POR PERFIL
-  // ------------------------------------------------------------
-  //  Aplica whitelist (Coordenador), ocultação da Tatiane
-  //  (Supervisor u.1 fora dela), travamento por equipe
-  //  (Supervisor) e travamento por e-mail (Assessor) antes de
-  //  qualquer filtro de UI.
   // ============================================================
   const scopedCollaborators = useMemo(() => {
     let list = [...collaborators];
@@ -329,8 +315,6 @@ export default function Analytics() {
   const isSupervisorSelected = !!selectedCollaborator && isSupervisorCargo(selectedCollaborator.cargo);
   const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
 
-  // Centraliza a montagem dos parâmetros de API, aplicando a regra
-  // "supervisor selecionado => visão da equipe".
   const getEffectiveFilterParams = useCallback(() => {
     let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
     let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
@@ -443,11 +427,14 @@ export default function Analytics() {
         if (signal.aborted) return;
         const dataMap = new Map<string, { leads: number; assinados: number; ganhos: number; protocolados: number; perdidos: number }>();
         const processData = (data: any[], field: 'leads' | 'assinados' | 'ganhos' | 'protocolados' | 'perdidos') => {
-          data.forEach(item => {
+          (data || []).forEach(item => {
             let rawDate = item.data || item.periodo; if (!rawDate) return;
-            const dateStr = rawDate.split('T')[0]; if (!dateStr) return;
+            const dateStr = String(rawDate).split('T')[0]; if (!dateStr) return;
             const existing = dataMap.get(dateStr) || { leads:0, assinados:0, ganhos:0, protocolados:0, perdidos:0 };
-            existing[field] += Number(item.total)||0; dataMap.set(dateStr, existing);
+            // Extração defensiva: aceita `total` (formato legado) ou `leads_recebidos` (novo).
+            const totalVal = Number(item.total ?? item.leads_recebidos ?? 0) || 0;
+            existing[field] += totalVal;
+            dataMap.set(dateStr, existing);
           });
         };
         processData(leadsData,'leads'); processData(assinadosData,'assinados'); processData(ganhosData,'ganhos'); processData(protocoladosData,'protocolados'); processData(perdidosData,'perdidos');
@@ -468,7 +455,7 @@ export default function Analytics() {
         setDailyChartData(chartArray); lastFetchChartTime.current = Date.now();
         setTotalLeads(Array.from(dataMap.values()).reduce((s,v)=>s+v.leads,0));
         setTotalAssinados(Array.from(dataMap.values()).reduce((s,v)=>s+v.assinados,0));
-        setTotalLigacoesProdutivas(ligacoesProdutivas);
+        setTotalLigacoesProdutivas(Number(ligacoesProdutivas) || 0);
         setApiError(null);
       } catch (err: any) { if (err.name !== 'AbortError') setApiError(err.message||"Erro ao carregar dados do gráfico"); }
       finally { isFetchingRef.current = false; }
@@ -560,7 +547,6 @@ export default function Analytics() {
     return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-2xl font-black text-[#0f172a]">{displayCurrency(userBonusCiclo)}</div><div className="text-xs text-[#64748b]">{bonusError||"valor do banco"}</div></div>);
   };
 
-  // Bloqueio de render enquanto o escopo do Coordenador ainda carrega.
   if (isCoordenador && coordenadorEscopoLoading) {
     return (
       <DashboardLayout title="Analytics" subtitle="Carregando escopo...">

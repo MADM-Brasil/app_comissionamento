@@ -35,23 +35,47 @@ function normalize(str) {
 }
 
 // ============================================================
+// Catálogo de variantes de produto (case/acento)
+// ============================================================
+const PRODUCT_VARIANTS = {
+  'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
+  'Quinquenio':       ['Quinquenio', 'Quinquênio'],
+  'Concomitante':     ['Concomitante', 'concomitante'],
+};
+
+function buildProdutoClause(produto, columnExpr, startIdx) {
+  if (!produto || produto === 'Todos') {
+    return { clause: '', params: [], nextIdx: startIdx };
+  }
+
+  const variants = PRODUCT_VARIANTS[produto];
+  const normalizedColumn = `LOWER(TRIM(${columnExpr}))`;
+
+  if (variants) {
+    const list = variants.map(v => v.trim().toLowerCase());
+    const placeholders = list.map((_, i) => `$${startIdx + i}`).join(', ');
+    return {
+      clause: ` AND ${normalizedColumn} IN (${placeholders})`,
+      params: list,
+      nextIdx: startIdx + list.length,
+    };
+  }
+
+  return {
+    clause: ` AND ${normalizedColumn} = $${startIdx}`,
+    params: [String(produto).trim().toLowerCase()],
+    nextIdx: startIdx + 1,
+  };
+}
+
+// ============================================================
 // Filtros fuzzy de colaborador e equipe
-// ------------------------------------------------------------
-// Regra (em ordem):
-//   1) Match EXATO após normalização (caixa/acentos). Se existir ao menos
-//      uma linha exata, retorna somente os exatos — evita incluir
-//      "João" quando o filtro é "João Silva".
-//   2) Fallback por TOKENS: todos os tokens do filtro devem existir,
-//      como tokens, na linha. Cobre variações de nome entre OLOS e
-//      core.view_app_colaboradores (ex.: "Sara Cristina De Moura Lourenco"
-//      vs "Sara Cristina de Moura Lourenço").
 // ============================================================
 function applyColaboradorFilter(rows, colaboradorNome, keyCandidates = ['colaborador', 'agent_name']) {
   if (!colaboradorNome) return rows;
   const normFilter = normalize(colaboradorNome);
   const filterTokens = normFilter.split(/\s+/).filter(Boolean);
 
-  // 1) Match EXATO normalizado
   const exact = rows.filter(row => {
     for (const key of keyCandidates) {
       const raw = row[key];
@@ -62,7 +86,6 @@ function applyColaboradorFilter(rows, colaboradorNome, keyCandidates = ['colabor
   });
   if (exact.length > 0) return exact;
 
-  // 2) Fallback: TODOS os tokens do filtro devem existir na linha (como tokens)
   return rows.filter(row => {
     for (const key of keyCandidates) {
       const raw = row[key];
@@ -74,13 +97,11 @@ function applyColaboradorFilter(rows, colaboradorNome, keyCandidates = ['colabor
   });
 }
 
-// Aplica filtro fuzzy de equipe no resultado (não no SQL).
 function applyEquipeFilter(rows, equipeNome, keyCandidates = ['equipe']) {
   if (!equipeNome || equipeNome === 'todas') return rows;
   const normFilter = normalize(equipeNome);
   const filterTokens = normFilter.split(/\s+/).filter(Boolean);
 
-  // 1) Match EXATO normalizado
   const exact = rows.filter(row => {
     for (const key of keyCandidates) {
       const raw = row[key];
@@ -91,7 +112,6 @@ function applyEquipeFilter(rows, equipeNome, keyCandidates = ['equipe']) {
   });
   if (exact.length > 0) return exact;
 
-  // 2) Fallback: todos os tokens do filtro devem estar presentes
   return rows.filter(row => {
     for (const key of keyCandidates) {
       const raw = row[key];
@@ -105,18 +125,6 @@ function applyEquipeFilter(rows, equipeNome, keyCandidates = ['equipe']) {
 
 // ============================================================
 // Resolução de EQUIPE → lista de nomes de colaboradores
-// ------------------------------------------------------------
-// A view madm.view_base_olos_temp NÃO possui a coluna `equipe`
-// preenchida (é sempre null). Por isso, para filtrar ligações por
-// equipe, o backend:
-//   1) Consulta core.view_app_colaboradores para descobrir quais
-//      colaboradores pertencem à equipe solicitada.
-//   2) Filtra as linhas da OLOS por `agent_name` (match exato ou
-//      por token, absorvendo divergências de grafia).
-//
-// STOPWORDS removem palavras que não distinguem equipes ("equipe",
-// "time", "comercial", "-", etc.), permitindo que "Equipe Juliana"
-// case com "Time Juliana" ou "JULIANA (DISCADORA)".
 // ============================================================
 const STOPWORDS_EQUIPE = new Set([
   'equipe', 'time', 'grupo', 'setor', 'area', 'área',
@@ -156,8 +164,6 @@ async function resolveNomesPorEquipe(equipeNome) {
   }
 }
 
-// Aplica o filtro de equipe por agent_name usando a lista de nomes.
-// Retorna as linhas cujo `colaborador`/`agent_name` casa com algum nome.
 function filterByNomesEquipe(rows, nomesEquipe, keyCandidates = ['colaborador', 'agent_name']) {
   if (!Array.isArray(nomesEquipe) || nomesEquipe.length === 0) return [];
   const normNomes = nomesEquipe.map(n => ({
@@ -243,21 +249,12 @@ router.get('/emitidos', requireAuth, async (req, res) => {
       query += ` AND LOWER(TRIM(e.equipe_responsavel_emissao)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
-    if (produto && produto !== 'Todos') {
-      const productVariants = {
-        'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
-      };
-      if (productVariants[produto]) {
-        const variants = productVariants[produto];
-        const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND e.produto IN (${placeholders})`;
-        params.push(...variants); idx += variants.length;
-      } else {
-        query += ` AND e.produto = $${idx}`;
-        params.push(produto); idx++;
-      }
-    }
+
+    const prod = buildProdutoClause(produto, 'e.produto', idx);
+    query += prod.clause;
+    params.push(...prod.params);
+    idx = prod.nextIdx;
+
     if (gran) {
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'),
@@ -311,21 +308,12 @@ router.get('/assinados', requireAuth, async (req, res) => {
       query += ` AND LOWER(TRIM(equipe_responsavel_assinatura)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
-    if (produto && produto !== 'Todos') {
-      const productVariants = {
-        'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
-      };
-      if (productVariants[produto]) {
-        const variants = productVariants[produto];
-        const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND produto IN (${placeholders})`;
-        params.push(...variants); idx += variants.length;
-      } else {
-        query += ` AND produto = $${idx}`;
-        params.push(produto); idx++;
-      }
-    }
+
+    const prod = buildProdutoClause(produto, 'produto', idx);
+    query += prod.clause;
+    params.push(...prod.params);
+    idx = prod.nextIdx;
+
     if (gran) {
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável'),
@@ -454,21 +442,12 @@ router.get('/protocolados', requireAuth, async (req, res) => {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
-    if (produto && produto !== 'Todos') {
-      const productVariants = {
-        'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
-      };
-      if (productVariants[produto]) {
-        const variants = productVariants[produto];
-        const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produto IN (${placeholders})`;
-        params.push(...variants); idx += variants.length;
-      } else {
-        query += ` AND l.produto = $${idx}`;
-        params.push(produto); idx++;
-      }
-    }
+
+    const prod = buildProdutoClause(produto, 'l.produto', idx);
+    query += prod.clause;
+    params.push(...prod.params);
+    idx = prod.nextIdx;
+
     if (gran) {
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
@@ -489,13 +468,6 @@ router.get('/protocolados', requireAuth, async (req, res) => {
 });
 
 // --- GANHOS ---
-// Query params:
-//   start, end, equipe, produto, granularity (comportamento antigo)
-//   + demanda = 'todos' (default) | 'atual'
-//       'atual' → considera apenas ganhos cuja ASSINATURA (core.assinaturas)
-//       ocorreu no mês do `start`. Exclui, portanto, ganhos originados
-//       de "demanda reprimida" (assinaturas de meses anteriores que só
-//       viraram ganho agora).
 router.get('/ganhos', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto, granularity, demanda } = req.query;
@@ -526,8 +498,6 @@ router.get('/ganhos', requireAuth, async (req, res) => {
         AND l.etapa <> 'Venda perdida'
     `;
 
-    // >>> FILTRO DE DEMANDA DO MÊS <<<
-    // Fonte de verdade: core.assinaturas.data_assinatura (ligada por deal_id).
     if (somenteDemandaAtual) {
       query += ` AND EXISTS (
         SELECT 1
@@ -545,22 +515,12 @@ router.get('/ganhos', requireAuth, async (req, res) => {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
-    if (produto && produto !== 'Todos') {
-      const productVariants = {
-        'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio'],
-        'Concomitante': ['Concomitante', 'concomitante']
-      };
-      if (productVariants[produto]) {
-        const variants = productVariants[produto];
-        const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produto IN (${placeholders})`;
-        params.push(...variants); idx += variants.length;
-      } else {
-        query += ` AND l.produto = $${idx}`;
-        params.push(produto); idx++;
-      }
-    }
+
+    const prod = buildProdutoClause(produto, 'l.produto', idx);
+    query += prod.clause;
+    params.push(...prod.params);
+    idx = prod.nextIdx;
+
     if (gran) {
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
@@ -616,21 +576,12 @@ router.get('/perdidos', requireAuth, async (req, res) => {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
       params.push(equipe); idx++;
     }
-    if (produto && produto !== 'Todos') {
-      const productVariants = {
-        'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-        'Quinquenio': ['Quinquenio', 'Quinquênio']
-      };
-      if (productVariants[produto]) {
-        const variants = productVariants[produto];
-        const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-        query += ` AND l.produto IN (${placeholders})`;
-        params.push(...variants); idx += variants.length;
-      } else {
-        query += ` AND l.produto = $${idx}`;
-        params.push(produto); idx++;
-      }
-    }
+
+    const prod = buildProdutoClause(produto, 'l.produto', idx);
+    query += prod.clause;
+    params.push(...prod.params);
+    idx = prod.nextIdx;
+
     if (gran) {
       query += ` GROUP BY 
         COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'),
@@ -653,31 +604,85 @@ router.get('/perdidos', requireAuth, async (req, res) => {
 // ============================================================
 // --- LEADS RECEBIDOS ---
 // ------------------------------------------------------------
-// Fonte de verdade: core.deals.data_distribuicao_comercial
-// (convertida para America/Sao_Paulo) — representa quando o lead
-// efetivamente chegou ao colaborador (closer_id ?? responsavel_id).
+// IMPORTANTE 1 — Sem AT TIME ZONE:
+//   core.deals.data_distribuicao_comercial é TIMESTAMP WITHOUT
+//   TIME ZONE e os valores JÁ estão em horário de São Paulo.
+//   Aplicar `AT TIME ZONE 'America/Sao_Paulo'` reinterpretaria
+//   os horários como SP e converteria para UTC, empurrando os
+//   últimos 3h de cada dia para o dia seguinte (gap de ~8 deals
+//   por período na borda). Por isso usamos `::date` direto.
 //
-// Retorna, por colaborador+equipe:
-//   leads_recebidos, assinados, ganhos, protocolados
-//   + conversao_assinatura_pct, conversao_ganho_pct, conversao_protocolo_pct
+// IMPORTANTE 2 — is_deleted agora é contado:
+//   Deals com is_deleted = TRUE passam a ser incluídos no total
+//   de leads recebidos, conforme regra de negócio atual.
 //
-// Regras:
-//   - Assinatura: apenas core.assinaturas com status_assinatura = 'ASSINADO'.
-//   - Protocolo : apenas core.processos com numero_processo OU
-//                 numero_protocolo preenchido.
-//   - Considera somente deals não deletados (is_deleted = FALSE).
-//   - Filtro de equipe aplicado em SQL (c.nome_equipe).
-//   - Filtro de colaborador aplicado no Node (fuzzy), mesmo padrão
-//     das demais rotas.
+// Dois modos:
+//   • Com `granularity` (daily|weekly|monthly) → série temporal
+//     { colaborador, equipe, periodo, total } (Home, Analytics).
+//   • Sem `granularity` → agregado enriquecido (pipeline, etapa,
+//     produto, leads_recebidos, assinados, ganhos, protocolados,
+//     taxas). `total` é exposto como alias de `leads_recebidos`.
 // ============================================================
 router.get('/leads-recebidos', requireAuth, async (req, res) => {
   try {
-    const { start, end, equipe } = req.query;
+    const { start, end, equipe, produto, granularity } = req.query;
     if (!start || !end) {
       return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     }
     const colaboradorNome = await resolveColaboradorNome(req);
+    const gran = mapGranularity(granularity);
 
+    // ----------------------------------------------------------
+    // MODO 1 — SÉRIE TEMPORAL
+    // ----------------------------------------------------------
+    if (gran) {
+      let query = `
+        SELECT
+          COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
+          COALESCE(c.nome_equipe, '') AS equipe,
+          (DATE_TRUNC('${gran}', d.data_distribuicao_comercial))::date AS periodo,
+          COUNT(DISTINCT d.deal_id)::int AS total
+        FROM core.deals d
+        LEFT JOIN core.colaboradores c
+          ON c.colaborador_id = COALESCE(d.closer_id, d.responsavel_id)
+        LEFT JOIN core.produtos pr
+          ON pr.produto_id = d.produto_id
+        WHERE d.data_distribuicao_comercial IS NOT NULL
+          AND d.data_distribuicao_comercial::date >= $1::date
+          AND d.data_distribuicao_comercial::date <  $2::date
+      `;
+      const params = [start, end];
+      let idx = 3;
+
+      if (equipe && equipe !== 'todas') {
+        query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
+        params.push(equipe);
+        idx++;
+      }
+
+      const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+      query += prod.clause;
+      params.push(...prod.params);
+      idx = prod.nextIdx;
+
+      query += `
+        GROUP BY
+          COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável'),
+          COALESCE(c.nome_equipe, ''),
+          (DATE_TRUNC('${gran}', d.data_distribuicao_comercial))::date
+        ORDER BY
+          (DATE_TRUNC('${gran}', d.data_distribuicao_comercial))::date,
+          COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável')
+      `;
+
+      const result = await db.query(query, params);
+      const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
+      return res.json({ success: true, data: rows });
+    }
+
+    // ----------------------------------------------------------
+    // MODO 2 — AGREGADO POR COLABORADOR
+    // ----------------------------------------------------------
     let query = `
       WITH assinatura_por_deal AS (
         SELECT
@@ -707,25 +712,34 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       base AS (
         SELECT
           d.deal_id,
-          (d.data_distribuicao_comercial AT TIME ZONE 'America/Sao_Paulo')::date AS data_recebimento,
+          d.data_distribuicao_comercial::date AS data_recebimento,
           COALESCE(d.closer_id, d.responsavel_id) AS colaborador_id,
           c.nome AS colaborador,
           c.nome_equipe,
           c.unidade_id,
+          COALESCE(p.nome_pipeline, 'Sem pipeline') AS pipeline,
+          COALESCE(e.nome_etapa,    'Sem etapa')    AS etapa,
+          COALESCE(pr.nome_produto, 'Sem produto')  AS produto,
           a.data_assinatura,
           d.data_ganho,
-          p.data_protocolo
+          pp.data_protocolo
         FROM core.deals d
         LEFT JOIN core.colaboradores c
           ON c.colaborador_id = COALESCE(d.closer_id, d.responsavel_id)
+        LEFT JOIN ops.crm_pipelines p
+          ON p.pipeline_id = d.pipeline_id
+        LEFT JOIN ops.crm_etapas e
+          ON e.etapa_id = d.etapa_id
+         AND (p.crm IS NULL OR e.crm = p.crm)
+        LEFT JOIN core.produtos pr
+          ON pr.produto_id = d.produto_id
         LEFT JOIN assinatura_por_deal a
           ON a.deal_id = d.deal_id
-        LEFT JOIN protocolo_por_deal p
-          ON p.deal_id = d.deal_id
+        LEFT JOIN protocolo_por_deal pp
+          ON pp.deal_id = d.deal_id
         WHERE d.data_distribuicao_comercial IS NOT NULL
-          AND COALESCE(d.is_deleted, FALSE) = FALSE
-          AND (d.data_distribuicao_comercial AT TIME ZONE 'America/Sao_Paulo')::date >= $1::date
-          AND (d.data_distribuicao_comercial AT TIME ZONE 'America/Sao_Paulo')::date <  $2::date
+          AND d.data_distribuicao_comercial::date >= $1::date
+          AND d.data_distribuicao_comercial::date <  $2::date
     `;
 
     const params = [start, end];
@@ -737,6 +751,11 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       idx++;
     }
 
+    const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+    query += prod.clause;
+    params.push(...prod.params);
+    idx = prod.nextIdx;
+
     query += `
       )
       SELECT
@@ -744,7 +763,11 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
         COALESCE(NULLIF(TRIM(colaborador), ''), 'Sem responsável') AS colaborador,
         COALESCE(nome_equipe, '') AS equipe,
         unidade_id,
+        pipeline,
+        etapa,
+        produto,
         COUNT(DISTINCT deal_id)::int AS leads_recebidos,
+        COUNT(DISTINCT deal_id)::int AS total,
         COUNT(DISTINCT deal_id) FILTER (WHERE data_assinatura IS NOT NULL)::int AS assinados,
         COUNT(DISTINCT deal_id) FILTER (WHERE data_ganho      IS NOT NULL)::int AS ganhos,
         COUNT(DISTINCT deal_id) FILTER (WHERE data_protocolo  IS NOT NULL)::int AS protocolados,
@@ -764,13 +787,11 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
           2
         ) AS conversao_protocolo_pct
       FROM base
-      GROUP BY colaborador_id, colaborador, nome_equipe, unidade_id
-      ORDER BY leads_recebidos DESC
+      GROUP BY colaborador_id, colaborador, nome_equipe, unidade_id, pipeline, etapa, produto
+      ORDER BY colaborador, pipeline, etapa
     `;
 
     const result = await db.query(query, params);
-
-    // Filtro fuzzy de colaborador no Node (mesmo padrão das demais rotas).
     const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
 
     res.json({ success: true, data: rows });
@@ -781,16 +802,6 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
 });
 
 // --- METRICAS DE LIGACOES ---
-// A view madm.view_base_olos_temp NÃO possui a coluna `equipe`
-// preenchida (é sempre null). Por isso, o filtro de equipe é
-// aplicado em DUAS ETAPAS:
-//   1) resolveNomesPorEquipe(equipe) → consulta
-//      core.view_app_colaboradores para obter os nomes dos
-//      colaboradores pertencentes à equipe.
-//   2) filterByNomesEquipe(rows, nomes) → filtra as linhas da OLOS
-//      por `agent_name` (match exato ou por token, absorvendo
-//      divergências de grafia).
-// O filtro de colaborador continua aplicado no Node (fuzzy).
 router.get('/ligacoes', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, colaborador, granularity } = req.query;
@@ -849,13 +860,11 @@ router.get('/ligacoes', requireAuth, async (req, res) => {
     const result = await db.query(query, params);
     let rows = result.rows;
 
-    // Filtro de equipe — resolvido por nomes de colaboradores.
     if (equipe && equipe !== 'todas') {
       const nomesEquipe = await resolveNomesPorEquipe(equipe);
       rows = filterByNomesEquipe(rows, nomesEquipe, ['colaborador', 'agent_name']);
     }
 
-    // Filtro de colaborador (fuzzy)
     rows = applyColaboradorFilter(rows, colaborador, ['colaborador', 'agent_name']);
 
     res.json({ success: true, data: rows });
@@ -896,16 +905,13 @@ router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
     const rawResult = await db.query(query, params);
     let filtered = rawResult.rows;
 
-    // Filtro de equipe — resolvido por nomes de colaboradores.
     if (equipe && equipe !== 'todas') {
       const nomesEquipe = await resolveNomesPorEquipe(equipe);
       filtered = filterByNomesEquipe(filtered, nomesEquipe, ['colaborador', 'agent_name']);
     }
 
-    // Filtro de colaborador (fuzzy)
     filtered = applyColaboradorFilter(filtered, colaborador, ['colaborador', 'agent_name']);
 
-    // Reagrega por tabulacao após o filtro fuzzy.
     const agg = new Map();
     filtered.forEach(row => {
       const key = row.tabulacao;
@@ -924,7 +930,6 @@ router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
 });
 
 // --- LIGACOES PRODUTIVAS ---
-// Filtro de equipe resolvido por agent_name (a coluna `equipe` da OLOS é null).
 router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, colaborador } = req.query;
@@ -940,7 +945,6 @@ router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
     const params = [QUALIFICATIONS.productive, start, end];
     let idx = 4;
 
-    // Filtro de equipe — resolve para uma lista de nomes e filtra por agent_name.
     if (equipe && equipe !== 'todas') {
       const nomesEquipe = await resolveNomesPorEquipe(equipe);
       if (nomesEquipe.length === 0) {
@@ -963,37 +967,99 @@ router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
   }
 });
 
+// ============================================================
 // --- LEADS POR ETAPA ---
+// ------------------------------------------------------------
+// Mesma correção de timezone e is_deleted aplicada em
+// `/leads-recebidos`, para manter o total consistente entre
+// as telas (Home, Analytics, Funil, Visão Geral, Equipe).
+// ============================================================
 router.get('/leads/stages', requireAuth, async (req, res) => {
   try {
     let { start, end, equipe, produto } = req.query;
-    if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+    if (!start || !end) {
+      return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+    }
     const colaboradorNome = await resolveColaboradorNome(req);
 
     let query = `
-      SELECT 
-        COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
-        l.etapa_lead,
-        COUNT(*)::int as total
-      FROM core.view_qualificados l
-      LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
-      WHERE l.data_qualificacao::date >= $1::date
-        AND l.data_qualificacao::date < $2::date
+      SELECT
+        COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
+        COALESCE(e.nome_etapa,    'Sem etapa')    AS etapa_lead,
+        COALESCE(p.nome_pipeline, 'Sem pipeline') AS pipeline,
+        COUNT(DISTINCT d.deal_id)::int            AS total
+      FROM core.deals d
+      LEFT JOIN core.colaboradores c
+        ON c.colaborador_id = COALESCE(d.closer_id, d.responsavel_id)
+      LEFT JOIN ops.crm_pipelines p
+        ON p.pipeline_id = d.pipeline_id
+      LEFT JOIN ops.crm_etapas e
+        ON e.etapa_id = d.etapa_id
+       AND (p.crm IS NULL OR e.crm = p.crm)
+      LEFT JOIN core.produtos pr
+        ON pr.produto_id = d.produto_id
+      WHERE d.data_distribuicao_comercial IS NOT NULL
+        AND d.data_distribuicao_comercial::date >= $1::date
+        AND d.data_distribuicao_comercial::date <  $2::date
     `;
     const params = [start, end];
     let idx = 3;
 
     if (equipe && equipe !== 'todas') {
       query += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
-      params.push(equipe); idx++;
+      params.push(equipe);
+      idx++;
     }
-    query += ` GROUP BY COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável'), l.etapa_lead, c.nome_equipe ORDER BY colaborador`;
+
+    const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+    query += prod.clause;
+    params.push(...prod.params);
+    idx = prod.nextIdx;
+
+    query += `
+      GROUP BY
+        COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável'),
+        COALESCE(e.nome_etapa,    'Sem etapa'),
+        COALESCE(p.nome_pipeline, 'Sem pipeline')
+      ORDER BY colaborador, etapa_lead
+    `;
 
     const result = await db.query(query, params);
     const rows = applyColaboradorFilter(result.rows, colaboradorNome, ['colaborador']);
     res.json({ success: true, data: rows });
   } catch (err) {
     console.error('Erro em /leads/stages:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// --- CATÁLOGO DE ETAPAS/PIPELINES ---
+router.get('/leads/stages/catalog', requireAuth, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    if (!start || !end) {
+      return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+    }
+    const query = `
+      SELECT DISTINCT
+        COALESCE(p.nome_pipeline, 'Sem pipeline')  AS pipeline,
+        COALESCE(p.crm,           '(sem crm)')     AS crm,
+        COALESCE(e.nome_etapa,    'Sem etapa')     AS etapa,
+        COALESCE(pr.nome_produto, '(sem produto)') AS produto
+      FROM core.deals d
+      LEFT JOIN ops.crm_pipelines p ON p.pipeline_id = d.pipeline_id
+      LEFT JOIN ops.crm_etapas   e ON e.etapa_id   = d.etapa_id
+                                  AND (p.crm IS NULL OR e.crm = p.crm)
+      LEFT JOIN core.produtos    pr ON pr.produto_id = d.produto_id
+      WHERE d.data_distribuicao_comercial IS NOT NULL
+        AND d.data_distribuicao_comercial::date >= $1::date
+        AND d.data_distribuicao_comercial::date <  $2::date
+      ORDER BY pipeline, etapa, produto
+    `;
+    const result = await db.query(query, [start, end]);
+    res.json({ success: true, data: result.rows });
+  } catch (err) {
+    console.error('Erro em /leads/stages/catalog:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -1033,17 +1099,7 @@ router.get('/weekly', requireAuth, async (req, res) => {
 
 // ============================================================
 // DEMANDA ATUAL E DEMANDA REPRIMIDA
-// ------------------------------------------------------------
-// Demanda Atual   : assinaturas com data_assinatura no mês corrente.
-// Demanda Reprimida: assinaturas de meses anteriores cujo deal
-//                    ainda não possui data_ganho (não convertido).
-// O filtro de colaborador/equipe é aplicado no Node (fuzzy match),
-// seguindo o padrão das demais rotas — evita divergências entre
-// core.colaboradores.nome e core.view_app_colaboradores.nome.
 // ============================================================
-
-// Executa a query base compartilhada entre os endpoints de demanda.
-// `tipo` = 'atual' | 'reprimida'
 async function runDemandaQuery({ tipo, equipe, produto }) {
   const baseSelect = `
     SELECT
@@ -1055,7 +1111,8 @@ async function runDemandaQuery({ tipo, equipe, produto }) {
       (a.data_assinatura AT TIME ZONE 'UTC')::date AS data_assinatura,
       (d.data_ganho      AT TIME ZONE 'UTC')::date AS data_ganho,
       p.nome_pipeline AS pipeline,
-      e.nome_etapa    AS etapa
+      e.nome_etapa    AS etapa,
+      COALESCE(pr.nome_produto, 'Sem produto') AS produto
     FROM core.assinaturas a
     INNER JOIN core.colaboradores c
       ON c.colaborador_id = a.consultor_responsavel_assinatura_id
@@ -1069,6 +1126,8 @@ async function runDemandaQuery({ tipo, equipe, produto }) {
     LEFT JOIN ops.crm_etapas e
       ON e.etapa_id = d.etapa_id
      AND e.crm = 'HUBSPOT'
+    LEFT JOIN core.produtos pr
+      ON pr.produto_id = d.produto_id
   `;
 
   const where = tipo === 'atual'
@@ -1085,23 +1144,10 @@ async function runDemandaQuery({ tipo, equipe, produto }) {
     params.push(equipe); idx++;
   }
 
-  // Produto (opcional — só aplica se a coluna existir em core.assinaturas).
-  if (produto && produto !== 'Todos') {
-    const productVariants = {
-      'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
-      'Quinquenio': ['Quinquenio', 'Quinquênio'],
-    };
-    if (productVariants[produto]) {
-      const variants = productVariants[produto];
-      const placeholders = variants.map((_, i) => `$${idx + i}`).join(', ');
-      query += ` AND a.produto IN (${placeholders})`;
-      params.push(...variants);
-      idx += variants.length;
-    } else {
-      query += ` AND a.produto = $${idx}`;
-      params.push(produto); idx++;
-    }
-  }
+  const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+  query += prod.clause;
+  params.push(...prod.params);
+  idx = prod.nextIdx;
 
   query += ` ORDER BY a.data_assinatura DESC`;
 
@@ -1149,7 +1195,7 @@ router.get('/demanda-reprimida', requireAuth, async (req, res) => {
   }
 });
 
-// --- DEMANDA RESUMO (agregado por colaborador+equipe) ---
+// --- DEMANDA RESUMO ---
 router.get('/demanda-resumo', requireAuth, async (req, res) => {
   try {
     const { equipe, produto } = req.query;
