@@ -27,7 +27,6 @@ class AccessControl {
     this.CARGO_LEVELS = {
       // Nenhum acesso
       'desativado':              this.LEVELS.NONE,
-      'assistente':              this.LEVELS.NONE,
       'analista juridico':       this.LEVELS.NONE,
       'gestor de projetos':      this.LEVELS.NONE,
       'analista':                this.LEVELS.NONE,
@@ -35,6 +34,7 @@ class AccessControl {
       // Assessor
       'assessor':                this.LEVELS.ASSESSOR,
       'analista de pastas':      this.LEVELS.ASSESSOR,
+      'assistente':              this.LEVELS.ASSESSOR,
 
       // Supervisão
       'supervisor':              this.LEVELS.SUPERVISAO,
