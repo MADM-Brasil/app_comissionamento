@@ -3399,16 +3399,16 @@ export default function Comissoes() {
                               const assinadosSemanal = sumAssinados(dailyDataSemanal);
                               const assinadosMensal = sumAssinados(dailyDataMensal);
 
-                              const protocoladosDiario = dailyDataDiario.reduce(
-                                (sum, d) => sum + (Number(d.protocolados) || 0),
+                              const ganhosDiario = dailyDataDiario.reduce(
+                              (sum, d) => sum + (Number(d.ganhos) || 0),
                                 0,
                               );
-                              const protocoladosSemanal = dailyDataSemanal.reduce(
-                                (sum, d) => sum + (Number(d.protocolados) || 0),
+                              const ganhosSemanal = dailyDataSemanal.reduce(
+                                (sum, d) => sum + (Number(d.ganhos) || 0),
                                 0,
                               );
-                              const protocoladosMensal = dailyDataMensal.reduce(
-                                (sum, d) => sum + (Number(d.protocolados) || 0),
+                              const ganhosMensal = dailyDataMensal.reduce(
+                                (sum, d) => sum + (Number(d.ganhos) || 0),
                                 0,
                               );
 
@@ -3418,7 +3418,7 @@ export default function Comissoes() {
                                   metaAss: metaDiarioAss,
                                   metaProt: metaDiarioProt,
                                   atualAss: assinadosDiario,
-                                  atualProt: protocoladosDiario,
+                                  atualProt: ganhosDiario,
                                   colorAss: "#2F6FED",
                                   colorProt: "#16A34A",
                                 },
@@ -3427,7 +3427,7 @@ export default function Comissoes() {
                                   metaAss: metaSemanalAss,
                                   metaProt: metaSemanalProt,
                                   atualAss: assinadosSemanal,
-                                  atualProt: protocoladosSemanal,
+                                  atualProt: ganhosSemanal,
                                   colorAss: "#EA8C1D",
                                   colorProt: "#16A34A",
                                 },
@@ -3436,7 +3436,7 @@ export default function Comissoes() {
                                   metaAss: metaMensalAss,
                                   metaProt: metaMensalProt,
                                   atualAss: assinadosMensal,
-                                  atualProt: protocoladosMensal,
+                                  atualProt: ganhosMensal,
                                   colorAss: "#8B5CF6",
                                   colorProt: "#16A34A",
                                 },
