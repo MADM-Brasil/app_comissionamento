@@ -28,7 +28,7 @@ import fs from 'fs';
 import { pool } from '../services/db.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
-import { HUBSPOT_PORTAL_ID_CONFIGURED } from '../services/hubspot.js';
+import { HUBSPOT_PORTAL_ID_CONFIGURED, buscarClienteResumo } from '../services/hubspot.js';
 import {
   getActiveSupportUser,
   isSupportAdmin,
@@ -539,6 +539,117 @@ router.get('/escopo', asyncRoute(async (req, res) => {
         porEquipe: PRODUCTS_BY_TEAM,
       },
     },
+  });
+}));
+
+// ---------------------- Busca de cliente na HubSpot ----------------------
+// Consulta somente leitura: telefone, e-mail ou CPF -> nome, etapa/pipeline
+// do negócio mais recente e responsável atual. Não altera nada no HubSpot.
+router.get('/buscar-cliente', asyncRoute(async (req, res) => {
+  const telefone = text(req.query.telefone, 'Telefone');
+  const cpf = text(req.query.cpf, 'CPF');
+  const emailBusca = text(req.query.email, 'E-mail');
+
+  if (!telefone && !cpf && !emailBusca) {
+    throw fail(400, 'Informe telefone, CPF ou e-mail para buscar.');
+  }
+
+  const resultado = await buscarClienteResumo({ email: emailBusca, phone: telefone, cpf });
+  const actor = req.supportActor;
+
+  if (resultado.found && resultado.responsavel?.email) {
+    try {
+      const equipeResult = await pool.query(
+        `SELECT nome_equipe FROM core.view_app_colaboradores WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) LIMIT 1`,
+        [resultado.responsavel.email]
+      );
+      resultado.responsavel.equipe = equipeResult.rows[0]?.nome_equipe || null;
+    } catch (err) {
+      console.error('Erro ao resolver equipe do responsável:', err.message);
+      resultado.responsavel.equipe = null;
+    }
+  }
+
+  // Monta o link direto do card na HubSpot (negócio mais recente, ou o
+  // contato quando não houver negócio associado).
+  const portalId = String(HUBSPOT_PORTAL_ID_CONFIGURED || '').trim();
+  if (resultado.found && !resultado.duplicado && /^\d+$/.test(portalId)) {
+    if (resultado.negocio?.id) {
+      resultado.link = `https://app.hubspot.com/contacts/${portalId}/record/0-3/${resultado.negocio.id}`;
+    } else if (resultado.contato?.id) {
+      resultado.link = `https://app.hubspot.com/contacts/${portalId}/record/0-1/${resultado.contato.id}`;
+    }
+  }
+
+  // Supervisores só enxergam detalhes/link de clientes da própria equipe.
+  // Coordenador/Admin não são afetados por esta restrição.
+  if (resultado.found && !resultado.duplicado && isSupportSupervisor(actor.cargo)) {
+    const equipeCliente = resultado.responsavel?.equipe || null;
+    const equipeSupervisor = normalizeAccessValue(actor.nome_equipe);
+    if (equipeCliente && normalizeAccessValue(equipeCliente) !== equipeSupervisor) {
+      return res.json({
+        success: true,
+        data: {
+          found: true,
+          restrito: true,
+          equipeCliente,
+          motivo: `Cliente se encontra na equipe ${equipeCliente}. Fale com seu coordenador para obter mais informações do card.`,
+        },
+      });
+    }
+  }
+
+  res.json({ success: true, data: resultado });
+}));
+
+// Encaminha um caso problemático da Busca Cliente (ex.: duplicado na HubSpot)
+// direto para a esteira Suporte do quadro de Movimentações, sem passar pela
+// fila de processamento automático (o worker ignora status != pendente).
+router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
+  const telefone = text(req.body?.telefone, 'Telefone');
+  const cpf = text(req.body?.cpf, 'CPF');
+  const emailInformado = text(req.body?.email, 'E-mail');
+  const motivo = text(req.body?.motivo, 'Motivo', { required: true, max: 2000 });
+
+  if (!telefone && !cpf && !emailInformado) {
+    throw fail(400, 'Informe ao menos telefone, CPF ou e-mail do caso.');
+  }
+
+  const actor = req.supportActor;
+
+  const result = await transaction(async client => {
+    const base = await client.query(`
+      INSERT INTO app_comissionamento.tickets_suporte
+      (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao,
+       origem_ticket, encaminhado_em, atualizado_em, metadados)
+      VALUES ($1, 'Movimentacao', 'Movimentacao', 'ALTA', 'Aguardando Suporte', 'Caso enviado via Busca Cliente', $2,
+              'suporte comissionamento', NOW(), NOW(), $3) RETURNING id_ticket`,
+    [PLACEHOLDER_UUID, motivo, JSON.stringify({
+      assunto: 'Busca Cliente',
+      origem_colaborador: actor.nome || '',
+      origem_equipe: actor.nome_equipe || '',
+      solicitante_email: actor.email,
+      solicitante_nome: actor.nome || actor.email,
+    })]);
+
+    const movement = await client.query(`
+      INSERT INTO app_comissionamento.tickets_movimentacao_lead
+      (ticket_id, crm_origem, nome_cliente_informado, telefone_cliente_informado, cpf_cliente_informado, email_cliente_informado,
+       tipo_solicitacao, colaborador_origem_nome, equipe_origem_nome, motivo_solicitacao,
+       status_mapeamento, observacao_sales_ops, atualizado_em)
+      VALUES ($1,'CRM','Caso duplicado na hubspot',$2,$3,$4,'Busca Cliente',$5,$6,$7,'suporte',$8,NOW())
+      RETURNING id_ticket_movimentacao`,
+    [base.rows[0].id_ticket, telefone || null, cpf || null, emailInformado || null,
+      actor.nome || actor.email, actor.nome_equipe || null, motivo,
+      JSON.stringify({ observacao: motivo })]);
+
+    return { id: movement.rows[0].id_ticket_movimentacao };
+  });
+
+  res.status(201).json({
+    success: true,
+    id: result.id,
+    message: 'Caso enviado para a esteira Suporte.',
   });
 }));
 

@@ -23,6 +23,10 @@ import {
   Ban,
   RotateCcw,
   RefreshCw,
+  ArrowRightLeft,
+  UserPlus,
+  Users,
+  ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
@@ -345,7 +349,7 @@ function getCsrfHeaders() {
 }
 
 export default function Suporte() {
-  const [activeTab, setActiveTab] = useState<"movimentacao" | "reportar" | "salesops">("reportar");
+  const [activeTab, setActiveTab] = useState<"movimentacao" | "busca" | "reportar" | "salesops">("reportar");
   const { currentUser: accessUser } = useAccessControl();
   const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
   const canAccessPage = accessLevel >= LEVELS.SUPERVISAO;
@@ -363,6 +367,7 @@ export default function Suporte() {
           {[
             { id: "reportar", label: "Reportar", icon: Search },
             { id: "movimentacao", label: "Movimentar", icon: ClipboardList },
+            { id: "busca", label: "Busca Cliente", icon: Users },
             ...(isAdmin ? [{ id: "salesops", label: "Visão SalesOps", icon: ChartNoAxesCombined }] : []),
           ].map(tab => (
             <button
@@ -383,6 +388,7 @@ export default function Suporte() {
         </div>
       </div>
       {activeTab === "movimentacao" && <MovimentacaoTab />}
+      {activeTab === "busca" && <BuscaClienteTab />}
       {activeTab === "reportar" && <ReportarTab />}
       {activeTab === "salesops" && isAdmin && <SalesOpsTab />}
     </DashboardLayout>
@@ -406,6 +412,7 @@ function MovimentacaoTab() {
   const [assessorId, setAssessorId] = useState("");
   const [produto, setProduto] = useState("");
   const [movimentacaoEmMassa, setMovimentacaoEmMassa] = useState(false);
+  const [modoEscolhido, setModoEscolhido] = useState<"movimentar" | "criar" | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [movements, setMovements] = useState<MovementItem[]>([]);
@@ -817,36 +824,63 @@ function MovimentacaoTab() {
           {movimentacaoEmMassa ? "Alterar responsável" : "Movimentação de Leads"}
         </h2>
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div className="rounded-lg border border-[#e2e8f0] bg-[#f8fafc] p-3">
-            <label className="flex items-center gap-2 text-sm font-semibold text-[#0f172a]">
-              <input
-                type="checkbox"
-                checked={movimentacaoEmMassa}
-                onChange={e => {
-                  const checked = e.target.checked;
-                  setMovimentacaoEmMassa(checked);
-                  setMessage(null);
-                  if (checked) {
-                    setFirstName("");
-                    setLastName("");
-                    setEmail("");
-                    setTelefone("");
-                    setCpf("");
-                    setOrigem("");
-                    setProduto(produtoConfig.default);
-                    if (isSupervisor && supervisorTeam) {
-                      setEquipe(supervisorTeam);
-                      setAssessorId("");
-                    }
-                  } else {
-                    setHubLink("");
-                  }
-                }}
-                className="h-4 w-4 rounded border-[#cbd5e1] text-[#2F6FED] focus:ring-[#2F6FED]"
-              />
-              Alterar responsável por link da HubSpot
-            </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => {
+                setModoEscolhido("movimentar");
+                setMovimentacaoEmMassa(true);
+                setMessage(null);
+                setFirstName("");
+                setLastName("");
+                setEmail("");
+                setTelefone("");
+                setCpf("");
+                setOrigem("");
+                setProduto(produtoConfig.default);
+                if (isSupervisor && supervisorTeam) {
+                  setEquipe(supervisorTeam);
+                  setAssessorId("");
+                }
+              }}
+              className={cn(
+                "flex items-start gap-3 text-left p-4 rounded-lg border-2 transition-colors",
+                modoEscolhido === "movimentar"
+                  ? "border-[#2F6FED] bg-blue-50"
+                  : "border-[#e2e8f0] bg-white hover:border-[#2F6FED]/50"
+              )}
+            >
+              <ArrowRightLeft className={cn("w-5 h-5 mt-0.5 flex-shrink-0", modoEscolhido === "movimentar" ? "text-[#2F6FED]" : "text-[#64748b]")} />
+              <div>
+                <div className="text-sm font-semibold text-[#0f172a]">Alterar Responsável</div>
+                <div className="text-xs text-[#64748b] mt-0.5">Altere o responsável de um card já existente via link da HubSpot.</div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setModoEscolhido("criar");
+                setMovimentacaoEmMassa(false);
+                setMessage(null);
+                setHubLink("");
+              }}
+              className={cn(
+                "flex items-start gap-3 text-left p-4 rounded-lg border-2 transition-colors",
+                modoEscolhido === "criar"
+                  ? "border-[#2F6FED] bg-blue-50"
+                  : "border-[#e2e8f0] bg-white hover:border-[#2F6FED]/50"
+              )}
+            >
+              <UserPlus className={cn("w-5 h-5 mt-0.5 flex-shrink-0", modoEscolhido === "criar" ? "text-[#2F6FED]" : "text-[#64748b]")} />
+              <div>
+                <div className="text-sm font-semibold text-[#0f172a]">Criar Lead</div>
+                <div className="text-xs text-[#64748b] mt-0.5">Informe os dados do cliente para cadastrar e movimentar um novo lead.</div>
+              </div>
+            </button>
           </div>
+          {modoEscolhido && (
+          <>
           <p className="mt-1 text-xs text-[#64748b]">
               {movimentacaoEmMassa
                 ? "Modo de alteração por link hub: Os links são lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado. Pode ser feito o ajuste "
@@ -1075,6 +1109,8 @@ function MovimentacaoTab() {
                   : "Registrar Movimentação"}
             </button>
           </div>
+          </>
+          )}
         </form>
       </div>
 
@@ -1164,6 +1200,269 @@ function MovimentacaoTab() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------- Aba Busca Cliente ----------------------
+interface BuscaClienteResultado {
+  found: boolean;
+  divergente?: boolean;
+  duplicado?: boolean;
+  restrito?: boolean;
+  equipeCliente?: string | null;
+  motivo?: string | null;
+  link?: string | null;
+  contato?: {
+    id: string;
+    nome: string | null;
+    email: string | null;
+    telefone: string | null;
+    cpf: string | null;
+  };
+  negocio?: {
+    id?: string;
+    nome: string | null;
+    pipeline: string | null;
+    pipelineNome: string | null;
+    etapa: string | null;
+    etapaNome: string | null;
+  } | null;
+  responsavel?: { nome: string | null; email: string | null; equipe?: string | null } | null;
+}
+
+function BuscaClienteTab() {
+  const [telefone, setTelefone] = useState("");
+  const [cpf, setCpf] = useState("");
+  const [email, setEmail] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
+  const [resultado, setResultado] = useState<BuscaClienteResultado | null>(null);
+  const [buscou, setBuscou] = useState(false);
+  const [enviandoSuporte, setEnviandoSuporte] = useState(false);
+  const [enviadoSuporte, setEnviadoSuporte] = useState(false);
+  const [erroEnvioSuporte, setErroEnvioSuporte] = useState<string | null>(null);
+
+  const handleEnviarSuporte = async () => {
+    if (!resultado?.motivo) return;
+    setEnviandoSuporte(true);
+    setErroEnvioSuporte(null);
+    try {
+      const res = await fetch(`${API_BASE}/suporte/buscar-cliente/enviar-suporte`, {
+        method: 'POST',
+        headers: getCsrfHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          telefone: telefone.replace(/\D/g, ''),
+          cpf: cpf.replace(/\D/g, ''),
+          email: email.trim(),
+          motivo: resultado.motivo,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Erro ao enviar para o suporte');
+      setEnviadoSuporte(true);
+    } catch (err: any) {
+      setErroEnvioSuporte(err.message || 'Erro ao enviar para o suporte');
+    } finally {
+      setEnviandoSuporte(false);
+    }
+  };
+
+  const handleBuscar = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const telefoneDigits = telefone.replace(/\D/g, '');
+    const cpfDigits = cpf.replace(/\D/g, '');
+    const emailLimpo = email.trim();
+
+    if (!telefoneDigits && !cpfDigits && !emailLimpo) {
+      setErro("Informe ao menos telefone, CPF ou e-mail.");
+      return;
+    }
+
+    setLoading(true);
+    setErro(null);
+    setResultado(null);
+    setBuscou(true);
+    setEnviadoSuporte(false);
+    setErroEnvioSuporte(null);
+
+    try {
+      const params = new URLSearchParams();
+      if (telefoneDigits) params.set('telefone', telefoneDigits);
+      if (cpfDigits) params.set('cpf', cpfDigits);
+      if (emailLimpo) params.set('email', emailLimpo);
+
+      const res = await fetch(`${API_BASE}/suporte/buscar-cliente?${params.toString()}`, { credentials: 'include' });
+      const data = await res.json();
+      if (!res.ok || !data.success) throw new Error(data.error || 'Erro ao buscar cliente');
+      setResultado(data.data as BuscaClienteResultado);
+    } catch (err: any) {
+      setErro(err.message || 'Erro ao buscar cliente');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 animate-fade-in-up">
+      <div className="card p-5">
+        <h2 className="text-lg font-bold text-[#0f172a] mb-1">Busca Cliente</h2>
+        <p className="text-xs text-[#64748b] mb-4">
+          Procure um cliente na HubSpot por telefone, CPF ou e-mail. Preencha pelo menos um campo.
+        </p>
+        <form onSubmit={handleBuscar} className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone</label>
+              <div className="flex items-center">
+                <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">+55</span>
+                <input
+                  type="tel"
+                  value={telefone}
+                  onChange={e => setTelefone(formatPhoneInput(e.target.value))}
+                  onBlur={() => telefone && setTelefone(formatPhoneInput(telefone))}
+                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
+                  placeholder="(00) 00000-0000"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label>
+              <input
+                type="text"
+                value={cpf}
+                onChange={e => setCpf(e.target.value)}
+                onBlur={() => cpf && setCpf(formatCPF(cpf))}
+                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                placeholder="000.000.000-00"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+                placeholder="cliente@email.com"
+              />
+            </div>
+          </div>
+
+          {erro && (
+            <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">{erro}</div>
+          )}
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={loading}
+              className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              {loading ? "Buscando..." : "Buscar"}
+            </button>
+          </div>
+        </form>
+      </div>
+
+      {buscou && !loading && (
+        <div className="card p-5">
+          {!resultado?.found ? (
+            <div className="text-center py-8 text-[#64748b]">Nenhum cliente encontrado com esses dados.</div>
+          ) : resultado.restrito ? (
+            <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-700 flex items-center gap-2" role="status">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+              {resultado.motivo || `Cliente se encontra na equipe ${resultado.equipeCliente}. Fale com seu coordenador para obter mais informações do card.`}
+            </div>
+          ) : resultado.duplicado ? (
+            <div className="space-y-3">
+              <div className="rounded-md bg-amber-50 px-4 py-3 text-sm text-amber-800 flex items-center gap-2" role="status">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                {resultado.motivo || "Caso duplicado: mais de um cadastro na HubSpot corresponde a esses dados."}
+              </div>
+
+              {enviadoSuporte ? (
+                <div className="rounded-md bg-green-50 px-4 py-3 text-sm text-green-700 flex items-center gap-2" role="status">
+                  <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                  Caso enviado para a esteira Suporte.
+                </div>
+              ) : (
+                <>
+                  {erroEnvioSuporte && (
+                    <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">{erroEnvioSuporte}</div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleEnviarSuporte}
+                    disabled={enviandoSuporte}
+                    className="bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-2 hover:bg-amber-700 transition-colors disabled:opacity-50"
+                  >
+                    {enviandoSuporte ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    {enviandoSuporte ? "Enviando..." : "Enviar ao Suporte"}
+                  </button>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {resultado.divergente && resultado.motivo && (
+                <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
+                  {resultado.motivo}
+                </div>
+              )}
+              <div>
+                <div className="text-xs text-[#94a3b8] mb-0.5">Nome</div>
+                <div className="text-lg font-semibold text-[#0f172a]">{resultado.contato?.nome || "—"}</div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Telefone</div>
+                  <div className="text-[#0f172a]">{resultado.contato?.telefone || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">E-mail</div>
+                  <div className="text-[#0f172a] break-all">{resultado.contato?.email || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">CPF</div>
+                  <div className="text-[#0f172a]">{resultado.contato?.cpf || "—"}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-2 border-t border-[#e2e8f0]">
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Pipeline</div>
+                  <div className="text-[#0f172a] font-medium">{resultado.negocio?.pipelineNome || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Etapa</div>
+                  <div className="text-[#0f172a] font-medium">{resultado.negocio?.etapaNome || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Responsável</div>
+                  <div className="text-[#0f172a] font-medium">{resultado.responsavel?.nome || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Equipe</div>
+                  <div className="text-[#0f172a] font-medium">{resultado.responsavel?.equipe || "—"}</div>
+                </div>
+              </div>
+              {resultado.link && (
+                <a
+                  href={resultado.link}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-sm font-medium text-[#2F6FED] hover:underline"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Abrir card na HubSpot
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2008,7 +2307,7 @@ function MovimentacoesSuporteTab() {
                 <div
                   key={coluna}
                   className={cn(
-                    "flex-shrink-0 w-64 h-[65vh] flex flex-col bg-[#f8fafc] rounded-lg border-2 transition-colors",
+                    "flex-1 min-w-[220px] h-[65vh] flex flex-col bg-[#f8fafc] rounded-lg border-2 transition-colors",
                     isDragOver ? "border-[#2F6FED] bg-blue-50" : "border-[#e2e8f0]"
                   )}
                   onDragOver={(e) => { e.preventDefault(); setDragOverColuna(coluna); }}

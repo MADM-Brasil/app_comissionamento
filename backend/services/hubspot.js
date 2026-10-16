@@ -342,10 +342,10 @@ async function searchContactByField(propertyName, value) {
   return searchContacts({ filterGroups: [{ filters: [{ propertyName, operator: 'EQ', value }] }] });
 }
 
-function chooseUnique(results) {
+function chooseUnique(results, campo = null) {
   const unique = [...new Map(results.map(c => [String(c.id), c])).values()];
   if (unique.length > 1) throw hubError('Mais de um contato corresponde à busca. Selecione o registro antes de movimentar.', {
-    blocked: true, code: 'AMBIGUOUS_CONTACT', candidateIds: unique.map(c => String(c.id)),
+    blocked: true, code: 'AMBIGUOUS_CONTACT', candidateIds: unique.map(c => String(c.id)), campo,
   });
   return unique[0] || null;
 }
@@ -357,7 +357,7 @@ async function searchContactByPhone(phone) {
     for (const property of ['phone', 'hs_whatsapp_phone_number']) results.push(...(await searchContactByField(property, variant)).filter(matching));
   }
   if (!results.length) results.push(...(await searchContacts({ query: normalizePhone(phone) })).filter(matching));
-  return chooseUnique(results);
+  return chooseUnique(results, 'telefone');
 }
 
 function validateContact(contact, input) {
@@ -376,8 +376,8 @@ export async function findContactAndValidate({ email, phone, cpf } = {}) {
   if (optionalText(cpf) && input.cpf.length !== 11) throw hubError('CPF deve conter 11 dígitos.', { blocked: true });
   let contact = null;
   if (nationalPhone(phone).length >= 10) contact = await searchContactByPhone(phone);
-  if (!contact && input.email) contact = chooseUnique(await searchContactByField('email', input.email));
-  if (!contact && input.cpf) contact = chooseUnique(await searchContactByField('contact_cpf', input.cpf));
+  if (!contact && input.email) contact = chooseUnique(await searchContactByField('email', input.email), 'e-mail');
+  if (!contact && input.cpf) contact = chooseUnique(await searchContactByField('contact_cpf', input.cpf), 'CPF');
   return contact ? validateContact(contact, input) : { found: false, divergente: false, contact: null };
 }
 
@@ -398,6 +398,86 @@ export async function findOwnerIdByEmailStrict(email) {
 }
 
 export async function findOwnerIdByEmail(email) { return findOwnerIdByEmailStrict(email); }
+
+// Busca um cliente por telefone, e-mail ou CPF e devolve um resumo pronto
+// para exibição (nome, etapa/pipeline do negócio mais recente, responsável).
+// Não bloqueia em caso de divergência de dados — é só consulta, não movimentação.
+export async function buscarClienteResumo({ email, phone, cpf } = {}) {
+  await accountReady();
+  let resultado;
+  try {
+    resultado = await findContactAndValidate({ email, phone, cpf });
+  } catch (err) {
+    if (err.code === 'AMBIGUOUS_CONTACT') {
+      return {
+        found: true,
+        duplicado: true,
+        campoDuplicado: err.campo || null,
+        motivo: err.campo
+          ? `Caso duplicado: mais de um cadastro na HubSpot usa esse mesmo ${err.campo}.`
+          : 'Caso duplicado: mais de um cadastro na HubSpot corresponde a esses dados.',
+      };
+    }
+    throw err;
+  }
+  if (!resultado.found || !resultado.contact) {
+    return { found: false };
+  }
+
+  const contact = resultado.contact;
+  const props = contact.properties || {};
+  const deals = await getContactDeals(contact.id);
+  const negocioRecente = deals.length
+    ? [...deals].sort((a, b) => new Date(b.lastModifiedDate || 0) - new Date(a.lastModifiedDate || 0))[0]
+    : null;
+
+  const ownerId = negocioRecente?.ownerId || props.hubspot_owner_id || null;
+  let responsavel = null;
+  if (ownerId) {
+    try {
+      const owner = await request(`/crm/v3/owners/${id(ownerId, 'Proprietário')}`);
+      const nome = [owner.firstName, owner.lastName].filter(Boolean).join(' ').trim();
+      responsavel = { nome: nome || cleanEmail(owner.email) || null, email: cleanEmail(owner.email) || null };
+    } catch {
+      responsavel = null;
+    }
+  }
+
+  let pipelineNome = negocioRecente ? (PIPELINE_NAMES[negocioRecente.pipeline] || negocioRecente.pipeline) : null;
+  let etapaNome = negocioRecente ? (STAGE_NAMES[negocioRecente.stage] || negocioRecente.stage) : null;
+  if (negocioRecente?.pipeline) {
+    try {
+      const pipelineInfo = await request(`/crm/v3/pipelines/deals/${id(negocioRecente.pipeline)}`);
+      pipelineNome = pipelineInfo.label || pipelineNome;
+      const stageInfo = (pipelineInfo.stages || []).find(s => String(s.id) === String(negocioRecente.stage));
+      if (stageInfo?.label) etapaNome = stageInfo.label;
+    } catch {
+      // mantém os nomes conhecidos (mapa estático) ou o ID puro como último recurso
+    }
+  }
+
+  return {
+    found: true,
+    divergente: resultado.divergente,
+    motivo: resultado.motivo || null,
+    contato: {
+      id: contact.id,
+      nome: [props.firstname, props.lastname].filter(Boolean).join(' ').trim() || null,
+      email: props.email || null,
+      telefone: props.phone || props.hs_whatsapp_phone_number || null,
+      cpf: props.contact_cpf || null,
+    },
+    negocio: negocioRecente ? {
+      id: negocioRecente.id,
+      nome: negocioRecente.dealName,
+      pipeline: negocioRecente.pipeline,
+      pipelineNome,
+      etapa: negocioRecente.stage,
+      etapaNome,
+    } : null,
+    responsavel,
+  };
+}
 
 async function activeOwner(ownerId) {
   const owner = await request(`/crm/v3/owners/${id(ownerId, 'Proprietário')}`);
