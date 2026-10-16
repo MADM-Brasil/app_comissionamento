@@ -32,9 +32,11 @@ import {
 } from "@/lib/accessControl";
 
 /**
- * Redireciona usuário autenticado para a landing page correta:
- * - Colaboradores da UNIDADE 3 → /home
- * - Demais usuários → / (comportamento anterior)
+ * Redireciona usuário autenticado para a landing page correta
+ * (definida em `getDefaultLandingPage`):
+ * - Assessor/Supervisor/Coordenador da UNIDADE 3 → /home
+ * - Supervisor fora da UNIDADE 3 → /suporte
+ * - Demais → / (comportamento anterior)
  */
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const currentUser = useAppStore((s) => s.currentUser);
@@ -46,7 +48,8 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
 
 /**
  * Protege rota verificando autenticação E permissão específica.
- * Se o usuário não tem a permissão, redireciona para uma tela segura.
+ * Se o usuário não tem a permissão, mostra uma tela segura com link
+ * para o Suporte (que é acessível por qualquer autenticado).
  */
 function ProtectedRouteWithPermission({
   permission,
@@ -61,8 +64,8 @@ function ProtectedRouteWithPermission({
   if (!currentUser?.email) return <Redirect to="/login" />;
 
   if (!perms[permission]) {
-    // Não redireciona para "/" (evita loop: se o usuário também não tem
-    // Home, cairia em loop). Mostra a mensagem e oferece o Suporte.
+    // Não redireciona para "/" (evita loop: quem não tem Home também
+    // não poderia ver "/", que exige canAccessDashboard).
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-2">
         <p className="text-slate-500">Acesso não autorizado a esta página.</p>
@@ -106,7 +109,8 @@ function Router() {
 
       <Route path="/404" component={NotFound} />
 
-      {/* Home – requer permissão canAccessDashboard (restrita à unidade 3) */}
+      {/* Home – requer permissão canAccessDashboard
+          (unidade 3: assessor/supervisor/coordenador; ou nível >= ADMINISTRATIVO) */}
       <Route path="/">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessDashboard">
@@ -122,7 +126,8 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Comissões – requer permissão canAccessComissoes (restrita à unidade 3) */}
+      {/* Comissões – requer permissão canAccessComissoes
+          (mesma regra da Home) */}
       <Route path="/comissoes">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessComissoes">
@@ -216,7 +221,10 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Suporte (mantido protegido apenas por autenticação) */}
+      {/* Suporte
+          - Landing de supervisores fora da unidade 3
+          - Acessível por qualquer autenticado; a própria página faz a
+            checagem de nível (>= SUPERVISAO) e redireciona se necessário. */}
       <Route path="/suporte">
         <PeriodProvider>
           <ProtectedRoute>

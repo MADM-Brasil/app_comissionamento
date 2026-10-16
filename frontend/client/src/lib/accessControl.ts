@@ -99,7 +99,7 @@ const CARGO_LEVELS: Record<string, Level> = {
   'administrativo':          LEVELS.ADMINISTRATIVO,
   'administrador':           LEVELS.ADMINISTRATIVO,
 
-  // Super Admin / visão liberada
+  // Super Admin
   'desenvolvedor':           LEVELS.SUPER_ADMIN,
   'diretora':                LEVELS.SUPER_ADMIN,
   'ceo':                     LEVELS.SUPER_ADMIN,
@@ -158,19 +158,12 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Visualiza dados da equipe; vê configurações sem editar',
   },
   [LEVELS.COORDENADOR]: {
-    canAccessDashboard: false,
-    canAccessComissoes: false,
-    canAccessRanking: false,
-    canAccessReports: false,
-    canAccessConfiguration: false,
-    canViewTeam: false,
-    canEditConfiguration: false,
-    canEditBonus: false,
-    canGenerateNextMonth: false,
-    canExportData: true,
-    filterLocked: false,
-    lockedTeam: false,
-    lockedCollaborator: false,
+    // Base "otimista": o acesso efetivo é restrito a coordenadores da
+    // UNIDADE 3 via canSeeHomeComissoes.
+    canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
+    canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+    canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+    canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
     description: 'Ajusta metas, não altera bônus, filtro livre',
   },
   [LEVELS.ADMINISTRATIVO]: {
@@ -194,6 +187,57 @@ function normalize(str: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Regra Home/Comissões:
+//   (assessor OU supervisor OU coordenador) da UNIDADE 3
+//   OU nível >= ADMINISTRATIVO (qualquer unidade)
+// ─────────────────────────────────────────────────────────────
+export const HOME_COMISSOES_ALLOWED_UNIT = 3;
+export const HOME_COMISSOES_ALLOWED_LEVELS: Level[] = [
+  LEVELS.ASSESSOR,
+  LEVELS.SUPERVISAO,
+  LEVELS.COORDENADOR,
+];
+
+/** (Assessor OU supervisor OU coordenador) E da unidade 3. */
+export function isUnit3HomeComissoesUser(user?: User | null): boolean {
+  if (!user) return false;
+  const level = getAccessLevel(user.cargo, user.status);
+  if (!HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
+  const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
+  return unidade === HOME_COMISSOES_ALLOWED_UNIT;
+}
+
+/** Alias retrocompatível. */
+export const isUnit3AssessorOrSupervisor = isUnit3HomeComissoesUser;
+
+/**
+ * Regra consolidada: quem pode ver Home e Comissões.
+ * - Assessor/Supervisor/Coordenador da unidade 3 → SIM
+ * - Administrativo ou Super Admin (qualquer unidade) → SIM
+ * - Demais → NÃO
+ */
+export function canSeeHomeComissoes(user?: User | null): boolean {
+  if (!user) return false;
+  const level = getAccessLevel(user.cargo, user.status);
+  if (level >= LEVELS.ADMINISTRATIVO) return true;
+  return isUnit3HomeComissoesUser(user);
+}
+
+/**
+ * Rota inicial recomendada após o login:
+ * - Assessor/Supervisor/Coordenador da UNIDADE 3 → "/home"
+ * - Supervisor fora da UNIDADE 3 → "/suporte"
+ * - Demais → "/"
+ */
+export function getDefaultLandingPage(user?: User | null): string {
+  if (!user) return "/login";
+  if (isUnit3HomeComissoesUser(user)) return "/home";
+  const level = getAccessLevel(user.cargo, user.status);
+  if (level === LEVELS.SUPERVISAO) return "/suporte";
+  return "/";
+}
+
+// ─────────────────────────────────────────────────────────────
 // API pública
 // ─────────────────────────────────────────────────────────────
 export function getAccessLevel(
@@ -209,7 +253,10 @@ export function getAccessLevel(
   return LEVELS.NONE;
 }
 
-export function hasPermission(user: User, permission: keyof Permissions): boolean {
+export function hasPermission(
+  user: User | null | undefined,
+  permission: keyof Permissions
+): boolean {
   if (!user) return false;
   const perms = getUserPermissions(user);
   return Boolean((perms as any)[permission]);
@@ -218,6 +265,9 @@ export function hasPermission(user: User, permission: keyof Permissions): boolea
 export function getUserPermissions(user?: User | null) {
   const level = getAccessLevel(user?.cargo, user?.status);
   const perms = PERMISSIONS[level];
+
+  const allowHomeComissoes = canSeeHomeComissoes(user);
+
   return {
     level,
     levelName: getLevelName(level),
@@ -350,4 +400,10 @@ export const accessControl = {
   getCargoLevel,
   resetCargoLevel,
   listCargoLevels,
+  isUnit3HomeComissoesUser,
+  isUnit3AssessorOrSupervisor,
+  canSeeHomeComissoes,
+  getDefaultLandingPage,
+  HOME_COMISSOES_ALLOWED_UNIT,
+  HOME_COMISSOES_ALLOWED_LEVELS,
 };
