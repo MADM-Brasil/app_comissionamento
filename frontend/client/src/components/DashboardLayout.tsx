@@ -175,7 +175,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   // Navegação (inalterada)
   const navItems: NavItem[] = useMemo(() => {
     const items: NavItem[] = [];
-    if (permissions.canAccessDashboard) items.push({ path: "/", label: "Home", icon: Home });
+    if (permissions.canAccessDashboard) items.push({ path: "/home", label: "Home", icon: Home });
     if (permissions.canAccessComissoes) items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
     if (permissions.canAccessRanking) items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
     const dashboardChildren: NavChild[] = [];
@@ -196,12 +196,12 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
-    if (permissions.canAccessDashboard) flat.push({ path: "/", label: "Home", icon: Home });
+    if (permissions.canAccessDashboard) flat.push({ path: "/home", label: "Home", icon: Home });
     if (permissions.canAccessComissoes) flat.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
     if (permissions.canViewTeam) flat.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
-      flat.push({ path: "/Visao_geral", label: "V. Geral", icon: BarChart3 });
+      flat.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
     }
     if (permissions.canAccessRanking) flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
