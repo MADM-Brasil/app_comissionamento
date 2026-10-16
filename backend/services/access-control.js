@@ -21,9 +21,6 @@ class AccessControl {
       SUPER_ADMIN: 5,
     });
 
-    // ─────────────────────────────────────────────────────────────
-    // FONTE ÚNICA DE VERDADE: cargo (normalizado) → nível
-    // ─────────────────────────────────────────────────────────────
     this.CARGO_LEVELS = {
       // Nenhum acesso
       'desativado':              this.LEVELS.NONE,
@@ -62,8 +59,6 @@ class AccessControl {
 
     this.DEFAULT_CARGO_LEVELS = { ...this.CARGO_LEVELS };
 
-    // Equipes reservadas — só supervisores da própria equipe direcionam.
-    // (Chaves normalizadas.)
     this.RESERVED_DESTINATION_TEAMS = new Set([
       'equipe tatiane',
     ]);
@@ -92,7 +87,9 @@ class AccessControl {
         description: 'Visualiza dados da equipe; vê configurações sem editar',
       },
       [this.LEVELS.COORDENADOR]: {
-        canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+        // Base "otimista": o acesso efetivo é restrito a coordenadores da
+        // UNIDADE 3 via canSeeHomeComissoes.
+        canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
         canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
         canExportData: true, filterLocked: false, lockedTeam: false,
@@ -118,7 +115,7 @@ class AccessControl {
 
   // ─────────────────────────────────────────────────────────────
   // Regra Home/Comissões:
-  //   (assessor OU supervisor) da UNIDADE 3
+  //   (assessor OU supervisor OU coordenador) da UNIDADE 3
   //   OU nível >= ADMINISTRATIVO (qualquer unidade)
   // ─────────────────────────────────────────────────────────────
   get HOME_COMISSOES_ALLOWED_UNIT() {
@@ -126,11 +123,11 @@ class AccessControl {
   }
 
   get HOME_COMISSOES_ALLOWED_LEVELS() {
-    return [this.LEVELS.ASSESSOR, this.LEVELS.SUPERVISAO];
+    return [this.LEVELS.ASSESSOR, this.LEVELS.SUPERVISAO, this.LEVELS.COORDENADOR];
   }
 
-  /** Assessor OU supervisor E da unidade 3. */
-  isUnit3AssessorOrSupervisor(user) {
+  /** (Assessor OU supervisor OU coordenador) E da unidade 3. */
+  isUnit3HomeComissoesUser(user) {
     if (!user) return false;
     const level = this.getAccessLevel(user.cargo, user.status);
     if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
@@ -138,9 +135,14 @@ class AccessControl {
     return unidade === this.HOME_COMISSOES_ALLOWED_UNIT;
   }
 
+  /** Alias retrocompatível. */
+  isUnit3AssessorOrSupervisor(user) {
+    return this.isUnit3HomeComissoesUser(user);
+  }
+
   /**
    * Regra consolidada: quem pode ver Home e Comissões.
-   * - Assessor/Supervisor da unidade 3 → SIM
+   * - Assessor/Supervisor/Coordenador da unidade 3 → SIM
    * - Administrativo ou Super Admin (qualquer unidade) → SIM
    * - Demais → NÃO
    */
@@ -148,26 +150,23 @@ class AccessControl {
     if (!user) return false;
     const level = this.getAccessLevel(user.cargo, user.status);
     if (level >= this.LEVELS.ADMINISTRATIVO) return true;
-    return this.isUnit3AssessorOrSupervisor(user);
+    return this.isUnit3HomeComissoesUser(user);
   }
 
   /**
    * Rota inicial recomendada após o login:
-   * - Assessor/Supervisor da UNIDADE 3 → "/home"
+   * - Assessor/Supervisor/Coordenador da UNIDADE 3 → "/home"
    * - Supervisor fora da UNIDADE 3 → "/suporte"
    * - Demais → "/" (comportamento anterior)
    */
   getDefaultLandingPage(user) {
     if (!user) return '/login';
 
-    // 1) Assessor/Supervisor da unidade 3 → /home
-    if (this.isUnit3AssessorOrSupervisor(user)) return '/home';
+    if (this.isUnit3HomeComissoesUser(user)) return '/home';
 
-    // 2) Supervisor fora da unidade 3 → /suporte
     const level = this.getAccessLevel(user.cargo, user.status);
     if (level === this.LEVELS.SUPERVISAO) return '/suporte';
 
-    // 3) Demais (admins, coordenadores, etc.) → /
     return '/';
   }
 
@@ -226,15 +225,15 @@ class AccessControl {
 
   hasPermission(user, permission) {
     if (!user) return false;
-    const level = this.getAccessLevel(user.cargo, user.status);
-    return this.PERMISSIONS[level]?.[permission] ?? false;
+    const perms = this.getUserPermissions(user);
+    return Boolean(perms?.[permission]);
   }
 
   getUserPermissions(user) {
     const level = this.getAccessLevel(user?.cargo, user?.status);
     const perms = this.PERMISSIONS[level];
 
-    // Regra consolidada: assessor/supervisor u3 OU nível >= ADMINISTRATIVO
+    // Regra consolidada: nível >= ADMINISTRATIVO OU unidade 3 (assessor/sup/coord)
     const allowHomeComissoes = this.canSeeHomeComissoes(user);
 
     return {
@@ -328,14 +327,6 @@ class AccessControl {
     return this.normalize(user?.status) === 'ativo' ? user : null;
   }
 
-  /**
-   * Valida se o solicitante pode movimentar cards para um destino.
-   *
-   * CORREÇÃO: aceita `sourceUnitId` — a unidade do owner atual do card,
-   * já resolvida pelo worker a partir do próprio registro dele na view.
-   * Quando informado, evita a consulta por `nome_equipe` (que era ambígua
-   * quando a mesma equipe existia com unidades diferentes na view).
-   */
   async validateHubSpotMovementAccess({
     requesterEmail,
     destinationName,
@@ -407,10 +398,6 @@ class AccessControl {
         }
       }
 
-      // ─── enforceSourceTeam ───
-      // Prioriza o `sourceUnitId` resolvido no worker (do owner atual do
-      // card). Só cai na consulta por `nome_equipe` quando ele não veio — e,
-      // nesse caso, com mensagens distintas para cada causa.
       if (enforceSourceTeam) {
         let sourceUnidade = sourceUnitId != null ? Number(sourceUnitId) : null;
 
@@ -476,10 +463,11 @@ export const validateHubSpotMovementAccess = (params) => instance.validateHubSpo
 
 // ─────────────────────────────────────────────────────────────
 // Regra Home/Comissões:
-//   (assessor OU supervisor) da UNIDADE 3
+//   (assessor OU supervisor OU coordenador) da UNIDADE 3
 //   OU nível >= ADMINISTRATIVO (qualquer unidade)
 // ─────────────────────────────────────────────────────────────
 export const HOME_COMISSOES_ALLOWED_UNIT = 3;
-export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3AssessorOrSupervisor(user);
+export const isUnit3HomeComissoesUser = (user) => instance.isUnit3HomeComissoesUser(user);
+export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3HomeComissoesUser(user); // alias
 export const canSeeHomeComissoes = (user) => instance.canSeeHomeComissoes(user);
 export const getDefaultLandingPage = (user) => instance.getDefaultLandingPage(user);
