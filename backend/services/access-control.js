@@ -87,8 +87,6 @@ class AccessControl {
         description: 'Visualiza dados da equipe; vê configurações sem editar',
       },
       [this.LEVELS.COORDENADOR]: {
-        // Base "otimista": o acesso efetivo é restrito a coordenadores da
-        // UNIDADE 3 via canSeeHomeComissoes.
         canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
         canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
