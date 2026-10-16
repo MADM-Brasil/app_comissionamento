@@ -25,21 +25,28 @@ import { API_BASE } from "@/lib/api";
 import { useAppStore } from "@/lib/dataStore";
 import { fetchCurrentUser } from "@/lib/auth";
 import { Loader2 } from "lucide-react";
-import { getUserPermissions, type Permissions } from "@/lib/accessControl";
-
+import {
+  getUserPermissions,
+  getDefaultLandingPage,
+  type Permissions,
+} from "@/lib/accessControl";
 
 /**
- * Redireciona usuário autenticado para Home ao acessar páginas públicas
+ * Redireciona usuário autenticado para a landing page correta:
+ * - Colaboradores da UNIDADE 3 → /home
+ * - Demais usuários → / (comportamento anterior)
  */
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const currentUser = useAppStore((s) => s.currentUser);
-  if (currentUser?.email) return <Redirect to="/" />;
+  if (currentUser?.email) {
+    return <Redirect to={getDefaultLandingPage(currentUser)} />;
+  }
   return <>{children}</>;
 }
 
 /**
  * Protege rota verificando autenticação E permissão específica.
- * Se o usuário não tem a permissão, redireciona para Home (ou mostra mensagem).
+ * Se o usuário não tem a permissão, redireciona para uma tela segura.
  */
 function ProtectedRouteWithPermission({
   permission,
@@ -52,14 +59,23 @@ function ProtectedRouteWithPermission({
   const perms = getUserPermissions(currentUser ?? undefined);
 
   if (!currentUser?.email) return <Redirect to="/login" />;
+
   if (!perms[permission]) {
+    // Não redireciona para "/" (evita loop: se o usuário também não tem
+    // Home, cairia em loop). Mostra a mensagem e oferece o Suporte.
     return (
-      <div className="flex flex-col items-center justify-center min-h-[60vh]">
+      <div className="flex flex-col items-center justify-center min-h-[60vh] gap-2">
         <p className="text-slate-500">Acesso não autorizado a esta página.</p>
-        <Redirect to="/" />
+        <a
+          href="/suporte"
+          className="text-[#2F6FED] text-sm font-medium hover:underline"
+        >
+          Ir para o Suporte
+        </a>
       </div>
     );
   }
+
   return <>{children}</>;
 }
 
@@ -90,12 +106,12 @@ function Router() {
 
       <Route path="/404" component={NotFound} />
 
-      {/* Home – requer permissão canAccessDashboard */}
+      {/* Home – requer permissão canAccessDashboard (restrita à unidade 3) */}
       <Route path="/">
         <PeriodProvider>
-          {/*<ProtectedRouteWithPermission permission="canAccessDashboard">*/}
+          <ProtectedRouteWithPermission permission="canAccessDashboard">
             <Suporte /> {/* home */}
-         {/* </ProtectedRouteWithPermission>*/}
+          </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
       <Route path="/home">
@@ -106,7 +122,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Comissões – requer permissão canAccessComissoes */}
+      {/* Comissões – requer permissão canAccessComissoes (restrita à unidade 3) */}
       <Route path="/comissoes">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessComissoes">
@@ -146,6 +162,7 @@ function Router() {
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
+
       {/* Equipe – requer permissão canViewTeam */}
       <Route path="/Equipe">
         <PeriodProvider>

@@ -7,6 +7,7 @@ import logoImg from "../components/img/logo.png";
 import { login, verify2FA, resendCode } from "@/lib/auth";
 import { useAppStore } from "@/lib/dataStore";
 import { API_BASE } from "@/lib/api";
+import { getDefaultLandingPage } from "@/lib/accessControl";
 
 export default function Login() {
   const [step, setStep] = useState<"credentials" | "2fa">("credentials");
@@ -37,11 +38,12 @@ export default function Login() {
   }, []);
 
   // Redirect if already authenticated (e.g., session restored)
+  // → Unidade 3 vai para /home; demais vão para /
   useEffect(() => {
     const currentUser = useAppStore.getState().currentUser;
     if (currentUser?.email && !redirectDoneRef.current) {
       redirectDoneRef.current = true;
-      setLocation("/");
+      setLocation(getDefaultLandingPage(currentUser));
     }
   }, [setLocation]);
 
@@ -62,7 +64,8 @@ export default function Login() {
           useAppStore.getState().setCurrentUser(data.user);
           if (!redirectDoneRef.current) {
             redirectDoneRef.current = true;
-            setLocation("/");
+            // Unidade 3 → /home; demais → /
+            setLocation(getDefaultLandingPage(data.user));
           }
         }
       }
@@ -88,10 +91,12 @@ export default function Login() {
 
     try {
       await verify2FA(tempToken, twoFactorCode);
-      // verify2FA already updates the store; now we redirect manually
+      // verify2FA já atualiza a store; pegamos o user atualizado para decidir
+      // a landing page correta (unidade 3 → /home; demais → /).
+      const user = useAppStore.getState().currentUser;
       if (!redirectDoneRef.current) {
         redirectDoneRef.current = true;
-        setLocation("/");
+        setLocation(getDefaultLandingPage(user));
       }
     } catch (err: any) {
       setError(err.message || "Código inválido");

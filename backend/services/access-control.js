@@ -34,11 +34,11 @@ class AccessControl {
       // Assessor
       'assessor':                this.LEVELS.ASSESSOR,
       'analista de pastas':      this.LEVELS.ASSESSOR,
-      'assistente':              this.LEVELS.ASSESSOR,
 
       // Supervisão
       'supervisor':              this.LEVELS.SUPERVISAO,
       'Supervisor':              this.LEVELS.SUPERVISAO,
+      'assistente':              this.LEVELS.SUPERVISAO,
 
       // Coordenador
       'coordenador':             this.LEVELS.COORDENADOR,
@@ -84,7 +84,7 @@ class AccessControl {
         lockedCollaborator: true, description: 'Visualiza seus próprios dados',
       },
       [this.LEVELS.SUPERVISAO]: {
-        canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+        canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: true,
         canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
         canExportData: false, filterLocked: true, lockedTeam: true,
@@ -114,6 +114,61 @@ class AccessControl {
         lockedCollaborator: false, description: 'Acesso total',
       },
     };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Regra Home/Comissões:
+  //   (assessor OU supervisor) da UNIDADE 3
+  //   OU nível >= ADMINISTRATIVO (qualquer unidade)
+  // ─────────────────────────────────────────────────────────────
+  get HOME_COMISSOES_ALLOWED_UNIT() {
+    return 3;
+  }
+
+  get HOME_COMISSOES_ALLOWED_LEVELS() {
+    return [this.LEVELS.ASSESSOR, this.LEVELS.SUPERVISAO];
+  }
+
+  /** Assessor OU supervisor E da unidade 3. */
+  isUnit3AssessorOrSupervisor(user) {
+    if (!user) return false;
+    const level = this.getAccessLevel(user.cargo, user.status);
+    if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
+    const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
+    return unidade === this.HOME_COMISSOES_ALLOWED_UNIT;
+  }
+
+  /**
+   * Regra consolidada: quem pode ver Home e Comissões.
+   * - Assessor/Supervisor da unidade 3 → SIM
+   * - Administrativo ou Super Admin (qualquer unidade) → SIM
+   * - Demais → NÃO
+   */
+  canSeeHomeComissoes(user) {
+    if (!user) return false;
+    const level = this.getAccessLevel(user.cargo, user.status);
+    if (level >= this.LEVELS.ADMINISTRATIVO) return true;
+    return this.isUnit3AssessorOrSupervisor(user);
+  }
+
+  /**
+   * Rota inicial recomendada após o login:
+   * - Assessor/Supervisor da UNIDADE 3 → "/home"
+   * - Supervisor fora da UNIDADE 3 → "/suporte"
+   * - Demais → "/" (comportamento anterior)
+   */
+  getDefaultLandingPage(user) {
+    if (!user) return '/login';
+
+    // 1) Assessor/Supervisor da unidade 3 → /home
+    if (this.isUnit3AssessorOrSupervisor(user)) return '/home';
+
+    // 2) Supervisor fora da unidade 3 → /suporte
+    const level = this.getAccessLevel(user.cargo, user.status);
+    if (level === this.LEVELS.SUPERVISAO) return '/suporte';
+
+    // 3) Demais (admins, coordenadores, etc.) → /
+    return '/';
   }
 
   normalize(str) {
@@ -178,13 +233,20 @@ class AccessControl {
   getUserPermissions(user) {
     const level = this.getAccessLevel(user?.cargo, user?.status);
     const perms = this.PERMISSIONS[level];
+
+    // Regra consolidada: assessor/supervisor u3 OU nível >= ADMINISTRATIVO
+    const allowHomeComissoes = this.canSeeHomeComissoes(user);
+
     return {
       level,
       levelName: this.getLevelName(level),
       cargo: user?.cargo,
       grupo: user?.cargo,
       nome_equipe: user?.nome_equipe,
+      unidade_id: user?.unidade_id,
       ...perms,
+      canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
+      canAccessComissoes: perms.canAccessComissoes && allowHomeComissoes,
     };
   }
 
@@ -347,8 +409,8 @@ class AccessControl {
 
       // ─── enforceSourceTeam ───
       // Prioriza o `sourceUnitId` resolvido no worker (do owner atual do
-      // card). Só cai na consulta por `nome_equipe` quando ele não veio —
-      // e, nesse caso, com mensagens distintas para cada causa.
+      // card). Só cai na consulta por `nome_equipe` quando ele não veio — e,
+      // nesse caso, com mensagens distintas para cada causa.
       if (enforceSourceTeam) {
         let sourceUnidade = sourceUnitId != null ? Number(sourceUnitId) : null;
 
@@ -411,3 +473,13 @@ export const isSupportSupervisor = (cargo) => instance.isSupervisor(cargo);
 export const isSupportCoordinatorOrAbove = (cargo) => instance.isCoordinatorOrAbove(cargo);
 export const isSupportAdmin = (cargo) => instance.isAdmin(cargo);
 export const validateHubSpotMovementAccess = (params) => instance.validateHubSpotMovementAccess(params);
+
+// ─────────────────────────────────────────────────────────────
+// Regra Home/Comissões:
+//   (assessor OU supervisor) da UNIDADE 3
+//   OU nível >= ADMINISTRATIVO (qualquer unidade)
+// ─────────────────────────────────────────────────────────────
+export const HOME_COMISSOES_ALLOWED_UNIT = 3;
+export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3AssessorOrSupervisor(user);
+export const canSeeHomeComissoes = (user) => instance.canSeeHomeComissoes(user);
+export const getDefaultLandingPage = (user) => instance.getDefaultLandingPage(user);

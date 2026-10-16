@@ -19,6 +19,7 @@ interface User {
   email?: string;
   nome?: string;
   status?: string;
+  unidade_id?: number | string | null;
   [key: string]: any;
 }
 
@@ -105,11 +106,10 @@ const CARGO_LEVELS: Record<string, Level> = {
   'coordenador sales ops':   LEVELS.SUPER_ADMIN,
 };
 
-// Cópia mutável em runtime (permite setCargoLevel no client se precisar)
 let cargoLevels: Record<string, Level> = { ...CARGO_LEVELS };
 
 // ─────────────────────────────────────────────────────────────
-// Override individual de cargo (mesma API do backend)
+// Override individual de cargo
 // ─────────────────────────────────────────────────────────────
 export function setCargoLevel(cargo: string, level: Level) {
   const key = normalize(cargo);
@@ -137,99 +137,45 @@ export function listCargoLevels(): Record<string, Level> {
 // ─────────────────────────────────────────────────────────────
 const PERMISSIONS: Record<Level, FullPermissions> = {
   [LEVELS.NONE]: {
-    canAccessDashboard: false,
-    canAccessComissoes: false,
-    canAccessRanking: false,
-    canAccessReports: false,
-    canAccessConfiguration: false,
-    canViewTeam: false,
-    canEditConfiguration: false,
-    canEditBonus: false,
-    canGenerateNextMonth: false,
-    canExportData: false,
-    filterLocked: true,
-    lockedTeam: true,
-    lockedCollaborator: true,
+    canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+    canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+    canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+    canExportData: false, filterLocked: true, lockedTeam: true, lockedCollaborator: true,
     description: 'Sem acesso',
   },
   [LEVELS.ASSESSOR]: {
-    canAccessDashboard: true,
-    canAccessComissoes: true,
-    canAccessRanking: true,
-    canAccessReports: false,
-    canAccessConfiguration: false,
-    canViewTeam: false,
-    canEditConfiguration: false,
-    canEditBonus: false,
-    canGenerateNextMonth: false,
-    canExportData: false,
-    filterLocked: true,
-    lockedTeam: true,
-    lockedCollaborator: true,
+    canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
+    canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+    canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+    canExportData: false, filterLocked: true, lockedTeam: true, lockedCollaborator: true,
     description: 'Visualiza seus próprios dados',
   },
   [LEVELS.SUPERVISAO]: {
-    canAccessDashboard: false,
-    canAccessComissoes: false,
-    canAccessRanking: false,
-    canAccessReports: false,
-    canAccessConfiguration: false,
-    canViewTeam: true,
-    canEditConfiguration: false,
-    canEditBonus: false,
-    canGenerateNextMonth: false,
-    canExportData: false,
-    filterLocked: true,
-    lockedTeam: true,
-    lockedCollaborator: false,
+    canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
+    canAccessReports: false, canAccessConfiguration: false, canViewTeam: true,
+    canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+    canExportData: false, filterLocked: true, lockedTeam: true, lockedCollaborator: false,
     description: 'Visualiza dados da equipe; vê configurações sem editar',
   },
   [LEVELS.COORDENADOR]: {
-    canAccessDashboard: false,
-    canAccessComissoes: false,
-    canAccessRanking: false,
-    canAccessReports: false,
-    canAccessConfiguration: false,
-    canViewTeam: false,
-    canEditConfiguration: false,
-    canEditBonus: false,
-    canGenerateNextMonth: false,
-    canExportData: true,
-    filterLocked: false,
-    lockedTeam: false,
-    lockedCollaborator: false,
+    canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+    canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+    canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+    canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
     description: 'Ajusta metas, não altera bônus, filtro livre',
   },
   [LEVELS.ADMINISTRATIVO]: {
-    canAccessDashboard: true,
-    canAccessComissoes: true,
-    canAccessRanking: true,
-    canAccessReports: true,
-    canAccessConfiguration: true,
-    canViewTeam: true,
-    canEditConfiguration: true,
-    canEditBonus: true,
-    canGenerateNextMonth: true,
-    canExportData: true,
-    filterLocked: false,
-    lockedTeam: false,
-    lockedCollaborator: false,
+    canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
+    canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
+    canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
+    canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
     description: 'Acesso total',
   },
   [LEVELS.SUPER_ADMIN]: {
-    canAccessDashboard: true,
-    canAccessComissoes: true,
-    canAccessRanking: true,
-    canAccessReports: true,
-    canAccessConfiguration: true,
-    canViewTeam: true,
-    canEditConfiguration: true,
-    canEditBonus: true,
-    canGenerateNextMonth: true,
-    canExportData: true,
-    filterLocked: false,
-    lockedTeam: false,
-    lockedCollaborator: false,
+    canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
+    canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
+    canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
+    canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
     description: 'Acesso total',
   },
 };
@@ -239,9 +185,65 @@ function normalize(str: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Regra Home/Comissões:
+//   (assessor OU supervisor) da UNIDADE 3
+//   OU nível >= ADMINISTRATIVO (qualquer unidade)
+// ─────────────────────────────────────────────────────────────
+export const HOME_COMISSOES_ALLOWED_UNIT = 3;
+export const HOME_COMISSOES_ALLOWED_LEVELS: Level[] = [
+  LEVELS.ASSESSOR,
+  LEVELS.SUPERVISAO,
+];
+
+/** Assessor OU supervisor E da unidade 3. */
+export function isUnit3AssessorOrSupervisor(user?: User | null): boolean {
+  if (!user) return false;
+  const level = getAccessLevel(user.cargo, user.status);
+  if (!HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
+  const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
+  return unidade === HOME_COMISSOES_ALLOWED_UNIT;
+}
+
+/**
+ * Regra consolidada: quem pode ver Home e Comissões.
+ * - Assessor/Supervisor da unidade 3 → SIM
+ * - Administrativo ou Super Admin (qualquer unidade) → SIM
+ * - Demais → NÃO
+ */
+export function canSeeHomeComissoes(user?: User | null): boolean {
+  if (!user) return false;
+  const level = getAccessLevel(user.cargo, user.status);
+  if (level >= LEVELS.ADMINISTRATIVO) return true;
+  return isUnit3AssessorOrSupervisor(user);
+}
+
+/**
+ * Rota inicial recomendada após o login:
+ * - Assessor/Supervisor da UNIDADE 3 → "/home"
+ * - Supervisor fora da UNIDADE 3 → "/suporte"
+ * - Demais → "/" (comportamento anterior)
+ */
+export function getDefaultLandingPage(user?: User | null): string {
+  if (!user) return "/login";
+
+  // 1) Assessor/Supervisor da unidade 3 → /home
+  if (isUnit3AssessorOrSupervisor(user)) return "/home";
+
+  // 2) Supervisor fora da unidade 3 → /suporte
+  const level = getAccessLevel(user.cargo, user.status);
+  if (level === LEVELS.SUPERVISAO) return "/suporte";
+
+  // 3) Demais (admins, coordenadores, etc.) → /
+  return "/";
+}
+
+// ─────────────────────────────────────────────────────────────
 // API pública
 // ─────────────────────────────────────────────────────────────
-export function getAccessLevel(cargo: string | undefined, status?: string): Level {
+export function getAccessLevel(
+  cargo: string | undefined | null,
+  status?: string
+): Level {
   if (status && normalize(status) === 'desativado') return LEVELS.NONE;
   if (!cargo) return LEVELS.NONE;
   const key = normalize(cargo);
@@ -251,23 +253,33 @@ export function getAccessLevel(cargo: string | undefined, status?: string): Leve
   return LEVELS.NONE;
 }
 
-export function hasPermission(user: User, permission: keyof Permissions): boolean {
+export function hasPermission(
+  user: User | null | undefined,
+  permission: keyof Permissions
+): boolean {
   if (!user) return false;
   const level = getAccessLevel(user.cargo, user.status);
   return PERMISSIONS[level]?.[permission] ?? false;
 }
 
-export function getUserPermissions(user?: User) {
+export function getUserPermissions(user?: User | null) {
   const level = getAccessLevel(user?.cargo, user?.status);
   const perms = PERMISSIONS[level];
+
+  // Regra consolidada: assessor/supervisor u3 OU nível >= ADMINISTRATIVO
+  const allowHomeComissoes = canSeeHomeComissoes(user);
+
   return {
     level,
     levelName: getLevelName(level),
     cargo: user?.cargo,
     grupo: user?.cargo,
     nome_equipe: user?.nome_equipe,
-    canAccessDashboard: perms.canAccessDashboard,
-    canAccessComissoes: perms.canAccessComissoes,
+    unidade_id: user?.unidade_id,
+
+    canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
+    canAccessComissoes: perms.canAccessComissoes && allowHomeComissoes,
+
     canAccessRanking: perms.canAccessRanking,
     canAccessReports: perms.canAccessReports,
     canAccessConfiguration: perms.canAccessConfiguration,
@@ -295,7 +307,10 @@ function getLevelName(level: Level): string {
   return names[level] || 'SEM ACESSO';
 }
 
-export function filterTeamData(teamMembers: User[], currentUser?: User): User[] {
+export function filterTeamData(
+  teamMembers: User[],
+  currentUser?: User | null
+): User[] {
   if (!currentUser || !teamMembers) return [];
   const userLevel = getAccessLevel(currentUser.cargo, currentUser.status);
   if (userLevel >= LEVELS.COORDENADOR) return teamMembers;
@@ -308,7 +323,7 @@ export function filterTeamData(teamMembers: User[], currentUser?: User): User[] 
   return [];
 }
 
-export function getFilterRestrictions(user?: User): FilterRestrictions {
+export function getFilterRestrictions(user?: User | null): FilterRestrictions {
   if (!user) {
     return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
   }
@@ -322,7 +337,7 @@ export function getFilterRestrictions(user?: User): FilterRestrictions {
   return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
 }
 
-export function getUIConfig(currentUser?: User): UIConfig {
+export function getUIConfig(currentUser?: User | null): UIConfig {
   const perms = getUserPermissions(currentUser);
   const filterRestrictions = getFilterRestrictions(currentUser);
 
@@ -382,9 +397,13 @@ export const accessControl = {
   filterTeamData,
   getFilterRestrictions,
   getUIConfig,
-  // Override por cargo:
   setCargoLevel,
   getCargoLevel,
   resetCargoLevel,
   listCargoLevels,
+  isUnit3AssessorOrSupervisor,
+  canSeeHomeComissoes,
+  getDefaultLandingPage,
+  HOME_COMISSOES_ALLOWED_UNIT,
+  HOME_COMISSOES_ALLOWED_LEVELS,
 };

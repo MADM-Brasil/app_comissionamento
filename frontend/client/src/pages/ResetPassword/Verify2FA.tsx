@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import logoImg from "@/components/img/logo.png";
 import { verify2FA, resendCode } from "@/lib/auth";
 import { useAppStore } from "@/lib/dataStore";
+import { getDefaultLandingPage } from "@/lib/accessControl";
 
 export default function Verify2FA() {
   const [code, setCode] = useState("");
@@ -39,7 +40,12 @@ export default function Verify2FA() {
       localStorage.setItem("accessToken", data.accessToken);
       if (data.user) setCurrentUser(data.user);
       sessionStorage.removeItem("tempToken");
-      setLocation("/");
+
+      // Redirect inteligente:
+      // - Colaboradores da UNIDADE 3 → /home
+      // - Demais usuários → / (comportamento anterior)
+      const landingUser = data.user ?? useAppStore.getState().currentUser;
+      setLocation(getDefaultLandingPage(landingUser));
     } catch (err: any) {
       setError(err.message);
     } finally {
