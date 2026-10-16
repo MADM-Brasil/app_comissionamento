@@ -158,10 +158,19 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     description: 'Visualiza dados da equipe; vê configurações sem editar',
   },
   [LEVELS.COORDENADOR]: {
-    canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
-    canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
-    canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
-    canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
+    canAccessDashboard: false,
+    canAccessComissoes: false,
+    canAccessRanking: false,
+    canAccessReports: false,
+    canAccessConfiguration: false,
+    canViewTeam: false,
+    canEditConfiguration: false,
+    canEditBonus: false,
+    canGenerateNextMonth: false,
+    canExportData: true,
+    filterLocked: false,
+    lockedTeam: false,
+    lockedCollaborator: false,
     description: 'Ajusta metas, não altera bônus, filtro livre',
   },
   [LEVELS.ADMINISTRATIVO]: {
@@ -185,59 +194,6 @@ function normalize(str: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Regra Home/Comissões:
-//   (assessor OU supervisor) da UNIDADE 3
-//   OU nível >= ADMINISTRATIVO (qualquer unidade)
-// ─────────────────────────────────────────────────────────────
-export const HOME_COMISSOES_ALLOWED_UNIT = 3;
-export const HOME_COMISSOES_ALLOWED_LEVELS: Level[] = [
-  LEVELS.ASSESSOR,
-  LEVELS.SUPERVISAO,
-];
-
-/** Assessor OU supervisor E da unidade 3. */
-export function isUnit3AssessorOrSupervisor(user?: User | null): boolean {
-  if (!user) return false;
-  const level = getAccessLevel(user.cargo, user.status);
-  if (!HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
-  const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
-  return unidade === HOME_COMISSOES_ALLOWED_UNIT;
-}
-
-/**
- * Regra consolidada: quem pode ver Home e Comissões.
- * - Assessor/Supervisor da unidade 3 → SIM
- * - Administrativo ou Super Admin (qualquer unidade) → SIM
- * - Demais → NÃO
- */
-export function canSeeHomeComissoes(user?: User | null): boolean {
-  if (!user) return false;
-  const level = getAccessLevel(user.cargo, user.status);
-  if (level >= LEVELS.ADMINISTRATIVO) return true;
-  return isUnit3AssessorOrSupervisor(user);
-}
-
-/**
- * Rota inicial recomendada após o login:
- * - Assessor/Supervisor da UNIDADE 3 → "/home"
- * - Supervisor fora da UNIDADE 3 → "/suporte"
- * - Demais → "/" (comportamento anterior)
- */
-export function getDefaultLandingPage(user?: User | null): string {
-  if (!user) return "/login";
-
-  // 1) Assessor/Supervisor da unidade 3 → /home
-  if (isUnit3AssessorOrSupervisor(user)) return "/home";
-
-  // 2) Supervisor fora da unidade 3 → /suporte
-  const level = getAccessLevel(user.cargo, user.status);
-  if (level === LEVELS.SUPERVISAO) return "/suporte";
-
-  // 3) Demais (admins, coordenadores, etc.) → /
-  return "/";
-}
-
-// ─────────────────────────────────────────────────────────────
 // API pública
 // ─────────────────────────────────────────────────────────────
 export function getAccessLevel(
@@ -253,22 +209,15 @@ export function getAccessLevel(
   return LEVELS.NONE;
 }
 
-export function hasPermission(
-  user: User | null | undefined,
-  permission: keyof Permissions
-): boolean {
+export function hasPermission(user: User, permission: keyof Permissions): boolean {
   if (!user) return false;
-  const level = getAccessLevel(user.cargo, user.status);
-  return PERMISSIONS[level]?.[permission] ?? false;
+  const perms = getUserPermissions(user);
+  return Boolean((perms as any)[permission]);
 }
 
 export function getUserPermissions(user?: User | null) {
   const level = getAccessLevel(user?.cargo, user?.status);
   const perms = PERMISSIONS[level];
-
-  // Regra consolidada: assessor/supervisor u3 OU nível >= ADMINISTRATIVO
-  const allowHomeComissoes = canSeeHomeComissoes(user);
-
   return {
     level,
     levelName: getLevelName(level),
@@ -401,9 +350,4 @@ export const accessControl = {
   getCargoLevel,
   resetCargoLevel,
   listCargoLevels,
-  isUnit3AssessorOrSupervisor,
-  canSeeHomeComissoes,
-  getDefaultLandingPage,
-  HOME_COMISSOES_ALLOWED_UNIT,
-  HOME_COMISSOES_ALLOWED_LEVELS,
 };
