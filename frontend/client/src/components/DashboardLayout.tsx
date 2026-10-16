@@ -18,11 +18,6 @@ import {
   Eye,
   EyeOff,
   Bell,
-  HelpingHandIcon,
-  HelpCircle,
-  LucideHandHelping,
-  BadgeHelp,
-  HeartPulse,
   CircleHelp,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
@@ -77,6 +72,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   const userLevel = getAccessLevel();
   const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
 
+  // Suporte é acessível por qualquer usuário >= SUPERVISAO
+  // (inclui supervisor, assistente, coordenador, admins)
+  const canSeeSuporte = userLevel >= LEVELS.SUPERVISAO;
+
   // Obtém o e-mail do colaborador selecionado (armazenado no dataStore)
   const selectedCollaboratorEmail = useAppStore(
     (state) => (state as any).selectedCollaboratorEmail ?? null
@@ -98,7 +97,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
-  const permissions = useMemo(() => getUserPermissions(currentUser ?? undefined), [currentUser]);
+  const permissions = useMemo(
+    () => getUserPermissions(currentUser ?? undefined),
+    [currentUser]
+  );
 
   // Contagem de não lidas (usa 'read' ou fallback 'isRead')
   const unreadCount = useMemo(() => {
@@ -172,12 +174,31 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   }, [currentUser]);
   // ================================================================
 
-  // Navegação (inalterada)
+  // ─────────────────────────────────────────────────────────────
+  // Navegação lateral
+  //
+  // Home e Comissões: `canAccessDashboard` / `canAccessComissoes`
+  //   → unit 3: assessor, supervisor, assistente, coordenador
+  //   → qualquer unidade: administrativo e super admin
+  //
+  // Suporte: visível para qualquer nível >= SUPERVISAO
+  //   (não depende de canAccessConfiguration)
+  //
+  // Configurações: apenas quem tem canAccessConfiguration
+  //   (administrativo / super admin)
+  // ─────────────────────────────────────────────────────────────
   const navItems: NavItem[] = useMemo(() => {
     const items: NavItem[] = [];
-    if (permissions.canAccessDashboard) items.push({ path: "/home", label: "Home", icon: Home });
-    if (permissions.canAccessComissoes) items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
-    if (permissions.canAccessRanking) items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+
+    if (permissions.canAccessDashboard)
+      items.push({ path: "/home", label: "Home", icon: Home });
+
+    if (permissions.canAccessComissoes)
+      items.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
+
+    if (permissions.canAccessRanking)
+      items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+
     const dashboardChildren: NavChild[] = [];
     if (permissions.canViewTeam && permissions.canAccessReports) {
       dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
@@ -188,28 +209,47 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (dashboardChildren.length > 0) {
       items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
     }
-    if (permissions.canAccessConfiguration)
+
+    if (canSeeSuporte) {
       items.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
+    }
+
+    if (permissions.canAccessConfiguration) {
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
+    }
+
     return items;
-  }, [permissions]);
+  }, [permissions, canSeeSuporte]);
 
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
-    if (permissions.canAccessDashboard) flat.push({ path: "/home", label: "Home", icon: Home });
-    if (permissions.canAccessComissoes) flat.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
-    if (permissions.canViewTeam) flat.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
+
+    if (permissions.canAccessDashboard)
+      flat.push({ path: "/home", label: "Home", icon: Home });
+
+    if (permissions.canAccessComissoes)
+      flat.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
+
+    if (permissions.canViewTeam)
+      flat.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
+
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
       flat.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
     }
-    if (permissions.canAccessRanking) flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
-    if (permissions.canAccessConfiguration)
+
+    if (permissions.canAccessRanking)
+      flat.push({ path: "/ranking", label: "Ranking", icon: Trophy });
+
+    if (canSeeSuporte)
       flat.push({ path: "/suporte", label: "Suporte", icon: CircleHelp });
+
+    if (permissions.canAccessConfiguration)
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
+
     return flat.slice(0, 5);
-  }, [permissions]);
+  }, [permissions, canSeeSuporte]);
 
   // Efeitos
   useEffect(() => setManualCloseChild(false), [location]);
