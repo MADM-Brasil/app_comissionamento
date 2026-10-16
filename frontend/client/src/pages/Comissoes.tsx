@@ -95,20 +95,6 @@ function getActiveCampaigns(campaigns: Campaign[]): CampaignLike[] {
 
 // ============================================================
 //  CAMPANHAS DIRECIONADAS AO GRUPO ESPECIAL
-//  (Tatiane / Quinquenio / Concomitante)
-// ------------------------------------------------------------
-//  Uma campanha é considerada "do grupo especial" quando o campo
-//  `produto` contém um dos marcadores abaixo. Isso permite criar
-//  campanhas pontuais para essa equipe sem afetar os demais.
-//
-//  Marcadores reconhecidos (case-insensitive, substring):
-//    - QUINQUENIO
-//    - CONCOMITANTE
-//    - TATIANE
-//
-//  Regra:
-//    - Colaborador do grupo especial → só vê campanhas marcadas.
-//    - Colaborador comum             → só vê campanhas não marcadas.
 // ============================================================
 const SPECIAL_GROUP_CAMPAIGN_MARKERS = ["QUINQUENIO", "CONCOMITANTE", "TATIANE"];
 
@@ -191,10 +177,6 @@ function mapDailyMetricsByCollaborator(assinadosRows: any[], ganhosRows: any[]) 
   );
 }
 
-/**
- * Soma de "Assinados" por equipe.
- * Grupo especial (Quinquenio/Concomitante): assinados = ganhos.
- */
 function sumTeamAssinados(collaborators: any[], teamName: string): number {
   return collaborators.reduce((total, collaborator) => {
     if (normalizeText(collaborator.equipeNome) !== normalizeText(teamName)) return total;
@@ -226,15 +208,6 @@ function calculateAssessorGols(
   return calcularTotalGolsComCampanhas(dailyMetrics as any, campaigns);
 }
 
-/**
- * Comissão do assessor:
- *   faixa do produto (tabela) + eventuais gols das campanhas que
- *   chegaram via `campaigns` — já filtradas pelo público-alvo do
- *   colaborador (`campaignsForUser` / `collabCampaigns`).
- *
- * Para o grupo especial (Quinquenio/Concomitante/Tatiane), a tabela
- * usada é a QUINQUENIO e as campanhas já vêm restritas às marcadas.
- */
 function calculateAssessorCommission(
   collaborator: Collaborator,
   dailyMetrics: Array<{ date: string; assinados: number; ganhos: number }>,
@@ -269,11 +242,6 @@ function isSpecialGroupColaborador(colaborador: any): boolean {
   );
 }
 
-/**
- * Define o tipo de produto usado na tabela de comissões.
- * Quinquenio e Concomitante compartilham a tabela QUINQUENIO.
- * A checagem de equipe é priorizada sobre produto/cargo.
- */
 function getFaixaProductType(colab: any): string {
   const equipeNormalizada = (colab?.equipeNome || "").toLowerCase().trim();
 
@@ -734,10 +702,6 @@ const CustomTooltip = ({ active, payload, label, hideValues }: any) => {
 
 // ============================================================
 //  EXTRATO DIALOG
-// ------------------------------------------------------------
-//  Recebe `campaigns` JÁ FILTRADAS pelo público-alvo do colaborador
-//  (`campaignsForUser`). Portanto, para o grupo especial, `campaigns`
-//  contém apenas as campanhas marcadas para o grupo.
 // ============================================================
 const ExtratoDialog = ({
   dailyMetrics,
@@ -776,8 +740,6 @@ const ExtratoDialog = ({
   const campGanhosSemanaMap = new Map<string, number>(
     (campGanhos2026?.detalhes?.semanas || []).map((s: CampGanhosSemana) => [s.weekKey, s.valor]),
   );
-  // `campGanhos2026` já foi calculado com `campaignsForUser`; se está ativo,
-  // é porque existe CAMPGANHOS_2026 válida para este colaborador.
   const campGanhosAtivo = !!campGanhos2026?.ativo;
 
   const campaignsAtivasCount = (campaigns || []).filter(
@@ -1217,11 +1179,31 @@ export default function Comissoes() {
   } = useAppStore();
 
   const { currentUser, hasPermission, getAccessLevel, LEVELS } = useAccessControl();
-  const canUseFilterBar = hasPermission("canViewTeam") || hasPermission("canAccessReports");
 
   const userLevel = getAccessLevel();
+
+  // ─────────────────────────────────────────────────────────────
+  // Regra de escopo por perfil:
+  //   - Coordenador: vê Visão Geral + FilterBar, MAS apenas colegas
+  //     da mesma unidade (unidade_id).
+  //   - ADM / SUPER_ADMIN: vê tudo.
+  //   - Supervisor / Assessor: segue as regras anteriores.
+  // ─────────────────────────────────────────────────────────────
+  const isCoordenadorUser = userLevel === LEVELS.COORDENADOR;
+  const userUnidadeId =
+    (currentUser as any)?.unidade_id != null
+      ? Number((currentUser as any).unidade_id)
+      : null;
+
+  const canUseFilterBar =
+    hasPermission("canViewTeam") ||
+    hasPermission("canAccessReports") ||
+    isCoordenadorUser;
+
   const canViewCommissionOverview =
-    userLevel === LEVELS.ADMINISTRATIVO || userLevel === LEVELS.SUPER_ADMIN;
+    userLevel === LEVELS.ADMINISTRATIVO ||
+    userLevel === LEVELS.SUPER_ADMIN ||
+    isCoordenadorUser;
 
   const [filters, setFilters] = useState<{
     equipe: string;
@@ -1264,6 +1246,20 @@ export default function Comissoes() {
   const [extratoDailyMetrics, setExtratoDailyMetrics] = useState<any[]>([]);
   const [extratoLoading, setExtratoLoading] = useState(false);
   const extratoRequest = useRef(0);
+
+  // ─────────────────────────────────────────────────────────────
+  // Lista de colaboradores visíveis, respeitando o escopo:
+  //   - Coordenador → apenas colaboradores da MESMA UNIDADE.
+  //   - Demais      → todos.
+  // ─────────────────────────────────────────────────────────────
+  const scopedColabs = useMemo(() => {
+    if (!isCoordenadorUser) return storeColabs;
+    if (userUnidadeId == null) return [];
+    return storeColabs.filter((c: any) => {
+      const uid = c.unidadeId ?? c.unidade_id ?? null;
+      return uid != null && Number(uid) === userUnidadeId;
+    });
+  }, [storeColabs, isCoordenadorUser, userUnidadeId]);
 
   // ============================================================
   //  RELOAD
@@ -1500,19 +1496,57 @@ export default function Comissoes() {
     await reloadData(true);
   }, [reloadData]);
 
-  const handleFilterChange = useCallback((newFilters: any) => {
-    setFilters((prev) => {
-      if (
-        prev.equipe === newFilters.equipe &&
-        prev.colaborador === newFilters.colaborador &&
-        String(prev.colaboradorId ?? "") === String(newFilters.colaboradorId ?? "") &&
-        prev.produto === newFilters.produto
-      ) {
-        return prev;
+  // ============================================================
+  //  HANDLER DO FILTRO (com validação de escopo para coordenador)
+  // ============================================================
+  const handleFilterChange = useCallback(
+    (rawFilters: any) => {
+      let newFilters = rawFilters;
+
+      // Coordenador: só pode filtrar por colaboradores/equipes da própria unidade
+      if (isCoordenadorUser && userUnidadeId != null) {
+        const selColab = storeColabs.find(
+          (c) =>
+            (newFilters.colaboradorId != null &&
+              String(c.id) === String(newFilters.colaboradorId)) ||
+            (newFilters.colaborador &&
+              newFilters.colaborador !== "todos" &&
+              c.name === newFilters.colaborador),
+        );
+
+        if (selColab) {
+          const uid = (selColab as any).unidadeId ?? (selColab as any).unidade_id;
+          if (uid == null || Number(uid) !== userUnidadeId) {
+            toast.error("Você só pode visualizar colaboradores da sua unidade.");
+            newFilters = { ...newFilters, colaborador: "todos", colaboradorId: undefined };
+          }
+        }
+
+        if (newFilters.equipe && newFilters.equipe !== "todas") {
+          const equipeNoEscopo = scopedColabs.some(
+            (c) => c.equipeNome === newFilters.equipe,
+          );
+          if (!equipeNoEscopo) {
+            toast.error("Equipe fora do escopo da sua unidade.");
+            newFilters = { ...newFilters, equipe: "todas" };
+          }
+        }
       }
-      return newFilters;
-    });
-  }, []);
+
+      setFilters((prev) => {
+        if (
+          prev.equipe === newFilters.equipe &&
+          prev.colaborador === newFilters.colaborador &&
+          String(prev.colaboradorId ?? "") === String(newFilters.colaboradorId ?? "") &&
+          prev.produto === newFilters.produto
+        ) {
+          return prev;
+        }
+        return newFilters;
+      });
+    },
+    [isCoordenadorUser, userUnidadeId, storeColabs, scopedColabs],
+  );
 
   const handleSelectFromOverview = useCallback((item: CommissionOverviewItem) => {
     if (item.role === "coordenador") {
@@ -1554,8 +1588,14 @@ export default function Comissoes() {
     reloadData(false);
   }, [currentStartDate, currentEndDate, filters, currentUser]);
 
+  // ============================================================
+  //  filteredColabs — respeita o escopo do coordenador
+  // ============================================================
   const filteredColabs = useMemo(() => {
-    let filtered = storeColabs.filter((c) => {
+    // Coordenador: parte da lista já escopada à unidade
+    const source = isCoordenadorUser ? scopedColabs : storeColabs;
+
+    let filtered = source.filter((c) => {
       if (EXCLUDED_TEAMS_SET.has(normalizeName(c.equipeNome))) return false;
       if (EXCLUDED_CARGOS.some((cargo) => normalizeName(c.cargo) === normalizeName(cargo)))
         return false;
@@ -1573,7 +1613,14 @@ export default function Comissoes() {
         filtered = filtered.filter((c) => c.name === filters.colaborador);
     }
     return filtered;
-  }, [storeColabs, currentUser, filters, canUseFilterBar]);
+  }, [
+    storeColabs,
+    scopedColabs,
+    isCoordenadorUser,
+    currentUser,
+    filters,
+    canUseFilterBar,
+  ]);
 
   const userColab = useMemo(() => {
     if (canUseFilterBar) {
@@ -1592,13 +1639,7 @@ export default function Comissoes() {
   }, [filteredColabs, currentUser, filters, canUseFilterBar]);
 
   // ============================================================
-  //  CAMPANHAS (dependem do colaborador selecionado)
-  // ------------------------------------------------------------
-  //  activeCampaigns       → lista crua (todas as validadas).
-  //  campaignsForUser      → filtrada pelo público-alvo do colaborador
-  //                          (grupo especial vê só as marcadas p/ ele;
-  //                          demais veem apenas as normais).
-  //  activeCampaignsForUser → mesmo filtro, apenas validadas.
+  //  CAMPANHAS
   // ============================================================
   const activeCampaigns = useMemo(() => getActiveCampaigns(campaigns), [campaigns]);
 
@@ -1804,7 +1845,6 @@ export default function Comissoes() {
     void loadExtratoData();
   }, [userColab, loadExtratoData]);
 
-  // Carrega ganhos mensais (demanda atual) para barras de progresso
   useEffect(() => {
     if (!userColab || !currentStartDate) {
       setCampaignDailyMetrics([]);
@@ -1978,9 +2018,6 @@ export default function Comissoes() {
         valor_comissao: band.valor_comissao,
       }));
     const progress = getTierProgress(bands, gains);
-    // As campanhas já vêm filtradas por público-alvo em `activeCampaignsForUser`.
-    // Se o grupo especial não tem campanhas marcadas, o array fica vazio e
-    // `calcularTotalGolsComCampanhas` retorna 0 naturalmente.
     const goalsCommission = isSupervisor
       ? 0
       : calculator.calculateGoalCommission(
@@ -2033,9 +2070,6 @@ export default function Comissoes() {
       );
       comissaoAssinados = totalCommission;
     } else if (isSpecial) {
-      // Grupo especial: faixa QUINQUENIO sobre ganhos totais + eventuais
-      // campanhas marcadas para o grupo (já filtradas em campaignsForUser /
-      // activeCampaignsForUser).
       const ganhosEspeciais = userColab.ganhos || 0;
       const productCommission = calculator.calculateProductCommission(
         ganhosEspeciais,
@@ -2070,8 +2104,6 @@ export default function Comissoes() {
       }
     }
 
-    // CAMPGANHOS_2026 só soma se houver campanha ativa válida para este
-    // colaborador (o `campGanhos2026` já foi calculado com campaignsForUser).
     if (campGanhos2026.ativo) {
       comissaoCampGanhos2026 =
         currentRole === "supervisor" || currentRole === "coordenador"
@@ -2089,7 +2121,6 @@ export default function Comissoes() {
         comissaoAssinados,
         comissaoGols,
         comissaoCampGanhos2026,
-        // Grupo especial: assinados = ganhos.
         assinados: isSpecial ? userColab.ganhos || 0 : userColab.assinados || 0,
         ganhos: userColab.ganhos || 0,
         protocolados: userColab.protocolados || 0,
@@ -2112,7 +2143,8 @@ export default function Comissoes() {
   ]);
 
   // ============================================================
-  //  VISÃO GERAL DAS COMISSÕES (admin/superadmin)
+  //  VISÃO GERAL DAS COMISSÕES
+  //  (ADM/Super Admin: tudo. Coordenador: apenas a própria unidade.)
   // ============================================================
   const loadCommissionOverview = useCallback(async () => {
     const requestId = ++commissionOverviewRequest.current;
@@ -2120,7 +2152,7 @@ export default function Comissoes() {
       !canViewCommissionOverview ||
       !currentStartDate ||
       !currentEndDate ||
-      storeColabs.length === 0
+      scopedColabs.length === 0
     ) {
       setCommissionOverview([]);
       setCommissionOverviewLoading(false);
@@ -2154,7 +2186,7 @@ export default function Comissoes() {
         campaignGanhosRows,
       );
 
-      const collaboratorsWithMetrics = storeColabs.map((collaborator) => {
+      const collaboratorsWithMetrics = scopedColabs.map((collaborator) => {
         const daily = dailyByCollaborator.get(normalizeName(collaborator.name)) || [];
         return {
           ...collaborator,
@@ -2163,7 +2195,7 @@ export default function Comissoes() {
         };
       });
 
-      const rows = storeColabs
+      const rows = scopedColabs
         .filter((collaborator) => !EXCLUDED_TEAMS_SET.has(normalizeName(collaborator.equipeNome)))
         .flatMap((collaborator) => {
           const role = getCommissionOverviewRole(collaborator);
@@ -2176,7 +2208,6 @@ export default function Comissoes() {
             Boolean(collaborator.isSupervisorSR) || calculator.isSupervisorSR(collaborator.email);
           const isSpecialCollab = isSpecialGroupColaborador(collaborator);
 
-          // Filtragem de campanhas por público-alvo DESTE colaborador.
           const collabCampaigns = filterCampaignsForCollaborator(campaigns, collaborator);
           const collabActiveCampaigns = collabCampaigns.filter(
             (c: any) => c.validacao_financeiro,
@@ -2229,7 +2260,6 @@ export default function Comissoes() {
               tabelaComissoes,
               collabActiveCampaigns as any,
             );
-            // CAMPGANHOS_2026 deste colaborador (já filtrada por público-alvo).
             if (isCampGanhos2026Active(collabCampaigns)) {
               const campaignDaily =
                 campaignDailyByCollaborator.get(normalizeName(collaborator.name)) || [];
@@ -2275,7 +2305,7 @@ export default function Comissoes() {
     canViewCommissionOverview,
     currentStartDate,
     currentEndDate,
-    storeColabs,
+    scopedColabs,
     campaigns,
     tabelaComissoes,
   ]);
@@ -2397,7 +2427,6 @@ export default function Comissoes() {
           : daily.reduce((total, day) => total + (Number(day.assinados) || 0), 0);
         ganhos = daily.reduce((total, day) => total + (Number(day.ganhos) || 0), 0);
 
-        // Campanhas filtradas por público-alvo DESTE colaborador.
         const collabCampaigns = filterCampaignsForCollaborator(campaigns, item.collaborator);
         const collabActiveCampaigns = collabCampaigns.filter(
           (c: any) => c.validacao_financeiro,
@@ -2410,7 +2439,6 @@ export default function Comissoes() {
           collabActiveCampaigns as any,
         );
 
-        // CAMPGANHOS_2026 deste colaborador (já filtrada por público-alvo).
         if (isCampGanhos2026Active(collabCampaigns)) {
           const campaignRows = await fetchGanhos({
             start: campaignRange.start,
@@ -2647,12 +2675,10 @@ export default function Comissoes() {
     };
   }, [campGanhos2026, currentRole, totalGols]);
 
-  // Leitura antecipada do primeiro item para evitar referência antes da inicialização.
   const firstCommissionItem = commissionData[0] || null;
   const specialGanhosForCards = firstCommissionItem?.ganhos || 0;
 
   const summaryCards = useMemo(() => {
-    // Grupo especial: "Vendas Fechadas" reflete ganhos.
     const ganhosEspeciais = isSpecialUser ? specialGanhosForCards : rawMetrics.ganhos;
 
     const cards: Array<{
@@ -2706,7 +2732,6 @@ export default function Comissoes() {
 
   const userData = firstCommissionItem;
   const recebidos = userData?.emitidos || 0;
-  // Para o grupo especial, `commissionData` já devolve assinados = ganhos.
   const assinados = userData?.assinados || 0;
   const protocolados = userData?.protocolados || 0;
   const ganhos = userData?.ganhos || 0;
@@ -2951,7 +2976,6 @@ export default function Comissoes() {
       const metricas = metricsMap.get(key) || {};
       return {
         label: formatLabel(date),
-        // Grupo especial: assinados = ganhos.
         assinados: isSpecialUser ? (metricas as any).ganhos || 0 : (metricas as any).assinados || 0,
         ganhos: (metricas as any).ganhos || 0,
       };
@@ -3026,8 +3050,6 @@ export default function Comissoes() {
         </div>
       )}
 
-      {/* Banner contextual do grupo especial — só aparece quando não há
-          campanha ativa marcada para o grupo. */}
       {!loading && isSpecialUser && activeCampaignsForUser.length === 0 && (
         <div className="card p-3 mb-6 border-l-4 border-l-[#8B5CF6] bg-[#f5f3ff] animate-fade-in-up">
           <p className="text-xs text-[#475569]">
@@ -3036,7 +3058,7 @@ export default function Comissoes() {
         </div>
       )}
 
-      {/* Visão Geral sempre visível para Admin/SuperAdmin, filtrada pela FilterBar */}
+      {/* Visão Geral — ADM/Super Admin: todos; Coordenador: apenas a própria unidade */}
       {isOverviewVisible && (
         <div className="card p-5 mb-6 animate-fade-in-up">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
@@ -3050,6 +3072,14 @@ export default function Comissoes() {
                   : ""}{" "}
                 colaboradores
               </span>
+              {isCoordenadorUser && (
+                <span
+                  className="text-[10px] px-2 py-0.5 rounded-full bg-[#f5f3ff] text-[#8B5CF6] font-medium"
+                  title="Você visualiza apenas colaboradores da sua unidade"
+                >
+                  Escopo: sua unidade
+                </span>
+              )}
               {campGanhos2026.ativo && (
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#fff7ed] text-[#EA8C1D] font-medium">
                   CAMPGANHOS_2026 ativa
@@ -3386,7 +3416,6 @@ export default function Comissoes() {
                                   d.date.slice(0, 10) <= monthEndStr,
                               );
 
-                              // Grupo especial: assinados = ganhos.
                               const sumAssinados = (rows: any[]) =>
                                 rows.reduce(
                                   (sum, d) =>
