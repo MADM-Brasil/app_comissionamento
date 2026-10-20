@@ -28,6 +28,7 @@ import { Loader2 } from "lucide-react";
 import {
   getUserPermissions,
   getDefaultLandingPage,
+  isAssessorRestrito,
   type Permissions,
 } from "@/lib/accessControl";
 
@@ -44,6 +45,29 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
     return <Redirect to={getDefaultLandingPage(currentUser)} />;
   }
   return <>{children}</>;
+}
+
+/**
+ * Decisão de landing para a rota "/":
+ *
+ *   • Assessor unidade 3 → redireciona para /home
+ *   • Todos os demais     → <Suporte /> (comportamento histórico)
+ *
+ * Importante: `isAssessorRestrito` retorna `true` SOMENTE para
+ * `getAccessLevel === ASSESSOR && unidade_id === 3`. Portanto, este
+ * wrapper NÃO altera o comportamento de:
+ *   - supervisores (qualquer unidade)
+ *   - coordenadores (qualquer unidade)
+ *   - assessores de outras unidades
+ *   - administrativo e super admin
+ * Todos esses continuam caindo em <Suporte /> como antes.
+ */
+function LandingRedirect() {
+  const currentUser = useAppStore((s) => s.currentUser);
+  if (isAssessorRestrito(currentUser)) {
+    return <Redirect to="/home" />;
+  }
+  return <Suporte />;
 }
 
 /**
@@ -110,11 +134,14 @@ function Router() {
       <Route path="/404" component={NotFound} />
 
       {/* Home – requer permissão canAccessDashboard
-          (unidade 3: assessor/supervisor/coordenador; ou nível >= ADMINISTRATIVO) */}
+          (unidade 3: assessor/supervisor/coordenador; ou nível >= ADMINISTRATIVO)
+          A rota "/" decide:
+            • assessor unidade 3 → /home
+            • todos os demais     → <Suporte /> (comportamento atual) */}
       <Route path="/">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessDashboard">
-            <Suporte /> {/* home */}
+            <LandingRedirect />
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
@@ -126,8 +153,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Comissões – requer permissão canAccessComissoes
-          (mesma regra da Home) */}
+      {/* Comissões – requer permissão canAccessComissoes */}
       <Route path="/comissoes">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessComissoes">
@@ -268,7 +294,7 @@ export default function App() {
           setAppLoading(false);
           return;
         }
-        await fetchCurrentUser();   // já atualiza a store se houver sessão
+        await fetchCurrentUser();
       } catch (err) {
         console.error('Erro ao restaurar sessão:', err);
       } finally {
@@ -278,7 +304,6 @@ export default function App() {
 
     restore();
 
-    // Timeout de segurança
     const timer = setTimeout(() => {
       if (appLoading) {
         console.warn('⏱️ Timeout de inicialização – forçando fim do carregamento');
@@ -299,7 +324,7 @@ export default function App() {
       return;
     }
 
-    dataLoaded.current = true; // evita múltiplas chamadas
+    dataLoaded.current = true;
     loadCollaboratorsAndMetrics().catch(err => console.error('Erro ao carregar métricas:', err));
     loadRawMetrics().catch(err => console.error('Erro ao carregar raw metrics:', err));
   }, [currentUser, collaborators.length, loadCollaboratorsAndMetrics, loadRawMetrics]);

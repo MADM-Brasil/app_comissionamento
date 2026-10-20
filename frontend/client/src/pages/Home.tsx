@@ -29,14 +29,6 @@ import {
 
 // ============================================================
 // FETCH LOCAL — LEADS RECEBIDOS (modo série temporal)
-// ------------------------------------------------------------
-// Bypassa o wrapper do api.ts e constrói a URL explicitamente.
-// Garante que:
-//   • `granularity=daily` sempre chega ao backend.
-//   • Parâmetros opcionais (equipe/colaborador/produto) só são
-//     enviados quando têm valor real (nunca "undefined"/"todas").
-// Isso evita cair no modo agregado sem `periodo`, que fazia os
-// gráficos ficarem zerados.
 // ============================================================
 async function fetchLeadsRecebidosDaily(params: {
   start: string;
@@ -89,6 +81,25 @@ const normalize = (str: string): string =>
 
 const extractLeadsTotal = (item: any): number =>
   Number(item?.total ?? item?.leads_recebidos ?? 0) || 0;
+
+// ============================================================
+// CORREÇÃO — comparação robusta colaborador ↔ usuário logado
+// ------------------------------------------------------------
+//  Após o login, o `currentUser.id` pode vir num formato
+//  diferente do `colaborador.id` (retornado por `/colaboradores`).
+//  Comparar por e-mail (case-insensitive) evita o "Selecione um
+//  colaborador…" / dados gerais no primeiro acesso.
+// ============================================================
+function isSameColaborator(colab: any, user: any): boolean {
+  if (!colab || !user) return false;
+  const colabEmail = String(colab.email || "").toLowerCase().trim();
+  const userEmail = String(user.email || "").toLowerCase().trim();
+  if (colabEmail && userEmail && colabEmail === userEmail) return true;
+  const colabId = colab.id;
+  const userId = user.id;
+  if (colabId == null || userId == null) return false;
+  return String(colabId) === String(userId);
+}
 
 function isSpecialGroupColaborador(colaborador: any): boolean {
   const produto = (colaborador.produto || '').toLowerCase();
@@ -373,6 +384,14 @@ export default function Home() {
   const canAccessReports = hasPermission('canAccessReports');
   const canAccessCommissoes = hasPermission('canViewOwnData');
 
+  // ─────────────────────────────────────────────────────────────
+  // Escopo do filtro:
+  //   • canViewTeam / canAccessReports → FilterBar livre (supervisores,
+  //     coordenadores, ADM, super admin).
+  //   • Demais (assessores) → filtro FORÇADO no próprio usuário.
+  // ─────────────────────────────────────────────────────────────
+  const canUseFilterBar = hasPermission("canViewTeam") || canAccessReports;
+
   const [allCollaborators, setAllCollaborators] = useState<any[]>([]);
   const [metricsData, setMetricsData] = useState<Record<string, { emitidos: number; assinados: number; protocolados: number; ganhos: number; perdidos: number }>>({});
   const [rankingLoading, setRankingLoading] = useState(false);
@@ -399,20 +418,36 @@ export default function Home() {
 
   // ============================================================
   // PARÂMETROS DE FILTRO PARA OS GRÁFICOS E APIs
+  // ------------------------------------------------------------
+  //  Correção: para perfis que NÃO têm FilterBar livre (assessores),
+  //  força `colaborador` = usuário logado, mesmo que o `FilterBar`
+  //  ainda não tenha travado o filtro. Sem isso, a primeira
+  //  requisição saía sem filtro → dados gerais.
   // ============================================================
   const getChartFilterParams = useCallback(() => {
     let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
     let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
     let colaboradorIdApi = filters.colaboradorId;
 
-    if (isSupervisorSelected && selectedCollaborator) {
+    if (!canUseFilterBar) {
+      // Assessor: força o próprio usuário
+      const userColab = collaborators.find(c => isSameColaborator(c, currentUser));
+      if (userColab) {
+        colaboradorApi = userColab.name;
+        colaboradorIdApi = currentUser?.id;
+      } else if (currentUser?.nome) {
+        colaboradorApi = currentUser.nome;
+        colaboradorIdApi = currentUser.id;
+      }
+    } else if (isSupervisorSelected && selectedCollaborator) {
+      // Supervisor selecionado no FilterBar → visão da equipe
       equipeApi = selectedCollaborator.equipeNome || equipeApi;
       colaboradorApi = undefined;
       colaboradorIdApi = undefined;
     }
 
     return { equipeApi, colaboradorApi, colaboradorIdApi };
-  }, [filters, isSupervisorSelected, selectedCollaborator]);
+  }, [filters, isSupervisorSelected, selectedCollaborator, canUseFilterBar, currentUser, collaborators]);
 
   // ============================================================
   // CARREGAMENTO DE DADOS PARA RANKING
@@ -463,8 +498,6 @@ export default function Home() {
       await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
       await loadWeeklyPerformanceData();
 
-      // KPI "Leads Recebidos": usa o modo diário e soma tudo (mesma
-      // fonte dos gráficos).
       const [leadsData, ligacoesProdutivas] = await Promise.all([
         fetchLeadsRecebidosDaily({
           start: currentStartDate,
@@ -495,7 +528,8 @@ export default function Home() {
 
       if (currentUser) {
         const allColabs = useAppStore.getState().collaborators;
-        const userColab = allColabs.find(c => c.id === currentUser.id);
+        // Correção: comparação por e-mail (fallback id).
+        const userColab = allColabs.find(c => isSameColaborator(c, currentUser));
         if (userColab) {
           const isSupervisor = (userColab.cargo || '').toLowerCase() === 'supervisor';
           const isEspecial = isSpecialGroupColaborador(userColab);
@@ -536,11 +570,15 @@ export default function Home() {
 
   // ============================================================
   // EFEITOS
+  // ------------------------------------------------------------
+  //  Adicionado `currentUser?.id` e `collaborators.length` às
+  //  dependências para re-fetch quando o colaborador ficar
+  //  disponível (evita "dados gerais no primeiro acesso").
   // ============================================================
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
-  }, [currentStartDate, currentEndDate, filters]);
+  }, [currentStartDate, currentEndDate, filters, currentUser?.id, collaborators.length]);
 
   useEffect(() => {
     if (currentStartDate && currentEndDate && allCollaborators.length === 0) {
@@ -575,15 +613,20 @@ export default function Home() {
     return sorted.map((item, idx) => ({ ...item, position: idx + 1 }));
   }, [allCollaborators, metricsData]);
 
+  // Correção: `currentUserData` compara por e-mail (fallback id).
   const currentUserData = useMemo(() => {
-    if (!currentUser?.id) return null;
+    if (!currentUser) return null;
     const allColabs = useAppStore.getState().collaborators;
-    return allColabs.find(c => c.id === currentUser.id) || collaborators.find(c => c.id === currentUser.id);
+    return allColabs.find(c => isSameColaborator(c, currentUser))
+      || collaborators.find(c => isSameColaborator(c, currentUser))
+      || null;
   }, [currentUser, collaborators]);
 
   const userRank = useMemo(() => {
     if (!currentUserData) return 0;
-    const found = globalRanking.find(item => item.id === currentUserData.id || item.name === currentUserData.name);
+    const found = globalRanking.find(item =>
+      isSameColaborator(item, currentUserData) || item.name === currentUserData.name
+    );
     return found ? found.position : 0;
   }, [globalRanking, currentUserData]);
   const totalRanking = globalRanking.length;
@@ -691,7 +734,7 @@ export default function Home() {
   }, [totalTargetGanhos, effectiveTotals.ganhos]);
 
   // ============================================================
-  // GRÁFICO: Emitidos vs Assinados (apenas grupo especial)
+  // GRÁFICO: Emitidos vs Assinados (grupo especial)
   // ============================================================
   useEffect(() => {
     if (!isSpecialGroup || !currentStartDate || !currentEndDate) return;
@@ -721,7 +764,7 @@ export default function Home() {
   }, [isSpecialGroup, currentStartDate, currentEndDate, filters, getChartFilterParams]);
 
   // ============================================================
-  // GRÁFICO: Performance semanal (Leads vs Assinados vs Ganhos)
+  // GRÁFICO: Performance semanal
   // ============================================================
   useEffect(() => {
     if (isSpecialGroup) return;
@@ -784,7 +827,7 @@ export default function Home() {
   }, [isSpecialGroup, filters, getChartFilterParams]);
 
   // ============================================================
-  // GRÁFICO: Produção Diária (Leads vs Assinados)
+  // GRÁFICO: Produção Diária
   // ============================================================
   useEffect(() => {
     if (isSpecialGroup) return;
@@ -1094,7 +1137,7 @@ export default function Home() {
                         const medals = ["🥇","🥈","🥉"];
                         return (
                           <div key={item.id || item.name} className="flex items-center justify-between text-xs">
-                            <div className="flex items-center gap-2"><span className="text-base">{medals[idx]}</span><span className="font-medium text-[#0f172a]">{item.name}</span>{item.id === currentUserData?.id && <span className="badge info">VOCÊ</span>}</div>
+                            <div className="flex items-center gap-2"><span className="text-base">{medals[idx]}</span><span className="font-medium text-[#0f172a]">{item.name}</span>{isSameColaborator(item, currentUserData) && <span className="badge info">VOCÊ</span>}</div>
                             <span className="font-bold text-[#2F6FED]">{formatInt(item.score)} pts</span>
                           </div>
                         );
