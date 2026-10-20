@@ -48,6 +48,32 @@ import {
 const formatInt = (num: number) => num?.toLocaleString("pt-BR") ?? "0";
 
 // ============================================================
+//  CORREÇÃO — comparação robusta colaborador ↔ usuário logado
+// ------------------------------------------------------------
+//  Após o login inicial, o `currentUser.id` retornado pela rota
+//  `/auth/login` pode vir num formato diferente (ex.: apenas o
+//  e-mail, ou id numérico) do `id` presente em
+//  `core.view_app_colaboradores` (retornado por `/colaboradores`).
+//  Quando os ids não batem, `userColab` fica `undefined` e a
+//  página exibe "Selecione um colaborador...". Ao recarregar, o
+//  `fetchCurrentUser` restaura o id correto e o problema some.
+//
+//  Comparar por e-mail (case-insensitive) é imune a esse
+//  descompasso. Fallback para id mantém compatibilidade com o
+//  formato "antigo".
+// ============================================================
+function isSameColaborator(colab: any, user: any): boolean {
+  if (!colab || !user) return false;
+  const colabEmail = String(colab.email || "").toLowerCase().trim();
+  const userEmail = String(user.email || "").toLowerCase().trim();
+  if (colabEmail && userEmail && colabEmail === userEmail) return true;
+  const colabId = colab.id;
+  const userId = user.id;
+  if (colabId == null || userId == null) return false;
+  return String(colabId) === String(userId);
+}
+
+// ============================================================
 //  HELPERS DE DATA
 // ============================================================
 function toInclusiveEnd(end: string): string {
@@ -409,7 +435,6 @@ function extractSupervisorMonthlyCampaignBands(
     const tiposTabela = Array.from(
       new Set((commissionBands || []).map((b) => (b.tipo || "").trim().toUpperCase()).filter(Boolean)),
     ).sort();
-    // eslint-disable-next-line no-console
     console.warn(
       `[Comissoes] Faixa mensal do supervisor "${CAMPGANHOS_MEN_2026_SUPER}" não encontrada.`,
       "\n  Tipos em campaigns      →", tiposCampanhas,
@@ -1182,13 +1207,6 @@ export default function Comissoes() {
 
   const userLevel = getAccessLevel();
 
-  // ─────────────────────────────────────────────────────────────
-  // Regra de escopo por perfil:
-  //   - Coordenador: vê Visão Geral + FilterBar, MAS apenas colegas
-  //     da mesma unidade (unidade_id).
-  //   - ADM / SUPER_ADMIN: vê tudo.
-  //   - Supervisor / Assessor: segue as regras anteriores.
-  // ─────────────────────────────────────────────────────────────
   const isCoordenadorUser = userLevel === LEVELS.COORDENADOR;
   const userUnidadeId =
     (currentUser as any)?.unidade_id != null
@@ -1247,11 +1265,6 @@ export default function Comissoes() {
   const [extratoLoading, setExtratoLoading] = useState(false);
   const extratoRequest = useRef(0);
 
-  // ─────────────────────────────────────────────────────────────
-  // Lista de colaboradores visíveis, respeitando o escopo:
-  //   - Coordenador → apenas colaboradores da MESMA UNIDADE.
-  //   - Demais      → todos.
-  // ─────────────────────────────────────────────────────────────
   const scopedColabs = useMemo(() => {
     if (!isCoordenadorUser) return storeColabs;
     if (userUnidadeId == null) return [];
@@ -1285,7 +1298,10 @@ export default function Comissoes() {
           colaboradorApi = filters.colaborador !== "todos" ? filters.colaborador : undefined;
           colaboradorIdApi = filters.colaboradorId;
         } else {
-          const userColab = storeColabs.find((c) => c.id === currentUser.id);
+          // CORREÇÃO: comparar por e-mail (fallback id) para cobrir o
+          // descompasso entre o id do `/auth/login` e o id de
+          // `core.view_app_colaboradores`.
+          const userColab = storeColabs.find((c) => isSameColaborator(c, currentUser));
           if (userColab) {
             colaboradorApi = userColab.name;
             colaboradorIdApi = currentUser.id;
@@ -1302,9 +1318,9 @@ export default function Comissoes() {
                 (colaboradorApi != null && c.name === colaboradorApi),
             ) ||
             (filters.colaborador === "todos"
-              ? collaboratorsForSelection.find((c) => String(c.id) === String(currentUser.id))
+              ? collaboratorsForSelection.find((c) => isSameColaborator(c, currentUser))
               : undefined)
-          : collaboratorsForSelection.find((c) => String(c.id) === String(currentUser.id));
+          : collaboratorsForSelection.find((c) => isSameColaborator(c, currentUser));
         const isSupervisorSelection = normalizeText(requestedColaborador?.cargo || "").startsWith(
           "supervisor",
         );
@@ -1354,7 +1370,7 @@ export default function Comissoes() {
         } else {
           targetColab = requestedColaborador
             ? colaboradoresAtualizados.find((c) => String(c.id) === String(requestedColaborador.id))
-            : colaboradoresAtualizados.find((c) => c.id === currentUser.id);
+            : colaboradoresAtualizados.find((c) => isSameColaborator(c, currentUser));
         }
 
         setDailyMetrics([]);
@@ -1496,14 +1512,10 @@ export default function Comissoes() {
     await reloadData(true);
   }, [reloadData]);
 
-  // ============================================================
-  //  HANDLER DO FILTRO (com validação de escopo para coordenador)
-  // ============================================================
   const handleFilterChange = useCallback(
     (rawFilters: any) => {
       let newFilters = rawFilters;
 
-      // Coordenador: só pode filtrar por colaboradores/equipes da própria unidade
       if (isCoordenadorUser && userUnidadeId != null) {
         const selColab = storeColabs.find(
           (c) =>
@@ -1588,11 +1600,7 @@ export default function Comissoes() {
     reloadData(false);
   }, [currentStartDate, currentEndDate, filters, currentUser]);
 
-  // ============================================================
-  //  filteredColabs — respeita o escopo do coordenador
-  // ============================================================
   const filteredColabs = useMemo(() => {
-    // Coordenador: parte da lista já escopada à unidade
     const source = isCoordenadorUser ? scopedColabs : storeColabs;
 
     let filtered = source.filter((c) => {
@@ -1602,8 +1610,9 @@ export default function Comissoes() {
       return true;
     });
     if (!canUseFilterBar) {
-      if (currentUser && !filtered.some((c) => c.id === currentUser.id)) {
-        const userColab = storeColabs.find((c) => c.id === currentUser.id);
+      // CORREÇÃO: usa isSameColaborator (email/id) em vez de `c.id === currentUser.id`.
+      if (currentUser && !filtered.some((c) => isSameColaborator(c, currentUser))) {
+        const userColab = storeColabs.find((c) => isSameColaborator(c, currentUser));
         if (userColab) filtered = [userColab, ...filtered];
       }
     } else {
@@ -1631,16 +1640,14 @@ export default function Comissoes() {
             c.name === filters.colaborador,
         ) ||
         (filters.colaborador === "todos"
-          ? filteredColabs.find((c) => String(c.id) === String(currentUser?.id))
+          ? filteredColabs.find((c) => isSameColaborator(c, currentUser))
           : undefined)
       );
     }
-    return filteredColabs.find((c) => c.id === currentUser?.id);
+    // CORREÇÃO: usa isSameColaborator (email/id) em vez de `c.id === currentUser?.id`.
+    return filteredColabs.find((c) => isSameColaborator(c, currentUser));
   }, [filteredColabs, currentUser, filters, canUseFilterBar]);
 
-  // ============================================================
-  //  CAMPANHAS
-  // ============================================================
   const activeCampaigns = useMemo(() => getActiveCampaigns(campaigns), [campaigns]);
 
   const campaignsForUser = useMemo(
@@ -2045,9 +2052,6 @@ export default function Comissoes() {
 
   const isOverviewVisible = canViewCommissionOverview && !loading;
 
-  // ============================================================
-  //  DADOS DO COLABORADOR SELECIONADO
-  // ============================================================
   const commissionData = useMemo(() => {
     if (!userColab) return [];
 
@@ -2142,10 +2146,6 @@ export default function Comissoes() {
     currentRole,
   ]);
 
-  // ============================================================
-  //  VISÃO GERAL DAS COMISSÕES
-  //  (ADM/Super Admin: tudo. Coordenador: apenas a própria unidade.)
-  // ============================================================
   const loadCommissionOverview = useCallback(async () => {
     const requestId = ++commissionOverviewRequest.current;
     if (
@@ -3058,7 +3058,6 @@ export default function Comissoes() {
         </div>
       )}
 
-      {/* Visão Geral — ADM/Super Admin: todos; Coordenador: apenas a própria unidade */}
       {isOverviewVisible && (
         <div className="card p-5 mb-6 animate-fade-in-up">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
@@ -3429,7 +3428,7 @@ export default function Comissoes() {
                               const assinadosMensal = sumAssinados(dailyDataMensal);
 
                               const ganhosDiario = dailyDataDiario.reduce(
-                              (sum, d) => sum + (Number(d.ganhos) || 0),
+                                (sum, d) => sum + (Number(d.ganhos) || 0),
                                 0,
                               );
                               const ganhosSemanal = dailyDataSemanal.reduce(

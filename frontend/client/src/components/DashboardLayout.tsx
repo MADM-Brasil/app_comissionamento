@@ -35,6 +35,16 @@ type NavItem =
 
 const HIDE_PERIOD_FILTER_PATHS = ["/configuration", "/suporte"];
 
+// ============================================================
+//  RESTRIÇÃO POR UNIDADE
+// ------------------------------------------------------------
+//  Assessores da unidade 3 só navegam por Home e Comissões.
+//  Aqui apenas filtramos o menu; as páginas restantes já são
+//  escopadas por e-mail para assessor em seus próprios componentes.
+// ============================================================
+const RESTRICTED_ASSESSOR_UNITS: readonly number[] = [3];
+const RESTRICTED_ALLOWED_PATHS: readonly string[] = ["/home", "/comissoes"];
+
 interface DashboardLayoutProps {
   children: React.ReactNode;
   title: string;
@@ -73,8 +83,20 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
 
   // Suporte é acessível por qualquer usuário >= SUPERVISAO
-  // (inclui supervisor, assistente, coordenador, admins)
   const canSeeSuporte = userLevel >= LEVELS.SUPERVISAO;
+
+  // ============================================================
+  //  Assessor da unidade 3 → apenas Home e Comissões no menu.
+  // ============================================================
+  const isAssessorUnidade3 = useMemo(() => {
+    if (userLevel !== LEVELS.ASSESSOR) return false;
+    const unidadeRaw =
+      (currentUser as any)?.unidade_id ??
+      (currentUser as any)?.unidadeId ??
+      null;
+    const unidade = unidadeRaw != null ? Number(unidadeRaw) : null;
+    return unidade != null && RESTRICTED_ASSESSOR_UNITS.includes(unidade);
+  }, [userLevel, currentUser, LEVELS.ASSESSOR]);
 
   // Obtém o e-mail do colaborador selecionado (armazenado no dataStore)
   const selectedCollaboratorEmail = useAppStore(
@@ -82,7 +104,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   );
 
   // Determina se o colaborador filtrado é diferente do usuário logado,
-  // EXCETO se o usuário for SUPER_ADMIN (mantém visualização livre).
+  // EXCETO se o usuário for SUPER_ADMIN.
   const isViewingOtherCollaborator = !isSuperAdmin &&
     !!selectedCollaboratorEmail &&
     !!currentUser?.email &&
@@ -102,7 +124,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     [currentUser]
   );
 
-  // Contagem de não lidas (usa 'read' ou fallback 'isRead')
+  // Contagem de não lidas
   const unreadCount = useMemo(() => {
     if (!notifications) return 0;
     return notifications.filter((n: any) => {
@@ -130,7 +152,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
         try {
           const data = JSON.parse(event.data);
 
-          // Filtra notificações direcionadas a outro usuário
           if (data.destinatario && data.destinatario !== currentUser?.email) {
             return;
           }
@@ -172,20 +193,9 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       if (eventSource) eventSource.close();
     };
   }, [currentUser]);
-  // ================================================================
 
   // ─────────────────────────────────────────────────────────────
   // Navegação lateral
-  //
-  // Home e Comissões: `canAccessDashboard` / `canAccessComissoes`
-  //   → unit 3: assessor, supervisor, assistente, coordenador
-  //   → qualquer unidade: administrativo e super admin
-  //
-  // Suporte: visível para qualquer nível >= SUPERVISAO
-  //   (não depende de canAccessConfiguration)
-  //
-  // Configurações: apenas quem tem canAccessConfiguration
-  //   (administrativo / super admin)
   // ─────────────────────────────────────────────────────────────
   const navItems: NavItem[] = useMemo(() => {
     const items: NavItem[] = [];
@@ -218,8 +228,18 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     }
 
+    // Assessor da unidade 3 → apenas Home e Comissões.
+    if (isAssessorUnidade3) {
+      return items.filter((item) => {
+        if ("path" in item && item.path) {
+          return RESTRICTED_ALLOWED_PATHS.includes(item.path);
+        }
+        return false; // remove grupos inteiros (Dashboard)
+      });
+    }
+
     return items;
-  }, [permissions, canSeeSuporte]);
+  }, [permissions, canSeeSuporte, isAssessorUnidade3]);
 
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
@@ -248,8 +268,13 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (permissions.canAccessConfiguration)
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
 
+    // Assessor da unidade 3 → apenas Home e Comissões.
+    if (isAssessorUnidade3) {
+      return flat.filter((item) => RESTRICTED_ALLOWED_PATHS.includes(item.path));
+    }
+
     return flat.slice(0, 5);
-  }, [permissions, canSeeSuporte]);
+  }, [permissions, canSeeSuporte, isAssessorUnidade3]);
 
   // Efeitos
   useEffect(() => setManualCloseChild(false), [location]);
@@ -544,7 +569,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
               </div>
             )}
 
-            {/* Botão ocultar valores – desabilitado se visualizar outro colaborador (exceto SUPER_ADMIN) */}
             <button
               onClick={toggleHideValues}
               disabled={isViewingOtherCollaborator}

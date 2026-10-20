@@ -237,6 +237,52 @@ export function getDefaultLandingPage(user?: User | null): string {
   return "/";
 }
 
+// ============================================================
+//  RESTRIÇÃO DE NAVEGAÇÃO — ASSESSOR DA UNIDADE 3
+// ------------------------------------------------------------
+//  Assessores da unidade 3 só navegam em Home e Comissões.
+//  Centralizado aqui para servir como fonte única de verdade
+//  para:
+//    • getUserPermissions()  → zera permissões extras
+//    • DashboardLayout       → filtra o menu
+//    • Guards/rotas futuras  → podem consultar `isAssessorRestrito`
+//
+//  Supervisores, coordenadores e níveis administrativos NÃO são
+//  afetados. Se quiser estender a outras unidades, basta editar
+//  `RESTRICTED_ASSESSOR_UNITS`.
+// ============================================================
+export const RESTRICTED_ASSESSOR_UNITS: readonly number[] = [HOME_COMISSOES_ALLOWED_UNIT];
+
+export const RESTRICTED_ASSESSOR_ALLOWED_PATHS: readonly string[] = [
+  "/home",
+  "/comissoes",
+];
+
+/**
+ * Retorna `true` quando o usuário é assessor E pertence a uma
+ * unidade restrita. Nesse caso, ele só deve ver Home e Comissões.
+ */
+export function isAssessorRestrito(user?: User | null): boolean {
+  if (!user) return false;
+  const level = getAccessLevel(user.cargo, user.status);
+  if (level !== LEVELS.ASSESSOR) return false;
+  const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
+  if (unidade == null) return false;
+  return RESTRICTED_ASSESSOR_UNITS.includes(unidade);
+}
+
+/**
+ * Guard auxiliar: `true` se o usuário pode navegar para o `path`
+ * informado. Para usuários não restritos, sempre `true`.
+ */
+export function canAccessPathForRestrictedAssessor(
+  user: User | null | undefined,
+  path: string
+): boolean {
+  if (!isAssessorRestrito(user)) return true;
+  return RESTRICTED_ASSESSOR_ALLOWED_PATHS.includes(path);
+}
+
 // ─────────────────────────────────────────────────────────────
 // API pública
 // ─────────────────────────────────────────────────────────────
@@ -267,6 +313,7 @@ export function getUserPermissions(user?: User | null) {
   const perms = PERMISSIONS[level];
 
   const allowHomeComissoes = canSeeHomeComissoes(user);
+  const restrito = isAssessorRestrito(user);
 
   return {
     level,
@@ -279,7 +326,10 @@ export function getUserPermissions(user?: User | null) {
     canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
     canAccessComissoes: perms.canAccessComissoes && allowHomeComissoes,
 
-    canAccessRanking: perms.canAccessRanking,
+    // ⚠️ Assessor restrito (unidade 3) não acessa Ranking mesmo que o
+    // nível ASSESSOR o permita na matriz de permissões.
+    canAccessRanking: perms.canAccessRanking && !restrito,
+
     canAccessReports: perms.canAccessReports,
     canAccessConfiguration: perms.canAccessConfiguration,
     canViewTeam: perms.canViewTeam,
@@ -406,4 +456,8 @@ export const accessControl = {
   getDefaultLandingPage,
   HOME_COMISSOES_ALLOWED_UNIT,
   HOME_COMISSOES_ALLOWED_LEVELS,
+  isAssessorRestrito,
+  canAccessPathForRestrictedAssessor,
+  RESTRICTED_ASSESSOR_UNITS,
+  RESTRICTED_ASSESSOR_ALLOWED_PATHS,
 };
