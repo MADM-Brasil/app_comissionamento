@@ -1430,7 +1430,7 @@ function BuscaClienteTab() {
                   <div className="text-[#0f172a]">{resultado.contato?.cpf || "—"}</div>
                 </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 pt-2 border-t border-[#e2e8f0]">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-[#e2e8f0]">
                 <div>
                   <div className="text-xs text-[#94a3b8] mb-0.5">Pipeline</div>
                   <div className="text-[#0f172a] font-medium">{resultado.negocio?.pipelineNome || "—"}</div>
@@ -1440,7 +1440,7 @@ function BuscaClienteTab() {
                   <div className="text-[#0f172a] font-medium">{resultado.negocio?.etapaNome || "—"}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">Atual Responsável</div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Responsável</div>
                   <div className="text-[#0f172a] font-medium">{resultado.responsavel?.nome || "—"}</div>
                 </div>
               </div>
