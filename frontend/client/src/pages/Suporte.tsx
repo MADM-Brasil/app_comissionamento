@@ -1440,12 +1440,8 @@ function BuscaClienteTab() {
                   <div className="text-[#0f172a] font-medium">{resultado.negocio?.etapaNome || "—"}</div>
                 </div>
                 <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">Responsável</div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Atual Responsável</div>
                   <div className="text-[#0f172a] font-medium">{resultado.responsavel?.nome || "—"}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">Equipe</div>
-                  <div className="text-[#0f172a] font-medium">{resultado.responsavel?.equipe || "—"}</div>
                 </div>
               </div>
               {resultado.link && (
