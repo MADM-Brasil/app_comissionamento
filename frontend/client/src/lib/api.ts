@@ -46,6 +46,31 @@ function csrfHeaders(extraHeaders: Record<string, string> = {}) {
   };
 }
 
+// ============================================================
+// TIPO COMUM — LINHA DE MÉTRICA POR COLABORADOR
+// ------------------------------------------------------------
+//  Usado por /metrics/assinados, /metrics/protocolados,
+//  /metrics/ganhos e /metrics/perdidos.
+//
+//  O backend historicamente devolve o valor em `total`. Alguns
+//  endpoints (ex.: /metrics/ganhos) podem devolver também em
+//  `ganhos` — por isso o campo é OPCIONAL. O consumidor deve
+//  sempre usar `row.ganhos ?? row.total` para cobrir os dois
+//  formatos sem precisar de `as any`.
+// ============================================================
+export interface MetricRow {
+  colaborador: string;
+  equipe: string;
+  total: number;
+  periodo?: string;
+  /**
+   * Presente apenas em endpoints que devolvem o valor com este
+   * nome explícito (ex.: /metrics/ganhos quando o backend envia
+   * `ganhos` além de `total`). Ausente nos demais casos.
+   */
+  ganhos?: number;
+}
+
 // ============ COLABORADORES E EQUIPES ============
 
 export async function fetchCollaborators(queryString = "") {
@@ -63,6 +88,7 @@ export async function fetchEquipes() {
   const data = await handleResponse(response, 'Erro ao carregar equipes');
   return data.data || [];
 }
+
 // ============================================================
 // MÉTRICAS GLOBAIS
 // ============================================================
@@ -147,21 +173,21 @@ function buildMetricUrl(base: string, params: MetricParams): string {
   return url.toString();
 }
 
-export async function fetchEmitidos(params: MetricParams) {
+export async function fetchEmitidos(params: MetricParams): Promise<MetricRow[]> {
   const url = buildMetricUrl(`${API_BASE}/metrics/emitidos`, params);
   const res = await fetch(url, { credentials: 'include', signal: params.signal });
   const data = await handleResponse(res, 'Erro ao carregar emitidos');
   return data.data || [];
 }
 
-export async function fetchAssinados(params: MetricParams): Promise<{ colaborador: string; equipe: string; total: number; periodo?: string }[]> {
+export async function fetchAssinados(params: MetricParams): Promise<MetricRow[]> {
   const url = buildMetricUrl(`${API_BASE}/metrics/assinados`, params);
   const res = await fetch(url, { credentials: 'include', signal: params.signal });
   const data = await handleResponse(res, 'Erro ao carregar assinados');
   return data.data || [];
 }
 
-export async function fetchProtocolados(params: MetricParams): Promise<{ colaborador: string; equipe: string; total: number; periodo?: string }[]> {
+export async function fetchProtocolados(params: MetricParams): Promise<MetricRow[]> {
   const url = buildMetricUrl(`${API_BASE}/metrics/protocolados`, params);
   const res = await fetch(url, { credentials: 'include', signal: params.signal });
   const data = await handleResponse(res, 'Erro ao carregar protocolados');
@@ -187,9 +213,7 @@ export interface GanhosParams extends MetricParams {
   demanda?: GanhosDemandaFilter;
 }
 
-export async function fetchGanhos(
-  params: GanhosParams
-): Promise<{ colaborador: string; equipe: string; total: number; periodo?: string }[]> {
+export async function fetchGanhos(params: GanhosParams): Promise<MetricRow[]> {
   const url = new URL(buildMetricUrl(`${API_BASE}/metrics/ganhos`, params), window.location.origin);
   if (params.demanda) url.searchParams.append('demanda', params.demanda);
   const res = await fetch(url.toString(), { credentials: 'include', signal: params.signal });
@@ -197,7 +221,7 @@ export async function fetchGanhos(
   return data.data || [];
 }
 
-export async function fetchPerdidos(params: MetricParams): Promise<{ colaborador: string; equipe: string; total: number; periodo?: string }[]> {
+export async function fetchPerdidos(params: MetricParams): Promise<MetricRow[]> {
   const url = buildMetricUrl(`${API_BASE}/metrics/perdidos`, params);
   const res = await fetch(url, { credentials: 'include', signal: params.signal });
   const data = await handleResponse(res, 'Erro ao carregar perdidos');

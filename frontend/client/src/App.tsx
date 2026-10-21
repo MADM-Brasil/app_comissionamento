@@ -1,5 +1,5 @@
 // src/App.tsx
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
@@ -28,52 +28,103 @@ import { Loader2 } from "lucide-react";
 import {
   getUserPermissions,
   getDefaultLandingPage,
-  isAssessorRestrito,
+  isUnit3HomeComissoesUser,   // [CHANGE] substitui isAssessorRestrito no LandingRedirect
+  resolveAccessUser,
   type Permissions,
 } from "@/lib/accessControl";
+
+// ============================================================
+// LOADER DE PERMISSÕES
+// ------------------------------------------------------------
+// Usado enquanto o `currentUser` ainda não trouxe `nome_equipe`
+// E o `collaborators` do store está vazio. Sem isso, guards e
+// landing decidem com dados incompletos e negam acesso
+// indevidamente no primeiro render.
+// ============================================================
+function AccessBootLoader() {
+  return (
+    <div className="flex items-center justify-center min-h-[40vh] gap-2">
+      <Loader2 className="w-5 h-5 animate-spin text-[#09175b]" />
+      <span className="text-sm text-slate-500">Carregando permissões...</span>
+    </div>
+  );
+}
 
 /**
  * Redireciona usuário autenticado para a landing page correta
  * (definida em `getDefaultLandingPage`):
- * - Assessor/Supervisor/Coordenador da UNIDADE 3 → /home
- * - Supervisor fora da UNIDADE 3 → /suporte
+ * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → /home
+ * - Supervisor fora da UNIDADE 3 (e fora das equipes liberadas) → /suporte
  * - Demais → / (comportamento anterior)
  */
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const currentUser = useAppStore((s) => s.currentUser);
-  if (currentUser?.email) {
-    return <Redirect to={getDefaultLandingPage(currentUser)} />;
+  const collaborators = useAppStore((s) => s.collaborators);
+
+  const accessUser = useMemo(
+    () => resolveAccessUser(currentUser, collaborators),
+    [currentUser, collaborators],
+  );
+
+  if (!accessUser?.email) {
+    return <>{children}</>;
   }
-  return <>{children}</>;
+
+  // [CHANGE] Aguarda o carregamento de colaboradores enquanto não
+  // sabemos o nome_equipe — sem isso, um supervisor da Equipe Felipe
+  // pode ser redirecionado para /suporte antes do dado chegar.
+  if (!accessUser.nome_equipe && collaborators.length === 0) {
+    return <AccessBootLoader />;
+  }
+
+  return <Redirect to={getDefaultLandingPage(accessUser)} />;
 }
 
 /**
  * Decisão de landing para a rota "/":
  *
- *   • Assessor unidade 3 → redireciona para /home
- *   • Todos os demais     → <Suporte /> (comportamento histórico)
+ *   • Assessor / Supervisor / Coordenador da Unidade 3
+ *     OU de equipe liberada (HOME_COMISSOES_ALLOWED_TEAM_NAMES) → /home
+ *   • Todos os demais → <Suporte /> (comportamento histórico)
  *
- * Importante: `isAssessorRestrito` retorna `true` SOMENTE para
- * `getAccessLevel === ASSESSOR && unidade_id === 3`. Portanto, este
- * wrapper NÃO altera o comportamento de:
- *   - supervisores (qualquer unidade)
- *   - coordenadores (qualquer unidade)
- *   - assessores de outras unidades
- *   - administrativo e super admin
- * Todos esses continuam caindo em <Suporte /> como antes.
+ * Antes usava `isAssessorRestrito`, que retorna true apenas para
+ * assessor — o que fazia supervisores e coordenadores da Unidade 3
+ * (e da Equipe Felipe) caírem em Suporte em vez de Home.
+ *
+ * `isUnit3HomeComissoesUser` cobre os três níveis
+ * (ASSESSOR/SUPERVISAO/COORDENADOR) tanto por `unidade_id === 3`
+ * quanto por `nome_equipe` presente na allowlist.
  */
 function LandingRedirect() {
   const currentUser = useAppStore((s) => s.currentUser);
-  if (isAssessorRestrito(currentUser)) {
+  const collaborators = useAppStore((s) => s.collaborators);
+
+  const accessUser = useMemo(
+    () => resolveAccessUser(currentUser, collaborators),
+    [currentUser, collaborators],
+  );
+
+  if (!accessUser?.email) return <Redirect to="/login" />;
+
+  // [CHANGE] Aguarda colaboradores enquanto não sabemos nome_equipe.
+  // Não condiciona mais a `!unidade_id`, porque `unidade_id` pode vir
+  // preenchido no login e não ser 3 — nesse caso o usuário ainda pode
+  // pertencer a uma equipe liberada.
+  if (!accessUser.nome_equipe && collaborators.length === 0) {
+    return <AccessBootLoader />;
+  }
+
+  // [CHANGE] Redireciona assessor, supervisor E coordenador de Unidade 3
+  // / Equipe Felipe para /home.
+  if (isUnit3HomeComissoesUser(accessUser)) {
     return <Redirect to="/home" />;
   }
+
   return <Suporte />;
 }
 
 /**
  * Protege rota verificando autenticação E permissão específica.
- * Se o usuário não tem a permissão, mostra uma tela segura com link
- * para o Suporte (que é acessível por qualquer autenticado).
  */
 function ProtectedRouteWithPermission({
   permission,
@@ -83,13 +134,23 @@ function ProtectedRouteWithPermission({
   children: React.ReactNode;
 }) {
   const currentUser = useAppStore((s) => s.currentUser);
-  const perms = getUserPermissions(currentUser ?? undefined);
+  const collaborators = useAppStore((s) => s.collaborators);
 
-  if (!currentUser?.email) return <Redirect to="/login" />;
+  const accessUser = useMemo(
+    () => resolveAccessUser(currentUser, collaborators),
+    [currentUser, collaborators],
+  );
+
+  if (!accessUser?.email) return <Redirect to="/login" />;
+
+  // [CHANGE] Aguarda colaboradores enquanto não sabemos nome_equipe.
+  if (!accessUser.nome_equipe && collaborators.length === 0) {
+    return <AccessBootLoader />;
+  }
+
+  const perms = getUserPermissions(accessUser);
 
   if (!perms[permission]) {
-    // Não redireciona para "/" (evita loop: quem não tem Home também
-    // não poderia ver "/", que exige canAccessDashboard).
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-2">
         <p className="text-slate-500">Acesso não autorizado a esta página.</p>
@@ -133,11 +194,7 @@ function Router() {
 
       <Route path="/404" component={NotFound} />
 
-      {/* Home – requer permissão canAccessDashboard
-          (unidade 3: assessor/supervisor/coordenador; ou nível >= ADMINISTRATIVO)
-          A rota "/" decide:
-            • assessor unidade 3 → /home
-            • todos os demais     → <Suporte /> (comportamento atual) */}
+      {/* Home – requer permissão canAccessDashboard */}
       <Route path="/">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessDashboard">
@@ -153,7 +210,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Comissões – requer permissão canAccessComissoes */}
+      {/* Comissões */}
       <Route path="/comissoes">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessComissoes">
@@ -162,7 +219,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Ranking – requer permissão canAccessRanking */}
+      {/* Ranking */}
       <Route path="/ranking">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessRanking">
@@ -171,7 +228,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Dashboard / Analytics – requer permissão canAccessReports */}
+      {/* Dashboard / Analytics */}
       <Route path="/funil">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessReports">
@@ -194,7 +251,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Equipe – requer permissão canViewTeam */}
+      {/* Equipe */}
       <Route path="/Equipe">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canViewTeam">
@@ -238,7 +295,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Configuração – requer permissão canAccessConfiguration */}
+      {/* Configuração */}
       <Route path="/configuration">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessConfiguration">
@@ -247,10 +304,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Suporte
-          - Landing de supervisores fora da unidade 3
-          - Acessível por qualquer autenticado; a própria página faz a
-            checagem de nível (>= SUPERVISAO) e redireciona se necessário. */}
+      {/* Suporte */}
       <Route path="/suporte">
         <PeriodProvider>
           <ProtectedRoute>
@@ -259,7 +313,6 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Fallback */}
       <Route component={NotFound} />
     </Switch>
   );
@@ -270,7 +323,6 @@ export default function App() {
   const [appLoading, setAppLoading] = useState(true);
   const initDone = useRef(false);
 
-  // 1. Token CSRF
   useEffect(() => {
     fetch(`${API_BASE}/csrf-token`, { credentials: 'include' })
       .then(res => res.json())
@@ -282,7 +334,6 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // 2. Restaura sessão apenas uma vez
   useEffect(() => {
     if (initDone.current) return;
     initDone.current = true;
@@ -314,7 +365,6 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [appLoading]);
 
-  // 3. Carrega dados em segundo plano quando usuário autenticado
   const dataLoaded = useRef(false);
   useEffect(() => {
     if (!currentUser) return;
@@ -329,7 +379,6 @@ export default function App() {
     loadRawMetrics().catch(err => console.error('Erro ao carregar raw metrics:', err));
   }, [currentUser, collaborators.length, loadCollaboratorsAndMetrics, loadRawMetrics]);
 
-  // 4. Heartbeat
   useEffect(() => {
     if (!currentUser) return;
     const interval = setInterval(() => {
@@ -341,7 +390,6 @@ export default function App() {
     return () => clearInterval(interval);
   }, [currentUser]);
 
-  // 5. Atualiza CSRF após login
   useEffect(() => {
     if (!currentUser) return;
     fetch(`${API_BASE}/csrf-token`, { credentials: 'include' })

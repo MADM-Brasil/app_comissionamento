@@ -159,7 +159,7 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
   },
   [LEVELS.COORDENADOR]: {
     // Base "otimista": o acesso efetivo é restrito a coordenadores da
-    // UNIDADE 3 via canSeeHomeComissoes.
+    // UNIDADE 3 (ou equipes liberadas) via canSeeHomeComissoes.
     canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
     canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
     canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
@@ -187,8 +187,61 @@ function normalize(str: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
+// RESOLUÇÃO DO "USUÁRIO DE ACESSO"
+// ------------------------------------------------------------
+// O payload do `/auth/login` historicamente NÃO inclui
+// `nome_equipe` nem `unidade_id`. Sem esses campos,
+// `canSeeHomeComissoes` e `isAssessorRestrito` não conseguem
+// reconhecer usuários da Unidade 3 nem de equipes liberadas,
+// mesmo que a lógica esteja correta.
+//
+// `resolveAccessUser` complementa o `currentUser` do store com
+// esses campos, fazendo match pelo e-mail em `collaborators`
+// (que já traz `equipeNome`/`unidadeId` a partir de
+// `/colaboradores`).
+//
+// Chamada recomendada em todos os guards e hooks que consultam
+// `getUserPermissions`, `isAssessorRestrito` ou
+// `getDefaultLandingPage`.
+// ─────────────────────────────────────────────────────────────
+export function resolveAccessUser(
+  user: any,
+  collaborators: any[] | null | undefined,
+): User | null {
+  if (!user) return null;
+
+  const email = String(user.email || '').toLowerCase().trim();
+  const match =
+    email && Array.isArray(collaborators)
+      ? collaborators.find(
+          (c: any) => String(c?.email || '').toLowerCase().trim() === email,
+        )
+      : undefined;
+
+  return {
+    ...(user as User),
+    nome_equipe:
+      user.nome_equipe ??
+      user.nomeEquipe ??
+      user.equipeNome ??
+      (match as any)?.equipeNome ??
+      (match as any)?.nome_equipe ??
+      (match as any)?.nomeEquipe ??
+      null,
+    unidade_id:
+      user.unidade_id ??
+      user.unidadeId ??
+      (match as any)?.unidadeId ??
+      (match as any)?.unidade_id ??
+      null,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
 // Regra Home/Comissões:
 //   (assessor OU supervisor OU coordenador) da UNIDADE 3
+//   OU (assessor OU supervisor OU coordenador) de uma EQUIPE
+//      liberada em HOME_COMISSOES_ALLOWED_TEAM_NAMES
 //   OU nível >= ADMINISTRATIVO (qualquer unidade)
 // ─────────────────────────────────────────────────────────────
 export const HOME_COMISSOES_ALLOWED_UNIT = 3;
@@ -198,13 +251,31 @@ export const HOME_COMISSOES_ALLOWED_LEVELS: Level[] = [
   LEVELS.COORDENADOR,
 ];
 
-/** (Assessor OU supervisor OU coordenador) E da unidade 3. */
+// [NOVO] Equipes que recebem a mesma visualização de páginas da Unidade 3.
+// A comparação usa normalize() → trim, lowercase, sem acentos.
+export const HOME_COMISSOES_ALLOWED_TEAM_NAMES: readonly string[] = [
+  'Equipe Felipe',
+];
+const HOME_COMISSOES_ALLOWED_TEAMS = new Set(
+  HOME_COMISSOES_ALLOWED_TEAM_NAMES.map(normalize),
+);
+
+/** Retorna `true` quando o usuário pertence a uma equipe liberada. */
+export function isHomeComissoesTeam(user?: User | null): boolean {
+  if (!user) return false;
+  const team = normalize(user.nome_equipe || '');
+  if (!team) return false;
+  return HOME_COMISSOES_ALLOWED_TEAMS.has(team);
+}
+
+/** (Assessor OU supervisor OU coordenador) E (da unidade 3 OU de equipe liberada). */
 export function isUnit3HomeComissoesUser(user?: User | null): boolean {
   if (!user) return false;
   const level = getAccessLevel(user.cargo, user.status);
   if (!HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
   const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
-  return unidade === HOME_COMISSOES_ALLOWED_UNIT;
+  if (unidade === HOME_COMISSOES_ALLOWED_UNIT) return true;
+  return isHomeComissoesTeam(user);
 }
 
 /** Alias retrocompatível. */
@@ -213,6 +284,7 @@ export const isUnit3AssessorOrSupervisor = isUnit3HomeComissoesUser;
 /**
  * Regra consolidada: quem pode ver Home e Comissões.
  * - Assessor/Supervisor/Coordenador da unidade 3 → SIM
+ * - Assessor/Supervisor/Coordenador de equipe liberada → SIM
  * - Administrativo ou Super Admin (qualquer unidade) → SIM
  * - Demais → NÃO
  */
@@ -225,8 +297,8 @@ export function canSeeHomeComissoes(user?: User | null): boolean {
 
 /**
  * Rota inicial recomendada após o login:
- * - Assessor/Supervisor/Coordenador da UNIDADE 3 → "/home"
- * - Supervisor fora da UNIDADE 3 → "/suporte"
+ * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → "/home"
+ * - Supervisor fora da UNIDADE 3 / fora das equipes liberadas → "/suporte"
  * - Demais → "/"
  */
 export function getDefaultLandingPage(user?: User | null): string {
@@ -238,9 +310,10 @@ export function getDefaultLandingPage(user?: User | null): string {
 }
 
 // ============================================================
-//  RESTRIÇÃO DE NAVEGAÇÃO — ASSESSOR DA UNIDADE 3
+//  RESTRIÇÃO DE NAVEGAÇÃO — ASSESSOR DA UNIDADE 3 (OU EQUIPE LIBERADA)
 // ------------------------------------------------------------
-//  Assessores da unidade 3 só navegam em Home e Comissões.
+//  Assessores da unidade 3 (e das equipes listadas em
+//  HOME_COMISSOES_ALLOWED_TEAM_NAMES) só navegam em Home e Comissões.
 //  Centralizado aqui para servir como fonte única de verdade
 //  para:
 //    • getUserPermissions()  → zera permissões extras
@@ -248,8 +321,7 @@ export function getDefaultLandingPage(user?: User | null): string {
 //    • Guards/rotas futuras  → podem consultar `isAssessorRestrito`
 //
 //  Supervisores, coordenadores e níveis administrativos NÃO são
-//  afetados. Se quiser estender a outras unidades, basta editar
-//  `RESTRICTED_ASSESSOR_UNITS`.
+//  afetados.
 // ============================================================
 export const RESTRICTED_ASSESSOR_UNITS: readonly number[] = [HOME_COMISSOES_ALLOWED_UNIT];
 
@@ -260,15 +332,16 @@ export const RESTRICTED_ASSESSOR_ALLOWED_PATHS: readonly string[] = [
 
 /**
  * Retorna `true` quando o usuário é assessor E pertence a uma
- * unidade restrita. Nesse caso, ele só deve ver Home e Comissões.
+ * unidade restrita ou a uma equipe liberada (que herda a mesma
+ * restrição de navegação da unidade 3).
  */
 export function isAssessorRestrito(user?: User | null): boolean {
   if (!user) return false;
   const level = getAccessLevel(user.cargo, user.status);
   if (level !== LEVELS.ASSESSOR) return false;
   const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
-  if (unidade == null) return false;
-  return RESTRICTED_ASSESSOR_UNITS.includes(unidade);
+  if (unidade != null && RESTRICTED_ASSESSOR_UNITS.includes(unidade)) return true;
+  return isHomeComissoesTeam(user);
 }
 
 /**
@@ -326,8 +399,8 @@ export function getUserPermissions(user?: User | null) {
     canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
     canAccessComissoes: perms.canAccessComissoes && allowHomeComissoes,
 
-    // ⚠️ Assessor restrito (unidade 3) não acessa Ranking mesmo que o
-    // nível ASSESSOR o permita na matriz de permissões.
+    // ⚠️ Assessor restrito (unidade 3 ou equipe liberada) não acessa
+    // Ranking mesmo que o nível ASSESSOR o permita na matriz de permissões.
     canAccessRanking: perms.canAccessRanking && !restrito,
 
     canAccessReports: perms.canAccessReports,
@@ -438,6 +511,9 @@ function getMenuItems(permissions: {
   return items;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Objeto agregador (usado em `import { accessControl } from ...`)
+// ─────────────────────────────────────────────────────────────
 export const accessControl = {
   LEVELS,
   getAccessLevel,
@@ -450,12 +526,21 @@ export const accessControl = {
   getCargoLevel,
   resetCargoLevel,
   listCargoLevels,
+
+  // Resolução do usuário de acesso (nome_equipe/unidade_id)
+  resolveAccessUser,
+
+  // Regras Home/Comissões
   isUnit3HomeComissoesUser,
   isUnit3AssessorOrSupervisor,
+  isHomeComissoesTeam,
   canSeeHomeComissoes,
   getDefaultLandingPage,
   HOME_COMISSOES_ALLOWED_UNIT,
   HOME_COMISSOES_ALLOWED_LEVELS,
+  HOME_COMISSOES_ALLOWED_TEAM_NAMES,
+
+  // Restrição de navegação do assessor
   isAssessorRestrito,
   canAccessPathForRestrictedAssessor,
   RESTRICTED_ASSESSOR_UNITS,
