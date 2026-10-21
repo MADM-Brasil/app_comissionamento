@@ -21,7 +21,8 @@ export const PRODUCT = Object.freeze({
   AUXILIO_ACIDENTE: 'auxilio_acidente',
   FATOR_K:          'Fator K',        // sem equipe no momento
   CONCOMITANTE:     'Concomitante',
-  BPC_LOAS:         'BPC/LOAS',       // sem equipe específica no momento
+  BPC_LOAS:         'BPC/LOAS', 
+  ISENCAO_IR:       'Isenção de IR Aposentadoria'      // ''sem equipe específica no momento
 });
 
 export const normalizeKey = value => String(value || '')
@@ -38,6 +39,12 @@ export const PRODUCTS_BY_TEAM = Object.freeze({
   [normalizeKey('Equipe Tatiane')]: {
     default: PRODUCT.QUINQUENIO,
     options: [PRODUCT.QUINQUENIO, PRODUCT.CONCOMITANTE],
+    allowChange: true,
+  },
+
+  [normalizeKey('Equipe Leticia Mathias')]: {
+    default: PRODUCT.ISENCAO_IR,
+    options: [PRODUCT.ISENCAO_IR],
     allowChange: true,
   },
 

@@ -64,7 +64,7 @@ const EXCLUDED_CARGOS = [
 // Precisa ficar em sincronia com backend/services/access-control.js
 // (RESERVED_DESTINATION_TEAMS) e backend/routes/suporte.js
 // (EQUIPES_TRAVADAS_DESTINO).
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
 
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');

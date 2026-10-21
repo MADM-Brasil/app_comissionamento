@@ -52,7 +52,7 @@ const EXCLUDED_CARGOS = [
 // Equipes reservadas — mesma regra da página de Suporte/Equipe/Visão Geral.
 // Precisa ficar em sincronia com backend/services/access-control.js
 // (RESERVED_DESTINATION_TEAMS).
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
 
 type RankingType = "colaborador" | "equipe";
 type SortMetric = "emitidos" | "assinados" | "protocolados" | "ganhos";

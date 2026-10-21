@@ -47,7 +47,7 @@ const EXCLUDED_GROUPS = [
 ];
 
 // ========== EQUIPES RESERVADAS (mesma regra de Suporte/Equipe/Visão Geral/Ranking/Comissões) ==========
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
 
 function isExcludedTeam(teamName: string): boolean { return EXCLUDED_TEAMS.includes(teamName); }
 function isExcludedGroup(group: string): boolean {

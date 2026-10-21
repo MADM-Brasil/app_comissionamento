@@ -59,6 +59,7 @@ const PRODUCT = Object.freeze({
   FATOR_K:          'Fator K',
   CONCOMITANTE:     'Concomitante',
   BPC_LOAS:         'BPC/LOAS',
+  ISENCAO_IR:       'Isenção de IR Aposentadoria',
 });
 
 const PRODUCT_LABELS: Record<string, string> = {
@@ -67,6 +68,7 @@ const PRODUCT_LABELS: Record<string, string> = {
   [PRODUCT.FATOR_K]:          'Fator K',
   [PRODUCT.CONCOMITANTE]:     'Concomitante',
   [PRODUCT.BPC_LOAS]:         'BPC/LOAS',
+  [PRODUCT.ISENCAO_IR]:       'Isenção de IR Aposentadoria'
 };
 
 function maskProduct(value?: string | null): string {
@@ -97,6 +99,12 @@ const FALLBACK_PRODUTOS_POR_EQUIPE: Record<string, ProdutoConfig> = {
     options: [PRODUCT.QUINQUENIO, PRODUCT.CONCOMITANTE],
     allowChange: true,
   },
+
+  [normalizeKey('Equipe Leticia Mathias')]: {
+    default: PRODUCT.ISENCAO_IR,
+    options: [PRODUCT.ISENCAO_IR],
+    allowChange: true,
+  },
 };
 
 function findProdutoConfig(
@@ -124,10 +132,10 @@ function findProdutoConfig(
 
 // Opções gerais exibidas quando NENHUMA equipe específica está selecionada.
 // Os valores são os rótulos visíveis (compatível com o filtro do Visao_geral).
-const GENERAL_PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante"];
+const GENERAL_PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante", "Fator K", "BPC/LOAS", "Isenção de IR Aposentadoria"];
 
 // Equipes reservadas — mesma regra da página de Suporte.
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
 
 function isEquipeTravadaDestino(nome: string): boolean {
   const n = normalizeKey(nome);

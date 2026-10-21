@@ -9,6 +9,7 @@
 // que decide o pipeline de destino:
 //   - Auxílio e demais produtos comuns → Closer / Em Contato.
 //   - Quinquênio/Quinqueino/Concomitante(s) → Quinquênio / Em contato.
+//   - Isenção de IR Aposentadoria (ISENCAO_IR) → Isenção de IR / Em Contato.  // [ISENÇÃO IR]
 //
 // A busca do card no contato também é orientada pelo produto (ver
 // garantirLeadNoCloser em hubspot.js).
@@ -32,8 +33,10 @@ import {
   validateFinalAssignment,
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_PIPELINE_QUINQUENIO_ID,
+  HUBSPOT_PIPELINE_ISENCAO_IR_ID,               // [ISENÇÃO IR]
   HUBSPOT_STAGE_EM_CONTATO_ID,
   HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID,
+  HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID,       // [ISENÇÃO IR]
 } from './hubspot.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 
@@ -72,6 +75,8 @@ const RULE_LABELS = Object.freeze({
   missing_email: 'Campos pendentes: preencha e-mail para tentar novamente.',
   invalid_email: 'E-mail inválido. Corrija e reenvie.',
   contact_data_mismatch: 'Dados divergentes do cadastro. Aguardando suporte.',
+  // Cobre Quinquênio E Isenção de IR (produto exige pipeline dedicado).
+  // [ISENÇÃO IR]
   product_pipeline_routing: 'Produto exige pipeline dedicado; movimentação executada.',
 });
 
@@ -83,11 +88,38 @@ function isQuinquenioOuConcomitante(produto) {
   return /\b(?:quinquenio|quinqueino|concomitantes?)\b/.test(normalized);
 }
 
+// [ISENÇÃO IR] Detecta "Isenção de IR Aposentadoria" e variações
+// (com/sem acento, com/sem hífen, caixa livre). Mesma regra do hubspot.js.
+function isIsencaoIR(produto) {
+  const normalized = String(produto ?? '')
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /\bisencao\b/.test(normalized) && /\bir\b/.test(normalized);
+}
+
 // Destino esperado, dado o produto. Fonte única para o worker CRM.
+// Ordem: Quinquênio → Isenção → Closer (fallback), mesma do hubspot.js.
+// [ISENÇÃO IR]
 function expectedDestination(produto) {
-  return isQuinquenioOuConcomitante(produto)
-    ? { pipeline: HUBSPOT_PIPELINE_QUINQUENIO_ID, stage: HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID, name: 'Quinquenio/concomitante' }
-    : { pipeline: HUBSPOT_PIPELINE_CLOSER_ID, stage: HUBSPOT_STAGE_EM_CONTATO_ID, name: 'Closer' };
+  if (isQuinquenioOuConcomitante(produto)) {
+    return {
+      pipeline: HUBSPOT_PIPELINE_QUINQUENIO_ID,
+      stage: HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID,
+      name: 'Quinquenio/concomitante',
+    };
+  }
+  if (isIsencaoIR(produto)) {
+    return {
+      pipeline: HUBSPOT_PIPELINE_ISENCAO_IR_ID,
+      stage: HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID,
+      name: 'Isenção de IR Aposentadoria',
+    };
+  }
+  return {
+    pipeline: HUBSPOT_PIPELINE_CLOSER_ID,
+    stage: HUBSPOT_STAGE_EM_CONTATO_ID,
+    name: 'Closer',
+  };
 }
 
 function describeBlockedReason(hubspotData) {
@@ -222,7 +254,10 @@ async function handleTicket(ticket, client) {
     ticket.metadados?.produto ||
     null;
 
-  // Destino esperado pelo produto (Auxílio → Closer; Quinquênio → Quinquênio).
+  // Destino esperado pelo produto:
+  //   Auxílio (e comuns)          → Closer / Em Contato.
+  //   Quinquênio/Concomitante     → Quinquênio / Em contato.
+  //   Isenção de IR Aposentadoria → Isenção de IR / Em Contato.  // [ISENÇÃO IR]
   const destination = expectedDestination(produto);
 
   const nomeCompleto = `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim();
@@ -373,6 +408,8 @@ async function handleTicket(ticket, client) {
         // Em modo estrito exigimos a etapa exata do destino. Fora dele,
         // aceitamos qualquer etapa entre as aceitas do Closer quando o
         // destino é o Closer — mesmo comportamento anterior para Auxílio.
+        // Para Quinquênio e Isenção (pipelines dedicados) a etapa é
+        // sempre exata.  // [ISENÇÃO IR]
         expectedStage: ENFORCE_EXACT_STAGE
           ? expectedStage
           : (String(expectedPipeline) === HUBSPOT_PIPELINE_CLOSER_ID ? null : expectedStage),
@@ -403,7 +440,8 @@ async function handleTicket(ticket, client) {
         // Aceitação de etapa:
         //   - Modo estrito: precisa ser exatamente expectedStage.
         //   - Não estrito + destino Closer: qualquer etapa entre as aceitas.
-        //   - Não estrito + destino Quinquênio: exige a etapa do pipeline.
+        //   - Não estrito + destino Quinquênio OU Isenção: exige a etapa
+        //     do pipeline.  // [ISENÇÃO IR]
         const stageOk = ENFORCE_EXACT_STAGE
           ? String(d.dealStage) === expectedStage
           : (String(expectedPipeline) === HUBSPOT_PIPELINE_CLOSER_ID

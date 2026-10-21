@@ -41,6 +41,8 @@ const PRODUCT_VARIANTS = {
   'Auxilio Acidente': ['Auxilio Acidente', 'Auxílio Acidente'],
   'Quinquenio':       ['Quinquenio', 'Quinquênio'],
   'Concomitante':     ['Concomitante', 'concomitante'],
+  'BPC/LOAS':         ['BPC/LOAS', 'BPC / LOAS', 'BPC_LOAS'],
+  'Isenção de IR Aposentadoria': ['Isenção de IR Aposentadoria', 'Isencao de IR Aposentadoria'],
 };
 
 function buildProdutoClause(produto, columnExpr, startIdx) {

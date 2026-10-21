@@ -85,6 +85,7 @@ const UNIDADES_TRAVADAS_EQUIPE = new Set([2, 3, 4, 5]);
 // Chaves normalizadas (lowercase, sem acento).
 const EQUIPES_TRAVADAS_DESTINO = new Set([
   normalizeAccessValue('Equipe Tatiane'),
+  normalizeAccessValue('Equipe Leticia Mathias')
 ]);
 
 function fail(status, message) {
@@ -1224,7 +1225,6 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
         WHERE id_ticket = $1`,
       [movement.ticket_id]
     );
-
     return {
       id: movement.id_ticket_movimentacao,
       ticketId: movement.ticket_id,

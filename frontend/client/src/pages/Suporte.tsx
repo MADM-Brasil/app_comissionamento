@@ -264,7 +264,7 @@ const EXCLUDED_TEAMS = [
 
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
 
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane', 'equipe leticia mathias'];
 
 function isEquipeTravadaDestino(nome: string): boolean {
   const n = normalizeKey(nome);
@@ -286,6 +286,7 @@ const PRODUCT = Object.freeze({
   FATOR_K:          'Fator K',
   CONCOMITANTE:     'Concomitante',
   BPC_LOAS:         'BPC/LOAS',
+  ISENCAO_IR:       'Isenção de IR Aposentadoria',
 });
 
 const PRODUCT_LABELS: Record<string, string> = {
@@ -294,6 +295,7 @@ const PRODUCT_LABELS: Record<string, string> = {
   [PRODUCT.FATOR_K]:          'Fator K',
   [PRODUCT.CONCOMITANTE]:     'Concomitante',
   [PRODUCT.BPC_LOAS]:         'BPC/LOAS',
+  [PRODUCT.ISENCAO_IR]:       'Isenção de IR Aposentadoria',
 };
 
 function maskProduct(value?: string | null): string {
@@ -313,6 +315,12 @@ const FALLBACK_PRODUTOS_POR_EQUIPE: Record<string, ProdutoConfig> = {
   [normalizeKey('Equipe Tatiane')]: {
     default: PRODUCT.QUINQUENIO,
     options: [PRODUCT.QUINQUENIO, PRODUCT.CONCOMITANTE],
+    allowChange: true,
+  },
+
+  [normalizeKey('Equipe Leticia Mathias')]: {
+    default: PRODUCT.ISENCAO_IR,
+    options: [PRODUCT.ISENCAO_IR],
     allowChange: true,
   },
 };
@@ -897,12 +905,6 @@ function MovimentacaoTab() {
             </div>
           )}
 
-          {deveOcultarEquipesReservadas && !movimentacaoEmMassa && (
-            <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
-              A equipe <strong>Equipe Tatiane</strong> não está disponível para o seu perfil.
-            </div>
-          )}
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {movimentacaoEmMassa && (
               <div className="md:col-span-2">
@@ -1160,7 +1162,7 @@ function MovimentacaoTab() {
                   <th>Equipe/Assessor</th>
                   <th>Produto</th>
                   <th>Status</th>
-                  <th>Obs. SalesOps</th>
+                  <th>Obs. Comercial</th>
                   <th>Resultado</th>
                 </tr>
               </thead>
@@ -1633,7 +1635,7 @@ function ReportarTab() {
 
   const exportReports = () => {
     if (reports.length === 0) return;
-    const headers = ["Data", "Título", "Assunto", "Status", "Solicitante", "Equipe", "Obs. SalesOps"];
+    const headers = ["Data", "Título", "Assunto", "Status", "Solicitante", "Equipe", "Obs. Comercial"];
     const rows = reports.map(r =>
       [new Date(r.data).toLocaleString("pt-BR"), `"${r.titulo}"`, `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`, `"${r.observacao_sales_ops}"`].join(";")
     );
@@ -1663,7 +1665,7 @@ Equipe: ${report.equipe || "Não informada"}
 Data de criação: ${dataFormatada}
 Status: ${statusLabel}
 ${report.descricao ? `\nDescrição:\n${report.descricao}` : ""}
-${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops}` : ""}
+${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_ops}` : ""}
 `.trim();
     alert(detalhes);
   };
@@ -1820,7 +1822,7 @@ ${report.observacao_sales_ops ? `\nObs. SalesOps:\n${report.observacao_sales_ops
                 <tr>
                   <th>Data</th>
                   <th>Título</th>
-                  <th>Obs. SalesOps</th>
+                  <th>Obs. Comercial</th>
                   <th>Status</th>
                   <th>Ações</th>
                 </tr>
@@ -2631,7 +2633,7 @@ function ReportesSuporteTab() {
                   <th>Equipe</th>
                   <th>Título</th>
                   <th>Status</th>
-                  <th>Obs. SalesOps</th>
+                  <th>Obs. Comercial</th>
                   <th className="w-20">Ações</th>
                 </tr>
               </thead>
