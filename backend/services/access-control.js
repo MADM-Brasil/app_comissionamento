@@ -61,6 +61,7 @@ class AccessControl {
 
     this.RESERVED_DESTINATION_TEAMS = new Set([
       'equipe tatiane',
+      'Equipe Leticia Mathias',
     ]);
 
     this.PERMISSIONS = {

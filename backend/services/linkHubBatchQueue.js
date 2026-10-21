@@ -19,6 +19,8 @@
 //   - Quinquênio/Quinqueino/Concomitante(s) → pipeline Quinquênio / Em contato,
 //     tanto vindo da Base de Leads quanto do próprio Closer ou já dentro
 //     do pipeline Quinquênio.
+//   - Isenção de IR Aposentadoria (ISENCAO_IR) → pipeline Isenção de IR
+//     (946074910) / Em Contato.  // [ISENÇÃO IR]
 // A regra gravada em `observacao_sales_ops.regra` reflete o pipeline final
 // confirmado, não apenas "veio da Base".
 //
@@ -33,6 +35,7 @@ import {
   reassignDealForLinkHubMovement,
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_PIPELINE_QUINQUENIO_ID,
+  HUBSPOT_PIPELINE_ISENCAO_IR_ID,   // [ISENÇÃO IR]
 } from './hubspot.js';
 import { getActiveSupportUser, validateHubSpotMovementAccess } from './access-control.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
@@ -49,6 +52,9 @@ const RULE_LABELS = Object.freeze({
     'Responsável alterado no Closer, pipeline e etapa preservados.',
   reassigned_in_quinquenio:
     'Card posicionado em Quinquenio/concomitante (Em contato).',
+  // [ISENÇÃO IR]
+  reassigned_in_isencao_ir:
+    'Card posicionado em Isenção de IR Aposentadoria (Em Contato).',
 });
 
 const NOTIFY_STATUSES = new Set(['erro', 'bloqueado']);
@@ -97,16 +103,20 @@ function describeFailure(error, attempts) {
 
 // Escolhe a regra a ser gravada em observacao_sales_ops.regra, com base no
 // pipeline final confirmado pela movimentação:
-//   - Quinquênio → reassigned_in_quinquenio (pipeline dedicado foi o destino)
+//   - Quinquênio     → reassigned_in_quinquenio
+//   - Isenção de IR  → reassigned_in_isencao_ir   // [ISENÇÃO IR]
 //   - Closer vindo da Base → moved_from_base_leads (fluxo original)
 //   - Closer sem origem Base → reassigned_in_closer (só responsável mudou)
 function resolveRuleLabel(resultData) {
   const pipelineFinal = String(resultData?.pipeline || '');
-  const movedFromBase = Boolean(resultData?.movedFromBaseLeads);
   if (pipelineFinal === String(HUBSPOT_PIPELINE_QUINQUENIO_ID)) {
     return { regra: 'reassigned_in_quinquenio', mensagem: RULE_LABELS.reassigned_in_quinquenio };
   }
-  if (movedFromBase) {
+  // [ISENÇÃO IR] Pipeline dedicado da Equipe Leticia Mathias.
+  if (pipelineFinal === String(HUBSPOT_PIPELINE_ISENCAO_IR_ID)) {
+    return { regra: 'reassigned_in_isencao_ir', mensagem: RULE_LABELS.reassigned_in_isencao_ir };
+  }
+  if (Boolean(resultData?.movedFromBaseLeads)) {
     return { regra: 'moved_from_base_leads', mensagem: RULE_LABELS.moved_from_base_leads };
   }
   return { regra: 'reassigned_in_closer', mensagem: RULE_LABELS.reassigned_in_closer };
@@ -446,9 +456,11 @@ async function handleLinkHubTicket(ticket, client) {
   }
 
   // O destino (pipeline/etapa) é decidido pelo hubspot.js a partir do produto.
-  // Quando o produto é especial, o card é movido para Quinquênio mesmo se já
-  // estiver no Closer ou no próprio Quinquênio. Quando é Auxílio/comum, o
-  // comportamento anterior (mover da Base; preservar Closer) é mantido.
+  // Quando o produto é especial (Quinquênio/Concomitante OU Isenção de IR),
+  // o card é movido para o pipeline dedicado — inclusive se já estiver no
+  // Closer ou já estiver dentro do próprio pipeline dedicado. Quando é
+  // Auxílio/comum, o comportamento anterior (mover da Base; preservar
+  // Closer) é mantido.  // [ISENÇÃO IR]
   const assignment = await reassignDealForLinkHubMovement(
     dealId,
     ownerId,

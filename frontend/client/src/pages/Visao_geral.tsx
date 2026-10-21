@@ -64,7 +64,7 @@ const EXCLUDED_CARGOS = [
 ];
 
 // Equipes reservadas — mesma regra de Suporte/Equipe/Ranking.
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
 
 const normalize = (str: string): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');

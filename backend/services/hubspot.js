@@ -6,17 +6,16 @@
 // Autorização de usuário/equipe continua sendo responsabilidade dos workers.
 // Locks locais não substituem reserva exclusiva e locks distribuídos.
 //
-// Roteamento por produto:
-//   - Produto explicitamente Quinquênio / Quinquenio / Quinqueino /
-//     Concomitante(s) → pipeline Quinquênio, etapa "Em contato".
-//   - Demais produtos (incl. Auxílio) → Closer, "Em Contato" (fluxo anterior).
+// Roteamento por produto (3 pipelines agora):
+//   - Quinquênio / Quinquenio / Quinqueino / Concomitante(s) → Quinquênio / Em contato.
+//   - Isenção de IR Aposentadoria (ISENCAO_IR)             → Isenção de IR / Em Contato.   // [ISENÇÃO IR]
+//   - Demais produtos (incl. Auxílio)                       → Closer / Em Contato.
 //   - Produto é passado pelo worker; não é inferido do nome do cliente.
 //
 // Busca orientada por produto (garantirLeadNoCloser):
-//   - Auxílio e demais produtos comuns → considera apenas cards no Closer
-//     e na Base de Leads.
-//   - Quinquênio/Quinqueino/Concomitante(s) → considera apenas cards no
-//     pipeline Quinquênio e na Base de Leads.
+//   - Auxílio e demais produtos comuns → considera Closer e Base de Leads.
+//   - Quinquênio/Quinqueino/Concomitante(s) → considera Quinquênio e Base de Leads.
+//   - Isenção de IR                        → considera Isenção de IR e Base de Leads.   // [ISENÇÃO IR]
 //   - Cards em outros pipelines são ignorados nesta movimentação.
 
 const API_ORIGIN = 'https://api.hubapi.com';
@@ -46,7 +45,7 @@ const STAGE_DESQUALIFICADO_ID         = settingNumeric('HUBSPOT_STAGE_DESQUALIFI
 const STAGE_COLETA_DOCUMENTACAO_ID    = settingNumeric('HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID', '1368997802');
 const STAGE_ENTRADA_ID                = settingNumeric('HUBSPOT_STAGE_ENTRADA_ID', '1368997800');
 
-// Pipeline/etapa de Quinquênio/Concomitante (novos).
+// Pipeline/etapa de Quinquênio/Concomitante.
 const PIPELINE_QUINQUENIO_ID = settingNumeric(
   'HUBSPOT_PIPELINE_QUINQUENIO_ID', '925690734'
 );
@@ -54,16 +53,30 @@ const STAGE_QUINQUENIO_EM_CONTATO_ID = settingNumeric(
   'HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID', '1419898635'
 );
 
+// [ISENÇÃO IR] Pipeline dedicado da Equipe Leticia Mathias.
+// O ID do pipeline está confirmado (946074910). O ID da ETAPA de destino
+// NÃO — precisa ser preenchido via env ou como default abaixo antes de rodar
+// em produção. Enquanto vazio, o worker falha em `id(finalStage, 'Etapa')`
+// com `Etapa inválido` (fail-safe: não move para lugar errado).
+const PIPELINE_ISENCAO_IR_ID = settingNumeric(
+  'HUBSPOT_PIPELINE_ISENCAO_IR_ID', '946074910'
+);
+const STAGE_ISENCAO_IR_EM_CONTATO_ID = settingNumeric(
+  'HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID', '1460263586'
+);
+
 export const HUBSPOT_PIPELINE_BASE_LEADS_ID = PIPELINE_BASE_LEADS_ID;
 export const HUBSPOT_PIPELINE_CLOSER_ID = PIPELINE_CLOSER_ID;
 export const HUBSPOT_PIPELINE_JURIDICO_AUDITORIA_ID = PIPELINE_JURIDICO_AUDITORIA_ID;
 export const HUBSPOT_PIPELINE_QUINQUENIO_ID = PIPELINE_QUINQUENIO_ID;
+export const HUBSPOT_PIPELINE_ISENCAO_IR_ID = PIPELINE_ISENCAO_IR_ID;             // [ISENÇÃO IR]
 export const HUBSPOT_PORTAL_ID_CONFIGURED = HUBSPOT_PORTAL_ID;
 export const HUBSPOT_STAGE_EM_CONTATO_ID = STAGE_EM_CONTATO_ID;
 export const HUBSPOT_STAGE_DESQUALIFICADO_ID = STAGE_DESQUALIFICADO_ID;
 export const HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID = STAGE_COLETA_DOCUMENTACAO_ID;
 export const HUBSPOT_STAGE_ENTRADA_ID = STAGE_ENTRADA_ID;
 export const HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID = STAGE_QUINQUENIO_EM_CONTATO_ID;
+export const HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID = STAGE_ISENCAO_IR_EM_CONTATO_ID; // [ISENÇÃO IR]
 
 const CONTACT_PROPERTIES = ['email','firstname','lastname','phone','hs_whatsapp_phone_number','contact_cpf','contact_fonte','contact_produto','hubspot_owner_id'];
 const DEAL_PROPERTIES = ['dealname','pipeline','dealstage','hubspot_owner_id','notes_last_updated','motivo_da_perda','hs_lastmodifieddate','produto'];
@@ -78,23 +91,53 @@ function isQuinquenioOuConcomitante(produto) {
   return /\b(?:quinquenio|quinqueino|concomitantes?)\b/.test(normalized);
 }
 
+// [ISENÇÃO IR] Detecta "Isenção de IR Aposentadoria" e variações
+// (com/sem acento, com/sem hífen, caixa livre). Casa quando as palavras
+// "isencao" E "ir" aparecem no valor normalizado.
+function isIsencaoIR(produto) {
+  const normalized = optionalText(produto)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /\bisencao\b/.test(normalized) && /\bir\b/.test(normalized);
+}
+
+// [ISENÇÃO IR] Unifica a checagem de "produto exige pipeline dedicado".
+// Usada nos fluxos que só decidem mover/não mover (não a etapa de destino).
+function isSpecialPipelineProduct(produto) {
+  return isQuinquenioOuConcomitante(produto) || isIsencaoIR(produto);
+}
+
 function movementDestination(produto) {
-  return isQuinquenioOuConcomitante(produto)
-    ? {
-        pipeline: PIPELINE_QUINQUENIO_ID,
-        stage: STAGE_QUINQUENIO_EM_CONTATO_ID,
-        name: 'Quinquenio/concomitante',
-      }
-    : {
-        pipeline: PIPELINE_CLOSER_ID,
-        stage: STAGE_EM_CONTATO_ID,
-        name: 'Closer',
-      };
+  if (isQuinquenioOuConcomitante(produto)) {
+    return {
+      pipeline: PIPELINE_QUINQUENIO_ID,
+      stage: STAGE_QUINQUENIO_EM_CONTATO_ID,
+      name: 'Quinquenio/concomitante',
+    };
+  }
+  // [ISENÇÃO IR] Pipeline dedicado da Equipe Leticia Mathias.
+  if (isIsencaoIR(produto)) {
+    return {
+      pipeline: PIPELINE_ISENCAO_IR_ID,
+      stage: STAGE_ISENCAO_IR_EM_CONTATO_ID,
+      name: 'Isenção de IR Aposentadoria',
+    };
+  }
+  return {
+    pipeline: PIPELINE_CLOSER_ID,
+    stage: STAGE_EM_CONTATO_ID,
+    name: 'Closer',
+  };
 }
 
 function isAllowedMovementPipeline(pipeline) {
-  return [PIPELINE_BASE_LEADS_ID, PIPELINE_CLOSER_ID, PIPELINE_QUINQUENIO_ID]
-    .includes(String(pipeline));
+  // [ISENÇÃO IR] Cards já no pipeline Isenção podem ser reatribuídos via Link Hub.
+  return [
+    PIPELINE_BASE_LEADS_ID,
+    PIPELINE_CLOSER_ID,
+    PIPELINE_QUINQUENIO_ID,
+    PIPELINE_ISENCAO_IR_ID,
+  ].includes(String(pipeline));
 }
 
 function movementMessage(rule, destination) {
@@ -112,6 +155,7 @@ const PIPELINE_NAMES = {
   [PIPELINE_CLOSER_ID]: 'Closer',
   [PIPELINE_JURIDICO_AUDITORIA_ID]: 'Jurídico Auditoria de Ganho',
   [PIPELINE_QUINQUENIO_ID]: 'Quinquenio/concomitante',
+  [PIPELINE_ISENCAO_IR_ID]: 'Isenção de IR Aposentadoria',   // [ISENÇÃO IR]
   '905179471': 'PRO',
   '926561825': 'Fator K',
 };
@@ -122,6 +166,7 @@ const STAGE_NAMES = {
   [STAGE_COLETA_DOCUMENTACAO_ID]: 'Coleta de documentação',
   [STAGE_ENTRADA_ID]: 'Entrada',
   [STAGE_QUINQUENIO_EM_CONTATO_ID]: 'Em contato',
+  [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 'Em Contato',   // [ISENÇÃO IR] rótulo provisório
 };
 
 const RULE_MESSAGES = Object.freeze({
@@ -565,8 +610,8 @@ export async function createDealForContact(contactId, dealName, pipelineId, stag
 }
 
 // ---------------------------------------------------------------------------
-// moveDealToCloserEmContato — nome público preservado por compatibilidade,
-// mas o destino agora depende do produto (Closer OU Quinquênio/Concomitante).
+// moveDealToCloserEmContato — nome público preservado por compatibilidade.
+// O destino agora depende do produto (Closer, Quinquênio OU Isenção de IR).
 // ---------------------------------------------------------------------------
 export async function moveDealToCloserEmContato(dealId, ownerId = null, produto = null) {
   await accountReady();
@@ -603,15 +648,20 @@ function hoursSince(value) {
 
 // ---------------------------------------------------------------------------
 // temporalCheck — regra de prazo por etapa.
-// Mantida como está: as regras de 24/72h não se estendem automaticamente ao
-// pipeline de Quinquênio/Concomitante. Se o negócio definir prazo para o
-// novo pipeline, ele deve ser adicionado aqui de forma explícita.
+// As regras de 24/72h foram originalmente definidas para o Closer. Para o
+// pipeline Quinquênio o time decidiu não estender automaticamente (ver
+// comentário original). Para Isenção de IR (Equipe Leticia Mathias), a etapa
+// de destino segue o MESMO prazo de 24h do Closer "Em Contato", para que
+// um card já parado ali há mais de um dia possa ser reatribuído. Se o
+// negócio definir outro prazo, ajuste apenas o mapa `required`.
+// [ISENÇÃO IR]
 // ---------------------------------------------------------------------------
 function temporalCheck(deal) {
   const required = {
     [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
     [STAGE_ENTRADA_ID]: 24,
     [STAGE_EM_CONTATO_ID]: 24,
+    [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 24,   // [ISENÇÃO IR]
   };
 
   const currentStage = String(deal.stage ?? '');
@@ -623,6 +673,8 @@ function temporalCheck(deal) {
     id(STAGE_ENTRADA_ID, 'HUBSPOT_STAGE_ENTRADA_ID');
   } else if (currentStage === STAGE_EM_CONTATO_ID) {
     id(STAGE_EM_CONTATO_ID, 'HUBSPOT_STAGE_EM_CONTATO_ID');
+  } else if (currentStage === STAGE_ISENCAO_IR_EM_CONTATO_ID) {
+    id(STAGE_ISENCAO_IR_EM_CONTATO_ID, 'HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID');
   }
 
   const hours = hoursSince(deal.lastModifiedDate);
@@ -650,8 +702,10 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     // Busca orientada pelo produto:
     //   - Auxílio (e demais produtos comuns):
     //       considera apenas cards no pipeline Closer e na Base de Leads.
-    //   - Quinquênio / Quinquenio / Quinqueino / Concomitante(s):
+    //   - Quinquênio / Quinqueino / Concomitante(s):
     //       considera apenas cards no pipeline Quinquênio e na Base de Leads.
+    //   - Isenção de IR:                                           // [ISENÇÃO IR]
+    //       considera apenas cards no pipeline Isenção e na Base de Leads.
     // Cards em outros pipelines são ignorados nesta movimentação.
     // ─────────────────────────────────────────────────────────────
     const allDeals = await getContactDeals(contactId);
@@ -783,7 +837,8 @@ export async function getDealMovementContext(dealId, portalId) {
   if (String(portalId) !== id(HUBSPOT_PORTAL_ID, 'HUBSPOT_PORTAL_ID')) throw hubError('Link pertence a outra conta.', { blocked: true });
   await accountReady(); const deal = mapDeal(await getDeal(dealId));
   if (!isAllowedMovementPipeline(deal.pipeline)) {
-    throw hubError('Link Hub permitido somente na Base de Leads, no Closer e em Quinquenio/concomitante.', {
+    // [ISENÇÃO IR] Mensagem atualizada para incluir o pipeline novo.
+    throw hubError('Link Hub permitido somente na Base de Leads, no Closer, em Quinquenio/concomitante e em Isenção de IR Aposentadoria.', {
       blocked: true,
       code: 'PIPELINE_NOT_ALLOWED',
     });
@@ -819,7 +874,10 @@ async function reassignWithContext(dealId, ownerId, portalId, expectedCurrentCon
 
       const destination = movementDestination(produto);
       const moveFromBase = linkHub && context.pipeline === PIPELINE_BASE_LEADS_ID;
-      const routeSpecialProduct = linkHub && isQuinquenioOuConcomitante(produto);
+      // [ISENÇÃO IR] isSpecialPipelineProduct cobre Quinquênio E Isenção.
+      // Antes só Quinquênio entrava aqui; Isenção caía no fallback e o card
+      // só trocava de owner sem mudar de pipeline.
+      const routeSpecialProduct = linkHub && isSpecialPipelineProduct(produto);
       const shouldMove = moveFromBase || routeSpecialProduct;
       const expectedPipeline = shouldMove ? destination.pipeline : context.pipeline;
       const expectedStage = shouldMove ? destination.stage : context.stage;

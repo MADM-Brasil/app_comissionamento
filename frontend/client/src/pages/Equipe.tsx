@@ -134,7 +134,7 @@ const EXCLUDED_TEAMS = [
 ];
 
 // ========== EQUIPES RESERVADAS (mesma regra das demais telas) ==========
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
 
 const normalize = (str: string | undefined | null): string =>
   (str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
