@@ -49,18 +49,6 @@ const formatInt = (num: number) => num?.toLocaleString("pt-BR") ?? "0";
 
 // ============================================================
 //  CORREÇÃO — comparação robusta colaborador ↔ usuário logado
-// ------------------------------------------------------------
-//  Após o login inicial, o `currentUser.id` retornado pela rota
-//  `/auth/login` pode vir num formato diferente (ex.: apenas o
-//  e-mail, ou id numérico) do `id` presente em
-//  `core.view_app_colaboradores` (retornado por `/colaboradores`).
-//  Quando os ids não batem, `userColab` fica `undefined` e a
-//  página exibe "Selecione um colaborador...". Ao recarregar, o
-//  `fetchCurrentUser` restaura o id correto e o problema some.
-//
-//  Comparar por e-mail (case-insensitive) é imune a esse
-//  descompasso. Fallback para id mantém compatibilidade com o
-//  formato "antigo".
 // ============================================================
 function isSameColaborator(colab: any, user: any): boolean {
   if (!colab || !user) return false;
@@ -1298,9 +1286,6 @@ export default function Comissoes() {
           colaboradorApi = filters.colaborador !== "todos" ? filters.colaborador : undefined;
           colaboradorIdApi = filters.colaboradorId;
         } else {
-          // CORREÇÃO: comparar por e-mail (fallback id) para cobrir o
-          // descompasso entre o id do `/auth/login` e o id de
-          // `core.view_app_colaboradores`.
           const userColab = storeColabs.find((c) => isSameColaborator(c, currentUser));
           if (userColab) {
             colaboradorApi = userColab.name;
@@ -1610,7 +1595,6 @@ export default function Comissoes() {
       return true;
     });
     if (!canUseFilterBar) {
-      // CORREÇÃO: usa isSameColaborator (email/id) em vez de `c.id === currentUser.id`.
       if (currentUser && !filtered.some((c) => isSameColaborator(c, currentUser))) {
         const userColab = storeColabs.find((c) => isSameColaborator(c, currentUser));
         if (userColab) filtered = [userColab, ...filtered];
@@ -1644,7 +1628,6 @@ export default function Comissoes() {
           : undefined)
       );
     }
-    // CORREÇÃO: usa isSameColaborator (email/id) em vez de `c.id === currentUser?.id`.
     return filteredColabs.find((c) => isSameColaborator(c, currentUser));
   }, [filteredColabs, currentUser, filters, canUseFilterBar]);
 
@@ -1885,7 +1868,9 @@ export default function Comissoes() {
             const date = String(row.periodo || "").slice(0, 10);
             if (!date) return;
             const entry = byDate.get(date) || { date, ganhos: 0 };
-            entry.ganhos += Number(row.total) || 0;
+            // [DEFENSIVO] Só considera `total` como ganhos. Se a API passar a
+            // retornar campos extras (ex.: protocolados), eles são ignorados.
+            entry.ganhos += Number(row.ganhos ?? row.total) || 0;
             byDate.set(date, entry);
           });
           if (!cancelled) {
@@ -1906,7 +1891,8 @@ export default function Comissoes() {
         const dailyGains = metrics
           .map((row) => ({
             date: String(row.periodo || "").slice(0, 10),
-            ganhos: Number(row.total) || 0,
+            // [DEFENSIVO] idem acima: usa `ganhos` se vier, senão `total`.
+            ganhos: Number((row as any).ganhos ?? row.total) || 0,
           }))
           .filter((day) => day.date);
         if (!cancelled) setCampaignDailyMetrics(dailyGains);
@@ -2003,13 +1989,24 @@ export default function Comissoes() {
     ];
   }, [campGanhos2026, currentRole, campaignsForUser, campaignDailyMetrics, tabelaComissoes]);
 
+  // ============================================================
+  //  [AJUSTE] Comissão normal — para supervisor usa a soma de
+  //  GANHOS DA EQUIPE (mesma fonte do card "Comissão Total Estimada").
+  //  Antes usava apenas `campaignDailyMetrics`, que pode estar
+  //  alimentado por outra métrica (ex.: protocolados) ou incompleto,
+  //  fazendo a faixa ser calculada sobre o valor errado.
+  // ============================================================
   const normalCommissionProgress = useMemo(() => {
     if (!userColab) return null;
-    const gains = campaignDailyMetrics.reduce(
-      (total, day) => total + (Number(day.ganhos) || 0),
-      0,
-    );
     const isSupervisor = currentRole === "supervisor";
+
+    const gains = isSupervisor
+      ? sumTeamGanhos(storeColabs, userColab.equipeNome)
+      : campaignDailyMetrics.reduce(
+          (total, day) => total + (Number(day.ganhos) || 0),
+          0,
+        );
+
     const isSR = Boolean(userColab.isSupervisorSR) || calculator.isSupervisorSR(userColab.email);
     const productType = isSupervisor
       ? isSR
@@ -2048,6 +2045,7 @@ export default function Comissoes() {
     tabelaComissoes,
     isSupervisorUser,
     activeCampaignsForUser,
+    storeColabs,
   ]);
 
   const isOverviewVisible = canViewCommissionOverview && !loading;
@@ -2064,9 +2062,28 @@ export default function Comissoes() {
     let comissaoAssinados = 0;
     let comissaoGols = 0;
     let comissaoCampGanhos2026 = 0;
+    // [AJUSTE] Para supervisor, os totais exibidos nos cards
+    // ("Seus Números") passam a refletir a equipe, não o supervisor.
+    let supervisorTeamAssinados = 0;
+    let supervisorTeamGanhos = 0;
+    let supervisorTeamProtocolados = 0;
 
     if (isSupervisor) {
       const totalGanEquipe = sumTeamGanhos(storeColabs, userColab.equipeNome);
+      supervisorTeamAssinados = sumTeamAssinados(storeColabs, userColab.equipeNome);
+      supervisorTeamGanhos = totalGanEquipe;
+      supervisorTeamProtocolados = storeColabs.reduce((total, c) => {
+        if (normalizeText(c.equipeNome) !== normalizeText(userColab.equipeNome)) return total;
+        const cargo = normalizeText(c.cargo);
+        if (
+          cargo.startsWith("supervisor") ||
+          cargo === "coordenador" ||
+          cargo === "administrativo"
+        )
+          return total;
+        return total + (Number(c.protocolados) || 0);
+      }, 0);
+
       totalCommission = calculator.calculateSupervisorCommission(
         totalGanEquipe,
         isSR,
@@ -2125,9 +2142,14 @@ export default function Comissoes() {
         comissaoAssinados,
         comissaoGols,
         comissaoCampGanhos2026,
-        assinados: isSpecial ? userColab.ganhos || 0 : userColab.assinados || 0,
-        ganhos: userColab.ganhos || 0,
-        protocolados: userColab.protocolados || 0,
+        // [AJUSTE] Para supervisor, reflete os totais da equipe.
+        assinados: isSupervisor
+          ? supervisorTeamAssinados
+          : isSpecial
+            ? userColab.ganhos || 0
+            : userColab.assinados || 0,
+        ganhos: isSupervisor ? supervisorTeamGanhos : userColab.ganhos || 0,
+        protocolados: isSupervisor ? supervisorTeamProtocolados : userColab.protocolados || 0,
         avatar: userColab.avatar || userColab.name.charAt(0).toUpperCase(),
         cargo: userColab.cargo,
         isSpecial,

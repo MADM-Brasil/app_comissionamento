@@ -25,7 +25,12 @@ import { logout } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 import { API_BASE } from "@/lib/api";
 import logoBranca from "./img/LogoBranca.png";
-import { getUserPermissions } from "@/lib/accessControl";
+import {
+  getUserPermissions,
+  isAssessorRestrito,
+  resolveAccessUser,               // [NOVO] enriquece nome_equipe/unidade_id
+  RESTRICTED_ASSESSOR_ALLOWED_PATHS,
+} from "@/lib/accessControl";
 import { useAccessControl } from "@/hooks/useAccessControl";
 
 type NavChild = { path: string; label: string; icon: React.ComponentType<any> };
@@ -34,16 +39,6 @@ type NavItem =
   | { label: string; icon: React.ComponentType<any>; children: NavChild[] };
 
 const HIDE_PERIOD_FILTER_PATHS = ["/configuration", "/suporte"];
-
-// ============================================================
-//  RESTRIÇÃO POR UNIDADE
-// ------------------------------------------------------------
-//  Assessores da unidade 3 só navegam por Home e Comissões.
-//  Aqui apenas filtramos o menu; as páginas restantes já são
-//  escopadas por e-mail para assessor em seus próprios componentes.
-// ============================================================
-const RESTRICTED_ASSESSOR_UNITS: readonly number[] = [3];
-const RESTRICTED_ALLOWED_PATHS: readonly string[] = ["/home", "/comissoes"];
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
@@ -77,7 +72,27 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     collaborators,
   } = useAppStore();
 
-  // Obtém nível de acesso
+  // ============================================================
+  //  USUÁRIO DE ACESSO (enriquecido)
+  // ------------------------------------------------------------
+  //  O payload do /auth/login não traz `nome_equipe` nem
+  //  `unidade_id`. `resolveAccessUser` complementa esses campos
+  //  com os dados do colaborador em `collaborators` (match por
+  //  e-mail). Sem isso:
+  //    • canSeeHomeComissoes → false
+  //    • canAccessDashboard / canAccessComissoes → false
+  //    • navItems sem Home/Comissões
+  //  — exatamente o sintoma observado para supervisores da
+  //  "Equipe Felipe" e também para usuários da Unidade 3 quando
+  //  o login não devolve unidade_id.
+  // ============================================================
+  const accessUser = useMemo(
+    () => resolveAccessUser(currentUser, collaborators),
+    [currentUser, collaborators],
+  );
+
+  // Obtém nível de acesso (cargo/status já vêm no currentUser,
+  // então este hook funciona mesmo sem enriquecimento).
   const { getAccessLevel, LEVELS } = useAccessControl();
   const userLevel = getAccessLevel();
   const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
@@ -85,18 +100,11 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   // Suporte é acessível por qualquer usuário >= SUPERVISAO
   const canSeeSuporte = userLevel >= LEVELS.SUPERVISAO;
 
-  // ============================================================
-  //  Assessor da unidade 3 → apenas Home e Comissões no menu.
-  // ============================================================
-  const isAssessorUnidade3 = useMemo(() => {
-    if (userLevel !== LEVELS.ASSESSOR) return false;
-    const unidadeRaw =
-      (currentUser as any)?.unidade_id ??
-      (currentUser as any)?.unidadeId ??
-      null;
-    const unidade = unidadeRaw != null ? Number(unidadeRaw) : null;
-    return unidade != null && RESTRICTED_ASSESSOR_UNITS.includes(unidade);
-  }, [userLevel, currentUser, LEVELS.ASSESSOR]);
+  // Assessor restrito (Unidade 3 OU equipe liberada) → apenas Home e Comissões.
+  const isAssessorRestritoUser = useMemo(
+    () => isAssessorRestrito(accessUser),
+    [accessUser],
+  );
 
   // Obtém o e-mail do colaborador selecionado (armazenado no dataStore)
   const selectedCollaboratorEmail = useAppStore(
@@ -119,9 +127,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
+  // [CHANGE] usa accessUser (enriquecido) em vez do currentUser cru.
   const permissions = useMemo(
-    () => getUserPermissions(currentUser ?? undefined),
-    [currentUser]
+    () => getUserPermissions(accessUser),
+    [accessUser],
   );
 
   // Contagem de não lidas
@@ -228,18 +237,18 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     }
 
-    // Assessor da unidade 3 → apenas Home e Comissões.
-    if (isAssessorUnidade3) {
+    // Assessor restrito (Unidade 3 ou equipe liberada) → apenas Home e Comissões.
+    if (isAssessorRestritoUser) {
       return items.filter((item) => {
         if ("path" in item && item.path) {
-          return RESTRICTED_ALLOWED_PATHS.includes(item.path);
+          return RESTRICTED_ASSESSOR_ALLOWED_PATHS.includes(item.path);
         }
         return false; // remove grupos inteiros (Dashboard)
       });
     }
 
     return items;
-  }, [permissions, canSeeSuporte, isAssessorUnidade3]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser]);
 
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
@@ -268,13 +277,13 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (permissions.canAccessConfiguration)
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
 
-    // Assessor da unidade 3 → apenas Home e Comissões.
-    if (isAssessorUnidade3) {
-      return flat.filter((item) => RESTRICTED_ALLOWED_PATHS.includes(item.path));
+    // Assessor restrito (Unidade 3 ou equipe liberada) → apenas Home e Comissões.
+    if (isAssessorRestritoUser) {
+      return flat.filter((item) => RESTRICTED_ASSESSOR_ALLOWED_PATHS.includes(item.path));
     }
 
     return flat.slice(0, 5);
-  }, [permissions, canSeeSuporte, isAssessorUnidade3]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser]);
 
   // Efeitos
   useEffect(() => setManualCloseChild(false), [location]);

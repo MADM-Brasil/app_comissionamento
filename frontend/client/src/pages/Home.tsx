@@ -83,12 +83,34 @@ const extractLeadsTotal = (item: any): number =>
   Number(item?.total ?? item?.leads_recebidos ?? 0) || 0;
 
 // ============================================================
-// CORREÇÃO — comparação robusta colaborador ↔ usuário logado
+// [NOVO] SOMA DE GANHOS DA EQUIPE (mesma lógica da Comissoes.tsx)
 // ------------------------------------------------------------
-//  Após o login, o `currentUser.id` pode vir num formato
-//  diferente do `colaborador.id` (retornado por `/colaboradores`).
-//  Comparar por e-mail (case-insensitive) evita o "Selecione um
-//  colaborador…" / dados gerais no primeiro acesso.
+//  Percorre `collaborators` e soma `ganhos` de todos os membros
+//  da equipe, excluindo supervisores, coordenadores e
+//  administrativos. Usado como entrada da faixa de comissão do
+//  supervisor.
+// ============================================================
+function sumTeamGanhos(collaborators: any[], teamName: string): number {
+  return (collaborators || []).reduce((total, c) => {
+    const teamOfColab = String(c?.equipeNome || '').trim().toLowerCase();
+    const teamTarget = String(teamName || '').trim().toLowerCase();
+    if (teamOfColab !== teamTarget) return total;
+
+    const cargo = String(c?.cargo || '').toLowerCase().trim();
+    if (
+      cargo.startsWith('supervisor') ||
+      cargo === 'coordenador' ||
+      cargo === 'administrativo'
+    ) {
+      return total;
+    }
+
+    return total + (Number(c?.ganhos) || 0);
+  }, 0);
+}
+
+// ============================================================
+// CORREÇÃO — comparação robusta colaborador ↔ usuário logado
 // ============================================================
 function isSameColaborator(colab: any, user: any): boolean {
   if (!colab || !user) return false;
@@ -382,14 +404,9 @@ export default function Home() {
 
   const { hasPermission, currentUser: authUser } = useAccessControl();
   const canAccessReports = hasPermission('canAccessReports');
-  const canAccessCommissoes = hasPermission('canViewOwnData');
+  // [AJUSTADO em iteração anterior] permissão correta
+  const canAccessCommissoes = hasPermission('canAccessComissoes');
 
-  // ─────────────────────────────────────────────────────────────
-  // Escopo do filtro:
-  //   • canViewTeam / canAccessReports → FilterBar livre (supervisores,
-  //     coordenadores, ADM, super admin).
-  //   • Demais (assessores) → filtro FORÇADO no próprio usuário.
-  // ─────────────────────────────────────────────────────────────
   const canUseFilterBar = hasPermission("canViewTeam") || canAccessReports;
 
   const [allCollaborators, setAllCollaborators] = useState<any[]>([]);
@@ -418,11 +435,6 @@ export default function Home() {
 
   // ============================================================
   // PARÂMETROS DE FILTRO PARA OS GRÁFICOS E APIs
-  // ------------------------------------------------------------
-  //  Correção: para perfis que NÃO têm FilterBar livre (assessores),
-  //  força `colaborador` = usuário logado, mesmo que o `FilterBar`
-  //  ainda não tenha travado o filtro. Sem isso, a primeira
-  //  requisição saía sem filtro → dados gerais.
   // ============================================================
   const getChartFilterParams = useCallback(() => {
     let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
@@ -430,7 +442,6 @@ export default function Home() {
     let colaboradorIdApi = filters.colaboradorId;
 
     if (!canUseFilterBar) {
-      // Assessor: força o próprio usuário
       const userColab = collaborators.find(c => isSameColaborator(c, currentUser));
       if (userColab) {
         colaboradorApi = userColab.name;
@@ -440,7 +451,6 @@ export default function Home() {
         colaboradorIdApi = currentUser.id;
       }
     } else if (isSupervisorSelected && selectedCollaborator) {
-      // Supervisor selecionado no FilterBar → visão da equipe
       equipeApi = selectedCollaborator.equipeNome || equipeApi;
       colaboradorApi = undefined;
       colaboradorIdApi = undefined;
@@ -528,7 +538,6 @@ export default function Home() {
 
       if (currentUser) {
         const allColabs = useAppStore.getState().collaborators;
-        // Correção: comparação por e-mail (fallback id).
         const userColab = allColabs.find(c => isSameColaborator(c, currentUser));
         if (userColab) {
           const isSupervisor = (userColab.cargo || '').toLowerCase() === 'supervisor';
@@ -568,13 +577,6 @@ export default function Home() {
     await reloadData(true);
   }, [reloadData]);
 
-  // ============================================================
-  // EFEITOS
-  // ------------------------------------------------------------
-  //  Adicionado `currentUser?.id` e `collaborators.length` às
-  //  dependências para re-fetch quando o colaborador ficar
-  //  disponível (evita "dados gerais no primeiro acesso").
-  // ============================================================
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
@@ -613,7 +615,6 @@ export default function Home() {
     return sorted.map((item, idx) => ({ ...item, position: idx + 1 }));
   }, [allCollaborators, metricsData]);
 
-  // Correção: `currentUserData` compara por e-mail (fallback id).
   const currentUserData = useMemo(() => {
     if (!currentUser) return null;
     const allColabs = useAppStore.getState().collaborators;
@@ -642,6 +643,27 @@ export default function Home() {
     if (filters.produto === 'Quinquenio' || filters.produto === 'Concomitante') return true;
     return currentUserData ? isSpecialGroupColaborador(currentUserData) : false;
   }, [filters.produto, currentUserData]);
+
+  // ============================================================
+  // [NOVO] SUPERVISOR EM EXIBIÇÃO
+  // ------------------------------------------------------------
+  //  Define qual supervisor a página está exibindo no momento:
+  //    • Se o usuário logado é supervisor → ele mesmo
+  //    • Se o FilterBar selecionou um supervisor → o selecionado
+  //      (esse caso prevalece sobre o usuário logado, pois é a
+  //       visão que o usuário escolheu ativamente)
+  //  Utilizado para o cálculo da Estimativa do Mês pela faixa de
+  //  comissão do supervisor.
+  // ============================================================
+  const supervisorInView = useMemo(() => {
+    if (canUseFilterBar && isSupervisorSelected && selectedCollaborator) {
+      return selectedCollaborator;
+    }
+    if (currentUserData && isSupervisorCargo(currentUserData.cargo)) {
+      return currentUserData;
+    }
+    return null;
+  }, [canUseFilterBar, isSupervisorSelected, selectedCollaborator, currentUserData]);
 
   // ============================================================
   // FILTRO DE COLABORADORES
@@ -674,24 +696,45 @@ export default function Home() {
   const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos" && !isSupervisorSelected;
 
   // ============================================================
-  // CÁLCULO DA COMISSÃO DO USUÁRIO LOGADO
+  // CÁLCULO DA COMISSÃO DO USUÁRIO LOGADO / VISÃO ATUAL
+  // ------------------------------------------------------------
+  //  [AJUSTADO] A visão de supervisor (própria ou selecionada via
+  //  FilterBar) agora calcula a Estimativa do Mês pela FAIXA DE
+  //  COMISSÃO DO SUPERVISOR, usando a SOMA DE GANHOS DA EQUIPE
+  //  (sumTeamGanhos) — em vez do `currentUserData.assinados`
+  //  anterior, que pegava o campo do próprio supervisor e quase
+  //  sempre retornava valor zerado/incorreto.
+  //
+  //  A lógica da faixa em si é a mesma usada na Comissoes.tsx:
+  //  `calculator.calculateSupervisorCommission(ganhosEquipe, isSR, tabelaComissoes)`.
   // ============================================================
   const userCommission = useMemo(() => {
-    if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) {
+    if (!tabelaComissoes || tabelaComissoes.length === 0) {
       return 0;
     }
-    const isSupervisor = (currentUserData.cargo || '').toLowerCase() === 'supervisor';
-    const isSR = Boolean(currentUserData.isSupervisorSR) || calculator.isSupervisorSR(currentUserData.email);
+
+    // ── Visão de supervisor (própria ou selecionada no FilterBar)
+    if (supervisorInView) {
+      const isSR =
+        Boolean((supervisorInView as any).isSupervisorSR) ||
+        calculator.isSupervisorSR((supervisorInView as any).email);
+      const teamGanhos = sumTeamGanhos(collaborators, (supervisorInView as any).equipeNome || '');
+      return calculator.calculateSupervisorCommission(teamGanhos, isSR, tabelaComissoes);
+    }
+
+    if (!currentUserData) return 0;
+
     const isEspecial = isSpecialGroupColaborador(currentUserData);
 
-    if (isSupervisor) {
-      const totalAssEquipe = currentUserData.assinados || 0;
-      return calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
-    }
     if (isEspecial) {
       const productType = getFaixaProductType(currentUserData);
-      return calculator.calculateProductCommission(currentUserData.assinados || 0, productType, tabelaComissoes);
+      return calculator.calculateProductCommission(
+        currentUserData.assinados || 0,
+        productType,
+        tabelaComissoes,
+      );
     }
+
     if (dailyMetrics.length > 0) {
       const metaGolsAss = currentUserData.metaGolsAssinados ?? 3;
       const metaGolsGan = currentUserData.metaGolsGanhos ?? 3;
@@ -703,7 +746,7 @@ export default function Home() {
       return result.totalCommission;
     }
     return 0;
-  }, [currentUserData, tabelaComissoes, dailyMetrics]);
+  }, [supervisorInView, collaborators, tabelaComissoes, currentUserData, dailyMetrics]);
 
   // ============================================================
   // METAS DE GANHOS
@@ -922,17 +965,42 @@ export default function Home() {
 
   const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
 
+  // ============================================================
+  // [AJUSTADO] META DO CARD "Estimativa do Mês"
+  // ------------------------------------------------------------
+  //  Mesmo sendo um card `simple` (não exibe barra), o target
+  //  é mantido correto para caso alguém o torne não-simples no
+  //  futuro. Para supervisor, usa a maior faixa do tipo correto
+  //  (SUPERVISOR ou SUPERVISOR SR).
+  // ============================================================
   const comissaoTarget = useMemo(() => {
-    if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) return 5000;
-    const tipo = (currentUserData.cargo || '').toLowerCase() === 'supervisor' ? 'SUPERVISOR' : 'GOL';
+    if (!tabelaComissoes || tabelaComissoes.length === 0) return 5000;
+
+    if (supervisorInView) {
+      const isSR =
+        Boolean((supervisorInView as any).isSupervisorSR) ||
+        calculator.isSupervisorSR((supervisorInView as any).email);
+      const tipo = isSR ? 'SUPERVISOR SR' : 'SUPERVISOR';
+      const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
+      if (faixas.length === 0) return 5000;
+      return faixas.reduce(
+        (max, f) => (f.valor_comissao > max.valor_comissao ? f : max),
+        faixas[0],
+      ).valor_comissao || 5000;
+    }
+
+    if (!currentUserData) return 5000;
+    const tipo = 'GOL';
     const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
     if (faixas.length === 0) return 5000;
-    const maxFaixa = faixas.reduce((max, f) => f.valor_comissao > max.valor_comissao ? f : max, faixas[0]);
-    return maxFaixa.valor_comissao || 5000;
-  }, [currentUserData, tabelaComissoes]);
+    return faixas.reduce(
+      (max, f) => (f.valor_comissao > max.valor_comissao ? f : max),
+      faixas[0],
+    ).valor_comissao || 5000;
+  }, [supervisorInView, tabelaComissoes, currentUserData]);
 
   // ============================================================
-  // KPI CARDS (5 cards — inclui "Leads Recebidos")
+  // KPI CARDS
   // ============================================================
   const kpiCards = [
     { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },

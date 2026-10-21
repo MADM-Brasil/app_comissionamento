@@ -64,6 +64,17 @@ class AccessControl {
       'Equipe Leticia Mathias',
     ]);
 
+    // [NOVO] Equipes que recebem a mesma visualização de páginas
+    //        da Unidade 3 (Home, Comissões e landing em /home para
+    //        assessor/supervisor/coordenador).
+    //        A comparação é feita com normalize() → trim, lowercase, sem acentos.
+    this.HOME_COMISSOES_ALLOWED_TEAM_NAMES = [
+      'Equipe Felipe',
+    ];
+    this.HOME_COMISSOES_ALLOWED_TEAMS = new Set(
+      this.HOME_COMISSOES_ALLOWED_TEAM_NAMES.map((t) => this.normalize(t))
+    );
+
     this.PERMISSIONS = {
       [this.LEVELS.NONE]: {
         canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
@@ -115,6 +126,8 @@ class AccessControl {
   // ─────────────────────────────────────────────────────────────
   // Regra Home/Comissões:
   //   (assessor OU supervisor OU coordenador) da UNIDADE 3
+  //   OU (assessor OU supervisor OU coordenador) de uma EQUIPE
+  //      liberada em HOME_COMISSOES_ALLOWED_TEAMS
   //   OU nível >= ADMINISTRATIVO (qualquer unidade)
   // ─────────────────────────────────────────────────────────────
   get HOME_COMISSOES_ALLOWED_UNIT() {
@@ -125,13 +138,29 @@ class AccessControl {
     return [this.LEVELS.ASSESSOR, this.LEVELS.SUPERVISAO, this.LEVELS.COORDENADOR];
   }
 
-  /** (Assessor OU supervisor OU coordenador) E da unidade 3. */
+  /**
+   * (Assessor OU supervisor OU coordenador) E (da unidade 3 OU de uma
+   * equipe liberada em HOME_COMISSOES_ALLOWED_TEAMS).
+   */
   isUnit3HomeComissoesUser(user) {
     if (!user) return false;
     const level = this.getAccessLevel(user.cargo, user.status);
     if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
     const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
-    return unidade === this.HOME_COMISSOES_ALLOWED_UNIT;
+    if (unidade === this.HOME_COMISSOES_ALLOWED_UNIT) return true;
+    // [NOVO] equipes liberadas recebem o mesmo tratamento da unidade 3
+    return this.isHomeComissoesTeam(user);
+  }
+
+  /**
+   * [NOVO] Retorna `true` quando o usuário pertence a uma equipe listada
+   *        em HOME_COMISSOES_ALLOWED_TEAMS (comparação com normalize).
+   */
+  isHomeComissoesTeam(user) {
+    if (!user) return false;
+    const team = this.normalize(user.nome_equipe);
+    if (!team) return false;
+    return this.HOME_COMISSOES_ALLOWED_TEAMS.has(team);
   }
 
   /** Alias retrocompatível. */
@@ -142,6 +171,7 @@ class AccessControl {
   /**
    * Regra consolidada: quem pode ver Home e Comissões.
    * - Assessor/Supervisor/Coordenador da unidade 3 → SIM
+   * - Assessor/Supervisor/Coordenador de equipe liberada → SIM
    * - Administrativo ou Super Admin (qualquer unidade) → SIM
    * - Demais → NÃO
    */
@@ -154,8 +184,8 @@ class AccessControl {
 
   /**
    * Rota inicial recomendada após o login:
-   * - Assessor/Supervisor/Coordenador da UNIDADE 3 → "/home"
-   * - Supervisor fora da UNIDADE 3 → "/suporte"
+   * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → "/home"
+   * - Supervisor fora da UNIDADE 3 / fora das equipes liberadas → "/suporte"
    * - Demais → "/" (comportamento anterior)
    */
   getDefaultLandingPage(user) {
@@ -233,6 +263,7 @@ class AccessControl {
     const perms = this.PERMISSIONS[level];
 
     // Regra consolidada: nível >= ADMINISTRATIVO OU unidade 3 (assessor/sup/coord)
+    // OU equipe liberada em HOME_COMISSOES_ALLOWED_TEAMS.
     const allowHomeComissoes = this.canSeeHomeComissoes(user);
 
     return {
@@ -463,10 +494,13 @@ export const validateHubSpotMovementAccess = (params) => instance.validateHubSpo
 // ─────────────────────────────────────────────────────────────
 // Regra Home/Comissões:
 //   (assessor OU supervisor OU coordenador) da UNIDADE 3
+//   OU (assessor OU supervisor OU coordenador) de equipe liberada
 //   OU nível >= ADMINISTRATIVO (qualquer unidade)
 // ─────────────────────────────────────────────────────────────
 export const HOME_COMISSOES_ALLOWED_UNIT = 3;
+export const HOME_COMISSOES_ALLOWED_TEAM_NAMES = [...instance.HOME_COMISSOES_ALLOWED_TEAM_NAMES]; // [NOVO]
 export const isUnit3HomeComissoesUser = (user) => instance.isUnit3HomeComissoesUser(user);
 export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3HomeComissoesUser(user); // alias
+export const isHomeComissoesTeam = (user) => instance.isHomeComissoesTeam(user); // [NOVO]
 export const canSeeHomeComissoes = (user) => instance.canSeeHomeComissoes(user);
 export const getDefaultLandingPage = (user) => instance.getDefaultLandingPage(user);
