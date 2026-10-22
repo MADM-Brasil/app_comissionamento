@@ -50,9 +50,7 @@ const EXCLUDED_CARGOS = [
 ];
 
 // Equipes reservadas — mesma regra da página de Suporte/Equipe/Visão Geral.
-// Precisa ficar em sincronia com backend/services/access-control.js
-// (RESERVED_DESTINATION_TEAMS).
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 type RankingType = "colaborador" | "equipe";
 type SortMetric = "emitidos" | "assinados" | "protocolados" | "ganhos";
@@ -110,6 +108,25 @@ const isDesativado = (c: any) => {
   const equipe = normalize(c.equipeNome);
   return cargo === 'desativado' || equipe.includes('desativado');
 };
+
+// ============================================================
+// CORREÇÃO — comparação robusta colaborador ↔ usuário logado
+// ------------------------------------------------------------
+//  Após o login, o `currentUser.id` pode vir num formato
+//  diferente do `colaborador.id`. Comparar por e-mail
+//  (case-insensitive) resolve o bug de "VOCÊ" não aparecer no
+//  ranking / dados próprios zerados no primeiro acesso.
+// ============================================================
+function isSameColaborator(colab: any, user: any): boolean {
+  if (!colab || !user) return false;
+  const colabEmail = String(colab.email || "").toLowerCase().trim();
+  const userEmail = String(user.email || "").toLowerCase().trim();
+  if (colabEmail && userEmail && colabEmail === userEmail) return true;
+  const colabId = colab.id;
+  const userId = user.id;
+  if (colabId == null || userId == null) return false;
+  return String(colabId) === String(userId);
+}
 
 const teamToProductMapping: Record<string, string> = {
   "Equipe Concomitante": "Concomitante",
@@ -513,7 +530,10 @@ export default function Ranking() {
         ganhos: metrics.ganhos || 0,
         avatar: colab.avatar || colab.name.charAt(0).toUpperCase(),
         trend: "same" as const,
-        isCurrentUser: colab.id === currentUser?.id || colab.name === currentUser?.nome,
+        // ⚠️ Correção: usa `isSameColaborator` (email/id) em vez de
+        // comparar `colab.id === currentUser?.id || colab.name === currentUser?.nome`.
+        // Garante que "VOCÊ" apareça desde o primeiro acesso pós-login.
+        isCurrentUser: isSameColaborator(colab, currentUser),
         equipe: colab.equipeNome,
       };
       const score = calculateWeightedScore(base, activeSortMetrics);
@@ -563,10 +583,6 @@ export default function Ranking() {
 
   const fullRanking = rankingType === "colaborador" ? individualRanking : teamRanking;
 
-  // ═══════════════════════════════════════════════════════════
-  //  AJUSTE: ranking de equipes limitado ao TOP 5.
-  //  Colaboradores mantêm 20 para preservar a experiência original.
-  // ═══════════════════════════════════════════════════════════
   const maxDisplayItems = MAX_DISPLAY_ITEMS[rankingType];
   const displayRanking = fullRanking.slice(0, maxDisplayItems);
   const top3 = fullRanking.slice(0, 3);
@@ -577,10 +593,15 @@ export default function Ranking() {
   );
   const myTeamRank = useMemo(() => {
     if (rankingType !== "equipe" || !currentUser?.equipe) return null;
-    return teamRanking.find((team) => team.name === currentUser.equipe);
+    const userTeamNorm = normalize(currentUser.equipe);
+    return teamRanking.find((team) => normalize(team.name) === userTeamNorm);
   }, [rankingType, teamRanking, currentUser]);
 
-  const currentUserData = allCollaborators.find(c => c.id === currentUser?.id || c.name === currentUser?.nome);
+  // ⚠️ Correção: usa `isSameColaborator` para garantir que, após o
+  // login, os números próprios (`myEmitidos`, `myAssinados`, etc.)
+  // sejam preenchidos mesmo que o id venha em formato diferente.
+  const currentUserData = allCollaborators.find(c => isSameColaborator(c, currentUser));
+
   const myEmitidos = metricsData[currentUserData?.name]?.emitidos || 0;
   const myAssinados = metricsData[currentUserData?.name]?.assinados || 0;
   const myProtocolados = metricsData[currentUserData?.name]?.protocolados || 0;
