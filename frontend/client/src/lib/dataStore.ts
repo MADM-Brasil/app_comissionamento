@@ -179,7 +179,23 @@ function normalizeGroup(cargo: string | undefined): string {
   return (cargo || '').trim().toLowerCase();
 }
 
-function applyHierarchyTotals(collaborators: Collaborator[]): Collaborator[] {
+// ============================================================
+// applyHierarchyTotals
+// ------------------------------------------------------------
+//  Soma os totais "para cima" na hierarquia:
+//    • Supervisor → soma dos colaboradores da própria equipe.
+//    • Coordenador → soma dos supervisores da PRÓPRIA UNIDADE
+//      (não mais de todos os supervisores do banco).
+//
+//  ⚠️ FIX: recebe `currentUser` para filtrar supervisores por
+//  `unidade_id`. Sem isso, a linha do coordenador na tabela
+//  `collaborators` era preenchida com a soma GLOBAL, o que
+//  causava "dados gerais" nas telas que leem a store.
+// ============================================================
+function applyHierarchyTotals(
+  collaborators: Collaborator[],
+  currentUser?: User | null
+): Collaborator[] {
   if (!collaborators.length) return collaborators;
   const updated = collaborators.map(c => ({ ...c }));
   const supervisors = updated.filter(c => normalizeGroup(c.cargo) === 'supervisor');
@@ -193,6 +209,8 @@ function applyHierarchyTotals(collaborators: Collaborator[]): Collaborator[] {
     ganhos: list.reduce((s, c) => s + (c.ganhos || 0), 0),
     perdidos: list.reduce((s, c) => s + (c.perdidos || 0), 0),
   });
+
+  // Supervisor: soma apenas os membros da própria equipe (comportamento mantido).
   for (const sup of supervisors) {
     const team = updated.filter(
       c => c.equipeNome === sup.equipeNome && c.id !== sup.id && normalizeGroup(c.cargo) !== 'supervisor'
@@ -204,8 +222,25 @@ function applyHierarchyTotals(collaborators: Collaborator[]): Collaborator[] {
     sup.ganhos = sums.ganhos;
     sup.perdidos = sums.perdidos;
   }
+
   if (supervisors.length > 0) {
-    const supersSums = sumMetrics(supervisors);
+    // ⚠️ FIX: Coordenador soma apenas supervisores da PRÓPRIA UNIDADE.
+    const normCargo = normalizeGroup(currentUser?.cargo || '');
+    const isCoord = normCargo === 'coordenador';
+    const unidadeRaw = (currentUser as any)?.unidade_id
+      ?? (currentUser as any)?.unidadeId
+      ?? null;
+    const userUnidade = unidadeRaw != null ? Number(unidadeRaw) : null;
+
+    let supersForCoord: Collaborator[] = supervisors;
+    if (isCoord && userUnidade != null) {
+      supersForCoord = supervisors.filter((s: any) => {
+        const su = s.unidadeId ?? s.unidade_id ?? null;
+        return su != null && Number(su) === userUnidade;
+      });
+    }
+
+    const supersSums = sumMetrics(supersForCoord);
     for (const coord of coordAdmins) {
       coord.emitidos = supersSums.emitidos;
       coord.assinados = supersSums.assinados;
@@ -214,6 +249,7 @@ function applyHierarchyTotals(collaborators: Collaborator[]): Collaborator[] {
       coord.perdidos = supersSums.perdidos;
     }
   }
+
   return updated;
 }
 
@@ -805,12 +841,12 @@ export const useAppStore = create<AppStore>()(
       // ============================================================
       // loadMetricsForPeriod
       // ------------------------------------------------------------
-      // Ajustes:
-      //  • Chama fetchLeadsRecebidos com `granularity: 'daily'` para obter
-      //    a série temporal (o modo agregado devolve só por colaborador,
-      //    sem `data`/`periodo`).
+      //  • Chama fetchLeadsRecebidos com `granularity: 'daily'`.
       //  • Extração defensiva: `total ?? leads_recebidos`.
       //  • Chave da série: `periodo ?? data`.
+      //  • ⚠️ Passa `currentUser` para `applyHierarchyTotals`, para que a
+      //    linha do coordenador agregue apenas os supervisores da
+      //    própria unidade.
       // ============================================================
       loadMetricsForPeriod: async (params = {}) => {
         try {
@@ -860,7 +896,8 @@ export const useAppStore = create<AppStore>()(
             }
           });
 
-          const hierarchical = applyHierarchyTotals(updated);
+          // ⚠️ FIX: passa currentUser para escopar a hierarquia por unidade.
+          const hierarchical = applyHierarchyTotals(updated, get().currentUser);
           set({ collaborators: hierarchical });
           get().updateKpiFromMetrics();
 
@@ -875,8 +912,6 @@ export const useAppStore = create<AppStore>()(
           set({ rawMetrics });
 
           // --- Série diária de leads (granularity='daily') ---
-          // Sem granularity o endpoint devolve agregado por colaborador, sem
-          // `periodo`/`data`. Por isso pedimos explicitamente o modo diário.
           const leadsData = await fetchLeadsRecebidos({ ...apiParams, granularity: 'daily' });
           const leadsByDate = new Map<string, number>();
           (leadsData || []).forEach((l: any) => {
@@ -981,8 +1016,7 @@ export const useAppStore = create<AppStore>()(
       },
 
       // ============================================================
-      // loadLeadsByStage — corrigido: envia `equipe` (não `equipeNome`).
-      // O backend lê req.query.equipe.
+      // loadLeadsByStage — envia `equipe` (não `equipeNome`).
       // ============================================================
       loadLeadsByStage: async (equipeNome, colaboradorNome, produto) => {
         try {
@@ -1110,8 +1144,9 @@ export const useAppStore = create<AppStore>()(
         }
       },
 
+      // ⚠️ FIX: passa `currentUser` para escopar a hierarquia por unidade.
       getCollaboratorsWithHierarchy: () => {
-        return applyHierarchyTotals(get().collaborators);
+        return applyHierarchyTotals(get().collaborators, get().currentUser);
       },
     }),
     {
@@ -1121,7 +1156,7 @@ export const useAppStore = create<AppStore>()(
         globalConfig: state.globalConfig,
         period: state.period,
         customStartDate: state.customStartDate,
-        customEndDate: state.customEndDate,
+        customEndDate: state.customEndDate, 
         // Persistência opcional do resumo de demanda (comente se não quiser)
         demandaResumo: state.demandaResumo,
       }),

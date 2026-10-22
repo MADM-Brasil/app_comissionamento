@@ -18,6 +18,7 @@ import {
   Trophy,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { toast } from "sonner";
 import {
   fetchLeadsRecebidos,
   fetchAssinados,
@@ -46,8 +47,8 @@ const EXCLUDED_GROUPS = [
   "administrativo"
 ];
 
-// ========== EQUIPES RESERVADAS (mesma regra de Suporte/Equipe/Visão Geral/Ranking/Comissões) ==========
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
+// ========== EQUIPES RESERVADAS ==========
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
 
 function isExcludedTeam(teamName: string): boolean { return EXCLUDED_TEAMS.includes(teamName); }
 function isExcludedGroup(group: string): boolean {
@@ -73,6 +74,20 @@ function isEquipeTravadaDestino(nome: string | undefined | null): boolean {
 
 const isSupervisorCargo = (cargo?: string | null): boolean =>
   (cargo || '').toLowerCase().trim().startsWith('supervisor');
+
+// ============================================================
+// CORREÇÃO — comparação robusta colaborador ↔ usuário logado
+// ============================================================
+function isSameColaborator(colab: any, user: any): boolean {
+  if (!colab || !user) return false;
+  const colabEmail = String(colab.email || "").toLowerCase().trim();
+  const userEmail = String(user.email || "").toLowerCase().trim();
+  if (colabEmail && userEmail && colabEmail === userEmail) return true;
+  const colabId = colab.id;
+  const userId = user.id;
+  if (colabId == null || userId == null) return false;
+  return String(colabId) === String(userId);
+}
 
 function findSelectedCollaborator(
   collaborators: any[],
@@ -158,7 +173,7 @@ export default function Analytics() {
     rawMetrics, loadRawMetrics,
     hideValues,
   } = useAppStore();
-  const { currentUser: accessUser, hasPermission } = useAccessControl();
+  const { currentUser: accessUser, hasPermission, getAccessLevel: getLevel, LEVELS: LC } = useAccessControl();
 
   // ============================================================
   //  CONTROLE DE ACESSO
@@ -166,7 +181,6 @@ export default function Analytics() {
   const userLevel = getAccessLevel(accessUser?.cargo, accessUser?.status);
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
-
   const userIsSupervisor = userLevel === LEVELS.SUPERVISAO;
 
   const userUnidadeRaw = (accessUser as any)?.unidade_id
@@ -189,47 +203,6 @@ export default function Analytics() {
     }
     return '';
   }, [accessUser, collaborators]);
-
-  // ============================================================
-  //  ESCOPO DO COORDENADOR (whitelist via /suporte/escopo)
-  // ============================================================
-  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
-    equipes: Set<string>;
-    colaboradores: Set<string>;
-  } | null>(null);
-  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
-
-  useEffect(() => {
-    if (!isCoordenador || !accessUser) {
-      setCoordenadorEscopo(null);
-      return;
-    }
-    let mounted = true;
-    (async () => {
-      setCoordenadorEscopoLoading(true);
-      try {
-        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
-        const data = await res.json().catch(() => ({}));
-        if (!mounted) return;
-        if (!res.ok || !data?.success) {
-          throw new Error(data?.error || `Erro HTTP ${res.status}`);
-        }
-        const equipes = new Set<string>(
-          (data.data?.equipes || []).map((e: string) => normalize(e))
-        );
-        const colaboradores = new Set<string>(
-          (data.data?.assessores || []).map((a: any) => normalize(a.email))
-        );
-        setCoordenadorEscopo({ equipes, colaboradores });
-      } catch (err: any) {
-        console.error("[Analytics] Falha ao carregar escopo do Coordenador:", err?.message);
-        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
-      } finally {
-        if (mounted) setCoordenadorEscopoLoading(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [isCoordenador, accessUser]);
 
   const currentUser = storeUser;
 
@@ -260,14 +233,26 @@ export default function Analytics() {
   const equipe = filters.equipe, colaborador = filters.colaborador, colaboradorId = filters.colaboradorId, produto = filters.produto;
 
   // ============================================================
+  //  Perfil: pode usar FilterBar livre?
+  // ============================================================
+  const canUseFilterBar =
+    hasPermission("canViewTeam") || hasPermission("canAccessReports") || isCoordenador;
+
+  // ============================================================
   //  BASE RESTRITA POR PERFIL
+  //  • Coordenador: filtra por unidade_id (padrão unificado com Home)
+  //  • Supervisor:  filtra por equipe
+  //  • Assessor:    filtra por e-mail
   // ============================================================
   const scopedCollaborators = useMemo(() => {
     let list = [...collaborators];
 
     if (isCoordenador) {
-      if (!coordenadorEscopo) return [];
-      list = list.filter(c => coordenadorEscopo.colaboradores.has(normalize(c.email)));
+      if (userUnidade == null) return [];
+      list = list.filter((c: any) => {
+        const rawUid = c.unidadeId ?? c.unidade_id ?? null;
+        return rawUid != null && Number(rawUid) === userUnidade;
+      });
     }
 
     const ocultarEquipesReservadas = userIsSupervisor
@@ -288,18 +273,42 @@ export default function Analytics() {
   }, [
     collaborators,
     isCoordenador,
-    coordenadorEscopo,
+    userUnidade,
     userIsSupervisor,
     isAssessor,
-    userUnidade,
     userTeam,
     accessUser,
   ]);
 
+  const equipesDaUnidade = useMemo<Set<string> | null>(() => {
+    if (!isCoordenador) return null;
+    const set = new Set<string>();
+    scopedCollaborators.forEach((c: any) => {
+      const eq = c?.equipeNome;
+      if (typeof eq === 'string' && eq.length > 0) set.add(eq);
+    });
+    return set;
+  }, [isCoordenador, scopedCollaborators]);
+
+  const filterByUnitIfNeeded = useCallback((rows: any[]): any[] => {
+    const unitSet = equipesDaUnidade as Set<string> | null;
+    if (!unitSet) return rows;
+    return (rows || []).filter((r: any) => {
+      if (!r) return false;
+      const raw = r.equipe;
+      if (typeof raw !== 'string') return false;
+      const equipeRow = raw.trim();
+      if (equipeRow.length === 0) return false;
+      return unitSet.has(equipeRow);
+    });
+  }, [equipesDaUnidade]);
+
+  // ⚠️ Correção: compara por e-mail (fallback id).
   const currentUserData = useMemo(
-    () => currentUser?.id ? scopedCollaborators.find(c => c.id === currentUser.id) : null,
+    () => currentUser ? scopedCollaborators.find(c => isSameColaborator(c, currentUser)) : null,
     [scopedCollaborators, currentUser]
   );
+
   useEffect(() => {
     if (!currentUserData) return;
     setIsExcluded(isExcludedTeam(currentUserData.equipeNome) || isExcludedGroup(currentUserData.cargo));
@@ -315,20 +324,37 @@ export default function Analytics() {
   const isSupervisorSelected = !!selectedCollaborator && isSupervisorCargo(selectedCollaborator.cargo);
   const supervisorSelectedTeam = isSupervisorSelected ? (selectedCollaborator?.equipeNome || '') : '';
 
+  // ============================================================
+  //  PARÂMETROS EFETIVOS
+  //  • Assessor: força o próprio usuário (mesmo padrão da Home)
+  //  • Supervisor selecionado: visão da equipe
+  //  • Coordenador: sem filtro de colaborador — filtragem por unidade
+  //    é feita em `filterByUnitIfNeeded` / `scopedCollaborators`
+  // ============================================================
   const getEffectiveFilterParams = useCallback(() => {
     let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
     let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
     let colaboradorIdApi = filters.colaboradorId;
 
-    if (isSupervisorSelected && selectedCollaborator) {
-      equipeApi = selectedCollaborator.equipeNome || equipeApi;
+    if (!canUseFilterBar) {
+      const userColab = collaborators.find(c => isSameColaborator(c, currentUser));
+      if (userColab && typeof userColab.name === 'string') {
+        colaboradorApi = userColab.name;
+        colaboradorIdApi = currentUser?.id;
+      } else if (typeof currentUser?.nome === 'string') {
+        colaboradorApi = currentUser.nome;
+        colaboradorIdApi = currentUser.id;
+      }
+    } else if (isSupervisorSelected && selectedCollaborator) {
+      const eq = selectedCollaborator?.equipeNome;
+      if (typeof eq === 'string' && eq.length > 0) equipeApi = eq;
       colaboradorApi = undefined;
       colaboradorIdApi = undefined;
     }
 
     const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
     return { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi };
-  }, [filters, isSupervisorSelected, selectedCollaborator]);
+  }, [filters, isSupervisorSelected, selectedCollaborator, canUseFilterBar, currentUser, collaborators]);
 
   // ========== FUNÇÃO DE RECARGA PRINCIPAL ==========
   const reloadData = useCallback(async (showRefreshing = false) => {
@@ -359,18 +385,50 @@ export default function Analytics() {
     }
   }, [currentStartDate, currentEndDate, getEffectiveFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
 
-  const handleFilterChange = useCallback((newFilters: typeof filters) => {
+  const handleFilterChange = useCallback((rawFilters: typeof filters) => {
+    let newFilters = rawFilters;
+
+    // Guarda de escopo para coordenador: só aceita colaborador/equipe da unidade.
+    if (isCoordenador && userUnidade != null) {
+      const selColab = collaborators.find(
+        (c) =>
+          (newFilters.colaboradorId != null && String(c.id) === String(newFilters.colaboradorId)) ||
+          (newFilters.colaborador && newFilters.colaborador !== "todos" && c.name === newFilters.colaborador),
+      );
+      if (selColab) {
+        const rawUid = (selColab as any).unidadeId ?? (selColab as any).unidade_id ?? null;
+        const uid = rawUid != null ? Number(rawUid) : null;
+        if (uid == null || uid !== userUnidade) {
+          toast.error("Você só pode visualizar colaboradores da sua unidade.");
+          newFilters = { ...newFilters, colaborador: "todos", colaboradorId: undefined };
+        }
+      }
+      if (typeof newFilters.equipe === 'string' && newFilters.equipe !== "todas") {
+        const equipeAlvo = newFilters.equipe;
+        const teamInUnit = scopedCollaborators.some(c => c.equipeNome === equipeAlvo);
+        if (!teamInUnit) {
+          toast.error("Equipe fora do escopo da sua unidade.");
+          newFilters = { ...newFilters, equipe: "todas" };
+        }
+      }
+    }
+
     setFilters(newFilters);
-  }, []);
+  }, [isCoordenador, userUnidade, collaborators, scopedCollaborators]);
 
   const handleRefresh = useCallback(async () => {
     await reloadData(true);
   }, [reloadData]);
 
+  // ============================================================
+  // EFEITO PRINCIPAL
+  // ⚠️ Correção: incluir currentUser?.id e collaborators.length para
+  // re-fetch quando o user/collaborators forem hidratados após login.
+  // ============================================================
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
-  }, [currentStartDate, currentEndDate, filters]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentStartDate, currentEndDate, filters, currentUser?.id, collaborators.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ========== BUSCA DO BÔNUS ==========
   useEffect(() => {
@@ -420,18 +478,30 @@ export default function Analytics() {
       try {
         const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
         const baseParams = { start: chartDateRange.start, end: chartDateRange.end, equipe: equipeApi, colaborador: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi, granularity: 'daily' as const };
-        const [leadsData, assinadosData, ganhosData, protocoladosData, perdidosData, ligacoesProdutivas] = await Promise.all([
-          fetchLeadsRecebidos(baseParams), fetchAssinados(baseParams), fetchGanhos(baseParams), fetchProtocolados(baseParams), fetchPerdidos(baseParams),
+
+        // ⚠️ Aplica filtro por unidade nas séries temporais (coordenador).
+        const [leadsRaw, assinadosRaw, ganhosRaw, protocoladosRaw, perdidosRaw, ligacoesProdutivas] = await Promise.all([
+          fetchLeadsRecebidos(baseParams),
+          fetchAssinados(baseParams),
+          fetchGanhos(baseParams),
+          fetchProtocolados(baseParams),
+          fetchPerdidos(baseParams),
           fetchLigacoesProdutivas(baseParams),
         ]);
         if (signal.aborted) return;
+
+        const leadsData = filterByUnitIfNeeded(leadsRaw || []);
+        const assinadosData = filterByUnitIfNeeded(assinadosRaw || []);
+        const ganhosData = filterByUnitIfNeeded(ganhosRaw || []);
+        const protocoladosData = filterByUnitIfNeeded(protocoladosRaw || []);
+        const perdidosData = filterByUnitIfNeeded(perdidosRaw || []);
+
         const dataMap = new Map<string, { leads: number; assinados: number; ganhos: number; protocolados: number; perdidos: number }>();
         const processData = (data: any[], field: 'leads' | 'assinados' | 'ganhos' | 'protocolados' | 'perdidos') => {
           (data || []).forEach(item => {
             let rawDate = item.data || item.periodo; if (!rawDate) return;
             const dateStr = String(rawDate).split('T')[0]; if (!dateStr) return;
             const existing = dataMap.get(dateStr) || { leads:0, assinados:0, ganhos:0, protocolados:0, perdidos:0 };
-            // Extração defensiva: aceita `total` (formato legado) ou `leads_recebidos` (novo).
             const totalVal = Number(item.total ?? item.leads_recebidos ?? 0) || 0;
             existing[field] += totalVal;
             dataMap.set(dateStr, existing);
@@ -462,14 +532,13 @@ export default function Analytics() {
     };
     fetchChartData();
     return () => { abortController.abort(); isFetchingRef.current = false; };
-  }, [chartDateRange, equipe, colaborador, colaboradorId, produto, period, dailyChartData.length, getEffectiveFilterParams]);
+  }, [chartDateRange, equipe, colaborador, colaboradorId, produto, period, dailyChartData.length, getEffectiveFilterParams, filterByUnitIfNeeded]);
 
   // ========== DADOS PARA KPIS ==========
-  const totals = rawMetrics;
   const isSpecialGroup = produto === 'Quinquenio' || produto === 'Concomitante';
 
   // ============================================================
-  //  FILTRO DE COLABORADORES (sobre a base restrita por perfil)
+  //  FILTRO DE COLABORADORES
   // ============================================================
   const filteredCollaborators = useMemo(() => {
     if (isSupervisorSelected && supervisorSelectedTeam) {
@@ -497,6 +566,24 @@ export default function Analytics() {
       targetProtocolados: baseCollaborators.reduce((sum,c)=>sum+getMeta(c, periodoMeta, 'protocolados'),0)
     };
   }, [baseCollaborators, equipe, colaborador, currentStartDate, currentEndDate, isSupervisorSelected]);
+
+  // ⚠️ Correção: para coordenador, `totals` é a soma das folhas da unidade.
+  const totals = useMemo(() => {
+    if (isCoordenador) {
+      const leaf = scopedCollaborators.filter(c => {
+        const cargo = (c.cargo || '').trim().toLowerCase();
+        return cargo !== 'supervisor' && cargo !== 'coordenador' && cargo !== 'administrativo' && cargo !== 'desativado';
+      });
+      return {
+        emitidos: leaf.reduce((s, c) => s + (Number(c.emitidos) || 0), 0),
+        assinados: leaf.reduce((s, c) => s + (Number(c.assinados) || 0), 0),
+        protocolados: leaf.reduce((s, c) => s + (Number(c.protocolados) || 0), 0),
+        ganhos: leaf.reduce((s, c) => s + (Number(c.ganhos) || 0), 0),
+        perdidos: leaf.reduce((s, c) => s + (Number(c.perdidos) || 0), 0),
+      };
+    }
+    return rawMetrics;
+  }, [isCoordenador, scopedCollaborators, rawMetrics]);
 
   const percentAssinados = targetAssinados>0 ? (totals.assinados/targetAssinados)*100 : 0;
   const percentGanhos = targetGanhos>0 ? (totals.ganhos/targetGanhos)*100 : 100;
@@ -547,17 +634,6 @@ export default function Analytics() {
     return (<div className="card text-center"><DollarSign className="w-4 h-4 text-[#2F6FED] mx-auto mb-1" /><div className="text-2xl font-black text-[#0f172a]">{displayCurrency(userBonusCiclo)}</div><div className="text-xs text-[#64748b]">{bonusError||"valor do banco"}</div></div>);
   };
 
-  if (isCoordenador && coordenadorEscopoLoading) {
-    return (
-      <DashboardLayout title="Analytics" subtitle="Carregando escopo...">
-        <div className="flex justify-center items-center py-12">
-          <Loader2 className="w-5 h-5 animate-spin text-[#2F6FED]" />
-          <span className="ml-2 text-sm text-gray-500">Carregando escopo...</span>
-        </div>
-      </DashboardLayout>
-    );
-  }
-
   return (
     <DashboardLayout title="Analytics" subtitle="Métricas avançadas, comissões e indicadores de performance">
       <FilterBar
@@ -602,6 +678,15 @@ export default function Analytics() {
                   <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
                 )}
                 {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
+              </span>
+            </div>
+          )}
+
+          {isCoordenador && userUnidade != null && (
+            <div className="mb-4 px-4 py-2 bg-[#f5f3ff] rounded-lg text-xs text-[#8B5CF6] flex items-center gap-2 flex-wrap">
+              <span>🔒</span>
+              <span>
+                Visão da sua unidade (<b>unidade {userUnidade}</b>) — {scopedCollaborators.length} colaboradores em {equipesDaUnidade ? equipesDaUnidade.size : 0} equipes.
               </span>
             </div>
           )}
@@ -669,7 +754,7 @@ export default function Analytics() {
             )}
           </div>
 
-          {/* Distribuição (agora barras) + Conversão */}
+          {/* Distribuição + Conversão */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
             <div className="card p-5 animate-fade-in-up" style={{ animationDelay: "480ms" }}>
               <h3 className="text-sm font-bold text-[#0f172a] mb-4">Distribuição por Etapa</h3>

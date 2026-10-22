@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
+import { toast } from "sonner";
 import {
   fetchEmitidos,
   fetchAssinados,
@@ -31,19 +32,32 @@ import {
 // FETCH LOCAL — LEADS RECEBIDOS (modo série temporal)
 // ============================================================
 async function fetchLeadsRecebidosDaily(params: {
-  start: string;
-  end: string;
-  equipe?: string;
-  colaborador?: string;
-  produto?: string;
+  start?: string | null;
+  end?: string | null;
+  equipe?: string | null;
+  colaborador?: string | null;
+  produto?: string | null;
 }): Promise<Array<{ colaborador: string; equipe: string; periodo: string; total: number }>> {
+  const startVal = typeof params.start === 'string' ? params.start : '';
+  const endVal = typeof params.end === 'string' ? params.end : '';
+  if (!startVal || !endVal) {
+    console.warn('[Home] fetchLeadsRecebidosDaily chamado sem start/end — ignorado');
+    return [];
+  }
+
   const searchParams = new URLSearchParams();
-  searchParams.append('start', params.start);
-  searchParams.append('end', params.end);
-  searchParams.append('granularity', 'daily');
-  if (params.equipe && params.equipe !== 'todas') searchParams.append('equipe', params.equipe);
-  if (params.colaborador && params.colaborador !== 'todos') searchParams.append('colaborador', params.colaborador);
-  if (params.produto && params.produto !== 'Todos') searchParams.append('produto', params.produto);
+  searchParams.set('start', startVal);
+  searchParams.set('end', endVal);
+  searchParams.set('granularity', 'daily');
+
+  const equipeVal = typeof params.equipe === 'string' ? params.equipe.trim() : '';
+  if (equipeVal && equipeVal !== 'todas') searchParams.set('equipe', equipeVal);
+
+  const colaboradorVal = typeof params.colaborador === 'string' ? params.colaborador.trim() : '';
+  if (colaboradorVal && colaboradorVal !== 'todos') searchParams.set('colaborador', colaboradorVal);
+
+  const produtoVal = typeof params.produto === 'string' ? params.produto.trim() : '';
+  if (produtoVal && produtoVal !== 'Todos') searchParams.set('produto', produtoVal);
 
   const url = `${API_BASE}/metrics/leads-recebidos?${searchParams.toString()}`;
   console.log('[Home] fetchLeadsRecebidosDaily →', url);
@@ -82,36 +96,6 @@ const normalize = (str: string): string =>
 const extractLeadsTotal = (item: any): number =>
   Number(item?.total ?? item?.leads_recebidos ?? 0) || 0;
 
-// ============================================================
-// [NOVO] SOMA DE GANHOS DA EQUIPE (mesma lógica da Comissoes.tsx)
-// ------------------------------------------------------------
-//  Percorre `collaborators` e soma `ganhos` de todos os membros
-//  da equipe, excluindo supervisores, coordenadores e
-//  administrativos. Usado como entrada da faixa de comissão do
-//  supervisor.
-// ============================================================
-function sumTeamGanhos(collaborators: any[], teamName: string): number {
-  return (collaborators || []).reduce((total, c) => {
-    const teamOfColab = String(c?.equipeNome || '').trim().toLowerCase();
-    const teamTarget = String(teamName || '').trim().toLowerCase();
-    if (teamOfColab !== teamTarget) return total;
-
-    const cargo = String(c?.cargo || '').toLowerCase().trim();
-    if (
-      cargo.startsWith('supervisor') ||
-      cargo === 'coordenador' ||
-      cargo === 'administrativo'
-    ) {
-      return total;
-    }
-
-    return total + (Number(c?.ganhos) || 0);
-  }, 0);
-}
-
-// ============================================================
-// CORREÇÃO — comparação robusta colaborador ↔ usuário logado
-// ============================================================
 function isSameColaborator(colab: any, user: any): boolean {
   if (!colab || !user) return false;
   const colabEmail = String(colab.email || "").toLowerCase().trim();
@@ -153,7 +137,7 @@ function getFaixaProductType(colab: any): string {
 }
 
 // ============================================================
-// PESOS (ranking/score) E METAS
+// PESOS E METAS
 // ============================================================
 const WEIGHTS: Record<'emitidos' | 'assinados' | 'protocolados' | 'ganhos', number> = {
   ganhos: 4, assinados: 3, protocolados: 1, emitidos: 2,
@@ -170,13 +154,18 @@ const isExcludedCargoForDisplay = (cargo: string) =>
   EXCLUDED_CARGOS_FOR_DISPLAY.some(g => normalize(g) === normalize(cargo));
 
 const isDesativado = (c: any) => {
-  const cargo = normalize(c.cargo);
-  const equipe = normalize(c.equipeNome);
+  const cargo = normalize(c?.cargo || '');
+  const equipe = normalize(c?.equipeNome || '');
   return cargo === 'desativado' || equipe.includes('desativado');
 };
 
 const isSupervisorCargo = (cargo?: string | null): boolean =>
   (cargo || '').toLowerCase().trim().startsWith('supervisor');
+
+const isAggregatedCargo = (cargo?: string | null): boolean => {
+  const c = normalize(cargo || '');
+  return c === 'supervisor' || c === 'coordenador' || c === 'administrativo';
+};
 
 function findSelectedCollaborator(
   collaborators: any[],
@@ -393,7 +382,7 @@ export default function Home() {
   const {
     currentStartDate, currentEndDate, period,
     bonusData,
-    globalConfig, collaborators, currentUser,
+    collaborators, currentUser,
     loadCollaboratorsAndMetrics,
     loadWeeklyPerformanceData,
     rawMetrics,
@@ -402,12 +391,44 @@ export default function Home() {
     tabelaComissoes,
   } = useAppStore();
 
-  const { hasPermission, currentUser: authUser } = useAccessControl();
+  const { hasPermission, getAccessLevel, LEVELS } = useAccessControl();
   const canAccessReports = hasPermission('canAccessReports');
-  // [AJUSTADO em iteração anterior] permissão correta
-  const canAccessCommissoes = hasPermission('canAccessComissoes');
+  const canAccessCommissoes = hasPermission('canViewOwnData');
 
-  const canUseFilterBar = hasPermission("canViewTeam") || canAccessReports;
+  // ─────────────────────────────────────────────────────────────
+  // DETECÇÃO DO PERFIL
+  // ─────────────────────────────────────────────────────────────
+  const userLevel = getAccessLevel();
+  const isCoordenadorUser = userLevel === LEVELS.COORDENADOR;
+  const userUnidadeId: number | null = (() => {
+    const raw = (currentUser as any)?.unidade_id ?? (currentUser as any)?.unidadeId ?? null;
+    return raw != null ? Number(raw) : null;
+  })();
+
+  // ─────────────────────────────────────────────────────────────
+  // ESCOPO DO COORDENADOR (usado para KPIs/totais/gráficos)
+  // ─────────────────────────────────────────────────────────────
+  const scopedCollaborators = useMemo<Collaborator[]>(() => {
+    if (!isCoordenadorUser) return collaborators;
+    if (userUnidadeId == null) return [];
+    return collaborators.filter((c: any) => {
+      const rawUid = c.unidadeId ?? c.unidade_id ?? null;
+      return rawUid != null && Number(rawUid) === userUnidadeId;
+    });
+  }, [collaborators, isCoordenadorUser, userUnidadeId]);
+
+  const equipesDaUnidade = useMemo<Set<string> | null>(() => {
+    if (!isCoordenadorUser) return null;
+    const set = new Set<string>();
+    scopedCollaborators.forEach((c) => {
+      const eq = c?.equipeNome;
+      if (typeof eq === 'string' && eq.length > 0) set.add(eq);
+    });
+    return set;
+  }, [isCoordenadorUser, scopedCollaborators]);
+
+  const canUseFilterBar =
+    hasPermission("canViewTeam") || canAccessReports || isCoordenadorUser;
 
   const [allCollaborators, setAllCollaborators] = useState<any[]>([]);
   const [metricsData, setMetricsData] = useState<Record<string, { emitidos: number; assinados: number; protocolados: number; ganhos: number; perdidos: number }>>({});
@@ -424,6 +445,75 @@ export default function Home() {
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
 
   // ============================================================
+  // FILTRO AUXILIAR DE UNIDADE
+  // ============================================================
+  const filterByUnitIfNeeded = useCallback((rows: any[]): any[] => {
+    const unitSet = equipesDaUnidade as Set<string> | null;
+    if (!unitSet) return rows;
+    return rows.filter((r: any) => {
+      if (!r) return false;
+      const raw = r.equipe;
+      if (typeof raw !== 'string') return false;
+      const equipe = raw.trim();
+      if (equipe.length === 0) return false;
+      return unitSet.has(equipe);
+    });
+  }, [equipesDaUnidade]);
+
+  // ============================================================
+  // ESCOPO DO RANKING POR NÍVEL DE ACESSO
+  //   • Assessor:                    apenas o próprio usuário
+  //   • Supervisor:                  apenas a própria equipe
+  //   • Coordenador:                 apenas colaboradores da própria unidade
+  //   • Administrativo / Super Admin: todos
+  // ============================================================
+  const rankingScope = useMemo<Collaborator[]>(() => {
+    if (!currentUser) return [];
+
+    if (userLevel === LEVELS.NONE) return [];
+
+    if (userLevel === LEVELS.ASSESSOR) {
+      return allCollaborators.filter(c => isSameColaborator(c, currentUser));
+    }
+
+    if (userLevel === LEVELS.SUPERVISAO) {
+      const team = String(
+        (currentUser as any)?.equipe ??
+        (currentUser as any)?.equipeNome ??
+        (currentUser as any)?.nome_equipe ??
+        ''
+      ).trim();
+      if (!team) return allCollaborators;
+      return allCollaborators.filter(c => normalize(c.equipeNome) === normalize(team));
+    }
+
+    if (userLevel === LEVELS.COORDENADOR && userUnidadeId != null) {
+      return allCollaborators.filter(c => {
+        const raw = (c as any).unidadeId ?? (c as any).unidade_id ?? null;
+        return raw != null && Number(raw) === userUnidadeId;
+      });
+    }
+
+    return allCollaborators;
+  }, [
+    allCollaborators,
+    currentUser,
+    userLevel,
+    userUnidadeId,
+    LEVELS.NONE,
+    LEVELS.ASSESSOR,
+    LEVELS.SUPERVISAO,
+    LEVELS.COORDENADOR,
+  ]);
+
+  const rankingScopeLabel = useMemo(() => {
+    if (userLevel === LEVELS.ASSESSOR)   return "Ranking individual";
+    if (userLevel === LEVELS.SUPERVISAO) return "Top 3 da equipe";
+    if (userLevel === LEVELS.COORDENADOR) return "Top 3 da unidade";
+    return "Top 3 do mês";
+  }, [userLevel, LEVELS.ASSESSOR, LEVELS.SUPERVISAO, LEVELS.COORDENADOR]);
+
+  // ============================================================
   // DETECÇÃO DE SUPERVISOR SELECIONADO
   // ============================================================
   const selectedCollaborator = useMemo(
@@ -437,21 +527,22 @@ export default function Home() {
   // PARÂMETROS DE FILTRO PARA OS GRÁFICOS E APIs
   // ============================================================
   const getChartFilterParams = useCallback(() => {
-    let equipeApi = filters.equipe === "todas" ? undefined : filters.equipe;
-    let colaboradorApi = filters.colaborador === "todos" ? undefined : filters.colaborador;
-    let colaboradorIdApi = filters.colaboradorId;
+    let equipeApi: string | undefined = filters.equipe === "todas" ? undefined : filters.equipe;
+    let colaboradorApi: string | undefined = filters.colaborador === "todos" ? undefined : filters.colaborador;
+    let colaboradorIdApi: string | number | undefined = filters.colaboradorId;
 
     if (!canUseFilterBar) {
       const userColab = collaborators.find(c => isSameColaborator(c, currentUser));
-      if (userColab) {
+      if (userColab && typeof userColab.name === 'string') {
         colaboradorApi = userColab.name;
         colaboradorIdApi = currentUser?.id;
-      } else if (currentUser?.nome) {
+      } else if (typeof currentUser?.nome === 'string') {
         colaboradorApi = currentUser.nome;
         colaboradorIdApi = currentUser.id;
       }
     } else if (isSupervisorSelected && selectedCollaborator) {
-      equipeApi = selectedCollaborator.equipeNome || equipeApi;
+      const eq = selectedCollaborator?.equipeNome;
+      if (typeof eq === 'string' && eq.length > 0) equipeApi = eq;
       colaboradorApi = undefined;
       colaboradorIdApi = undefined;
     }
@@ -508,7 +599,7 @@ export default function Home() {
       await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
       await loadWeeklyPerformanceData();
 
-      const [leadsData, ligacoesProdutivas] = await Promise.all([
+      const [leadsRaw, ligacoesProdutivas] = await Promise.all([
         fetchLeadsRecebidosDaily({
           start: currentStartDate,
           end: currentEndDate,
@@ -524,8 +615,9 @@ export default function Home() {
           produto: produtoApi,
         }).catch(() => 0),
       ]);
-      const totalLeadsRecebidos = (leadsData || []).reduce(
-        (acc, item) => acc + extractLeadsTotal(item),
+      const leadsData = filterByUnitIfNeeded(leadsRaw || []);
+      const totalLeadsRecebidos = leadsData.reduce(
+        (acc: number, item: any) => acc + extractLeadsTotal(item),
         0
       );
       setTotalLeads(totalLeadsRecebidos);
@@ -536,10 +628,10 @@ export default function Home() {
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
       if (datesChanged) await loadRankingData();
 
-      if (currentUser) {
+      if (currentUser && !isCoordenadorUser) {
         const allColabs = useAppStore.getState().collaborators;
         const userColab = allColabs.find(c => isSameColaborator(c, currentUser));
-        if (userColab) {
+        if (userColab && typeof userColab.name === 'string') {
           const isSupervisor = (userColab.cargo || '').toLowerCase() === 'supervisor';
           const isEspecial = isSpecialGroupColaborador(userColab);
           if (!isSupervisor && !isEspecial) {
@@ -558,6 +650,8 @@ export default function Home() {
             setDailyMetrics([]);
           }
         }
+      } else {
+        setDailyMetrics([]);
       }
 
       lastDatesRef.current = { start: currentStartDate, end: currentEndDate };
@@ -567,16 +661,58 @@ export default function Home() {
       setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, filters, getChartFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData, currentUser]);
+  }, [currentStartDate, currentEndDate, filters, getChartFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData, currentUser, isCoordenadorUser, filterByUnitIfNeeded]);
 
-  const handleFilterChange = useCallback((newFilters: typeof filters) => {
-    setFilters(newFilters);
-  }, []);
+  // ============================================================
+  // HANDLER DO FILTRO
+  // ============================================================
+  const handleFilterChange = useCallback((rawFilters: typeof filters) => {
+    let newFilters = rawFilters;
+
+    if (isCoordenadorUser && userUnidadeId != null) {
+      const selColab = collaborators.find(
+        (c) =>
+          (newFilters.colaboradorId != null && String(c.id) === String(newFilters.colaboradorId)) ||
+          (newFilters.colaborador && newFilters.colaborador !== "todos" && c.name === newFilters.colaborador),
+      );
+      if (selColab) {
+        const rawUid = (selColab as any).unidadeId ?? (selColab as any).unidade_id ?? null;
+        const uid = rawUid != null ? Number(rawUid) : null;
+        if (uid == null || uid !== userUnidadeId) {
+          toast.error("Você só pode visualizar colaboradores da sua unidade.");
+          newFilters = { ...newFilters, colaborador: "todos", colaboradorId: undefined };
+        }
+      }
+      if (typeof newFilters.equipe === 'string' && newFilters.equipe !== "todas") {
+        const equipeAlvo = newFilters.equipe;
+        const teamInUnit = scopedCollaborators.some(c => c.equipeNome === equipeAlvo);
+        if (!teamInUnit) {
+          toast.error("Equipe fora do escopo da sua unidade.");
+          newFilters = { ...newFilters, equipe: "todas" };
+        }
+      }
+    }
+
+    setFilters(prev => {
+      if (
+        prev.equipe === newFilters.equipe &&
+        prev.colaborador === newFilters.colaborador &&
+        String(prev.colaboradorId ?? "") === String(newFilters.colaboradorId ?? "") &&
+        prev.produto === newFilters.produto
+      ) {
+        return prev;
+      }
+      return newFilters;
+    });
+  }, [isCoordenadorUser, userUnidadeId, collaborators, scopedCollaborators]);
 
   const handleRefresh = useCallback(async () => {
     await reloadData(true);
   }, [reloadData]);
 
+  // ============================================================
+  // EFEITOS
+  // ============================================================
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
@@ -593,8 +729,10 @@ export default function Home() {
   // ============================================================
   // CÁLCULOS DERIVADOS
   // ============================================================
+  // ⚠️ Agora usa `rankingScope` (filtrado por nível de acesso),
+  // não `allCollaborators` (que é sempre global).
   const globalRanking = useMemo(() => {
-    const eligible = allCollaborators.filter(c => {
+    const eligible = rankingScope.filter(c => {
       if (isDesativado(c)) return false;
       if (isExcludedCargoForDisplay(c.cargo)) return false;
       if (isExcludedTeam(c.equipeNome)) return false;
@@ -613,7 +751,7 @@ export default function Home() {
       return b.emitidos - a.emitidos;
     });
     return sorted.map((item, idx) => ({ ...item, position: idx + 1 }));
-  }, [allCollaborators, metricsData]);
+  }, [rankingScope, metricsData]);
 
   const currentUserData = useMemo(() => {
     if (!currentUser) return null;
@@ -645,39 +783,19 @@ export default function Home() {
   }, [filters.produto, currentUserData]);
 
   // ============================================================
-  // [NOVO] SUPERVISOR EM EXIBIÇÃO
-  // ------------------------------------------------------------
-  //  Define qual supervisor a página está exibindo no momento:
-  //    • Se o usuário logado é supervisor → ele mesmo
-  //    • Se o FilterBar selecionou um supervisor → o selecionado
-  //      (esse caso prevalece sobre o usuário logado, pois é a
-  //       visão que o usuário escolheu ativamente)
-  //  Utilizado para o cálculo da Estimativa do Mês pela faixa de
-  //  comissão do supervisor.
-  // ============================================================
-  const supervisorInView = useMemo(() => {
-    if (canUseFilterBar && isSupervisorSelected && selectedCollaborator) {
-      return selectedCollaborator;
-    }
-    if (currentUserData && isSupervisorCargo(currentUserData.cargo)) {
-      return currentUserData;
-    }
-    return null;
-  }, [canUseFilterBar, isSupervisorSelected, selectedCollaborator, currentUserData]);
-
-  // ============================================================
-  // FILTRO DE COLABORADORES
+  // FILTRO DE COLABORADORES (base para metas/totais)
   // ============================================================
   const filteredCollaborators = useMemo(() => {
+    const base = isCoordenadorUser ? scopedCollaborators : collaborators;
     if (isSupervisorSelected && supervisorSelectedTeam) {
-      return collaborators.filter(c => c.equipeNome === supervisorSelectedTeam);
+      return base.filter(c => c.equipeNome === supervisorSelectedTeam);
     }
-    return collaborators.filter(c => {
+    return base.filter(c => {
       if (filters.equipe !== "todas" && c.equipeNome !== filters.equipe) return false;
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
       return true;
     });
-  }, [collaborators, filters.equipe, filters.colaborador, isSupervisorSelected, supervisorSelectedTeam]);
+  }, [collaborators, scopedCollaborators, isCoordenadorUser, filters.equipe, filters.colaborador, isSupervisorSelected, supervisorSelectedTeam]);
 
   const displayCollaborators = useMemo(() => filteredCollaborators.filter(c => {
     if (isDesativado(c)) return false;
@@ -685,7 +803,19 @@ export default function Home() {
     return cargo !== 'supervisor' && cargo !== 'coordenador' && cargo !== 'administrativo';
   }), [filteredCollaborators]);
 
-  const totals = rawMetrics;
+  const totals = useMemo(() => {
+    if (isCoordenadorUser) {
+      const leaf = scopedCollaborators.filter(c => !isAggregatedCargo(c.cargo));
+      return {
+        emitidos: leaf.reduce((s, c) => s + (Number(c.emitidos) || 0), 0),
+        assinados: leaf.reduce((s, c) => s + (Number(c.assinados) || 0), 0),
+        protocolados: leaf.reduce((s, c) => s + (Number(c.protocolados) || 0), 0),
+        ganhos: leaf.reduce((s, c) => s + (Number(c.ganhos) || 0), 0),
+        perdidos: leaf.reduce((s, c) => s + (Number(c.perdidos) || 0), 0),
+      };
+    }
+    return rawMetrics;
+  }, [isCoordenadorUser, scopedCollaborators, rawMetrics]);
 
   const effectiveTotals = useMemo(() => {
     if (!isSpecialGroup) return totals;
@@ -693,48 +823,33 @@ export default function Home() {
   }, [totals, isSpecialGroup]);
 
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
-  const isGlobalView = filters.equipe === "todas" && filters.colaborador === "todos" && !isSupervisorSelected;
+
+  const isGlobalView =
+    !isCoordenadorUser &&
+    filters.equipe === "todas" &&
+    filters.colaborador === "todos" &&
+    !isSupervisorSelected;
 
   // ============================================================
-  // CÁLCULO DA COMISSÃO DO USUÁRIO LOGADO / VISÃO ATUAL
-  // ------------------------------------------------------------
-  //  [AJUSTADO] A visão de supervisor (própria ou selecionada via
-  //  FilterBar) agora calcula a Estimativa do Mês pela FAIXA DE
-  //  COMISSÃO DO SUPERVISOR, usando a SOMA DE GANHOS DA EQUIPE
-  //  (sumTeamGanhos) — em vez do `currentUserData.assinados`
-  //  anterior, que pegava o campo do próprio supervisor e quase
-  //  sempre retornava valor zerado/incorreto.
-  //
-  //  A lógica da faixa em si é a mesma usada na Comissoes.tsx:
-  //  `calculator.calculateSupervisorCommission(ganhosEquipe, isSR, tabelaComissoes)`.
+  // COMISSÃO DO USUÁRIO LOGADO
   // ============================================================
   const userCommission = useMemo(() => {
-    if (!tabelaComissoes || tabelaComissoes.length === 0) {
+    if (isCoordenadorUser) return 0;
+    if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) {
       return 0;
     }
-
-    // ── Visão de supervisor (própria ou selecionada no FilterBar)
-    if (supervisorInView) {
-      const isSR =
-        Boolean((supervisorInView as any).isSupervisorSR) ||
-        calculator.isSupervisorSR((supervisorInView as any).email);
-      const teamGanhos = sumTeamGanhos(collaborators, (supervisorInView as any).equipeNome || '');
-      return calculator.calculateSupervisorCommission(teamGanhos, isSR, tabelaComissoes);
-    }
-
-    if (!currentUserData) return 0;
-
+    const isSupervisor = (currentUserData.cargo || '').toLowerCase() === 'supervisor';
+    const isSR = Boolean(currentUserData.isSupervisorSR) || calculator.isSupervisorSR(currentUserData.email);
     const isEspecial = isSpecialGroupColaborador(currentUserData);
 
+    if (isSupervisor) {
+      const totalAssEquipe = currentUserData.assinados || 0;
+      return calculator.calculateSupervisorCommission(totalAssEquipe, isSR, tabelaComissoes);
+    }
     if (isEspecial) {
       const productType = getFaixaProductType(currentUserData);
-      return calculator.calculateProductCommission(
-        currentUserData.assinados || 0,
-        productType,
-        tabelaComissoes,
-      );
+      return calculator.calculateProductCommission(currentUserData.assinados || 0, productType, tabelaComissoes);
     }
-
     if (dailyMetrics.length > 0) {
       const metaGolsAss = currentUserData.metaGolsAssinados ?? 3;
       const metaGolsGan = currentUserData.metaGolsGanhos ?? 3;
@@ -746,7 +861,7 @@ export default function Home() {
       return result.totalCommission;
     }
     return 0;
-  }, [supervisorInView, collaborators, tabelaComissoes, currentUserData, dailyMetrics]);
+  }, [currentUserData, tabelaComissoes, dailyMetrics, isCoordenadorUser]);
 
   // ============================================================
   // METAS DE GANHOS
@@ -785,16 +900,18 @@ export default function Home() {
     const fetchWeeklyData = async () => {
       try {
         const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
-        const [emitidosData, assinadosData] = await Promise.all([
+        const [emitidosRaw, assinadosRaw] = await Promise.all([
           fetchEmitidos({ start: currentStartDate, end: currentEndDate, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi }),
           fetchAssinados({ start: currentStartDate, end: currentEndDate, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' })
         ]);
+        const emitidosData = filterByUnitIfNeeded(emitidosRaw || []);
+        const assinadosData = filterByUnitIfNeeded(assinadosRaw || []);
         const dayNames = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
         const emitidosMap = new Map<string, number>(), assinadosMap = new Map<string, number>();
         const aggregateEA = (data: any[], map: Map<string, number>) => {
           (data || []).forEach((item: any) => {
             const dateStr = item.data || item.periodo; if (!dateStr) return;
-            const date = parseUTCDate(dateStr); if (isNaN(date.getTime())) return;
+            const date = parseUTCDate(String(dateStr)); if (isNaN(date.getTime())) return;
             const dayName = dayNames[date.getUTCDay()]; map.set(dayName, (map.get(dayName) || 0) + (Number(item.total) || 0));
           });
         };
@@ -804,7 +921,7 @@ export default function Home() {
       } catch (err) { console.error('Erro ao carregar dados semanais emitidos/assinados:', err); }
     };
     fetchWeeklyData();
-  }, [isSpecialGroup, currentStartDate, currentEndDate, filters, getChartFilterParams]);
+  }, [isSpecialGroup, currentStartDate, currentEndDate, filters, getChartFilterParams, filterByUnitIfNeeded]);
 
   // ============================================================
   // GRÁFICO: Performance semanal
@@ -818,7 +935,7 @@ export default function Home() {
         const { start, end } = getCurrentWeekDatesUTC();
         const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
 
-        const [leadsData, assinadosData, ganhosData] = await Promise.all([
+        const [leadsRaw, assinadosRaw, ganhosRaw] = await Promise.all([
           fetchLeadsRecebidosDaily({
             start, end,
             equipe: equipeApi,
@@ -830,13 +947,17 @@ export default function Home() {
         ]);
         if (cancelled) return;
 
+        const leadsData = filterByUnitIfNeeded(leadsRaw || []);
+        const assinadosData = filterByUnitIfNeeded(assinadosRaw || []);
+        const ganhosData = filterByUnitIfNeeded(ganhosRaw || []);
+
         const weekdays = ['Seg','Ter','Qua','Qui','Sex'];
         const leadsMap = new Map<string, number>(), assinadosMap = new Map<string, number>(), ganhosMap = new Map<string, number>(), dateMap = new Map<string, string>();
 
         const aggregate = (data: any[], map: Map<string, number>, useLeadsTotal = false) => {
           (data || []).forEach(item => {
             const dateStr = item.data || item.periodo; if (!dateStr) return;
-            const date = parseUTCDate(dateStr); if (isNaN(date.getTime())) return;
+            const date = parseUTCDate(String(dateStr)); if (isNaN(date.getTime())) return;
             const dayIndex = date.getUTCDay(); if (dayIndex === 0 || dayIndex === 6) return;
             const dayName = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][dayIndex];
             const value = useLeadsTotal ? extractLeadsTotal(item) : (Number(item.total) || 0);
@@ -867,7 +988,7 @@ export default function Home() {
     };
     fetchWeeklyDetailed();
     return () => { cancelled = true; };
-  }, [isSpecialGroup, filters, getChartFilterParams]);
+  }, [isSpecialGroup, filters, getChartFilterParams, filterByUnitIfNeeded]);
 
   // ============================================================
   // GRÁFICO: Produção Diária
@@ -886,7 +1007,7 @@ export default function Home() {
         }
         const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
 
-        const [leadsData, assinadosData] = await Promise.all([
+        const [leadsRaw, assinadosRaw] = await Promise.all([
           fetchLeadsRecebidosDaily({
             start, end,
             equipe: equipeApi,
@@ -897,11 +1018,14 @@ export default function Home() {
         ]);
         if (cancelled) return;
 
+        const leadsData = filterByUnitIfNeeded(leadsRaw || []);
+        const assinadosData = filterByUnitIfNeeded(assinadosRaw || []);
+
         const leadsMap = new Map<string, number>(), assinadosMap = new Map<string, number>();
         const process = (data: any[], map: Map<string, number>, useLeadsTotal = false) => {
           (data || []).forEach(item => {
             const dateStr = item.data || item.periodo; if (!dateStr) return;
-            const date = parseUTCDate(dateStr); if (isNaN(date.getTime())) return;
+            const date = parseUTCDate(String(dateStr)); if (isNaN(date.getTime())) return;
             const formatted = date.toLocaleDateString('pt-BR', { timeZone: 'UTC' });
             const value = useLeadsTotal ? extractLeadsTotal(item) : (Number(item.total) || 0);
             map.set(formatted, (map.get(formatted) || 0) + value);
@@ -935,7 +1059,7 @@ export default function Home() {
     };
     fetchDailyData();
     return () => { cancelled = true; };
-  }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams]);
+  }, [currentStartDate, currentEndDate, period, filters, isSpecialGroup, getChartFilterParams, filterByUnitIfNeeded]);
 
   // ============================================================
   // STATS DA SEMANA
@@ -965,39 +1089,14 @@ export default function Home() {
 
   const displayCurrency = (val: number) => hideValues ? "R$ ****" : formatCurrency(val);
 
-  // ============================================================
-  // [AJUSTADO] META DO CARD "Estimativa do Mês"
-  // ------------------------------------------------------------
-  //  Mesmo sendo um card `simple` (não exibe barra), o target
-  //  é mantido correto para caso alguém o torne não-simples no
-  //  futuro. Para supervisor, usa a maior faixa do tipo correto
-  //  (SUPERVISOR ou SUPERVISOR SR).
-  // ============================================================
   const comissaoTarget = useMemo(() => {
-    if (!tabelaComissoes || tabelaComissoes.length === 0) return 5000;
-
-    if (supervisorInView) {
-      const isSR =
-        Boolean((supervisorInView as any).isSupervisorSR) ||
-        calculator.isSupervisorSR((supervisorInView as any).email);
-      const tipo = isSR ? 'SUPERVISOR SR' : 'SUPERVISOR';
-      const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
-      if (faixas.length === 0) return 5000;
-      return faixas.reduce(
-        (max, f) => (f.valor_comissao > max.valor_comissao ? f : max),
-        faixas[0],
-      ).valor_comissao || 5000;
-    }
-
-    if (!currentUserData) return 5000;
-    const tipo = 'GOL';
+    if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) return 5000;
+    const tipo = (currentUserData.cargo || '').toLowerCase() === 'supervisor' ? 'SUPERVISOR' : 'GOL';
     const faixas = tabelaComissoes.filter(f => f.tipo === tipo);
     if (faixas.length === 0) return 5000;
-    return faixas.reduce(
-      (max, f) => (f.valor_comissao > max.valor_comissao ? f : max),
-      faixas[0],
-    ).valor_comissao || 5000;
-  }, [supervisorInView, tabelaComissoes, currentUserData]);
+    const maxFaixa = faixas.reduce((max, f) => f.valor_comissao > max.valor_comissao ? f : max, faixas[0]);
+    return maxFaixa.valor_comissao || 5000;
+  }, [currentUserData, tabelaComissoes]);
 
   // ============================================================
   // KPI CARDS
@@ -1048,6 +1147,15 @@ export default function Home() {
                   <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
                 )}
                 {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
+              </span>
+            </div>
+          )}
+
+          {isCoordenadorUser && userUnidadeId != null && (
+            <div className="mb-4 px-4 py-2 bg-[#f5f3ff] rounded-lg text-xs text-[#8B5CF6] flex items-center gap-2 flex-wrap">
+              <span>🔒</span>
+              <span>
+                Visão da sua unidade (<b>unidade {userUnidadeId}</b>) — {scopedCollaborators.length} colaboradores em {equipesDaUnidade ? equipesDaUnidade.size : 0} equipes.
               </span>
             </div>
           )}
@@ -1189,7 +1297,11 @@ export default function Home() {
                     <>
                       <div className="rounded-xl p-4 text-center mb-4" style={{ background: "linear-gradient(135deg, #2F6FED, #1e40af)" }}>
                         <div className="text-5xl font-black text-[#16A34A] leading-none">#{userRank}</div>
-                        <div className="text-white/70 text-xs mt-1">Sua posição entre {totalRanking} consultores</div>
+                        <div className="text-white/70 text-xs mt-1">
+                          {userLevel === LEVELS.ASSESSOR
+                            ? "Ranking individual"
+                            : `Sua posição entre ${totalRanking} consultores`}
+                        </div>
                       </div>
                       <div className="space-y-2 mb-4">
                         <div className="flex items-center justify-between text-xs"><span className="text-[#64748b]">Posição acima</span><span className="font-semibold text-[#0f172a]">{aboveUser?.name || "—"}</span></div>
@@ -1199,7 +1311,9 @@ export default function Home() {
                     </>
                   )}
                   <div className="border-t border-[#e2e8f0] pt-3">
-                    <p className="text-xs text-[#64748b] mb-2">{userRank > 0 ? "🏆 Top 3 do mês" : "🏆 Você não está no ranking. Conheça os líderes:"}</p>
+                    <p className="text-xs text-[#64748b] mb-2">
+                      {userRank > 0 ? `🏆 ${rankingScopeLabel}` : "🏆 Você não está no ranking. Conheça os líderes:"}
+                    </p>
                     <div className="space-y-2">
                       {globalRanking.slice(0, 3).map((item, idx) => {
                         const medals = ["🥇","🥈","🥉"];
