@@ -51,12 +51,13 @@ const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3007/api";
 
 // ========== CONSTANTES DE EXCLUSÃO ==========
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial',
-  'Equipe Elizandra', 'Equipe Gabriela Toledo','Equipe Lucilene','Backoffice','Equipe Curitiba','Equipe Treinamento'
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
+  'Equipe Lucas Magno','Equipe SP01'
 ];
+
 const EXCLUDED_CARGOS = [
   "desativado", "assistente", "analista juridico", "gestor de projetos", "analista",
   "analista de discadora", "supervisor", "coordenador", "salesops", "ceo",

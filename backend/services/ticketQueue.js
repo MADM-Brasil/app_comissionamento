@@ -620,7 +620,7 @@ async function handleTicket(ticket, client) {
       ...observacaoAtual,
       hubspot: { ...hubspotData, erro: true, status: 'erro', mensagem: error.message },
       motivoOriginal: ticket.motivo_solicitacao || '',
-      observacao: `Erro: ${error.message}`,
+      observacao: `Erro: ${error.message}`, 
       processado: true,
       produto: observacaoAtual.produto || produto || null,
     });
