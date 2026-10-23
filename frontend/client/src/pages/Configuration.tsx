@@ -22,10 +22,11 @@ import { cn } from "@/lib/utils";
 import { calculator } from "@/lib/calculator";
 
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
+  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','', 'Equipe Elizandra'
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
+  'Equipe Lucas Magno','Equipe SP01'
 ];
 
 const isExcludedTeam = (teamName: string) => EXCLUDED_TEAMS.includes(teamName);

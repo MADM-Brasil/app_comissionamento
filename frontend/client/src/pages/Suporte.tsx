@@ -255,11 +255,11 @@ const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
 ];
 
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial', 'Equipe Gabriela Toledo',
-  'Equipe Lucilene','Equipe Elizandra'
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
+  'Equipe Lucas Magno','Equipe SP01'
 ];
 
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];

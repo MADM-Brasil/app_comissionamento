@@ -36,6 +36,7 @@ async function fetchLeadsRecebidosDaily(params: {
   end?: string | null;
   equipe?: string | null;
   colaborador?: string | null;
+  colaboradorId?: string | number; // NEW — alinha com os outros endpoints
   produto?: string | null;
 }): Promise<Array<{ colaborador: string; equipe: string; periodo: string; total: number }>> {
   const startVal = typeof params.start === 'string' ? params.start : '';
@@ -56,6 +57,12 @@ async function fetchLeadsRecebidosDaily(params: {
   const colaboradorVal = typeof params.colaborador === 'string' ? params.colaborador.trim() : '';
   if (colaboradorVal && colaboradorVal !== 'todos') searchParams.set('colaborador', colaboradorVal);
 
+  // NEW — envia colaboradorId (mesmo padrão dos endpoints de emitidos/assinados/ganhos/protocolados)
+  const colaboradorIdVal = params.colaboradorId;
+  if (colaboradorIdVal != null && String(colaboradorIdVal).trim() !== '') {
+    searchParams.set('colaboradorId', String(colaboradorIdVal));
+  }
+
   const produtoVal = typeof params.produto === 'string' ? params.produto.trim() : '';
   if (produtoVal && produtoVal !== 'Todos') searchParams.set('produto', produtoVal);
 
@@ -74,11 +81,11 @@ async function fetchLeadsRecebidosDaily(params: {
 // CONSTANTES DE EXCLUSÃO
 // ============================================================
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing',
-   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
+  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops', 'Departamento Comercial',
-  'Equipe Gabriela Toledo','Equipe Treinamento', 'Equipe lucilene', 'Equipe Elizandra'
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
+  'Equipe Lucas Magno','Equipe SP01'
 ];
 
 const EXCLUDED_CARGOS_FOR_DISPLAY = [
@@ -445,20 +452,43 @@ export default function Home() {
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
 
   // ============================================================
-  // FILTRO AUXILIAR DE UNIDADE
+  // FILTRO AUXILIAR DE UNIDADE — normalizado + fallback por colaborador
   // ============================================================
   const filterByUnitIfNeeded = useCallback((rows: any[]): any[] => {
     const unitSet = equipesDaUnidade as Set<string> | null;
     if (!unitSet) return rows;
+    if (unitSet.size === 0) return [];
+
+    // Nomes de equipe da unidade (normalizados)
+    const unitTeamsNorm = new Set<string>();
+    unitSet.forEach((t) => {
+      if (typeof t === 'string' && t.trim()) unitTeamsNorm.add(normalize(t));
+    });
+
+    // Fallback: nomes dos colaboradores da unidade (normalizados)
+    const unitCollabNorm = new Set<string>();
+    scopedCollaborators.forEach((c) => {
+      if (typeof c?.name === 'string' && c.name.trim()) unitCollabNorm.add(normalize(c.name));
+    });
+
     return rows.filter((r: any) => {
       if (!r) return false;
-      const raw = r.equipe;
-      if (typeof raw !== 'string') return false;
-      const equipe = raw.trim();
-      if (equipe.length === 0) return false;
-      return unitSet.has(equipe);
+
+      // 1) Tenta casar pela equipe (aceita vários nomes de campo do backend)
+      const rawTeam = r.equipe ?? r.nome_equipe ?? r.equipeNome ?? r.team;
+      if (typeof rawTeam === 'string' && rawTeam.trim()) {
+        if (unitTeamsNorm.has(normalize(rawTeam))) return true;
+      }
+
+      // 2) Fallback: casa pelo colaborador — útil quando o backend agrega sem preencher `equipe`
+      const rawCol = r.colaborador ?? r.nome ?? r.nome_colaborador ?? r.colaboradorNome;
+      if (typeof rawCol === 'string' && rawCol.trim()) {
+        if (unitCollabNorm.has(normalize(rawCol))) return true;
+      }
+
+      return false;
     });
-  }, [equipesDaUnidade]);
+  }, [equipesDaUnidade, scopedCollaborators]);
 
   // ============================================================
   // ESCOPO DO RANKING POR NÍVEL DE ACESSO
@@ -605,6 +635,7 @@ export default function Home() {
           end: currentEndDate,
           equipe: equipeApi,
           colaborador: colaboradorApi,
+          colaboradorId: colaboradorIdApi, // NEW — alinha com os outros endpoints
           produto: produtoApi,
         }).catch((e) => { console.warn('[Home] reloadData leads falhou:', e?.message); return []; }),
         fetchLigacoesProdutivas({
@@ -929,7 +960,7 @@ export default function Home() {
   useEffect(() => {
     if (isSpecialGroup) return;
     let cancelled = false;
-    const { equipeApi, colaboradorApi } = getChartFilterParams();
+    const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
     const fetchWeeklyDetailed = async () => {
       try {
         const { start, end } = getCurrentWeekDatesUTC();
@@ -940,6 +971,7 @@ export default function Home() {
             start, end,
             equipe: equipeApi,
             colaborador: colaboradorApi,
+            colaboradorId: colaboradorIdApi, // NEW
             produto: produtoApi,
           }).catch((e) => { console.warn('[Home] weekly leads falhou:', e?.message); return []; }),
           fetchAssinados({ start, end, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' }).catch(() => []),
@@ -996,7 +1028,7 @@ export default function Home() {
   useEffect(() => {
     if (isSpecialGroup) return;
     let cancelled = false;
-    const { equipeApi, colaboradorApi } = getChartFilterParams();
+    const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
     const fetchDailyData = async () => {
       try {
         const range = getDailyChartDateRangeUTC(period, currentStartDate, currentEndDate);
@@ -1012,6 +1044,7 @@ export default function Home() {
             start, end,
             equipe: equipeApi,
             colaborador: colaboradorApi,
+            colaboradorId: colaboradorIdApi, // NEW
             produto: produtoApi,
           }).catch((e) => { console.warn('[Home] daily leads falhou:', e?.message); return []; }),
           fetchAssinados({ start, end, equipe: equipeApi, colaborador: colaboradorApi, produto: produtoApi, granularity: 'daily' }).catch(() => []),
@@ -1105,7 +1138,7 @@ export default function Home() {
     { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
     { label: "Leads Recebidos", value: totalLeads, target: 0, unit: "", icon: Users, color: "#3B82F6", simple: true },
     { label: "Ganhos", value: effectiveTotals.ganhos, target: totalTargetGanhos, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
-    { label: "Protocolados", value: totals.protocolados, target: 1200, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
+    { label: "Protocolados",value: effectiveTotals.ganhos, target: totalTargetGanhos, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
   ];
 
