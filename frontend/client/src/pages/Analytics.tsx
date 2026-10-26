@@ -40,15 +40,22 @@ const EXCLUDED_TEAMS = [
   'Equipe Lucas Magno','Equipe SP01'
 ];
 
+// [CORRIGIDO] Inclui os cargos que mapeiam para o nível JURIDICO
+// (Analista Jurídico / Analista). Antes havia apenas "Juridico",
+// que nunca casava com "analista juridico" via comparação exata.
 const EXCLUDED_GROUPS = [
   "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
-  "Diretoria", "Desativado", "Juridico", "Ultravita", "Diligencia",
+  "Diretoria", "Desativado",
+  "analista juridico", "analista",       // [NOVO] nível JURIDICO
+  "Ultravita", "Diligencia",
   "Marketing", "Gerência", "Contrato", "Dr. Felipe Marx", "Administrativo",
   "administrativo"
 ];
 
 // ========== EQUIPES RESERVADAS ==========
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane'];
+// [CORRIGIDO] Alinhado com access-control.js (RESERVED_DESTINATION_TEAMS)
+// e com Suporte.tsx / Equipe.tsx / Visao_geral.tsx / Funil.tsx.
+const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane', 'equipe leticia mathias'];
 
 function isExcludedTeam(teamName: string): boolean { return EXCLUDED_TEAMS.includes(teamName); }
 function isExcludedGroup(group: string): boolean {
@@ -551,7 +558,19 @@ export default function Analytics() {
     );
   }, [scopedCollaborators, equipe, colaborador, isSupervisorSelected, supervisorSelectedTeam]);
 
-  const baseCollaborators = useMemo(() => filteredCollaborators.filter(c => { const g = (c.grupo||'').trim().toLowerCase(); return g!=='supervisor' && g!=='coordenador' && g!=='administrativo' && g!=='desativado'; }), [filteredCollaborators]);
+  // [CORRIGIDO] Exclui "analista juridico" e "analista" (nível JURIDICO)
+  // do somatório de metas. Sem isso, esses cargos — que antes eram NONE
+  // e não conseguiam logar — passariam a contribuir com metas zeradas
+  // (ou eventualmente preenchidas) nos totais de um ADMIN/SUPER_ADMIN.
+  const baseCollaborators = useMemo(() => filteredCollaborators.filter(c => {
+    const g = (c.grupo || '').trim().toLowerCase();
+    return g !== 'supervisor'
+      && g !== 'coordenador'
+      && g !== 'administrativo'
+      && g !== 'desativado'
+      && g !== 'analista juridico'   // [NOVO] nível JURIDICO
+      && g !== 'analista';           // [NOVO] nível JURIDICO
+  }), [filteredCollaborators]);
 
   const { targetAssinados, targetGanhos, targetProtocolados } = useMemo(() => {
     if (equipe==="todas" && colaborador==="todos" && !isSupervisorSelected) {

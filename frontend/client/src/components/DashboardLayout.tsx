@@ -82,9 +82,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   //    • canSeeHomeComissoes → false
   //    • canAccessDashboard / canAccessComissoes → false
   //    • navItems sem Home/Comissões
-  //  — exatamente o sintoma observado para supervisores da
-  //  "Equipe Felipe" e também para usuários da Unidade 3 quando
-  //  o login não devolve unidade_id.
   // ============================================================
   const accessUser = useMemo(
     () => resolveAccessUser(currentUser, collaborators),
@@ -97,8 +94,13 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
   const userLevel = getAccessLevel();
   const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
 
+  // [NOVO] Nível JURIDICO (Analista Jurídico / Analista).
+  const isJuridicoUser = userLevel === LEVELS.JURIDICO;
+
   // Suporte é acessível por qualquer usuário >= SUPERVISAO
-  const canSeeSuporte = userLevel >= LEVELS.SUPERVISAO;
+  // OU pelo nível JURIDICO (que só pode ver essa página).
+  const canSeeSuporte =
+    userLevel >= LEVELS.SUPERVISAO || isJuridicoUser;
 
   // Assessor restrito (Unidade 3 OU equipe liberada) → apenas Home e Comissões.
   const isAssessorRestritoUser = useMemo(
@@ -237,6 +239,14 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     }
 
+    // [NOVO] JURIDICO: apenas "Suporte" no menu — defesa em profundidade,
+    // independente de eventuais configurações futuras de permissão.
+    if (isJuridicoUser) {
+      return items.filter(
+        (item) => "path" in item && item.path === "/suporte"
+      );
+    }
+
     // Assessor restrito (Unidade 3 ou equipe liberada) → apenas Home e Comissões.
     if (isAssessorRestritoUser) {
       return items.filter((item) => {
@@ -248,7 +258,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
 
     return items;
-  }, [permissions, canSeeSuporte, isAssessorRestritoUser]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser]);
 
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
@@ -277,13 +287,18 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (permissions.canAccessConfiguration)
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
 
+    // [NOVO] JURIDICO: apenas "Suporte" na navegação inferior.
+    if (isJuridicoUser) {
+      return flat.filter((item) => item.path === "/suporte");
+    }
+
     // Assessor restrito (Unidade 3 ou equipe liberada) → apenas Home e Comissões.
     if (isAssessorRestritoUser) {
       return flat.filter((item) => RESTRICTED_ASSESSOR_ALLOWED_PATHS.includes(item.path));
     }
 
     return flat.slice(0, 5);
-  }, [permissions, canSeeSuporte, isAssessorRestritoUser]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser]);
 
   // Efeitos
   useEffect(() => setManualCloseChild(false), [location]);
@@ -377,22 +392,37 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
           sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
-        {/* Logo */}
-        <div className="flex items-center gap-3 px-5 py-5 border-b border-[#e2e8f0]">
-          <img src={logoBranca} alt="MADM Brasil" className="w-10 h-10 object-contain" />
-          <div>
-            <div className="text-[#0f172a] font-bold text-sm leading-tight">MADM Brasil</div>
-            <div className="text-[#64748b] text-xs">Performance & Comissões</div>
+        {/* Logo — oculto para JURIDICO (mantém apenas o botão de fechar no mobile) */}
+        {!isJuridicoUser ? (
+          <div className="flex items-center gap-3 px-5 py-5 border-b border-[#e2e8f0]">
+            <img src={logoBranca} alt="MADM Brasil" className="w-10 h-10 object-contain" />
+            <div>
+              <div className="text-[#0f172a] font-bold text-sm leading-tight">MADM Brasil</div>
+              <div className="text-[#64748b] text-xs">Performance & Comissões</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              className="lg:hidden text-[#64748b] hover:text-[#0f172a] ml-auto"
+              aria-label="Fechar menu"
+            >
+              <X className="w-5 h-5" />
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => setSidebarOpen(false)}
-            className="lg:hidden text-[#64748b] hover:text-[#0f172a] ml-auto"
-            aria-label="Fechar menu"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+        ) : (
+          // JURIDICO: sem logo/título/subtítulo. Mantém apenas o botão de
+          // fechar (mobile) para não quebrar a UX do menu lateral.
+          <div className="flex items-center justify-end px-3 py-2 border-b border-[#e2e8f0] lg:hidden">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              className="text-[#64748b] hover:text-[#0f172a]"
+              aria-label="Fechar menu"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        )}
 
         {/* Perfil */}
         <div className="px-4 py-4 border-b border-[#e2e8f0]">

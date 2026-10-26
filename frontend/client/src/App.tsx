@@ -29,14 +29,16 @@ import {
   getUserPermissions,
   getDefaultLandingPage,
   isAssessorRestrito,
+  LEVELS,
   type Permissions,
 } from "@/lib/accessControl";
 
 /**
  * Redireciona usuário autenticado para a landing page correta
  * (definida em `getDefaultLandingPage`):
- * - Assessor/Supervisor/Coordenador da UNIDADE 3 → /home
- * - Supervisor fora da UNIDADE 3 → /suporte
+ * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → /home
+ * - JURIDICO → /suporte (aba Busca Cliente)
+ * - Supervisor fora da UNIDADE 3 / equipes liberadas → /suporte
  * - Demais → / (comportamento anterior)
  */
 function PublicRoute({ children }: { children: React.ReactNode }) {
@@ -61,6 +63,10 @@ function PublicRoute({ children }: { children: React.ReactNode }) {
  *   - assessores de outras unidades
  *   - administrativo e super admin
  * Todos esses continuam caindo em <Suporte /> como antes.
+ *
+ * ⚠️ JURIDICO nunca chega aqui — o guard `ProtectedRouteWithPermission`
+ * (permission="canAccessDashboard") já redireciona para "/suporte"
+ * antes deste componente ser avaliado.
  */
 function LandingRedirect() {
   const currentUser = useAppStore((s) => s.currentUser);
@@ -72,8 +78,15 @@ function LandingRedirect() {
 
 /**
  * Protege rota verificando autenticação E permissão específica.
- * Se o usuário não tem a permissão, mostra uma tela segura com link
- * para o Suporte (que é acessível por qualquer autenticado).
+ *
+ * Se o usuário não tem a permissão:
+ *   • JURIDICO  → redireciona automaticamente para "/suporte"
+ *                 (única rota que ele pode acessar).
+ *   • Demais    → mostra uma tela segura com link para o Suporte
+ *                 (que é acessível por qualquer autenticado).
+ *
+ * ⚠️ Não redirecionamos todos para "/": quem não tem Home também
+ *    não poderia ver "/", entrando em loop de redirecionamento.
  */
 function ProtectedRouteWithPermission({
   permission,
@@ -88,8 +101,14 @@ function ProtectedRouteWithPermission({
   if (!currentUser?.email) return <Redirect to="/login" />;
 
   if (!perms[permission]) {
-    // Não redireciona para "/" (evita loop: quem não tem Home também
-    // não poderia ver "/", que exige canAccessDashboard).
+    // [NOVO] JURIDICO: qualquer rota protegida leva a "/suporte".
+    // Evita que o Analista Jurídico veja "Acesso não autorizado"
+    // ao abrir a raiz da aplicação (ex.: refresh em "/" ou URL digitada).
+    if (perms.level === LEVELS.JURIDICO) {
+      return <Redirect to="/suporte" />;
+    }
+
+    // Demais: tela segura com link para o Suporte.
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-2">
         <p className="text-slate-500">Acesso não autorizado a esta página.</p>
@@ -137,6 +156,7 @@ function Router() {
           (unidade 3: assessor/supervisor/coordenador; ou nível >= ADMINISTRATIVO)
           A rota "/" decide:
             • assessor unidade 3 → /home
+            • JURIDICO            → /suporte (via guard)
             • todos os demais     → <Suporte /> (comportamento atual) */}
       <Route path="/">
         <PeriodProvider>
@@ -249,9 +269,11 @@ function Router() {
       </Route>
 
       {/* Suporte
-          - Landing de supervisores fora da unidade 3
+          - Landing de JURIDICO (aba Busca Cliente) e de supervisores
+            fora da unidade 3 / das equipes liberadas.
           - Acessível por qualquer autenticado; a própria página faz a
-            checagem de nível (>= SUPERVISAO) e redireciona se necessário. */}
+            checagem de nível (>= SUPERVISAO OU === JURIDICO) e
+            redireciona para "/" se necessário. */}
       <Route path="/suporte">
         <PeriodProvider>
           <ProtectedRoute>

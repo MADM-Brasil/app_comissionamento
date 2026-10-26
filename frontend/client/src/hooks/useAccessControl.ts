@@ -67,7 +67,7 @@ export function useAccessControl() {
     return restrictions;
   };
 
-  const filterTeamDataSafe = (teamMembers: any[]) => {
+  const filterTeamDataSafe = (teamMembers: any[]) => { 
     if (!currentUser) return [];
     return filterTeam(teamMembers, currentUser);
   };
