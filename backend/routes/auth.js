@@ -11,57 +11,26 @@ console.log('✅ [AUTH] Módulo de autenticação carregado');
 
 // ============================================================
 // AUTORIZAÇÃO DE CARGO — fonte única de verdade: access-control.js
-// ============================================================
-//
-// Histórico: o limite era `LEVELS.ASSESSOR` (nível 1 na escala antiga).
-// Com a introdução do nível JURIDICO (nível 1) e o deslocamento dos
-// demais em +1, o limite inferior passou a ser `LEVELS.JURIDICO`.
-//
-// Regra atual: qualquer cargo mapeado com nível >= JURIDICO (1) pode
-// autenticar. Isso inclui:
-//   • JURIDICO       (1) — Analista Jurídico, Analista
-//   • ASSESSOR       (2)
-//   • SUPERVISAO     (3)
-//   • COORDENADOR    (4)
-//   • ADMINISTRATIVO (5)
-//   • SUPER_ADMIN    (6)
-//
-// Continuam bloqueados:
-//   • NONE           (0) — desativado, gestor de projetos
-//   • cargos não mapeados (getCargoLevel retorna undefined)
-//   • qualquer usuário com status = "desativado"
+// Regra: nível >= JURIDICO (inclui Analista/Coordenador/Supervisor
+// Jurídico, Assessor, Supervisão, Coordenador, Admin, Super Admin).
 // ============================================================
 function cargoPermitido(cargo, status) {
   if (!cargo) return false;
-
-  if (status && accessControl.normalize(status) === 'desativado') {
-    return false;
-  }
-
+  if (status && accessControl.normalize(status) === 'desativado') return false;
   const level = accessControl.getCargoLevel(cargo);
   if (level === undefined) return false;
-
-  // ⚠️ Limite inferior atualizado de ASSESSOR → JURIDICO
   return level >= accessControl.LEVELS.JURIDICO;
 }
 
-// ============================================================
-// HELPER — salva sessão e devolve Promise
-// ============================================================
 function saveSession(req) {
   return new Promise((resolve, reject) => {
     req.session.save((err) => (err ? reject(err) : resolve()));
   });
 }
 
-// ============================================================
-// HELPER — monta o objeto `user` padronizado devolvido ao front.
-// Centraliza a lista de campos para não esquecer nenhum.
-// ============================================================
 function buildPublicUser(row) {
   const level = accessControl.getAccessLevel(row.cargo, row.status);
   const levelName = accessControl.getLevelName(level);
-
   return {
     id: row.id_assessor ?? row.id ?? null,
     name: row.nome,
@@ -73,28 +42,16 @@ function buildPublicUser(row) {
     cargo: row.cargo,
     status: row.status,
     periodo: row.periodo,
-    unidade_id: row.unidade_id != null ? Number(row.unidade_id) : null, // ✅
-    // JURIDICO devolve 'JURIDICO'; o front usa `getDefaultLandingPage` para
-    // redirecionar para "/suporte" (aba Busca Cliente).
+    unidade_id: row.unidade_id != null ? Number(row.unidade_id) : null,
     accessLevel: levelName,
   };
 }
 
-// ============================================================
-// ROTA DE TESTE
-// ============================================================
 router.get('/test', (req, res) => {
   console.log('🔍 Rota /auth/test foi chamada');
   res.json({ success: true, message: 'Rota auth/test funcionando' });
 });
 
-// ============================================================
-// /me — verifica sessão ativa
-//
-// Devolve o usuário da sessão. Como a sessão é populada no 2FA
-// com o objeto completo (incluindo unidade_id), este endpoint
-// reflete os dados corretos sem precisar de query extra.
-// ============================================================
 router.get('/me', (req, res) => {
   if (req.session.user) {
     return res.json({ success: true, user: req.session.user });
@@ -115,22 +72,22 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    // ✅ Inclui c.unidade_id no SELECT
     const result = await pool.query(
-      `SELECT 
-          a.id_assessor,
+      `SELECT
+          m.id_assessor,
           c.email,
           c.nome,
-          a.senha_colaborador_hash,
+          m.senha_colaborador_hash,
           c.nome_equipe,
           c.cargo,
           c.status,
           c.periodo,
           c.unidade_id
-       FROM app_comissionamento.view_app_metricas_assessores a
-       INNER JOIN core.view_app_colaboradores c 
-           ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))`,
+       FROM core.view_app_colaboradores c
+       INNER JOIN app_comissionamento.metricas_assessores m
+           ON LOWER(TRIM(m.email)) = LOWER(TRIM(c.email))
+       WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))
+       LIMIT 1`,
       [email]
     );
 
@@ -143,17 +100,20 @@ router.post('/login', async (req, res) => {
     if (!cargoPermitido(user.cargo, user.status)) {
       const level = accessControl.getCargoLevel(user.cargo);
       const levelName = accessControl.getLevelName(level ?? accessControl.LEVELS.NONE);
-      console.log(
-        `🚫 Login negado: cargo="${user.cargo}" status="${user.status}" ` +
-        `nível=${levelName}`
-      );
+      console.log(`🚫 Login negado: cargo="${user.cargo}" status="${user.status}" nível=${levelName}`);
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
 
-    console.log(
-      `👤 Usuário encontrado: ${user.nome}, cargo="${user.cargo}", ` +
-      `status=${user.status}, unidade_id=${user.unidade_id}`
-    );
+    // Se existe em metricas_assessores mas sem hash (raro):
+    // sinaliza primeiro acesso para o frontend.
+    if (!user.senha_colaborador_hash) {
+      console.log(`⚠️  Login: ${email} existe em metricas_assessores mas sem hash.`);
+      return res.status(409).json({
+        success: false,
+        error: 'Conta sem senha cadastrada. Use "Esqueci minha senha" para definir a senha inicial.',
+        code: 'FIRST_ACCESS',
+      });
+    }
 
     const match = await bcrypt.compare(password, user.senha_colaborador_hash);
     if (!match) {
@@ -161,7 +121,6 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Credenciais inválidas' });
     }
 
-    // Duração da sessão
     if (rememberMe) {
       req.session.cookie.maxAge = 30 * 24 * 60 * 60 * 1000;
       req.session.cookie.expires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -172,7 +131,6 @@ router.post('/login', async (req, res) => {
       console.log('🔑 Sessão padrão de 1 dia (rememberMe desativado)');
     }
 
-    // ✅ tempUser agora inclui unidade_id
     req.session.tempUser = {
       id_assessor: user.id_assessor,
       email: user.email,
@@ -192,7 +150,6 @@ router.post('/login', async (req, res) => {
     }
 
     await saveSession(req);
-
     console.log(`✅ Código 2FA enviado para ${email}`);
     return res.json({ success: true, requiresTwoFactor: true, tempToken: user.nome });
   } catch (err) {
@@ -203,12 +160,8 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// ============================================================
-// /verify-2fa — valida código e conclui autenticação
-// ============================================================
 router.post('/verify-2fa', async (req, res) => {
   const { tempToken, code } = req.body;
-
   const verification = twoFactorService.verifyCode(tempToken, code);
   if (!verification.success) {
     return res.status(401).json({ success: false, error: verification.error });
@@ -220,7 +173,7 @@ router.post('/verify-2fa', async (req, res) => {
   }
 
   if (!cargoPermitido(user.cargo, user.status)) {
-    console.log(`🚫 [2FA] autorização revogada para ${user.email} (cargo="${user.cargo}", status="${user.status}")`);
+    console.log(`🚫 [2FA] autorização revogada para ${user.email}`);
     return req.session.destroy(() =>
       res.status(401).json({ success: false, error: 'Acesso não autorizado' })
     );
@@ -232,42 +185,20 @@ router.post('/verify-2fa', async (req, res) => {
   delete req.session.tempUser;
 
   const accessToken = crypto.randomBytes(32).toString('hex');
-
   await saveSession(req);
 
-  console.log(
-    `✅ [2FA] usuário autenticado: ${user.email} ` +
-    `(cargo=${user.cargo}, unidade_id=${user.unidade_id ?? 'null'})`
-  );
-
-  // ✅ Resposta padronizada via buildPublicUser, incluindo unidade_id.
-  // Para JURIDICO, `user.accessLevel === 'JURIDICO'`; o front usa
-  // `getDefaultLandingPage(user)` para direcionar para "/suporte".
-  return res.json({
-    success: true,
-    accessToken,
-    user: buildPublicUser(user),
-  });
+  console.log(`✅ [2FA] usuário autenticado: ${user.email} (cargo=${user.cargo})`);
+  return res.json({ success: true, accessToken, user: buildPublicUser(user) });
 });
 
-// ============================================================
-// /resend-code — reenvia código 2FA
-// ============================================================
 router.post('/resend-code', async (req, res) => {
   const user = req.session.tempUser;
-  if (!user) {
-    return res.status(401).json({ success: false, error: 'Sessão inválida' });
-  }
+  if (!user) return res.status(401).json({ success: false, error: 'Sessão inválida' });
   const sendResult = await twoFactorService.resendCode(user.nome, user.email);
-  if (!sendResult.success) {
-    return res.status(500).json({ success: false, error: sendResult.error });
-  }
+  if (!sendResult.success) return res.status(500).json({ success: false, error: sendResult.error });
   res.json({ success: true });
 });
 
-// ============================================================
-// /logout — destrói a sessão
-// ============================================================
 router.post('/logout', (req, res) => {
   req.session.destroy((err) => {
     if (err) console.error('Erro ao destruir sessão:', err);
@@ -277,7 +208,14 @@ router.post('/logout', (req, res) => {
 });
 
 // ============================================================
-// /forgot-password — envia código de recuperação
+// /forgot-password — envia código (reset OU primeiro acesso)
+//
+// REGRA ATUAL:
+//   - Colaborador existe em view_app_colaboradores + cargo/status
+//     permitidos → SEMPRE envia o código.
+//   - Se NÃO tem hash em metricas_assessores → marca
+//     `resetFirstAccess = true`. O /reset-password criará a senha.
+//   - Se tem hash → fluxo tradicional de reset.
 // ============================================================
 router.post('/forgot-password', async (req, res) => {
   const { email } = req.body;
@@ -287,57 +225,83 @@ router.post('/forgot-password', async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT c.nome, a.email, c.cargo, c.status
-       FROM app_comissionamento.view_app_metricas_assessores a
-       INNER JOIN core.view_app_colaboradores c 
-           ON LOWER(TRIM(a.email)) = LOWER(TRIM(c.email))
-       WHERE LOWER(TRIM(a.email)) = LOWER(TRIM($1))`,
+      `SELECT
+          c.nome,
+          c.email,
+          c.cargo,
+          c.status,
+          m.id_assessor,
+          (m.senha_colaborador_hash IS NOT NULL) AS tem_senha
+       FROM core.view_app_colaboradores c
+       LEFT JOIN app_comissionamento.metricas_assessores m
+           ON LOWER(TRIM(m.email)) = LOWER(TRIM(c.email))
+       WHERE LOWER(TRIM(c.email)) = LOWER(TRIM($1))
+       LIMIT 1`,
       [email]
     );
 
     if (result.rows.length === 0) {
+      console.log(`[forgot-password] Colaborador não encontrado em view_app_colaboradores: ${email}`);
       return res.status(404).json({ success: false, error: 'E-mail não encontrado ou sem permissão.' });
     }
 
     const user = result.rows[0];
 
     if (!cargoPermitido(user.cargo, user.status)) {
+      const level = accessControl.getAccessLevel(user.cargo, user.status);
+      console.log(
+        `[forgot-password] Cargo bloqueado: email=${email} cargo="${user.cargo}" ` +
+        `status="${user.status}" nivel=${accessControl.getLevelName(level)}`
+      );
       return res.status(404).json({ success: false, error: 'E-mail não encontrado ou sem permissão.' });
     }
 
+    const isFirstAccess = !user.tem_senha;
     const userId = user.nome;
     const userEmail = user.email;
 
     const sendResult = await twoFactorService.sendPasswordResetCode(userEmail, userId);
     if (!sendResult.success) {
+      console.log(`[forgot-password] Falha ao enviar código: ${sendResult.error}`);
       return res.status(500).json({ success: false, error: sendResult.error });
     }
 
     req.session.resetEmail = email;
     req.session.resetName = userId;
+    // Guarda o contexto para o /reset-password decidir INSERT x UPDATE
+    // e revalidar cargo/status (defesa contra desativação entre etapas).
+    req.session.resetFirstAccess = isFirstAccess;
+    req.session.resetCargo = user.cargo;
+    req.session.resetStatus = user.status;
 
     await saveSession(req);
 
-    res.json({ success: true, message: 'Código de recuperação enviado para o e-mail.' });
+    console.log(
+      `[forgot-password] Código enviado para ${email} ` +
+      `(firstAccess=${isFirstAccess}, cargo="${user.cargo}")`
+    );
+
+    res.json({
+      success: true,
+      message: isFirstAccess
+        ? 'Enviamos um código de verificação. Ao confirmá-lo, você definirá sua senha de primeiro acesso.'
+        : 'Código de recuperação enviado para o e-mail.',
+      isFirstAccess,
+    });
   } catch (err) {
     console.error('Erro em forgot-password:', err);
     res.status(500).json({ success: false, error: 'Erro interno do servidor' });
   }
 });
 
-// ============================================================
-// /verify-reset-code — valida código e gera resetToken
-// ============================================================
 router.post('/verify-reset-code', async (req, res) => {
   const { email, code } = req.body;
-
   if (!email || !code) {
     return res.status(400).json({ success: false, error: 'E-mail e código são obrigatórios' });
   }
 
   const resetName = req.session.resetName;
   const storedEmail = req.session.resetEmail;
-
   if (!resetName || storedEmail !== email) {
     return res.status(400).json({ success: false, error: 'Sessão de recuperação inválida ou e-mail divergente.' });
   }
@@ -351,7 +315,11 @@ router.post('/verify-reset-code', async (req, res) => {
     req.session.resetToken = verification.resetToken;
     await saveSession(req);
 
-    res.json({ success: true, resetToken: verification.resetToken });
+    res.json({
+      success: true,
+      resetToken: verification.resetToken,
+      isFirstAccess: Boolean(req.session.resetFirstAccess),
+    });
   } catch (err) {
     console.error('Erro em verify-reset-code:', err);
     res.status(500).json({ success: false, error: 'Erro interno' });
@@ -359,13 +327,24 @@ router.post('/verify-reset-code', async (req, res) => {
 });
 
 // ============================================================
-// /reset-password — atualiza a senha
+// /reset-password — define a senha (UPDATE ou INSERT)
+//
+//   - Se já existe linha em metricas_assessores → UPDATE.
+//   - Se NÃO existe (primeiro acesso JURIDICO etc.) → INSERT
+//     usando id_assessor de view_app_colaboradores.
+//
+// Defesas:
+//   - Exige resetToken válido na sessão.
+//   - Revalida cargoPermitido usando o cargo/status capturado em
+//     /forgot-password (protege contra desativação no meio do fluxo).
 // ============================================================
 router.post('/reset-password', async (req, res) => {
   const { resetToken, newPassword } = req.body;
 
   const storedToken = req.session.resetToken;
   const email = req.session.resetEmail;
+  const resetCargo = req.session.resetCargo;
+  const resetStatus = req.session.resetStatus;
 
   if (!email || !storedToken || storedToken !== resetToken) {
     return res.status(401).json({ success: false, error: 'Token inválido ou sessão expirada' });
@@ -373,30 +352,56 @@ router.post('/reset-password', async (req, res) => {
   if (!newPassword || newPassword.length < 6) {
     return res.status(400).json({ success: false, error: 'A senha deve ter pelo menos 6 caracteres' });
   }
+  if (!cargoPermitido(resetCargo, resetStatus)) {
+    return res.status(403).json({ success: false, error: 'Cadastro não autorizado a definir senha.' });
+  }
 
   try {
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
+    // 1) Tenta UPDATE (fluxo tradicional de reset)
     const updateResult = await pool.query(
       `UPDATE app_comissionamento.metricas_assessores
-       SET senha_colaborador_hash = $1,
-           updated_at = NOW()
+       SET senha_colaborador_hash = $1, updated_at = NOW()
        WHERE LOWER(TRIM(email)) = LOWER(TRIM($2))
        RETURNING id_assessor`,
       [hashedPassword, email]
     );
 
     if (updateResult.rowCount === 0) {
-      return res.status(404).json({ success: false, error: 'Assessor não encontrado' });
+      // 2) Primeiro acesso — INSERT
+      const colab = await pool.query(
+        `SELECT id_assessor, nome FROM core.view_app_colaboradores
+         WHERE LOWER(TRIM(email)) = LOWER(TRIM($1)) LIMIT 1`,
+        [email]
+      );
+      if (colab.rowCount === 0) {
+        console.log(`[reset-password] Colaborador não encontrado em view_app_colaboradores: ${email}`);
+        return res.status(404).json({ success: false, error: 'Colaborador não encontrado.' });
+      }
+      const { id_assessor, nome } = colab.rows[0];
+
+      await pool.query(
+        `INSERT INTO app_comissionamento.metricas_assessores
+           (id_assessor, email, nome, senha_colaborador_hash, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())`,
+        [id_assessor, email, nome, hashedPassword]
+      );
+      console.log(`[reset-password] Primeiro acesso: senha criada para ${email} (id_assessor=${id_assessor}).`);
+    } else {
+      console.log(`[reset-password] Senha atualizada para ${email}.`);
     }
 
     delete req.session.resetToken;
     delete req.session.resetEmail;
     delete req.session.resetName;
+    delete req.session.resetFirstAccess;
+    delete req.session.resetCargo;
+    delete req.session.resetStatus;
 
     await saveSession(req);
 
-    res.json({ success: true, message: 'Senha redefinida com sucesso' });
+    res.json({ success: true, message: 'Senha definida com sucesso' });
   } catch (err) {
     console.error('Erro em reset-password:', err);
     res.status(500).json({ success: false, error: 'Erro ao atualizar senha' });
