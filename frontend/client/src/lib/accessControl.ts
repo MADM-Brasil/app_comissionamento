@@ -84,6 +84,7 @@ const CARGO_LEVELS: Record<string, Level> = {
   'analista juridico':       LEVELS.JURIDICO,
   'analista':                LEVELS.JURIDICO,
   'coordenador jurídico':    LEVELS.JURIDICO,
+  'supervisor juridico':     LEVELS.JURIDICO,
 
   // ── Nenhum acesso ─────────────────────────────────────────
   'desativado':              LEVELS.NONE,
