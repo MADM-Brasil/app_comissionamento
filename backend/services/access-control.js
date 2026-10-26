@@ -14,7 +14,7 @@ class AccessControl {
   constructor() {
     this.LEVELS = Object.freeze({
       NONE: 0,
-      JURIDICO: 1,        // [NOVO] acesso apenas à Busca Cliente do Suporte
+      JURIDICO: 1,
       ASSESSOR: 2,
       SUPERVISAO: 3,
       COORDENADOR: 4,
@@ -27,8 +27,8 @@ class AccessControl {
       // Acesso APENAS à página /suporte → aba "Busca Cliente".
       'analista juridico':       this.LEVELS.JURIDICO,
       'analista':                this.LEVELS.JURIDICO,
-      'coordenador jurídico':    this.LEVELS.JURIDICO,
-      'supervisor juridico':     this.LEVELS.JURIDICO,
+      'coordenador juridico':    this.LEVELS.JURIDICO,
+      'supervisor juridico':     this.LEVELS.JURIDICO, 
 
       // ── Nenhum acesso ─────────────────────────────────────────
       'desativado':              this.LEVELS.NONE,

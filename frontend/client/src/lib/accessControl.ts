@@ -83,8 +83,8 @@ const CARGO_LEVELS: Record<string, Level> = {
   // Acesso APENAS à página /suporte → aba "Busca Cliente".
   'analista juridico':       LEVELS.JURIDICO,
   'analista':                LEVELS.JURIDICO,
-  'coordenador jurídico':    LEVELS.JURIDICO,
-  'supervisor juridico':     LEVELS.JURIDICO,
+  'coordenador juridico':    LEVELS.JURIDICO,
+  'supervisor juridico':     LEVELS.JURIDICO, 
 
   // ── Nenhum acesso ─────────────────────────────────────────
   'desativado':              LEVELS.NONE,
