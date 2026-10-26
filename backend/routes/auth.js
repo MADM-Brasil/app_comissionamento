@@ -12,6 +12,25 @@ console.log('✅ [AUTH] Módulo de autenticação carregado');
 // ============================================================
 // AUTORIZAÇÃO DE CARGO — fonte única de verdade: access-control.js
 // ============================================================
+//
+// Histórico: o limite era `LEVELS.ASSESSOR` (nível 1 na escala antiga).
+// Com a introdução do nível JURIDICO (nível 1) e o deslocamento dos
+// demais em +1, o limite inferior passou a ser `LEVELS.JURIDICO`.
+//
+// Regra atual: qualquer cargo mapeado com nível >= JURIDICO (1) pode
+// autenticar. Isso inclui:
+//   • JURIDICO       (1) — Analista Jurídico, Analista
+//   • ASSESSOR       (2)
+//   • SUPERVISAO     (3)
+//   • COORDENADOR    (4)
+//   • ADMINISTRATIVO (5)
+//   • SUPER_ADMIN    (6)
+//
+// Continuam bloqueados:
+//   • NONE           (0) — desativado, gestor de projetos
+//   • cargos não mapeados (getCargoLevel retorna undefined)
+//   • qualquer usuário com status = "desativado"
+// ============================================================
 function cargoPermitido(cargo, status) {
   if (!cargo) return false;
 
@@ -21,7 +40,9 @@ function cargoPermitido(cargo, status) {
 
   const level = accessControl.getCargoLevel(cargo);
   if (level === undefined) return false;
-  return level >= accessControl.LEVELS.ASSESSOR;
+
+  // ⚠️ Limite inferior atualizado de ASSESSOR → JURIDICO
+  return level >= accessControl.LEVELS.JURIDICO;
 }
 
 // ============================================================
@@ -53,6 +74,8 @@ function buildPublicUser(row) {
     status: row.status,
     periodo: row.periodo,
     unidade_id: row.unidade_id != null ? Number(row.unidade_id) : null, // ✅
+    // JURIDICO devolve 'JURIDICO'; o front usa `getDefaultLandingPage` para
+    // redirecionar para "/suporte" (aba Busca Cliente).
     accessLevel: levelName,
   };
 }
@@ -217,7 +240,9 @@ router.post('/verify-2fa', async (req, res) => {
     `(cargo=${user.cargo}, unidade_id=${user.unidade_id ?? 'null'})`
   );
 
-  // ✅ Resposta padronizada via buildPublicUser, incluindo unidade_id
+  // ✅ Resposta padronizada via buildPublicUser, incluindo unidade_id.
+  // Para JURIDICO, `user.accessLevel === 'JURIDICO'`; o front usa
+  // `getDefaultLandingPage(user)` para direcionar para "/suporte".
   return res.json({
     success: true,
     accessToken,

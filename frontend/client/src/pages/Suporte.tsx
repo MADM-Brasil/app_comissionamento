@@ -357,27 +357,51 @@ function getCsrfHeaders() {
 }
 
 export default function Suporte() {
-  const [activeTab, setActiveTab] = useState<"movimentacao" | "busca" | "reportar" | "salesops">("reportar");
   const { currentUser: accessUser } = useAccessControl();
   const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
-  const canAccessPage = accessLevel >= LEVELS.SUPERVISAO;
+
+  // [NOVO] Nível JURIDICO: acesso exclusivo à aba Busca Cliente.
+  const isJuridico = accessLevel === LEVELS.JURIDICO;
+
+  // [NOVO] JURIDICO inicia direto em "busca"; demais começam em "reportar".
+  const [activeTab, setActiveTab] = useState<"movimentacao" | "busca" | "reportar" | "salesops">(
+    isJuridico ? "busca" : "reportar"
+  );
+
+  // [NOVO] Liberação da página para JURIDICO.
+  const canAccessPage = accessLevel >= LEVELS.SUPERVISAO || isJuridico;
 
   const isAdmin = useMemo(() => {
     return accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
   }, [accessLevel]);
 
+  // [NOVO] Se o nível de acesso mudar (ex.: hidratação tardia do usuário)
+  // e virar JURIDICO, força a aba para "busca".
+  useEffect(() => {
+    if (isJuridico && activeTab !== "busca") {
+      setActiveTab("busca");
+    }
+  }, [isJuridico, activeTab]);
+
   if (!canAccessPage) return <Redirect to="/" />;
+
+  // [NOVO] Tabs visíveis — JURIDICO só vê "Busca Cliente".
+  const tabs = [
+    { id: "reportar", label: "Reportar", icon: Search },
+    { id: "movimentacao", label: "Movimentar", icon: ClipboardList },
+    { id: "busca", label: "Busca Cliente", icon: Users },
+    ...(isAdmin ? [{ id: "salesops", label: "Visão SalesOps", icon: ChartNoAxesCombined }] : []),
+  ] as const;
+
+  const visibleTabs = isJuridico
+    ? tabs.filter(t => t.id === "busca")
+    : tabs;
 
   return (
     <DashboardLayout title="Suporte Operacional" subtitle="Movimentação de leads e reporte de problemas">
       <div className="mb-6 border-b border-[#e2e8f0]">
         <div className="flex gap-2">
-          {[
-            { id: "reportar", label: "Reportar", icon: Search },
-            { id: "movimentacao", label: "Movimentar", icon: ClipboardList },
-            { id: "busca", label: "Busca Cliente", icon: Users },
-            ...(isAdmin ? [{ id: "salesops", label: "Visão SalesOps", icon: ChartNoAxesCombined }] : []),
-          ].map(tab => (
+          {visibleTabs.map(tab => (
             <button
               key={tab.id}
               type="button"
@@ -395,10 +419,11 @@ export default function Suporte() {
           ))}
         </div>
       </div>
-      {activeTab === "movimentacao" && <MovimentacaoTab />}
+      {/* [NOVO] Guards defensivos — JURIDICO não renderiza nada além de Busca Cliente. */}
+      {activeTab === "movimentacao" && !isJuridico && <MovimentacaoTab />}
       {activeTab === "busca" && <BuscaClienteTab />}
-      {activeTab === "reportar" && <ReportarTab />}
-      {activeTab === "salesops" && isAdmin && <SalesOpsTab />}
+      {activeTab === "reportar" && !isJuridico && <ReportarTab />}
+      {activeTab === "salesops" && isAdmin && !isJuridico && <SalesOpsTab />}
     </DashboardLayout>
   );
 }
@@ -1234,6 +1259,12 @@ interface BuscaClienteResultado {
 }
 
 function BuscaClienteTab() {
+  // [NOVO] Identifica o nível do solicitante — JURIDICO ignora a
+  // restrição por equipe e exibe o resultado integral.
+  const { currentUser: accessUser } = useAccessControl();
+  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  const isJuridico = accessLevel === LEVELS.JURIDICO;
+
   const [telefone, setTelefone] = useState("");
   const [cpf, setCpf] = useState("");
   const [email, setEmail] = useState("");
@@ -1306,6 +1337,11 @@ function BuscaClienteTab() {
     }
   };
 
+  // [NOVO] JURIDICO: ignora a sinalização `restrito` do backend e
+  // exibe o resultado completo. Demais níveis continuam bloqueados
+  // quando o cliente está em outra equipe.
+  const showRestritoBlock = !!resultado?.restrito && !isJuridico;
+
   return (
     <div className="space-y-6 animate-fade-in-up">
       <div className="card p-5">
@@ -1373,7 +1409,7 @@ function BuscaClienteTab() {
         <div className="card p-5">
           {!resultado?.found ? (
             <div className="text-center py-8 text-[#64748b]">Nenhum cliente encontrado com esses dados.</div>
-          ) : resultado.restrito ? (
+          ) : showRestritoBlock ? (
             <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-700 flex items-center gap-2" role="status">
               <AlertTriangle className="w-4 h-4 flex-shrink-0" />
               {resultado.motivo || `Cliente se encontra na equipe ${resultado.equipeCliente}. Fale com seu coordenador para obter mais informações do card.`}
@@ -1409,11 +1445,21 @@ function BuscaClienteTab() {
             </div>
           ) : (
             <div className="space-y-4">
-              {resultado.divergente && resultado.motivo && (
+              {/* [NOVO] JURIDICO: nota informativa quando o cliente
+                  pertence a outra equipe. Os dados completos abaixo
+                  continuam sendo exibidos normalmente. */}
+              {isJuridico && resultado.restrito && resultado.motivo && (
+                <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800" role="note">
+                  <strong>Acesso jurídico:</strong> {resultado.motivo} — exibindo dados completos conforme nível de acesso.
+                </div>
+              )}
+
+              {resultado.divergente && resultado.motivo && !resultado.restrito && (
                 <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
                   {resultado.motivo}
                 </div>
               )}
+
               <div>
                 <div className="text-xs text-[#94a3b8] mb-0.5">Nome</div>
                 <div className="text-lg font-semibold text-[#0f172a]">{resultado.contato?.nome || "—"}</div>

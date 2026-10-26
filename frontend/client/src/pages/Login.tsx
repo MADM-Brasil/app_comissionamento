@@ -285,7 +285,7 @@ export default function Login() {
                     className="text-xs text-[#09175b] hover:underline flex items-center gap-1"
                   >
                     <RefreshCw className={cn("w-3 h-3", isLoading && "animate-spin")} />
-                    Reenviar código
+                    Reenviar código 
                   </button>
                 </div>
               </form>

@@ -4,11 +4,12 @@
 
 export const LEVELS = {
   NONE: 0,
-  ASSESSOR: 1,
-  SUPERVISAO: 2,
-  COORDENADOR: 3,
-  ADMINISTRATIVO: 4,
-  SUPER_ADMIN: 5,
+  JURIDICO: 1,        // [NOVO] acesso apenas à Busca Cliente do Suporte
+  ASSESSOR: 2,
+  SUPERVISAO: 3,
+  COORDENADOR: 4,
+  ADMINISTRATIVO: 5,
+  SUPER_ADMIN: 6,
 } as const;
 
 type Level = typeof LEVELS[keyof typeof LEVELS];
@@ -37,6 +38,13 @@ export interface Permissions {
   filterLocked: boolean;
   lockedTeam: boolean;
   lockedCollaborator: boolean;
+
+  // [NOVO] flags de Suporte
+  canAccessSuporte: boolean;
+  canAccessSuporteBuscaCliente: boolean;
+  canAccessSuporteMovimentar: boolean;
+  canAccessSuporteReportar: boolean;
+  canAccessSuporteSalesOps: boolean;
 }
 
 interface FullPermissions extends Permissions {
@@ -71,25 +79,29 @@ interface UIConfig extends FullPermissions {
 // Mantenha IDÊNTICO ao backend/services/access-control.js.
 // ─────────────────────────────────────────────────────────────
 const CARGO_LEVELS: Record<string, Level> = {
-  // Nenhum acesso
-  'desativado':              LEVELS.NONE,
-  'analista juridico':       LEVELS.NONE,
-  'gestor de projetos':      LEVELS.NONE,
-  'analista':                LEVELS.NONE,
+  // ── Jurídico ──────────────────────────────────────────────
+  // Acesso APENAS à página /suporte → aba "Busca Cliente".
+  'analista juridico':       LEVELS.JURIDICO,
+  'analista':                LEVELS.JURIDICO,
+  'coordenador jurídico':    LEVELS.JURIDICO,
 
-  // Assessor
+  // ── Nenhum acesso ─────────────────────────────────────────
+  'desativado':              LEVELS.NONE,
+  'gestor de projetos':      LEVELS.NONE,
+
+  // ── Assessor ──────────────────────────────────────────────
   'assessor':                LEVELS.ASSESSOR,
   'analista de pastas':      LEVELS.ASSESSOR,
 
-  // Supervisão
+  // ── Supervisão ────────────────────────────────────────────
   'supervisor':              LEVELS.SUPERVISAO,
   'Supervisor':              LEVELS.SUPERVISAO,
   'assistente':              LEVELS.SUPERVISAO,
 
-  // Coordenador
+  // ── Coordenador ───────────────────────────────────────────
   'coordenador':             LEVELS.COORDENADOR,
 
-  // Administrativo
+  // ── Administrativo ────────────────────────────────────────
   'salesops':                LEVELS.ADMINISTRATIVO,
   'analista de crm':         LEVELS.ADMINISTRATIVO,
   'analista de dados':       LEVELS.ADMINISTRATIVO,
@@ -99,7 +111,7 @@ const CARGO_LEVELS: Record<string, Level> = {
   'administrativo':          LEVELS.ADMINISTRATIVO,
   'administrador':           LEVELS.ADMINISTRATIVO,
 
-  // Super Admin
+  // ── Super Admin ───────────────────────────────────────────
   'desenvolvedor':           LEVELS.SUPER_ADMIN,
   'diretora':                LEVELS.SUPER_ADMIN,
   'ceo':                     LEVELS.SUPER_ADMIN,
@@ -142,21 +154,58 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
     canExportData: false, filterLocked: true, lockedTeam: true, lockedCollaborator: true,
     description: 'Sem acesso',
+
+    canAccessSuporte: false,
+    canAccessSuporteBuscaCliente: false,
+    canAccessSuporteMovimentar: false,
+    canAccessSuporteReportar: false,
+    canAccessSuporteSalesOps: false,
   },
+
+  // ── [NOVO] JURIDICO ────────────────────────────────────────
+  // Acesso somente à Busca Cliente dentro de /suporte.
+  [LEVELS.JURIDICO]: {
+    canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+    canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+    canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+    canExportData: false, filterLocked: true, lockedTeam: true, lockedCollaborator: true,
+    description: 'Acesso somente à Busca Cliente do Suporte',
+
+    canAccessSuporte: true,
+    canAccessSuporteBuscaCliente: true,
+    canAccessSuporteMovimentar: false,
+    canAccessSuporteReportar: false,
+    canAccessSuporteSalesOps: false,
+  },
+
   [LEVELS.ASSESSOR]: {
     canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
     canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
     canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
     canExportData: false, filterLocked: true, lockedTeam: true, lockedCollaborator: true,
     description: 'Visualiza seus próprios dados',
+
+    canAccessSuporte: false,
+    canAccessSuporteBuscaCliente: false,
+    canAccessSuporteMovimentar: false,
+    canAccessSuporteReportar: false,
+    canAccessSuporteSalesOps: false,
   },
+
   [LEVELS.SUPERVISAO]: {
     canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
     canAccessReports: false, canAccessConfiguration: false, canViewTeam: true,
     canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
     canExportData: false, filterLocked: true, lockedTeam: true, lockedCollaborator: false,
     description: 'Visualiza dados da equipe; vê configurações sem editar',
+
+    canAccessSuporte: true,
+    canAccessSuporteBuscaCliente: true,
+    canAccessSuporteMovimentar: true,
+    canAccessSuporteReportar: true,
+    canAccessSuporteSalesOps: false,
   },
+
   [LEVELS.COORDENADOR]: {
     // Base "otimista": o acesso efetivo é restrito a coordenadores da
     // UNIDADE 3 (ou equipes liberadas) via canSeeHomeComissoes.
@@ -165,20 +214,40 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
     canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
     canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
     description: 'Ajusta metas, não altera bônus, filtro livre',
+
+    canAccessSuporte: true,
+    canAccessSuporteBuscaCliente: true,
+    canAccessSuporteMovimentar: true,
+    canAccessSuporteReportar: true,
+    canAccessSuporteSalesOps: false,
   },
+
   [LEVELS.ADMINISTRATIVO]: {
     canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
     canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
     canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
     canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
     description: 'Acesso total',
+
+    canAccessSuporte: true,
+    canAccessSuporteBuscaCliente: true,
+    canAccessSuporteMovimentar: true,
+    canAccessSuporteReportar: true,
+    canAccessSuporteSalesOps: true,
   },
+
   [LEVELS.SUPER_ADMIN]: {
     canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
     canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
     canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
     canExportData: true, filterLocked: false, lockedTeam: false, lockedCollaborator: false,
     description: 'Acesso total',
+
+    canAccessSuporte: true,
+    canAccessSuporteBuscaCliente: true,
+    canAccessSuporteMovimentar: true,
+    canAccessSuporteReportar: true,
+    canAccessSuporteSalesOps: true,
   },
 };
 
@@ -298,6 +367,7 @@ export function canSeeHomeComissoes(user?: User | null): boolean {
 /**
  * Rota inicial recomendada após o login:
  * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → "/home"
+ * - JURIDICO → "/suporte"  (abre já na aba Busca Cliente)
  * - Supervisor fora da UNIDADE 3 / fora das equipes liberadas → "/suporte"
  * - Demais → "/"
  */
@@ -305,6 +375,8 @@ export function getDefaultLandingPage(user?: User | null): string {
   if (!user) return "/login";
   if (isUnit3HomeComissoesUser(user)) return "/home";
   const level = getAccessLevel(user.cargo, user.status);
+  // [NOVO] JURIDICO vai direto para a página de Suporte
+  if (level === LEVELS.JURIDICO)   return "/suporte";
   if (level === LEVELS.SUPERVISAO) return "/suporte";
   return "/";
 }
@@ -372,6 +444,12 @@ export function getAccessLevel(
   return LEVELS.NONE;
 }
 
+// [NOVO] helper de conveniência
+export function isJuridico(user?: User | null): boolean {
+  if (!user) return false;
+  return getAccessLevel(user.cargo, user.status) === LEVELS.JURIDICO;
+}
+
 export function hasPermission(
   user: User | null | undefined,
   permission: keyof Permissions
@@ -414,12 +492,20 @@ export function getUserPermissions(user?: User | null) {
     lockedTeam: perms.lockedTeam,
     lockedCollaborator: perms.lockedCollaborator,
     description: perms.description,
+
+    // [NOVO] Suporte
+    canAccessSuporte: perms.canAccessSuporte,
+    canAccessSuporteBuscaCliente: perms.canAccessSuporteBuscaCliente,
+    canAccessSuporteMovimentar: perms.canAccessSuporteMovimentar,
+    canAccessSuporteReportar: perms.canAccessSuporteReportar,
+    canAccessSuporteSalesOps: perms.canAccessSuporteSalesOps,
   };
 }
 
 function getLevelName(level: Level): string {
   const names: Record<Level, string> = {
     [LEVELS.NONE]: 'SEM ACESSO',
+    [LEVELS.JURIDICO]: 'JURIDICO',            // [NOVO]
     [LEVELS.ASSESSOR]: 'ASSESSOR',
     [LEVELS.SUPERVISAO]: 'SUPERVISAO',
     [LEVELS.COORDENADOR]: 'COORDENADOR',
@@ -478,6 +564,14 @@ export function getUIConfig(currentUser?: User | null): UIConfig {
     lockedTeam: perms.lockedTeam,
     lockedCollaborator: perms.lockedCollaborator,
     description: perms.description,
+
+    // [NOVO] Suporte
+    canAccessSuporte: perms.canAccessSuporte,
+    canAccessSuporteBuscaCliente: perms.canAccessSuporteBuscaCliente,
+    canAccessSuporteMovimentar: perms.canAccessSuporteMovimentar,
+    canAccessSuporteReportar: perms.canAccessSuporteReportar,
+    canAccessSuporteSalesOps: perms.canAccessSuporteSalesOps,
+
     level: perms.level,
     levelName: perms.levelName,
     cargo: perms.cargo,
@@ -493,20 +587,32 @@ export function getUIConfig(currentUser?: User | null): UIConfig {
 }
 
 function getMenuItems(permissions: {
+  level: Level;
   canAccessDashboard: boolean;
   canAccessComissoes: boolean;
   canAccessRanking: boolean;
   canViewTeam: boolean;
   canAccessReports: boolean;
   canAccessConfiguration: boolean;
+  canAccessSuporte: boolean;
 }): MenuItem[] {
   const items: MenuItem[] = [];
+
+  // [NOVO] JURIDICO → menu exclusivo de Suporte
+  if (permissions.level === LEVELS.JURIDICO) {
+    if (permissions.canAccessSuporte) {
+      items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
+    }
+    return items;
+  }
+
   if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });
   if (permissions.canAccessComissoes) items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
   if (permissions.canViewTeam || permissions.canAccessReports) {
     items.push({ id: 'dashboard-group', label: 'Dashboard', link: '' });
   }
   if (permissions.canAccessRanking) items.push({ id: 'ranking', label: 'Ranking', link: '/ranking' });
+  if (permissions.canAccessSuporte) items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
   if (permissions.canAccessConfiguration) items.push({ id: 'configuration', label: 'Configurações', link: '/configuration' });
   return items;
 }
@@ -545,4 +651,7 @@ export const accessControl = {
   canAccessPathForRestrictedAssessor,
   RESTRICTED_ASSESSOR_UNITS,
   RESTRICTED_ASSESSOR_ALLOWED_PATHS,
+
+  // [NOVO] JURIDICO
+  isJuridico,
 };

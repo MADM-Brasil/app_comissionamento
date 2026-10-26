@@ -14,33 +14,38 @@ class AccessControl {
   constructor() {
     this.LEVELS = Object.freeze({
       NONE: 0,
-      ASSESSOR: 1,
-      SUPERVISAO: 2,
-      COORDENADOR: 3,
-      ADMINISTRATIVO: 4,
-      SUPER_ADMIN: 5,
+      JURIDICO: 1,        // [NOVO] acesso apenas à Busca Cliente do Suporte
+      ASSESSOR: 2,
+      SUPERVISAO: 3,
+      COORDENADOR: 4,
+      ADMINISTRATIVO: 5,
+      SUPER_ADMIN: 6,
     });
 
     this.CARGO_LEVELS = {
-      // Nenhum acesso
-      'desativado':              this.LEVELS.NONE,
-      'analista juridico':       this.LEVELS.NONE,
-      'gestor de projetos':      this.LEVELS.NONE,
-      'analista':                this.LEVELS.NONE,
+      // ── Jurídico ──────────────────────────────────────────────
+      // Acesso APENAS à página /suporte → aba "Busca Cliente".
+      'analista juridico':       this.LEVELS.JURIDICO,
+      'analista':                this.LEVELS.JURIDICO,
+      'coordenador jurídico':    this.LEVELS.JURIDICO,
 
-      // Assessor
+      // ── Nenhum acesso ─────────────────────────────────────────
+      'desativado':              this.LEVELS.NONE,
+      'gestor de projetos':      this.LEVELS.NONE,
+
+      // ── Assessor ──────────────────────────────────────────────
       'assessor':                this.LEVELS.ASSESSOR,
       'analista de pastas':      this.LEVELS.ASSESSOR,
 
-      // Supervisão
+      // ── Supervisão ────────────────────────────────────────────
       'supervisor':              this.LEVELS.SUPERVISAO,
       'Supervisor':              this.LEVELS.SUPERVISAO,
       'assistente':              this.LEVELS.SUPERVISAO,
 
-      // Coordenador
+      // ── Coordenador ───────────────────────────────────────────
       'coordenador':             this.LEVELS.COORDENADOR,
 
-      // Administrativo
+      // ── Administrativo ────────────────────────────────────────
       'salesops':                this.LEVELS.ADMINISTRATIVO,
       'analista de crm':         this.LEVELS.ADMINISTRATIVO,
       'analista de dados':       this.LEVELS.ADMINISTRATIVO,
@@ -50,7 +55,7 @@ class AccessControl {
       'administrativo':          this.LEVELS.ADMINISTRATIVO,
       'administrador':           this.LEVELS.ADMINISTRATIVO,
 
-      // Super Admin
+      // ── Super Admin ───────────────────────────────────────────
       'desenvolvedor':           this.LEVELS.SUPER_ADMIN,
       'diretora':                this.LEVELS.SUPER_ADMIN,
       'ceo':                     this.LEVELS.SUPER_ADMIN,
@@ -64,10 +69,10 @@ class AccessControl {
       'Equipe Leticia Mathias',
     ]);
 
-    // [NOVO] Equipes que recebem a mesma visualização de páginas
-    //        da Unidade 3 (Home, Comissões e landing em /home para
-    //        assessor/supervisor/coordenador).
-    //        A comparação é feita com normalize() → trim, lowercase, sem acentos.
+    // Equipes que recebem a mesma visualização de páginas
+    // da Unidade 3 (Home, Comissões e landing em /home para
+    // assessor/supervisor/coordenador).
+    // A comparação é feita com normalize() → trim, lowercase, sem acentos.
     this.HOME_COMISSOES_ALLOWED_TEAM_NAMES = [
       'Equipe Felipe',
     ];
@@ -82,14 +87,47 @@ class AccessControl {
         canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
         canExportData: false, filterLocked: true, lockedTeam: true,
         lockedCollaborator: true, description: 'Sem acesso',
+
+        // Suporte
+        canAccessSuporte: false,
+        canAccessSuporteBuscaCliente: false,
+        canAccessSuporteMovimentar: false,
+        canAccessSuporteReportar: false,
+        canAccessSuporteSalesOps: false,
       },
+
+      // ── [NOVO] JURIDICO ──────────────────────────────────────
+      // Acesso somente à Busca Cliente dentro de /suporte.
+      [this.LEVELS.JURIDICO]: {
+        canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+        canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+        canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+        canExportData: false, filterLocked: true, lockedTeam: true,
+        lockedCollaborator: true,
+        description: 'Acesso somente à Busca Cliente do Suporte',
+
+        // Suporte
+        canAccessSuporte: true,
+        canAccessSuporteBuscaCliente: true,
+        canAccessSuporteMovimentar: false,
+        canAccessSuporteReportar: false,
+        canAccessSuporteSalesOps: false,
+      },
+
       [this.LEVELS.ASSESSOR]: {
         canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
         canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
         canExportData: false, filterLocked: true, lockedTeam: true,
         lockedCollaborator: true, description: 'Visualiza seus próprios dados',
+
+        canAccessSuporte: false,
+        canAccessSuporteBuscaCliente: false,
+        canAccessSuporteMovimentar: false,
+        canAccessSuporteReportar: false,
+        canAccessSuporteSalesOps: false,
       },
+
       [this.LEVELS.SUPERVISAO]: {
         canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: true,
@@ -97,7 +135,14 @@ class AccessControl {
         canExportData: false, filterLocked: true, lockedTeam: true,
         lockedCollaborator: false,
         description: 'Visualiza dados da equipe; vê configurações sem editar',
+
+        canAccessSuporte: true,
+        canAccessSuporteBuscaCliente: true,
+        canAccessSuporteMovimentar: true,
+        canAccessSuporteReportar: true,
+        canAccessSuporteSalesOps: false,
       },
+
       [this.LEVELS.COORDENADOR]: {
         canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
@@ -105,20 +150,40 @@ class AccessControl {
         canExportData: true, filterLocked: false, lockedTeam: false,
         lockedCollaborator: false,
         description: 'Ajusta metas, não altera bônus, filtro livre',
+
+        canAccessSuporte: true,
+        canAccessSuporteBuscaCliente: true,
+        canAccessSuporteMovimentar: true,
+        canAccessSuporteReportar: true,
+        canAccessSuporteSalesOps: false,
       },
+
       [this.LEVELS.ADMINISTRATIVO]: {
         canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
         canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
         canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
         canExportData: true, filterLocked: false, lockedTeam: false,
         lockedCollaborator: false, description: 'Acesso total',
+
+        canAccessSuporte: true,
+        canAccessSuporteBuscaCliente: true,
+        canAccessSuporteMovimentar: true,
+        canAccessSuporteReportar: true,
+        canAccessSuporteSalesOps: true,
       },
+
       [this.LEVELS.SUPER_ADMIN]: {
         canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
         canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
         canEditConfiguration: true, canEditBonus: true, canGenerateNextMonth: true,
         canExportData: true, filterLocked: false, lockedTeam: false,
         lockedCollaborator: false, description: 'Acesso total',
+
+        canAccessSuporte: true,
+        canAccessSuporteBuscaCliente: true,
+        canAccessSuporteMovimentar: true,
+        canAccessSuporteReportar: true,
+        canAccessSuporteSalesOps: true,
       },
     };
   }
@@ -148,13 +213,13 @@ class AccessControl {
     if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
     const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
     if (unidade === this.HOME_COMISSOES_ALLOWED_UNIT) return true;
-    // [NOVO] equipes liberadas recebem o mesmo tratamento da unidade 3
+    // equipes liberadas recebem o mesmo tratamento da unidade 3
     return this.isHomeComissoesTeam(user);
   }
 
   /**
-   * [NOVO] Retorna `true` quando o usuário pertence a uma equipe listada
-   *        em HOME_COMISSOES_ALLOWED_TEAMS (comparação com normalize).
+   * Retorna `true` quando o usuário pertence a uma equipe listada
+   * em HOME_COMISSOES_ALLOWED_TEAMS (comparação com normalize).
    */
   isHomeComissoesTeam(user) {
     if (!user) return false;
@@ -185,6 +250,7 @@ class AccessControl {
   /**
    * Rota inicial recomendada após o login:
    * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → "/home"
+   * - JURIDICO → "/suporte"  (abre já na aba Busca Cliente)
    * - Supervisor fora da UNIDADE 3 / fora das equipes liberadas → "/suporte"
    * - Demais → "/" (comportamento anterior)
    */
@@ -194,6 +260,9 @@ class AccessControl {
     if (this.isUnit3HomeComissoesUser(user)) return '/home';
 
     const level = this.getAccessLevel(user.cargo, user.status);
+
+    // [NOVO] JURIDICO vai direto para a página de Suporte
+    if (level === this.LEVELS.JURIDICO)   return '/suporte';
     if (level === this.LEVELS.SUPERVISAO) return '/suporte';
 
     return '/';
@@ -204,8 +273,9 @@ class AccessControl {
   }
 
   setCargoLevel(cargo, level) {
-    if (typeof level !== 'number' || level < 0 || level > 5) {
-      throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–5.`);
+    // Intervalo ampliado para 0–6 em razão do novo nível JURIDICO
+    if (typeof level !== 'number' || level < 0 || level > 6) {
+      throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–6.`);
     }
     this.CARGO_LEVELS[this.normalize(cargo)] = level;
     console.log(`[accessControl] setCargoLevel("${cargo}") → ${level}`);
@@ -236,6 +306,11 @@ class AccessControl {
     return this.LEVELS.NONE;
   }
 
+  // [NOVO] helper de conveniência
+  isJuridico(cargo, status) {
+    return this.getAccessLevel(cargo, status) === this.LEVELS.JURIDICO;
+  }
+
   isSupervisor(cargo, status) {
     return this.getAccessLevel(cargo, status) === this.LEVELS.SUPERVISAO;
   }
@@ -248,8 +323,42 @@ class AccessControl {
     return this.getAccessLevel(cargo, status) >= this.LEVELS.ADMINISTRATIVO;
   }
 
+  /**
+   * Quem pode entrar em /suporte.
+   * Inclui JURIDICO (mesmo estando abaixo de SUPERVISAO na hierarquia).
+   */
   canAccessSupport(cargo, status) {
-    return this.getAccessLevel(cargo, status) >= this.LEVELS.SUPERVISAO;
+    const level = this.getAccessLevel(cargo, status);
+    return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;
+  }
+
+  /** Pode ver a página de Suporte? (alias semântico) */
+  canAccessSuportePage(cargo, status) {
+    return this.canAccessSupport(cargo, status);
+  }
+
+  /** Pode usar a aba Busca Cliente? */
+  canAccessSuporteBuscaCliente(cargo, status) {
+    const level = this.getAccessLevel(cargo, status);
+    return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;
+  }
+
+  /** Pode usar a aba Movimentar? (JURIDICO NÃO) */
+  canAccessSuporteMovimentar(cargo, status) {
+    const level = this.getAccessLevel(cargo, status);
+    return level >= this.LEVELS.SUPERVISAO;
+  }
+
+  /** Pode usar a aba Reportar? (JURIDICO NÃO) */
+  canAccessSuporteReportar(cargo, status) {
+    const level = this.getAccessLevel(cargo, status);
+    return level >= this.LEVELS.SUPERVISAO;
+  }
+
+  /** Pode ver a aba Visão SalesOps? (só ADMINISTRATIVO+) */
+  canAccessSuporteSalesOps(cargo, status) {
+    const level = this.getAccessLevel(cargo, status);
+    return level >= this.LEVELS.ADMINISTRATIVO;
   }
 
   hasPermission(user, permission) {
@@ -282,6 +391,7 @@ class AccessControl {
   getLevelName(level) {
     const names = {
       [this.LEVELS.NONE]: 'SEM ACESSO',
+      [this.LEVELS.JURIDICO]: 'JURIDICO',            // [NOVO]
       [this.LEVELS.ASSESSOR]: 'ASSESSOR',
       [this.LEVELS.SUPERVISAO]: 'SUPERVISAO',
       [this.LEVELS.COORDENADOR]: 'COORDENADOR',
@@ -334,12 +444,22 @@ class AccessControl {
 
   getMenuItems(permissions) {
     const items = [];
+    // [NOVO] JURIDICO → menu exclusivo de Suporte
+    if (
+      permissions.level === this.LEVELS.JURIDICO ||
+      (permissions.canAccessSuporte && !permissions.canAccessDashboard)
+    ) {
+      if (permissions.canAccessSuporte) items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
+      return items;
+    }
+
     if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });
     if (permissions.canAccessComissoes) items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
     if (permissions.canViewTeam || permissions.canAccessReports) {
       items.push({ id: 'dashboard-group', label: 'Dashboard', link: '' });
     }
     if (permissions.canAccessRanking) items.push({ id: 'ranking', label: 'Ranking', link: '/ranking' });
+    if (permissions.canAccessSuporte) items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
     if (permissions.canAccessConfiguration) items.push({ id: 'configuration', label: 'Configurações', link: '/configuration' });
     return items;
   }
@@ -489,6 +609,8 @@ export const getActiveSupportUser = (email, db) => instance.getActiveSupportUser
 export const isSupportSupervisor = (cargo) => instance.isSupervisor(cargo);
 export const isSupportCoordinatorOrAbove = (cargo) => instance.isCoordinatorOrAbove(cargo);
 export const isSupportAdmin = (cargo) => instance.isAdmin(cargo);
+export const isSupportJuridico = (cargo, status) => instance.isJuridico(cargo, status);  // [NOVO]
+export const canAccessSupport = (cargo, status) => instance.canAccessSupport(cargo, status);
 export const validateHubSpotMovementAccess = (params) => instance.validateHubSpotMovementAccess(params);
 
 // ─────────────────────────────────────────────────────────────
@@ -498,9 +620,9 @@ export const validateHubSpotMovementAccess = (params) => instance.validateHubSpo
 //   OU nível >= ADMINISTRATIVO (qualquer unidade)
 // ─────────────────────────────────────────────────────────────
 export const HOME_COMISSOES_ALLOWED_UNIT = 3;
-export const HOME_COMISSOES_ALLOWED_TEAM_NAMES = [...instance.HOME_COMISSOES_ALLOWED_TEAM_NAMES]; // [NOVO]
+export const HOME_COMISSOES_ALLOWED_TEAM_NAMES = [...instance.HOME_COMISSOES_ALLOWED_TEAM_NAMES];
 export const isUnit3HomeComissoesUser = (user) => instance.isUnit3HomeComissoesUser(user);
 export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3HomeComissoesUser(user); // alias
-export const isHomeComissoesTeam = (user) => instance.isHomeComissoesTeam(user); // [NOVO]
+export const isHomeComissoesTeam = (user) => instance.isHomeComissoesTeam(user);
 export const canSeeHomeComissoes = (user) => instance.canSeeHomeComissoes(user);
 export const getDefaultLandingPage = (user) => instance.getDefaultLandingPage(user);

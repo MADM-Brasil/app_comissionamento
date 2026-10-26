@@ -30,6 +30,7 @@ import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
 import { HUBSPOT_PORTAL_ID_CONFIGURED, buscarClienteResumo } from '../services/hubspot.js';
 import {
+  accessControl,                    // [NOVO] necessário para LEVELS.JURIDICO e getAccessLevel
   getActiveSupportUser,
   isSupportAdmin,
   isSupportCoordinatorOrAbove,
@@ -201,17 +202,46 @@ async function transaction(callback) {
 }
 const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
-// Executado antes de uploads e antes de qualquer acesso aos dados.
+// ============================================================
+// Middleware principal de autenticação.
+//
+// [NOVO] Aceita JURIDICO além de SUPERVISAO+. O nível JURIDICO
+// (Analista Jurídico / Analista) é liberado APENAS para consultar
+// a Busca Cliente — todas as demais rotas são bloqueadas logo
+// abaixo pelo middleware `requireNonJuridico`.
+//
+// Marca `req.supportIsJuridico` para os handlers consultarem quando
+// precisarem aplicar regras específicas (ex.: buscar-cliente).
+// ============================================================
 router.use(asyncRoute(async (req, res, next) => {
   const requesterEmail = email(req.session?.userId, 'Identidade da sessão');
   if (!requesterEmail) throw fail(401, 'Autenticação necessária.');
+
   const actor = await getActiveSupportUser(requesterEmail);
-  if (!actor || (!isSupportSupervisor(actor.cargo) && !isSupportCoordinatorOrAbove(actor.cargo))) {
+  if (!actor) throw fail(403, 'Perfil sem acesso à página de Suporte.');
+
+  const level = accessControl.getAccessLevel(actor.cargo, actor.status);
+  const isJuridico = level === accessControl.LEVELS.JURIDICO;
+  const isSupervisorOrAbove = level >= accessControl.LEVELS.SUPERVISAO;
+
+  if (!isSupervisorOrAbove && !isJuridico) {
     throw fail(403, 'Perfil sem acesso à página de Suporte.');
   }
+
   req.supportActor = { ...actor, email: email(actor.email, 'E-mail do usuário', true) };
+  req.supportIsJuridico = isJuridico;
   next();
 }));
+
+// [NOVO] Bloqueia JURIDICO em rotas que exigem SUPERVISAO+.
+// Aplicado a todas as rotas EXCETO as duas de Busca Cliente.
+function requireNonJuridico(req, res, next) {
+  if (req.supportIsJuridico) {
+    return next(fail(403, 'Nível de acesso insuficiente para esta operação.'));
+  }
+  next();
+}
+
 function requireAdmin(req) {
   if (!isSupportAdmin(req.supportActor.cargo)) throw fail(403, 'Sem permissão para esta operação.');
 }
@@ -306,8 +336,9 @@ function notify(payload) {
 // GET /escopo/debug
 // Diagnóstico temporário. Mostra exatamente o que o servidor vê.
 // Pode ser removido após a validação do filtro por unidade.
+// [NOVO] Bloqueado para JURIDICO.
 // ============================================================
-router.get('/escopo/debug', asyncRoute(async (req, res) => {
+router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
   const actor = req.supportActor;
   const isAdmin = isSupportAdmin(actor.cargo);
   const unidadeId = actor.unidade_id != null ? Number(actor.unidade_id) : null;
@@ -428,8 +459,10 @@ router.get('/escopo/debug', asyncRoute(async (req, res) => {
 //  - m.data_metrica do mês corrente garante apenas colaboradores do mês.
 //  - m.classificacao_operacional preenchida filtra os desativados/duplicados.
 //  - c.unidade_id aplica o filtro de unidade.
+//
+// [NOVO] Bloqueado para JURIDICO.
 // ============================================================
-router.get('/escopo', asyncRoute(async (req, res) => {
+router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
   const actor = req.supportActor;
   const isAdmin = isSupportAdmin(actor.cargo);
   const unidadeId = actor.unidade_id != null ? Number(actor.unidade_id) : null;
@@ -494,8 +527,6 @@ router.get('/escopo', asyncRoute(async (req, res) => {
     const equipeNome = (row.nome_equipe || '').trim();
     if (!equipeNome) continue;
 
-    // Unidade 1 (supervisor fora da equipe reservada): não exibe a equipe
-    // reservada nem seus assessores.
     if (ocultarEquipesReservadas
         && EQUIPES_TRAVADAS_DESTINO.has(normalizeAccessValue(equipeNome))) {
       continue;
@@ -546,6 +577,18 @@ router.get('/escopo', asyncRoute(async (req, res) => {
 // ---------------------- Busca de cliente na HubSpot ----------------------
 // Consulta somente leitura: telefone, e-mail ou CPF -> nome, etapa/pipeline
 // do negócio mais recente e responsável atual. Não altera nada no HubSpot.
+//
+// [NOVO] JURIDICO:
+//   - Recebe SEMPRE o payload completo, mesmo quando o cliente está em
+//     outra equipe.
+//   - Quando o cliente está em outra equipe, o backend retorna também
+//     `restrito: true` e `motivo` (dados completos + aviso) para o
+//     frontend exibir o banner informativo "Acesso jurídico: ...".
+//
+// Regra antiga (mantida para supervisor):
+//   - Supervisor só enxerga detalhes/link de clientes da própria equipe.
+//   - Coordenador/Admin não são afetados.
+// ---------------------- Busca de cliente na HubSpot ----------------------
 router.get('/buscar-cliente', asyncRoute(async (req, res) => {
   const telefone = text(req.query.telefone, 'Telefone');
   const cpf = text(req.query.cpf, 'CPF');
@@ -582,12 +625,31 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
     }
   }
 
-  // Supervisores só enxergam detalhes/link de clientes da própria equipe.
-  // Coordenador/Admin não são afetados por esta restrição.
-  if (resultado.found && !resultado.duplicado && isSupportSupervisor(actor.cargo)) {
-    const equipeCliente = resultado.responsavel?.equipe || null;
-    const equipeSupervisor = normalizeAccessValue(actor.nome_equipe);
-    if (equipeCliente && normalizeAccessValue(equipeCliente) !== equipeSupervisor) {
+  // [NOVO] JURIDICO: retorna dados completos.
+  // Quando o cliente está em outra equipe, anexa `restrito: true` +
+  // `motivo` (para o banner informativo do frontend), mas mantém o
+  // payload (contato, negocio, responsavel, link) intacto.
+  const equipeCliente = resultado.responsavel?.equipe || null;
+  const equipeSolicitante = normalizeAccessValue(actor.nome_equipe);
+  const clienteEmOutraEquipe = Boolean(
+    equipeCliente && normalizeAccessValue(equipeCliente) !== equipeSolicitante
+  );
+
+  if (resultado.found && !resultado.duplicado && clienteEmOutraEquipe) {
+    if (req.supportIsJuridico) {
+      // JURIDICO: dados completos + aviso informativo.
+      return res.json({
+        success: true,
+        data: {
+          ...resultado,
+          restrito: true,
+          equipeCliente,
+          motivo: `Cliente cadastrado na equipe ${equipeCliente}.`,
+        },
+      });
+    }
+    if (isSupportSupervisor(actor.cargo)) {
+      // Supervisor: bloqueia (comportamento original).
       return res.json({
         success: true,
         data: {
@@ -598,6 +660,7 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
         },
       });
     }
+    // Coordenador/Admin: cai no caminho normal (payload completo sem marca).
   }
 
   res.json({ success: true, data: resultado });
@@ -606,6 +669,10 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
 // Encaminha um caso problemático da Busca Cliente (ex.: duplicado na HubSpot)
 // direto para a esteira Suporte do quadro de Movimentações, sem passar pela
 // fila de processamento automático (o worker ignora status != pendente).
+//
+// [NOVO] JURIDICO: permitido (é o único caso em que JURIDICO pode criar
+// um ticket — para escalar duplicados ao time de Suporte).
+// ---------------------- Encaminhar caso ao Suporte ----------------------
 router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
   const telefone = text(req.body?.telefone, 'Telefone');
   const cpf = text(req.body?.cpf, 'CPF');
@@ -655,7 +722,8 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Movimentação normal (CRM) ----------------------
-router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
+// [NOVO] Bloqueado para JURIDICO.
+router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const body = req.body;
 
   if (body.crm_origem === HUBSPOT_LINK_MOVEMENT || body.tipo_solicitacao === 'Movimentação Link Hub') {
@@ -809,7 +877,8 @@ router.post('/ticket-movimentacao', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
-router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
+// [NOVO] Bloqueado para JURIDICO.
+router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async (req, res) => {
   const { links } = req.body;
   if (!Array.isArray(links) || links.length < 1 || links.length > 50) {
     throw fail(400, 'Envie de 1 a 50 links HubSpot por lote.');
@@ -962,7 +1031,8 @@ router.post('/movimentacoes-linkhub/lotes', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Histórico unificado ----------------------
-router.get('/tickets-movimentacao', asyncRoute(async (req, res) => {
+// [NOVO] Bloqueado para JURIDICO.
+router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
   const status = text(req.query.status_mapeamento, 'Status', { max: 40 }) || null;
   if (status && !Object.hasOwn(STATUS_MAP, status)) throw fail(400, 'Status de movimentação inválido.');
@@ -994,7 +1064,8 @@ router.get('/tickets-movimentacao', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Reportes ----------------------
-router.get('/ticket-suporte', asyncRoute(async (req, res) => {
+// [NOVO] Bloqueado para JURIDICO (leitura e escrita).
+router.get('/ticket-suporte', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
   const { page, limit, offset } = pageParams(req.query);
   const result = await pool.query(`
@@ -1014,7 +1085,8 @@ router.get('/ticket-suporte', asyncRoute(async (req, res) => {
     pagination: { page, limit, hasMore: result.rows.length > limit } });
 }));
 
-router.post('/ticket-suporte', upload.array('arquivos', 5), asyncRoute(async (req, res) => {
+// [NOVO] Bloqueado para JURIDICO.
+router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), asyncRoute(async (req, res) => {
   const title = text(req.body.titulo, 'Título', { required: true, max: 500 });
   const subject = text(req.body.assunto, 'Assunto', { required: true, max: 500 });
   const description = text(req.body.descricao, 'Descrição', { required: true, max: 50000 });
@@ -1049,6 +1121,7 @@ router.post('/ticket-suporte', upload.array('arquivos', 5), asyncRoute(async (re
 }));
 
 // ---------------------- Edição manual (SalesOps) ----------------------
+// JURIDICO: bloqueado por `requireAdmin` (JURIDICO < ADMINISTRATIVO).
 router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
@@ -1094,6 +1167,7 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
   res.json({ success: true, message: 'Ticket atualizado. Alteração manual de status não comprova execução no HubSpot.' });
 }));
 
+// JURIDICO: bloqueado por `requireAdmin`.
 router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
@@ -1137,6 +1211,8 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
 //   - Se for necessário trocar o produto de um ticket já criado, faça uma
 //     solicitação nova; a troca de produto em um ticket existente não é
 //     suportada por esta rota.
+//
+// JURIDICO: bloqueado por `requireAdmin`.
 router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
