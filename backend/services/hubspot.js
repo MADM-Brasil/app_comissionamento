@@ -708,9 +708,32 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
     //       considera apenas cards no pipeline Isenção e na Base de Leads.
     // Cards em outros pipelines são ignorados nesta movimentação.
     // ─────────────────────────────────────────────────────────────
-    const allDeals = await getContactDeals(contactId);
-    const relevantPipelines = [String(PIPELINE_BASE_LEADS_ID), String(destination.pipeline)];
-    const deals = allDeals.filter(d => relevantPipelines.includes(String(d.pipeline)));
+const allDeals = await getContactDeals(contactId);
+
+// Bloqueia antes de qualquer criação, movimentação ou sincronização
+// se o contato possui negócio no pipeline Jurídico Auditoria de Ganho.
+const negocioJuridico = allDeals.find(
+  d => String(d.pipeline) === String(PIPELINE_JURIDICO_AUDITORIA_ID)
+);
+
+if (negocioJuridico) {
+  return assignmentResult(negocioJuridico, {
+    blocked: true,
+    ruleApplied: 'contact_has_juridico_deal',
+    message:
+      'Movimentação bloqueada: o contato possui um negócio no pipeline ' +
+      'Jurídico Auditoria de Ganho. Encaminhe o caso para validação do coordenador.',
+  });
+}
+
+const relevantPipelines = [
+  String(PIPELINE_BASE_LEADS_ID),
+  String(destination.pipeline),
+];
+
+const deals = allDeals.filter(d =>
+  relevantPipelines.includes(String(d.pipeline))
+);
 
     if (deals.length > 1) {
       return assignmentResult(null, {

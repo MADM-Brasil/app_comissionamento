@@ -28,7 +28,8 @@ class AccessControl {
       'analista juridico':       this.LEVELS.JURIDICO,
       'analista':                this.LEVELS.JURIDICO,
       'coordenador juridico':    this.LEVELS.JURIDICO,
-      'supervisor juridico':     this.LEVELS.JURIDICO, 
+      'supervisor juridico':     this.LEVELS.JURIDICO,
+      'assistente sac':          this.LEVELS.JURIDICO, 
 
       // ── Nenhum acesso ─────────────────────────────────────────
       'desativado':              this.LEVELS.NONE,
