@@ -197,7 +197,9 @@ const QUALIFICATIONS = {
     'Emissao de contrato',
     'Tratativa via WhatsApp',
   ],
-  appointments: ['Retornar ligacao', 'Trabalhando'],
+  appointments: [
+    'Retornar ligacao', 'Trabalhando'
+  ],
   occurrences: [
     'Nao tabulada - tempo excedido', 'Não tabulada - tempo excedido',
     'Mudo', 'Queda de ligacao', 'Queda de ligação', 'Caixa postal',
