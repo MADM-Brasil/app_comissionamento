@@ -166,7 +166,6 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
   },
 
   // ── [NOVO] JURIDICO ────────────────────────────────────────
-  // Acesso somente à Busca Cliente dentro de /suporte.
   [LEVELS.JURIDICO]: {
     canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
     canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
@@ -210,8 +209,6 @@ const PERMISSIONS: Record<Level, FullPermissions> = {
   },
 
   [LEVELS.COORDENADOR]: {
-    // Base "otimista": o acesso efetivo é restrito a coordenadores da
-    // UNIDADE 3 (ou equipes liberadas) via canSeeHomeComissoes.
     canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
     canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
     canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
@@ -260,21 +257,6 @@ function normalize(str: string): string {
 
 // ─────────────────────────────────────────────────────────────
 // RESOLUÇÃO DO "USUÁRIO DE ACESSO"
-// ------------------------------------------------------------
-// O payload do `/auth/login` historicamente NÃO inclui
-// `nome_equipe` nem `unidade_id`. Sem esses campos,
-// `canSeeHomeComissoes` e `isAssessorRestrito` não conseguem
-// reconhecer usuários da Unidade 3 nem de equipes liberadas,
-// mesmo que a lógica esteja correta.
-//
-// `resolveAccessUser` complementa o `currentUser` do store com
-// esses campos, fazendo match pelo e-mail em `collaborators`
-// (que já traz `equipeNome`/`unidadeId` a partir de
-// `/colaboradores`).
-//
-// Chamada recomendada em todos os guards e hooks que consultam
-// `getUserPermissions`, `isAssessorRestrito` ou
-// `getDefaultLandingPage`.
 // ─────────────────────────────────────────────────────────────
 export function resolveAccessUser(
   user: any,
@@ -323,14 +305,38 @@ export const HOME_COMISSOES_ALLOWED_LEVELS: Level[] = [
   LEVELS.COORDENADOR,
 ];
 
-// [NOVO] Equipes que recebem a mesma visualização de páginas da Unidade 3.
-// A comparação usa normalize() → trim, lowercase, sem acentos.
 export const HOME_COMISSOES_ALLOWED_TEAM_NAMES: readonly string[] = [
   'Equipe Felipe',
 ];
 const HOME_COMISSOES_ALLOWED_TEAMS = new Set(
   HOME_COMISSOES_ALLOWED_TEAM_NAMES.map(normalize),
 );
+
+// ─────────────────────────────────────────────────────────────
+// [NOVO] Bloqueio individual da página de Comissões
+// ------------------------------------------------------------
+// Lista de e-mails que NÃO podem acessar /comissoes mesmo
+// estando em HOME_COMISSOES_ALLOWED_TEAM_NAMES (ou em qualquer
+// outra regra que liberaria a página).
+//
+// ⚠️ Substitua o e-mail de exemplo pelo e-mail REAL do supervisor
+//    da Equipe Felipe que deve ser bloqueado. A comparação usa
+//    normalize() (trim + lowercase), então o case não importa.
+//
+// Comentário acima dele(a) no banco? Adicione o e-mail real aqui.
+// ─────────────────────────────────────────────────────────────
+export const COMISSOES_BLOCKED_EMAILS: readonly string[] = [
+  'wallace.batista@madmbrasil.com.br', // ← TROQUE PELO E-MAIL REAL
+];
+const COMISSOES_BLOCKED_EMAILS_SET = new Set(
+  COMISSOES_BLOCKED_EMAILS.map(normalize),
+);
+
+/** Retorna `true` quando o e-mail do usuário está em COMISSOES_BLOCKED_EMAILS. */
+export function isComissoesBlockedByEmail(user?: User | null): boolean {
+  if (!user?.email) return false;
+  return COMISSOES_BLOCKED_EMAILS_SET.has(normalize(user.email));
+}
 
 /** Retorna `true` quando o usuário pertence a uma equipe liberada. */
 export function isHomeComissoesTeam(user?: User | null): boolean {
@@ -355,10 +361,9 @@ export const isUnit3AssessorOrSupervisor = isUnit3HomeComissoesUser;
 
 /**
  * Regra consolidada: quem pode ver Home e Comissões.
- * - Assessor/Supervisor/Coordenador da unidade 3 → SIM
- * - Assessor/Supervisor/Coordenador de equipe liberada → SIM
- * - Administrativo ou Super Admin (qualquer unidade) → SIM
- * - Demais → NÃO
+ * (Obs.: esta função NÃO aplica COMISSOES_BLOCKED_EMAILS — o bloqueio
+ *  individual é aplicado em getUserPermissions, que é o ponto que
+ *  alimenta o guard e o menu.)
  */
 export function canSeeHomeComissoes(user?: User | null): boolean {
   if (!user) return false;
@@ -370,15 +375,18 @@ export function canSeeHomeComissoes(user?: User | null): boolean {
 /**
  * Rota inicial recomendada após o login:
  * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → "/home"
- * - JURIDICO → "/suporte"  (abre já na aba Busca Cliente)
+ * - JURIDICO → "/suporte"
  * - Supervisor fora da UNIDADE 3 / fora das equipes liberadas → "/suporte"
  * - Demais → "/"
+ *
+ * ⚠️ Usuários em COMISSOES_BLOCKED_EMAILS continuam caindo em "/home"
+ *    (Home não é bloqueada), mas o item "Comissões" some do menu e a
+ *    rota /comissoes é bloqueada pelo guard.
  */
 export function getDefaultLandingPage(user?: User | null): string {
   if (!user) return "/login";
   if (isUnit3HomeComissoesUser(user)) return "/home";
   const level = getAccessLevel(user.cargo, user.status);
-  // [NOVO] JURIDICO vai direto para a página de Suporte
   if (level === LEVELS.JURIDICO)   return "/suporte";
   if (level === LEVELS.SUPERVISAO) return "/suporte";
   return "/";
@@ -386,17 +394,6 @@ export function getDefaultLandingPage(user?: User | null): string {
 
 // ============================================================
 //  RESTRIÇÃO DE NAVEGAÇÃO — ASSESSOR DA UNIDADE 3 (OU EQUIPE LIBERADA)
-// ------------------------------------------------------------
-//  Assessores da unidade 3 (e das equipes listadas em
-//  HOME_COMISSOES_ALLOWED_TEAM_NAMES) só navegam em Home e Comissões.
-//  Centralizado aqui para servir como fonte única de verdade
-//  para:
-//    • getUserPermissions()  → zera permissões extras
-//    • DashboardLayout       → filtra o menu
-//    • Guards/rotas futuras  → podem consultar `isAssessorRestrito`
-//
-//  Supervisores, coordenadores e níveis administrativos NÃO são
-//  afetados.
 // ============================================================
 export const RESTRICTED_ASSESSOR_UNITS: readonly number[] = [HOME_COMISSOES_ALLOWED_UNIT];
 
@@ -405,11 +402,6 @@ export const RESTRICTED_ASSESSOR_ALLOWED_PATHS: readonly string[] = [
   "/comissoes",
 ];
 
-/**
- * Retorna `true` quando o usuário é assessor E pertence a uma
- * unidade restrita ou a uma equipe liberada (que herda a mesma
- * restrição de navegação da unidade 3).
- */
 export function isAssessorRestrito(user?: User | null): boolean {
   if (!user) return false;
   const level = getAccessLevel(user.cargo, user.status);
@@ -419,10 +411,6 @@ export function isAssessorRestrito(user?: User | null): boolean {
   return isHomeComissoesTeam(user);
 }
 
-/**
- * Guard auxiliar: `true` se o usuário pode navegar para o `path`
- * informado. Para usuários não restritos, sempre `true`.
- */
 export function canAccessPathForRestrictedAssessor(
   user: User | null | undefined,
   path: string
@@ -447,7 +435,6 @@ export function getAccessLevel(
   return LEVELS.NONE;
 }
 
-// [NOVO] helper de conveniência
 export function isJuridico(user?: User | null): boolean {
   if (!user) return false;
   return getAccessLevel(user.cargo, user.status) === LEVELS.JURIDICO;
@@ -469,6 +456,9 @@ export function getUserPermissions(user?: User | null) {
   const allowHomeComissoes = canSeeHomeComissoes(user);
   const restrito = isAssessorRestrito(user);
 
+  // [NOVO] Bloqueio individual da página de Comissões.
+  const bloqueadoComissoes = isComissoesBlockedByEmail(user);
+
   return {
     level,
     levelName: getLevelName(level),
@@ -478,10 +468,11 @@ export function getUserPermissions(user?: User | null) {
     unidade_id: user?.unidade_id,
 
     canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
-    canAccessComissoes: perms.canAccessComissoes && allowHomeComissoes,
 
-    // ⚠️ Assessor restrito (unidade 3 ou equipe liberada) não acessa
-    // Ranking mesmo que o nível ASSESSOR o permita na matriz de permissões.
+    // [NOVO] canAccessComissoes agora respeita a lista de bloqueio.
+    canAccessComissoes:
+      perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
+
     canAccessRanking: perms.canAccessRanking && !restrito,
 
     canAccessReports: perms.canAccessReports,
@@ -496,7 +487,7 @@ export function getUserPermissions(user?: User | null) {
     lockedCollaborator: perms.lockedCollaborator,
     description: perms.description,
 
-    // [NOVO] Suporte
+    // Suporte
     canAccessSuporte: perms.canAccessSuporte,
     canAccessSuporteBuscaCliente: perms.canAccessSuporteBuscaCliente,
     canAccessSuporteMovimentar: perms.canAccessSuporteMovimentar,
@@ -508,7 +499,7 @@ export function getUserPermissions(user?: User | null) {
 function getLevelName(level: Level): string {
   const names: Record<Level, string> = {
     [LEVELS.NONE]: 'SEM ACESSO',
-    [LEVELS.JURIDICO]: 'JURIDICO',            // [NOVO]
+    [LEVELS.JURIDICO]: 'JURIDICO',
     [LEVELS.ASSESSOR]: 'ASSESSOR',
     [LEVELS.SUPERVISAO]: 'SUPERVISAO',
     [LEVELS.COORDENADOR]: 'COORDENADOR',
@@ -568,7 +559,6 @@ export function getUIConfig(currentUser?: User | null): UIConfig {
     lockedCollaborator: perms.lockedCollaborator,
     description: perms.description,
 
-    // [NOVO] Suporte
     canAccessSuporte: perms.canAccessSuporte,
     canAccessSuporteBuscaCliente: perms.canAccessSuporteBuscaCliente,
     canAccessSuporteMovimentar: perms.canAccessSuporteMovimentar,
@@ -601,7 +591,6 @@ function getMenuItems(permissions: {
 }): MenuItem[] {
   const items: MenuItem[] = [];
 
-  // [NOVO] JURIDICO → menu exclusivo de Suporte
   if (permissions.level === LEVELS.JURIDICO) {
     if (permissions.canAccessSuporte) {
       items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
@@ -610,6 +599,8 @@ function getMenuItems(permissions: {
   }
 
   if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });
+  // O item de Comissões só aparece se canAccessComissoes === true
+  // (o que já leva em conta COMISSOES_BLOCKED_EMAILS).
   if (permissions.canAccessComissoes) items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
   if (permissions.canViewTeam || permissions.canAccessReports) {
     items.push({ id: 'dashboard-group', label: 'Dashboard', link: '' });
@@ -621,7 +612,7 @@ function getMenuItems(permissions: {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Objeto agregador (usado em `import { accessControl } from ...`)
+// Objeto agregador
 // ─────────────────────────────────────────────────────────────
 export const accessControl = {
   LEVELS,
@@ -636,10 +627,8 @@ export const accessControl = {
   resetCargoLevel,
   listCargoLevels,
 
-  // Resolução do usuário de acesso (nome_equipe/unidade_id)
   resolveAccessUser,
 
-  // Regras Home/Comissões
   isUnit3HomeComissoesUser,
   isUnit3AssessorOrSupervisor,
   isHomeComissoesTeam,
@@ -649,12 +638,13 @@ export const accessControl = {
   HOME_COMISSOES_ALLOWED_LEVELS,
   HOME_COMISSOES_ALLOWED_TEAM_NAMES,
 
-  // Restrição de navegação do assessor
   isAssessorRestrito,
   canAccessPathForRestrictedAssessor,
   RESTRICTED_ASSESSOR_UNITS,
   RESTRICTED_ASSESSOR_ALLOWED_PATHS,
 
-  // [NOVO] JURIDICO
   isJuridico,
+
+  isComissoesBlockedByEmail,
+  COMISSOES_BLOCKED_EMAILS,
 };
