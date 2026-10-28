@@ -226,6 +226,46 @@ app.get('/api/csrf-token', (req, res) => {
 app.use('/api/auth', authRoutes);
 
 // ============================================================
+// ARQUIVOS ESTÁTICOS (uploads) — PÚBLICOS, porém inavegáveis
+// ------------------------------------------------------------
+// [CORRIGIDO] Movido para ANTES do middleware de autenticação.
+//
+// Motivo: os arquivos de /uploads/suporte/* são referenciados em
+// notificações do Microsoft Teams (via `teams_notificador`). O
+// Teams NÃO possui sessão do sistema — logo, se estivéssemos atrás
+// do middleware de auth, o clique no link no Teams retornaria 401.
+//
+// Segurança:
+//  - Os nomes dos arquivos são `randomUUID()` gerados pelo Multer
+//    (122 bits de entropia) — impossível adivinhar.
+//  - `express.static` NÃO faz directory listing.
+//  - Content-Type é derivado da extensão; arquivos fora da lista
+//    branca do Multer já são rejeitados no upload.
+//  - CORS/CSP continuam valendo para contextos de página; aqui
+//    apenas servimos o binário.
+//
+// Headers aplicados apenas em /uploads/*:
+//  - Cross-Origin-Resource-Policy: cross-origin → permite preview
+//    de imagem/PDF embutido pelo Teams (fora da CSP da página).
+//  - Cache-Control: public, max-age=86400, immutable → arquivos
+//    têm nome imutável (UUID), cachear 1 dia é seguro.
+// ============================================================
+app.use(
+  '/uploads',
+  (req, res, next) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    next();
+  },
+  express.static(path.join(process.cwd(), 'uploads'), {
+    fallthrough: true,
+    index: false,
+    dotfiles: 'ignore',
+  })
+);
+
+// ============================================================
 // MIDDLEWARES DE PROTEÇÃO (aplicados a tudo abaixo)
 // ============================================================
 app.use(csrfProtection);
@@ -233,11 +273,6 @@ app.use((req, res, next) => {
   if (req.session?.isAuthenticated) return next();
   return res.status(401).json({ success: false, error: 'Não autenticado' });
 });
-
-// ============================================================
-// ARQUIVOS ESTÁTICOS (uploads) — protegidos por sessão
-// ============================================================
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // ============================================================
 // ROTAS PROTEGIDAS

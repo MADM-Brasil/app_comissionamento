@@ -30,7 +30,7 @@ import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
 import { HUBSPOT_PORTAL_ID_CONFIGURED, buscarClienteResumo } from '../services/hubspot.js';
 import {
-  accessControl,                    // [NOVO] necessário para LEVELS.JURIDICO e getAccessLevel
+  accessControl,                    // necessário para LEVELS.JURIDICO e getAccessLevel
   getActiveSupportUser,
   isSupportAdmin,
   isSupportCoordinatorOrAbove,
@@ -205,10 +205,11 @@ const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, r
 // ============================================================
 // Middleware principal de autenticação.
 //
-// [NOVO] Aceita JURIDICO além de SUPERVISAO+. O nível JURIDICO
-// (Analista Jurídico / Analista) é liberado APENAS para consultar
-// a Busca Cliente — todas as demais rotas são bloqueadas logo
-// abaixo pelo middleware `requireNonJuridico`.
+// Aceita JURIDICO além de SUPERVISAO+. O nível JURIDICO
+// (Analista Jurídico / Coordenador Jurídico / Supervisor Jurídico /
+// Analista) é liberado APENAS para consultar a Busca Cliente — todas
+// as demais rotas são bloqueadas logo abaixo pelo middleware
+// `requireNonJuridico`.
 //
 // Marca `req.supportIsJuridico` para os handlers consultarem quando
 // precisarem aplicar regras específicas (ex.: buscar-cliente).
@@ -233,7 +234,7 @@ router.use(asyncRoute(async (req, res, next) => {
   next();
 }));
 
-// [NOVO] Bloqueia JURIDICO em rotas que exigem SUPERVISAO+.
+// Bloqueia JURIDICO em rotas que exigem SUPERVISAO+.
 // Aplicado a todas as rotas EXCETO as duas de Busca Cliente.
 function requireNonJuridico(req, res, next) {
   if (req.supportIsJuridico) {
@@ -336,7 +337,7 @@ function notify(payload) {
 // GET /escopo/debug
 // Diagnóstico temporário. Mostra exatamente o que o servidor vê.
 // Pode ser removido após a validação do filtro por unidade.
-// [NOVO] Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO.
 // ============================================================
 router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
   const actor = req.supportActor;
@@ -460,7 +461,7 @@ router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
 //  - m.classificacao_operacional preenchida filtra os desativados/duplicados.
 //  - c.unidade_id aplica o filtro de unidade.
 //
-// [NOVO] Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO.
 // ============================================================
 router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
   const actor = req.supportActor;
@@ -578,7 +579,7 @@ router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
 // Consulta somente leitura: telefone, e-mail ou CPF -> nome, etapa/pipeline
 // do negócio mais recente e responsável atual. Não altera nada no HubSpot.
 //
-// [NOVO] JURIDICO:
+// JURIDICO:
 //   - Recebe SEMPRE o payload completo, mesmo quando o cliente está em
 //     outra equipe.
 //   - Quando o cliente está em outra equipe, o backend retorna também
@@ -625,7 +626,7 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
     }
   }
 
-  // [NOVO] JURIDICO: retorna dados completos.
+  // JURIDICO: retorna dados completos.
   // Quando o cliente está em outra equipe, anexa `restrito: true` +
   // `motivo` (para o banner informativo do frontend), mas mantém o
   // payload (contato, negocio, responsavel, link) intacto.
@@ -670,7 +671,7 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
 // direto para a esteira Suporte do quadro de Movimentações, sem passar pela
 // fila de processamento automático (o worker ignora status != pendente).
 //
-// [NOVO] JURIDICO: permitido (é o único caso em que JURIDICO pode criar
+// JURIDICO: permitido (é o único caso em que JURIDICO pode criar
 // um ticket — para escalar duplicados ao time de Suporte).
 // ---------------------- Encaminhar caso ao Suporte ----------------------
 router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
@@ -722,7 +723,7 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Movimentação normal (CRM) ----------------------
-// [NOVO] Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO.
 router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const body = req.body;
 
@@ -877,7 +878,7 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
 }));
 
 // ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
-// [NOVO] Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO.
 router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async (req, res) => {
   const { links } = req.body;
   if (!Array.isArray(links) || links.length < 1 || links.length > 50) {
@@ -1031,7 +1032,7 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
 }));
 
 // ---------------------- Histórico unificado ----------------------
-// [NOVO] Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO.
 router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
   const status = text(req.query.status_mapeamento, 'Status', { max: 40 }) || null;
@@ -1064,7 +1065,7 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
 }));
 
 // ---------------------- Reportes ----------------------
-// [NOVO] Bloqueado para JURIDICO (leitura e escrita).
+// Bloqueado para JURIDICO (leitura e escrita).
 router.get('/ticket-suporte', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
   const { page, limit, offset } = pageParams(req.query);
@@ -1085,39 +1086,117 @@ router.get('/ticket-suporte', requireNonJuridico, asyncRoute(async (req, res) =>
     pagination: { page, limit, hasMore: result.rows.length > limit } });
 }));
 
-// [NOVO] Bloqueado para JURIDICO.
+// ============================================================
+// POST /ticket-suporte — Reportar problema
+//
+// [CORRIGIDO]
+//   - Se SUPPORT_PUBLIC_BASE_URL / APP_PUBLIC_URL estiver
+//     configurada → gera as URLs absolutas dos anexos e envia
+//     ao Teams.
+//   - Se NÃO estiver configurada → loga um aviso, SALVA o ticket
+//     normalmente, mas a notificação do Teams vai sem os links
+//     dos anexos. NÃO bloqueia mais o reporte.
+//   - Em dev (NODE_ENV !== 'production'), aceita http:// além
+//     de https://.
+//   - Resposta inclui `anexos_com_link` e `anexos_sem_link`
+//     para o frontend detectar o fallback se quiser avisar.
+//
+// Bloqueado para JURIDICO.
+// ============================================================
 router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), asyncRoute(async (req, res) => {
   const title = text(req.body.titulo, 'Título', { required: true, max: 500 });
   const subject = text(req.body.assunto, 'Assunto', { required: true, max: 500 });
   const description = text(req.body.descricao, 'Descrição', { required: true, max: 50000 });
   const actor = req.supportActor;
+
+  const uploadedFiles = req.files || [];
+  const hasFiles = uploadedFiles.length > 0;
   const configuredUrl = process.env.SUPPORT_PUBLIC_BASE_URL || process.env.APP_PUBLIC_URL;
-  if ((req.files || []).length && !configuredUrl) throw fail(503, 'URL pública dos anexos não configurada.');
+
   let attachments = [];
-  if ((req.files || []).length) {
-    let base;
-    try { base = new URL(configuredUrl); } catch { throw fail(503, 'URL pública dos anexos inválida.'); }
-    if (base.protocol !== 'https:' || base.username || base.password) throw fail(503, 'A URL dos anexos deve usar HTTPS sem credenciais.');
-    attachments = req.files.map(file => ({ nome: file.originalname,
-      url: new URL(`/uploads/suporte/${encodeURIComponent(file.filename)}`, base.origin).href }));
+  if (hasFiles) {
+    if (!configuredUrl) {
+      // Não bloqueia: apenas avisa e segue sem URLs absolutas.
+      // Os arquivos físicos já foram gravados em uploads/suporte/ pelo Multer.
+      console.warn(
+        '[suporte/ticket-suporte] SUPPORT_PUBLIC_BASE_URL/APP_PUBLIC_URL não configurada. ' +
+        'O ticket será salvo, mas os anexos NÃO aparecerão como links na notificação do Teams. ' +
+        'Configure uma dessas variáveis para exibir os anexos corretamente.'
+      );
+    } else {
+      let base;
+      try {
+        base = new URL(configuredUrl);
+      } catch {
+        throw fail(503, 'URL pública dos anexos inválida. Verifique SUPPORT_PUBLIC_BASE_URL/APP_PUBLIC_URL.');
+      }
+
+      const isProduction = process.env.NODE_ENV === 'production';
+      const protocoloOk = base.protocol === 'https:' || (!isProduction && base.protocol === 'http:');
+      if (!protocoloOk || base.username || base.password) {
+        throw fail(
+          503,
+          'A URL dos anexos deve usar HTTPS (HTTP apenas em desenvolvimento) e não pode conter credenciais.'
+        );
+      }
+
+      attachments = uploadedFiles.map(file => ({
+        nome: file.originalname,
+        url: new URL(`/uploads/suporte/${encodeURIComponent(file.filename)}`, base.origin).href,
+      }));
+    }
   }
-  const metadata = { arquivos: attachments, solicitante_nome: actor.nome || actor.email,
-    solicitante_email: actor.email, equipe_nome: actor.nome_equipe || '', observacao_sales_ops: '', assunto: subject };
+
+  const metadata = {
+    arquivos: attachments,
+    solicitante_nome: actor.nome || actor.email,
+    solicitante_email: actor.email,
+    equipe_nome: actor.nome_equipe || '',
+    observacao_sales_ops: '',
+    assunto: subject,
+  };
+
   const result = await pool.query(`
     INSERT INTO app_comissionamento.tickets_suporte
     (solicitante_usuario_id, categoria, tipo_ticket, prioridade, status, titulo, descricao,
      origem_ticket, encaminhado_em, atualizado_em, metadados)
     VALUES ($1,$2,'Reporte','NORMAL','Aberto',$3,$4,'suporte comissionamento',NOW(),NOW(),$5)
-    RETURNING id_ticket`, [PLACEHOLDER_UUID, subject, title, description, JSON.stringify(metadata)]);
+    RETURNING id_ticket`,
+    [PLACEHOLDER_UUID, subject, title, description, JSON.stringify(metadata)]
+  );
   req.supportUploadsPersisted = true;
+
+  const anexosComLink = attachments.length;
+  const anexosSemLink = hasFiles ? Math.max(0, uploadedFiles.length - attachments.length) : 0;
+
   try {
     const escapeLabel = value => value.replace(/[\[\]\\\r\n]/g, ' ');
-    Promise.resolve(teamsNotificador.enviar({ titulo: title, assunto: subject, descricao: description,
-      solicitante: actor.nome || actor.email, equipe: actor.nome_equipe || '', arquivos: attachments,
-      anexosMarkdown: attachments.length ? attachments.map(a => `[${escapeLabel(a.nome)}](${a.url})`).join(', ') : 'Nenhum anexo',
+    const anexosMarkdown = attachments.length
+      ? attachments.map(a => `[${escapeLabel(a.nome)}](${a.url})`).join(', ')
+      : (hasFiles
+          ? `${uploadedFiles.length} arquivo(s) anexado(s) — links indisponíveis (configure SUPPORT_PUBLIC_BASE_URL no servidor).`
+          : 'Nenhum anexo');
+
+    Promise.resolve(teamsNotificador.enviar({
+      titulo: title,
+      assunto: subject,
+      descricao: description,
+      solicitante: actor.nome || actor.email,
+      equipe: actor.nome_equipe || '',
+      arquivos: attachments,
+      anexosMarkdown,
     })).catch(error => console.error('Falha na notificação Teams:', error.message));
-  } catch (error) { console.error('Falha na notificação Teams:', error.message); }
-  res.status(201).json({ success: true, message: 'Ticket de suporte registrado com sucesso.', id_ticket: result.rows[0].id_ticket });
+  } catch (error) {
+    console.error('Falha na notificação Teams:', error.message);
+  }
+
+  res.status(201).json({
+    success: true,
+    message: 'Ticket de suporte registrado com sucesso.',
+    id_ticket: result.rows[0].id_ticket,
+    anexos_com_link: anexosComLink,
+    anexos_sem_link: anexosSemLink,
+  });
 }));
 
 // ---------------------- Edição manual (SalesOps) ----------------------
