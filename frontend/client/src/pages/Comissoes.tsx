@@ -3351,7 +3351,7 @@ export default function Comissoes() {
                           ? [
                               {
                                 id: `team-${userColab?.id || "goals"}`,
-                                name: `Equipe ${userColab?.equipeNome || ""}`.trim(),
+                                name: `${userColab?.equipeNome || ""}`.trim(),
                                 avatar: userColab?.avatar,
                                 pesoDiarioAssinados: teamGoalTargets.diarioAssinados,
                                 pesoDiarioGanhos: teamGoalTargets.diarioGanhos,

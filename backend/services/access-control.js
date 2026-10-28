@@ -2,6 +2,10 @@
 // Sistema de Controle de Acesso unificado (backend).
 // Fonte única de verdade: CARGO_LEVELS.
 //
+// As chaves de CARGO_LEVELS devem estar SEMPRE normalizadas
+// (minúsculas, sem acentos), porque getAccessLevel() aplica
+// normalize() ao cargo antes da lookup.
+//
 // Para alterar o nível de um cargo individualmente em runtime:
 //   import { accessControl } from './access-control.js';
 //   accessControl.setCargoLevel('desenvolvedor', accessControl.LEVELS.SUPERVISAO);
@@ -24,13 +28,12 @@ class AccessControl {
 
     this.CARGO_LEVELS = {
       // ── Jurídico ──────────────────────────────────────────────
-      // Acesso APENAS à página /suporte → aba "Busca Cliente".
       'analista juridico':       this.LEVELS.JURIDICO,
       'analista':                this.LEVELS.JURIDICO,
       'coordenador juridico':    this.LEVELS.JURIDICO,
       'supervisor juridico':     this.LEVELS.JURIDICO,
       'assistente sac':          this.LEVELS.JURIDICO,
-      'supervisor sac':     this.LEVELS.JURIDICO,
+      'supervisor sac':          this.LEVELS.JURIDICO,
 
       // ── Nenhum acesso ─────────────────────────────────────────
       'desativado':              this.LEVELS.NONE,
@@ -69,18 +72,31 @@ class AccessControl {
 
     this.RESERVED_DESTINATION_TEAMS = new Set([
       'equipe tatiane',
-      'Equipe Leticia Mathias',
+      'equipe leticia mathias',
     ]);
 
-    // Equipes que recebem a mesma visualização de páginas
-    // da Unidade 3 (Home, Comissões e landing em /home para
-    // assessor/supervisor/coordenador).
-    // A comparação é feita com normalize() → trim, lowercase, sem acentos.
     this.HOME_COMISSOES_ALLOWED_TEAM_NAMES = [
       'Equipe Felipe',
     ];
     this.HOME_COMISSOES_ALLOWED_TEAMS = new Set(
       this.HOME_COMISSOES_ALLOWED_TEAM_NAMES.map((t) => this.normalize(t))
+    );
+
+    // ─────────────────────────────────────────────────────────
+    // [NOVO] Bloqueio individual da página de Comissões
+    //
+    // E-mails que NÃO podem acessar /comissoes nem consumir a API
+    // de comissões, mesmo que a regra geral (unidade 3 ou equipe
+    // liberada) os liberasse.
+    //
+    // ⚠️ Substitua o e-mail de exemplo pelo e-mail REAL do supervisor.
+    // A comparação usa this.normalize (trim + lowercase + sem acento).
+    // ─────────────────────────────────────────────────────────
+    this.COMISSOES_BLOCKED_EMAILS = [
+      'wallace.batista@madmbrasil.com.br', // ← TROQUE PELO E-MAIL REAL
+    ];
+    this.COMISSOES_BLOCKED_EMAILS_SET = new Set(
+      this.COMISSOES_BLOCKED_EMAILS.map((e) => this.normalize(e))
     );
 
     this.PERMISSIONS = {
@@ -91,7 +107,6 @@ class AccessControl {
         canExportData: false, filterLocked: true, lockedTeam: true,
         lockedCollaborator: true, description: 'Sem acesso',
 
-        // Suporte
         canAccessSuporte: false,
         canAccessSuporteBuscaCliente: false,
         canAccessSuporteMovimentar: false,
@@ -99,8 +114,6 @@ class AccessControl {
         canAccessSuporteSalesOps: false,
       },
 
-      // ── [NOVO] JURIDICO ──────────────────────────────────────
-      // Acesso somente à Busca Cliente dentro de /suporte.
       [this.LEVELS.JURIDICO]: {
         canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
@@ -109,7 +122,6 @@ class AccessControl {
         lockedCollaborator: true,
         description: 'Acesso somente à Busca Cliente do Suporte',
 
-        // Suporte
         canAccessSuporte: true,
         canAccessSuporteBuscaCliente: true,
         canAccessSuporteMovimentar: false,
@@ -191,13 +203,6 @@ class AccessControl {
     };
   }
 
-  // ─────────────────────────────────────────────────────────────
-  // Regra Home/Comissões:
-  //   (assessor OU supervisor OU coordenador) da UNIDADE 3
-  //   OU (assessor OU supervisor OU coordenador) de uma EQUIPE
-  //      liberada em HOME_COMISSOES_ALLOWED_TEAMS
-  //   OU nível >= ADMINISTRATIVO (qualquer unidade)
-  // ─────────────────────────────────────────────────────────────
   get HOME_COMISSOES_ALLOWED_UNIT() {
     return 3;
   }
@@ -206,24 +211,15 @@ class AccessControl {
     return [this.LEVELS.ASSESSOR, this.LEVELS.SUPERVISAO, this.LEVELS.COORDENADOR];
   }
 
-  /**
-   * (Assessor OU supervisor OU coordenador) E (da unidade 3 OU de uma
-   * equipe liberada em HOME_COMISSOES_ALLOWED_TEAMS).
-   */
   isUnit3HomeComissoesUser(user) {
     if (!user) return false;
     const level = this.getAccessLevel(user.cargo, user.status);
     if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
     const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
     if (unidade === this.HOME_COMISSOES_ALLOWED_UNIT) return true;
-    // equipes liberadas recebem o mesmo tratamento da unidade 3
     return this.isHomeComissoesTeam(user);
   }
 
-  /**
-   * Retorna `true` quando o usuário pertence a uma equipe listada
-   * em HOME_COMISSOES_ALLOWED_TEAMS (comparação com normalize).
-   */
   isHomeComissoesTeam(user) {
     if (!user) return false;
     const team = this.normalize(user.nome_equipe);
@@ -231,18 +227,16 @@ class AccessControl {
     return this.HOME_COMISSOES_ALLOWED_TEAMS.has(team);
   }
 
-  /** Alias retrocompatível. */
+  /** [NOVO] Retorna `true` quando o e-mail do usuário está bloqueado de /comissoes. */
+  isComissoesBlockedByEmail(user) {
+    if (!user?.email) return false;
+    return this.COMISSOES_BLOCKED_EMAILS_SET.has(this.normalize(user.email));
+  }
+
   isUnit3AssessorOrSupervisor(user) {
     return this.isUnit3HomeComissoesUser(user);
   }
 
-  /**
-   * Regra consolidada: quem pode ver Home e Comissões.
-   * - Assessor/Supervisor/Coordenador da unidade 3 → SIM
-   * - Assessor/Supervisor/Coordenador de equipe liberada → SIM
-   * - Administrativo ou Super Admin (qualquer unidade) → SIM
-   * - Demais → NÃO
-   */
   canSeeHomeComissoes(user) {
     if (!user) return false;
     const level = this.getAccessLevel(user.cargo, user.status);
@@ -250,13 +244,6 @@ class AccessControl {
     return this.isUnit3HomeComissoesUser(user);
   }
 
-  /**
-   * Rota inicial recomendada após o login:
-   * - Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → "/home"
-   * - JURIDICO → "/suporte"  (abre já na aba Busca Cliente)
-   * - Supervisor fora da UNIDADE 3 / fora das equipes liberadas → "/suporte"
-   * - Demais → "/" (comportamento anterior)
-   */
   getDefaultLandingPage(user) {
     if (!user) return '/login';
 
@@ -264,7 +251,6 @@ class AccessControl {
 
     const level = this.getAccessLevel(user.cargo, user.status);
 
-    // [NOVO] JURIDICO vai direto para a página de Suporte
     if (level === this.LEVELS.JURIDICO)   return '/suporte';
     if (level === this.LEVELS.SUPERVISAO) return '/suporte';
 
@@ -276,7 +262,6 @@ class AccessControl {
   }
 
   setCargoLevel(cargo, level) {
-    // Intervalo ampliado para 0–6 em razão do novo nível JURIDICO
     if (typeof level !== 'number' || level < 0 || level > 6) {
       throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–6.`);
     }
@@ -309,7 +294,6 @@ class AccessControl {
     return this.LEVELS.NONE;
   }
 
-  // [NOVO] helper de conveniência
   isJuridico(cargo, status) {
     return this.getAccessLevel(cargo, status) === this.LEVELS.JURIDICO;
   }
@@ -326,42 +310,30 @@ class AccessControl {
     return this.getAccessLevel(cargo, status) >= this.LEVELS.ADMINISTRATIVO;
   }
 
-  /**
-   * Quem pode entrar em /suporte.
-   * Inclui JURIDICO (mesmo estando abaixo de SUPERVISAO na hierarquia).
-   */
   canAccessSupport(cargo, status) {
     const level = this.getAccessLevel(cargo, status);
     return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;
   }
 
-  /** Pode ver a página de Suporte? (alias semântico) */
   canAccessSuportePage(cargo, status) {
     return this.canAccessSupport(cargo, status);
   }
 
-  /** Pode usar a aba Busca Cliente? */
   canAccessSuporteBuscaCliente(cargo, status) {
     const level = this.getAccessLevel(cargo, status);
     return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;
   }
 
-  /** Pode usar a aba Movimentar? (JURIDICO NÃO) */
   canAccessSuporteMovimentar(cargo, status) {
-    const level = this.getAccessLevel(cargo, status);
-    return level >= this.LEVELS.SUPERVISAO;
+    return this.getAccessLevel(cargo, status) >= this.LEVELS.SUPERVISAO;
   }
 
-  /** Pode usar a aba Reportar? (JURIDICO NÃO) */
   canAccessSuporteReportar(cargo, status) {
-    const level = this.getAccessLevel(cargo, status);
-    return level >= this.LEVELS.SUPERVISAO;
+    return this.getAccessLevel(cargo, status) >= this.LEVELS.SUPERVISAO;
   }
 
-  /** Pode ver a aba Visão SalesOps? (só ADMINISTRATIVO+) */
   canAccessSuporteSalesOps(cargo, status) {
-    const level = this.getAccessLevel(cargo, status);
-    return level >= this.LEVELS.ADMINISTRATIVO;
+    return this.getAccessLevel(cargo, status) >= this.LEVELS.ADMINISTRATIVO;
   }
 
   hasPermission(user, permission) {
@@ -374,9 +346,10 @@ class AccessControl {
     const level = this.getAccessLevel(user?.cargo, user?.status);
     const perms = this.PERMISSIONS[level];
 
-    // Regra consolidada: nível >= ADMINISTRATIVO OU unidade 3 (assessor/sup/coord)
-    // OU equipe liberada em HOME_COMISSOES_ALLOWED_TEAMS.
     const allowHomeComissoes = this.canSeeHomeComissoes(user);
+
+    // [NOVO] Bloqueio individual da página de Comissões.
+    const bloqueadoComissoes = this.isComissoesBlockedByEmail(user);
 
     return {
       level,
@@ -387,14 +360,16 @@ class AccessControl {
       unidade_id: user?.unidade_id,
       ...perms,
       canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
-      canAccessComissoes: perms.canAccessComissoes && allowHomeComissoes,
+      // [NOVO] canAccessComissoes respeita a lista de bloqueio individual.
+      canAccessComissoes:
+        perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
     };
   }
 
   getLevelName(level) {
     const names = {
       [this.LEVELS.NONE]: 'SEM ACESSO',
-      [this.LEVELS.JURIDICO]: 'JURIDICO',            // [NOVO]
+      [this.LEVELS.JURIDICO]: 'JURIDICO',
       [this.LEVELS.ASSESSOR]: 'ASSESSOR',
       [this.LEVELS.SUPERVISAO]: 'SUPERVISAO',
       [this.LEVELS.COORDENADOR]: 'COORDENADOR',
@@ -447,7 +422,6 @@ class AccessControl {
 
   getMenuItems(permissions) {
     const items = [];
-    // [NOVO] JURIDICO → menu exclusivo de Suporte
     if (
       permissions.level === this.LEVELS.JURIDICO ||
       (permissions.canAccessSuporte && !permissions.canAccessDashboard)
@@ -457,6 +431,8 @@ class AccessControl {
     }
 
     if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });
+    // O item só aparece se canAccessComissoes === true — o que já leva
+    // em conta o bloqueio individual por e-mail.
     if (permissions.canAccessComissoes) items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
     if (permissions.canViewTeam || permissions.canAccessReports) {
       items.push({ id: 'dashboard-group', label: 'Dashboard', link: '' });
@@ -612,20 +588,18 @@ export const getActiveSupportUser = (email, db) => instance.getActiveSupportUser
 export const isSupportSupervisor = (cargo) => instance.isSupervisor(cargo);
 export const isSupportCoordinatorOrAbove = (cargo) => instance.isCoordinatorOrAbove(cargo);
 export const isSupportAdmin = (cargo) => instance.isAdmin(cargo);
-export const isSupportJuridico = (cargo, status) => instance.isJuridico(cargo, status);  // [NOVO]
+export const isSupportJuridico = (cargo, status) => instance.isJuridico(cargo, status);
 export const canAccessSupport = (cargo, status) => instance.canAccessSupport(cargo, status);
 export const validateHubSpotMovementAccess = (params) => instance.validateHubSpotMovementAccess(params);
 
-// ─────────────────────────────────────────────────────────────
-// Regra Home/Comissões:
-//   (assessor OU supervisor OU coordenador) da UNIDADE 3
-//   OU (assessor OU supervisor OU coordenador) de equipe liberada
-//   OU nível >= ADMINISTRATIVO (qualquer unidade)
-// ─────────────────────────────────────────────────────────────
+// [NOVO] Bloqueio individual da página de Comissões
+export const COMISSOES_BLOCKED_EMAILS = [...instance.COMISSOES_BLOCKED_EMAILS];
+export const isComissoesBlockedByEmail = (user) => instance.isComissoesBlockedByEmail(user);
+
 export const HOME_COMISSOES_ALLOWED_UNIT = 3;
 export const HOME_COMISSOES_ALLOWED_TEAM_NAMES = [...instance.HOME_COMISSOES_ALLOWED_TEAM_NAMES];
 export const isUnit3HomeComissoesUser = (user) => instance.isUnit3HomeComissoesUser(user);
-export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3HomeComissoesUser(user); // alias
+export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3HomeComissoesUser(user);
 export const isHomeComissoesTeam = (user) => instance.isHomeComissoesTeam(user);
 export const canSeeHomeComissoes = (user) => instance.canSeeHomeComissoes(user);
 export const getDefaultLandingPage = (user) => instance.getDefaultLandingPage(user);
