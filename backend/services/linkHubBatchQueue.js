@@ -1,31 +1,4 @@
 // backend/services/linkHubBatchQueue.js
-// Worker do fluxo de Movimentação por Link Hub.
-// Opera sobre a MESMA tabela app_comissionamento.tickets_movimentacao_lead,
-// filtrando por crm_origem = 'HUBSPOT_LINK'.
-//
-// ─── Correção do erro "Supervisores só podem reativar cards..." ───
-// 1) Diagnosticamos e logamos sempre o que o worker viu como "origem do
-//    card": ownerId do deal, e-mail do owner, linha correspondente na view.
-// 2) Se o owner do card não foi resolvido (deal sem proprietário, ou
-//    e-mail do proprietário não bate na view), lançamos um erro descritivo
-//    em vez de cair no `enforceSourceTeam` genérico.
-// 3) Passamos `sourceUnitId` para `validateHubSpotMovementAccess` — a
-//    unidade vem direto do registro do owner, sem depender da consulta
-//    por `nome_equipe` (ambígua quando a mesma equipe tem unidades mistas).
-//
-// ─── Roteamento por produto ───
-// O produto do ticket é repassado a `reassignDealForLinkHubMovement`, que:
-//   - Auxílio e demais produtos comuns → Closer / Em Contato.
-//   - Quinquênio/Quinqueino/Concomitante(s) → pipeline Quinquênio / Em contato,
-//     tanto vindo da Base de Leads quanto do próprio Closer ou já dentro
-//     do pipeline Quinquênio.
-//   - Isenção de IR Aposentadoria (ISENCAO_IR) → pipeline Isenção de IR
-//     (946074910) / Em Contato.  // [ISENÇÃO IR]
-// A regra gravada em `observacao_sales_ops.regra` reflete o pipeline final
-// confirmado, não apenas "veio da Base".
-//
-// O fluxo de reprocessamento continua o mesmo: a rota `/reprocessar`
-// reseta `_worker` e `processado`, e o worker aqui pega o ticket normalmente.
 
 import { pool } from './db.js';
 import {
@@ -35,7 +8,7 @@ import {
   reassignDealForLinkHubMovement,
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_PIPELINE_QUINQUENIO_ID,
-  HUBSPOT_PIPELINE_ISENCAO_IR_ID,   // [ISENÇÃO IR]
+  HUBSPOT_PIPELINE_ISENCAO_IR_ID,   
 } from './hubspot.js';
 import { getActiveSupportUser, validateHubSpotMovementAccess } from './access-control.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
@@ -68,7 +41,7 @@ function isRetryableError(error) {
   );
   if (status) return status === 429 || status >= 500;
   const normalizedMessage = message.toLowerCase();
-  return ![
+  return ![ 
     'não encontrado', 'nao encontrado', 'não permitida', 'nao permitida',
     'inválido', 'invalido', 'outra conta', 'mudou desde', 'mudou após',
     'sem acesso', 'própria equipe', 'propria equipe', 'somente supervisores',
@@ -101,12 +74,6 @@ function describeFailure(error, attempts) {
   return parts.filter(Boolean).join(' ');
 }
 
-// Escolhe a regra a ser gravada em observacao_sales_ops.regra, com base no
-// pipeline final confirmado pela movimentação:
-//   - Quinquênio     → reassigned_in_quinquenio
-//   - Isenção de IR  → reassigned_in_isencao_ir   // [ISENÇÃO IR]
-//   - Closer vindo da Base → moved_from_base_leads (fluxo original)
-//   - Closer sem origem Base → reassigned_in_closer (só responsável mudou)
 function resolveRuleLabel(resultData) {
   const pipelineFinal = String(resultData?.pipeline || '');
   if (pipelineFinal === String(HUBSPOT_PIPELINE_QUINQUENIO_ID)) {
@@ -403,9 +370,6 @@ async function handleLinkHubTicket(ticket, client) {
     })
   );
 
-  // Owner do card não resolvido: separamos "sem proprietário" de
-  // "proprietário sem cadastro ativo". Ambos geram erro descritivo em vez
-  // de cair no enforceSourceTeam genérico.
   if (context.ownerId && !sourceOwner) {
     const error = new Error(
       sourceOwnerEmail
@@ -436,7 +400,7 @@ async function handleLinkHubTicket(ticket, client) {
     destinationEmail: destinationEmail || undefined,
     destinationTeam,
     sourceTeam: sourceOwner?.nome_equipe || null,
-    sourceUnitId: sourceOwner?.unidade_id ?? null,   // <-- NÃO depende mais da consulta por nome
+    sourceUnitId: sourceOwner?.unidade_id ?? null,  
     enforceSourceTeam: true,
     enforceDestinationSameTeam: true,
   });
@@ -455,12 +419,6 @@ async function handleLinkHubTicket(ticket, client) {
     throw error;
   }
 
-  // O destino (pipeline/etapa) é decidido pelo hubspot.js a partir do produto.
-  // Quando o produto é especial (Quinquênio/Concomitante OU Isenção de IR),
-  // o card é movido para o pipeline dedicado — inclusive se já estiver no
-  // Closer ou já estiver dentro do próprio pipeline dedicado. Quando é
-  // Auxílio/comum, o comportamento anterior (mover da Base; preservar
-  // Closer) é mantido.  // [ISENÇÃO IR]
   const assignment = await reassignDealForLinkHubMovement(
     dealId,
     ownerId,
@@ -477,16 +435,24 @@ async function handleLinkHubTicket(ticket, client) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Loop principal — corrigido para sobreviver a falhas transitórias de pool.
+// `pool.connect()` agora é feito dentro do try; `isProcessing` é marcado
+// antes; `client.release()` fica protegido. Nenhuma exceção escapa.
+// ─────────────────────────────────────────────────────────────────────────────
 async function processLinkHubQueue() {
   if (isProcessing) return;
-  const client = await pool.connect();
+  isProcessing = true;
+
+  let client = null;
   let hasLock = false;
 
   try {
+    client = await pool.connect();
+
     const lockResult = await client.query('SELECT pg_try_advisory_lock($1)', [LOCK_KEY]);
     hasLock = lockResult.rows[0].pg_try_advisory_lock === true;
     if (!hasLock) return;
-    isProcessing = true;
 
     await reclaimStaleLeases(client);
 
@@ -503,27 +469,57 @@ async function processLinkHubQueue() {
         } catch (persistError) {
           console.error(
             `Falha ao persistir erro do ticket Link Hub ${ticket.id_ticket_movimentacao}:`,
-            persistError
+            persistError?.message || persistError
           );
         }
       }
     }
   } catch (error) {
-    console.error('Erro no worker Link Hub:', error);
+    // Erros aqui são majoritariamente transitórios de banco
+    // (Connection terminated, timeout de connect, lock). Logamos e o
+    // próximo ciclo do setInterval tenta novamente com uma conexão nova.
+    console.error('[linkHubBatchQueue] ciclo interrompido:', error?.message || error);
   } finally {
-    if (hasLock) {
+    if (client && hasLock) {
       try {
         await client.query('SELECT pg_advisory_unlock($1)', [LOCK_KEY]);
       } catch (unlockErr) {
-        console.error('Erro ao liberar advisory lock Link Hub:', unlockErr);
+        console.error(
+          '[linkHubBatchQueue] falha ao liberar advisory lock:',
+          unlockErr?.message || unlockErr
+        );
+      }
+    }
+    if (client) {
+      try {
+        client.release();
+      } catch (releaseErr) {
+        // Conexão já morta — o pg-pool descarta sozinho.
+        console.warn(
+          '[linkHubBatchQueue] release falhou (conexão já encerrada):',
+          releaseErr?.message || releaseErr
+        );
       }
     }
     isProcessing = false;
-    client.release();
   }
 }
 
 export function startLinkHubBatchQueue(intervalMs = 5000) {
-  setInterval(() => { void processLinkHubQueue(); }, intervalMs);
+  const safeRun = () => {
+    // Captura defensiva: se por algum motivo processLinkHubQueue ainda
+    // lançar para fora, o processo NÃO morre.
+    processLinkHubQueue().catch((err) => {
+      console.error(
+        '[linkHubBatchQueue] falha não tratada no ciclo:',
+        err?.stack || err?.message || err
+      );
+    });
+  };
+
+  const timer = setInterval(safeRun, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();   // não trava exit do processo
+
   console.log('🔄 Fila de lotes Link Hub iniciada');
+  return timer;
 }

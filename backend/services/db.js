@@ -35,19 +35,24 @@ if (connectionString) {
   };
 }
 
-// ─── Criação do pool ───────────────────────────────────────────
+const useSSL = dbConfig.ssl;
+
 const pool = new Pool({
   ...dbConfig,
+
   max: Number(process.env.DB_POOL_MAX || 20),
-  idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 30000),
-  connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10000),
+  idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 25_000),
+  connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10_000),
   keepAlive: true,
-  keepAliveInitialDelayMillis: 10000,
+  keepAliveInitialDelayMillis: 10_000,
+  application_name: 'madm-backend',
+
+  // Guardas opcionais de execução. Se as envs não existirem, os
+  // defaults abaixo se aplicam — podem ser desligadas com 0.
+  statement_timeout: Number(process.env.DB_STATEMENT_TIMEOUT_MS || 60_000),
+  query_timeout: Number(process.env.DB_QUERY_TIMEOUT_MS || 30_000),
 });
 
-// ─── Listeners ─────────────────────────────────────────────────
-// ✅ Correção CRÍTICA: anexa um listener de erro em CADA cliente novo.
-// Sem isso, erros emitidos no Client (não no Pool) derrubam o processo.
 pool.on('connect', (client) => {
   console.log('✅ Conectado ao PostgreSQL com sucesso');
 
@@ -57,10 +62,11 @@ pool.on('connect', (client) => {
   });
 });
 
-// Mantido: cobre erros emitidos diretamente pelo Pool (clientes idle).
 pool.on('error', (err) => {
   console.error('❌ [DB Pool] Erro inesperado no pool do PostgreSQL:', err.message);
-  console.warn('⚠️ O cliente afetado foi descartado. O pool tentará estabelecer uma nova conexão na próxima operação.');
+  console.warn(
+    '⚠️ O cliente afetado foi descartado. O pool tentará estabelecer uma nova conexão na próxima operação.'
+  );
 });
 
 pool.on('remove', () => {
@@ -80,11 +86,13 @@ export async function waitForDatabase({ retryDelayMs = 5000, maxAttempts = Infin
       }
       return;
     } catch (error) {
-      console.error(`❌ Banco indisponível (tentativa ${attempt}). Nova tentativa em ${retryDelayMs} ms: ${error.message}`);
+      console.error(
+        `❌ Banco indisponível (tentativa ${attempt}). Nova tentativa em ${retryDelayMs} ms: ${error.message}`
+      );
       if (attempt >= maxAttempts) {
         throw new Error(`Banco inacessível após ${attempt} tentativa(s): ${error.message}`);
       }
-      await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
     }
   }
 }

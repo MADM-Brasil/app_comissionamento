@@ -46,7 +46,7 @@ const EXCLUDED_TEAMS = [
 const EXCLUDED_GROUPS = [
   "Supervisor", "Salesops", "Sales ops", "Coordenador", "CEO",
   "Diretoria", "Desativado",
-  "analista juridico", "analista",       // [NOVO] nível JURIDICO
+  "analista juridico", "analista",
   "Ultravita", "Diligencia",
   "Marketing", "Gerência", "Contrato", "Dr. Felipe Marx", "Administrativo",
   "administrativo"
@@ -427,11 +427,6 @@ export default function Analytics() {
     await reloadData(true);
   }, [reloadData]);
 
-  // ============================================================
-  // EFEITO PRINCIPAL
-  // ⚠️ Correção: incluir currentUser?.id e collaborators.length para
-  // re-fetch quando o user/collaborators forem hidratados após login.
-  // ============================================================
   useEffect(() => {
     if (!currentStartDate || !currentEndDate) return;
     reloadData(false);
@@ -558,18 +553,14 @@ export default function Analytics() {
     );
   }, [scopedCollaborators, equipe, colaborador, isSupervisorSelected, supervisorSelectedTeam]);
 
-  // [CORRIGIDO] Exclui "analista juridico" e "analista" (nível JURIDICO)
-  // do somatório de metas. Sem isso, esses cargos — que antes eram NONE
-  // e não conseguiam logar — passariam a contribuir com metas zeradas
-  // (ou eventualmente preenchidas) nos totais de um ADMIN/SUPER_ADMIN.
   const baseCollaborators = useMemo(() => filteredCollaborators.filter(c => {
     const g = (c.grupo || '').trim().toLowerCase();
     return g !== 'supervisor'
       && g !== 'coordenador'
       && g !== 'administrativo'
       && g !== 'desativado'
-      && g !== 'analista juridico'   // [NOVO] nível JURIDICO
-      && g !== 'analista';           // [NOVO] nível JURIDICO
+      && g !== 'analista juridico'   
+      && g !== 'analista';
   }), [filteredCollaborators]);
 
   const { targetAssinados, targetGanhos, targetProtocolados } = useMemo(() => {

@@ -32,7 +32,11 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { API_BASE } from "@/lib/api";
-import { getAccessLevel as resolveAccessLevel, LEVELS } from "@/lib/accessControl";
+// [CHANGELOG] Adicionado `getEffectiveAccessLevel` para reconhecer o
+// novo nível ASSESSOR_PLUS (promoção por e-mail). O alias
+// `getAccessLevel as resolveAccessLevel` foi removido porque não era
+// mais utilizado em nenhum ponto do arquivo.
+import { getEffectiveAccessLevel, LEVELS } from "@/lib/accessControl";
 
 // ---------------------- Tipos ----------------------
 interface MovementItem {
@@ -195,11 +199,33 @@ const normalizeKey = (str: string): string =>
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ');
 
-function getSupportAccessLevel(cargo?: string, status?: string): number {
-  const level = resolveAccessLevel(cargo, status);
-  return level === LEVELS.NONE && normalize(cargo || '').startsWith('supervisor')
-    ? LEVELS.SUPERVISAO
-    : level;
+/**
+ * [CHANGELOG] Antes recebia `cargo`/`status` e usava `resolveAccessLevel`
+ * (= getAccessLevel), que IGNORA a whitelist ASSESSOR_PLUS. Um assessor
+ * promovido por e-mail continuava caindo como `LEVELS.ASSESSOR` (2),
+ * `canAccessPage` dava `false` e a página redirecionava para "/" —
+ * gerando o loop infinito de redirect reportado no console.
+ *
+ * Agora recebe o USUÁRIO COMPLETO (com `email`) e delega para
+ * `getEffectiveAccessLevel`, que aplica a promoção ASSESSOR_PLUS:
+ *
+ *   cargo "assessor" + email em ASSESSOR_PLUS_EMAILS  →  nível 4
+ *   cargo "assessor" (fora da whitelist)              →  nível 2
+ *   cargo "supervisor"/"coordenador"/etc.             →  nível normal
+ *
+ * O fallback histórico para cargos legados tipo "supervisor xxx"
+ * (não mapeados em CARGO_LEVELS) foi mantido.
+ */
+function getSupportAccessLevel(user?: {
+  email?: string;
+  cargo?: string;
+  status?: string;
+} | null): number {
+  const level = getEffectiveAccessLevel(user);
+  if (level === LEVELS.NONE && normalize(user?.cargo || '').startsWith('supervisor')) {
+    return LEVELS.SUPERVISAO;
+  }
+  return level;
 }
 
 const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string): boolean => {
@@ -358,24 +384,29 @@ function getCsrfHeaders() {
 
 export default function Suporte() {
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  // [CHANGELOG] Passa o usuário completo (com `email`) para que
+  // `getEffectiveAccessLevel` reconheça ASSESSOR_PLUS.
+  const accessLevel = getSupportAccessLevel(accessUser);
 
-  // [NOVO] Nível JURIDICO: acesso exclusivo à aba Busca Cliente.
+  // Nível JURIDICO: acesso exclusivo à aba Busca Cliente.
   const isJuridico = accessLevel === LEVELS.JURIDICO;
 
-  // [NOVO] JURIDICO inicia direto em "busca"; demais começam em "reportar".
+  // [CHANGELOG] ASSESSOR_PLUS também inicia em "reportar" — mesma UX
+  // do coordenador (que é o nível com quem ele compartilha permissões).
+  // Nada a mudar aqui: `isJuridico` já é `false` para ASSESSOR_PLUS.
   const [activeTab, setActiveTab] = useState<"movimentacao" | "busca" | "reportar" | "salesops">(
     isJuridico ? "busca" : "reportar"
   );
 
-  // [NOVO] Liberação da página para JURIDICO.
+  // Liberação da página para JURIDICO e ASSESSOR_PLUS (ambos têm
+  // accessLevel >= SUPERVISAO após a promoção).
   const canAccessPage = accessLevel >= LEVELS.SUPERVISAO || isJuridico;
 
   const isAdmin = useMemo(() => {
     return accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
   }, [accessLevel]);
 
-  // [NOVO] Se o nível de acesso mudar (ex.: hidratação tardia do usuário)
+  // Se o nível de acesso mudar (ex.: hidratação tardia do usuário)
   // e virar JURIDICO, força a aba para "busca".
   useEffect(() => {
     if (isJuridico && activeTab !== "busca") {
@@ -385,7 +416,9 @@ export default function Suporte() {
 
   if (!canAccessPage) return <Redirect to="/" />;
 
-  // [NOVO] Tabs visíveis — JURIDICO só vê "Busca Cliente".
+  // Tabs visíveis — JURIDICO só vê "Busca Cliente".
+  // ASSESSOR_PLUS vê Movimentar / Busca / Reportar (como coordenador);
+  // SalesOps continua oculto porque `isAdmin` é `false`.
   const tabs = [
     { id: "reportar", label: "Reportar", icon: Search },
     { id: "movimentacao", label: "Movimentar", icon: ClipboardList },
@@ -419,7 +452,7 @@ export default function Suporte() {
           ))}
         </div>
       </div>
-      {/* [NOVO] Guards defensivos — JURIDICO não renderiza nada além de Busca Cliente. */}
+      {/* Guards defensivos — JURIDICO não renderiza nada além de Busca Cliente. */}
       {activeTab === "movimentacao" && !isJuridico && <MovimentacaoTab />}
       {activeTab === "busca" && <BuscaClienteTab />}
       {activeTab === "reportar" && !isJuridico && <ReportarTab />}
@@ -431,7 +464,12 @@ export default function Suporte() {
 function MovimentacaoTab() {
   const { currentUser, setCurrentUser } = useAppStore();
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  // [CHANGELOG] Passa o usuário completo — necessário para o
+  // `getEffectiveAccessLevel` reconhecer ASSESSOR_PLUS.
+  // Importante: `isSupervisor` continua sendo `accessLevel === SUPERVISAO`,
+  // portanto ASSESSOR_PLUS (4) NÃO é supervisor → herda as regras de
+  // coordenador ao movimentar cards (sem travas de equipe/unidade).
+  const accessLevel = getSupportAccessLevel(accessUser);
   const isSupervisor = accessLevel === LEVELS.SUPERVISAO;
 
   const [firstName, setFirstName] = useState("");
@@ -1259,10 +1297,15 @@ interface BuscaClienteResultado {
 }
 
 function BuscaClienteTab() {
-  // [NOVO] Identifica o nível do solicitante — JURIDICO ignora a
-  // restrição por equipe e exibe o resultado integral.
+  // Identifica o nível do solicitante — JURIDICO ignora a restrição
+  // por equipe e exibe o resultado integral.
+  //
+  // [CHANGELOG] Passa o usuário completo para `getSupportAccessLevel`
+  // — necessário para reconhecer ASSESSOR_PLUS. Sem isso, um assessor
+  // promovido por e-mail era tratado como assessor comum aqui e não
+  // conseguia enxergar os dados completos (quando aplicável).
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  const accessLevel = getSupportAccessLevel(accessUser);
   const isJuridico = accessLevel === LEVELS.JURIDICO;
 
   const [telefone, setTelefone] = useState("");
@@ -1337,9 +1380,9 @@ function BuscaClienteTab() {
     }
   };
 
-  // [NOVO] JURIDICO: ignora a sinalização `restrito` do backend e
-  // exibe o resultado completo. Demais níveis continuam bloqueados
-  // quando o cliente está em outra equipe.
+  // JURIDICO: ignora a sinalização `restrito` do backend e exibe o
+  // resultado completo. Demais níveis continuam bloqueados quando o
+  // cliente está em outra equipe.
   const showRestritoBlock = !!resultado?.restrito && !isJuridico;
 
   return (
@@ -1445,9 +1488,9 @@ function BuscaClienteTab() {
             </div>
           ) : (
             <div className="space-y-4">
-              {/* [NOVO] JURIDICO: nota informativa quando o cliente
-                  pertence a outra equipe. Os dados completos abaixo
-                  continuam sendo exibidos normalmente. */}
+              {/* JURIDICO: nota informativa quando o cliente pertence a
+                  outra equipe. Os dados completos abaixo continuam
+                  sendo exibidos normalmente. */}
               {isJuridico && resultado.restrito && resultado.motivo && (
                 <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800" role="note">
                   <strong>Acesso jurídico:</strong> {resultado.motivo} — exibindo dados completos conforme nível de acesso.
@@ -1956,14 +1999,21 @@ interface EditModalProps {
   children: React.ReactNode;
   onSave: () => void;
   saving: boolean;
+  onConcluir?: () => void;
+  concluindo?: boolean;
+  concluirDisabled?: boolean;
+  concluirTitle?: string;
 }
 
-function EditModal({ isOpen, onClose, title, children, onSave, saving }: EditModalProps) {
+function EditModal({
+  isOpen, onClose, title, children, onSave, saving,
+  onConcluir, concluindo = false, concluirDisabled = false, concluirTitle,
+}: EditModalProps) {
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-lg font-bold text-[#0f172a]">{title}</h3>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
@@ -1984,12 +2034,24 @@ function EditModal({ isOpen, onClose, title, children, onSave, saving }: EditMod
           <button
             type="button"
             onClick={onSave}
-            disabled={saving}
+            disabled={saving || concluindo}
             className="px-4 py-2 bg-[#2F6FED] text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-[#2F6FED]/90 disabled:opacity-50"
           >
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             {saving ? "Salvando..." : "Salvar"}
           </button>
+          {onConcluir && (
+            <button
+              type="button"
+              onClick={onConcluir}
+              disabled={saving || concluindo || concluirDisabled}
+              title={concluirTitle}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-green-700 disabled:opacity-50"
+            >
+              {concluindo ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+              {concluindo ? 'Concluindo...' : 'Concluir'}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -2123,8 +2185,28 @@ function MovimentacoesSuporteTab() {
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
-  const [editForm, setEditForm] = useState<{ status_mapeamento: string; observacao_sales_ops: string }>({ status_mapeamento: '', observacao_sales_ops: '' });
+
+  const [editForm, setEditForm] = useState<{
+    status_mapeamento: string;
+    observacao_sales_ops: string;
+    nome_cliente_informado: string;
+    sobrenome_cliente_informado: string;
+    email_cliente_informado: string;
+    telefone_cliente_informado: string;
+    cpf_cliente_informado: string;
+    origem_cliente_informada: string;
+  }>({
+    status_mapeamento: '',
+    observacao_sales_ops: '',
+    nome_cliente_informado: '',
+    sobrenome_cliente_informado: '',
+    email_cliente_informado: '',
+    telefone_cliente_informado: '',
+    cpf_cliente_informado: '',
+    origem_cliente_informada: '',
+  });
   const [saving, setSaving] = useState(false);
+  const [concluindo, setConcluindo] = useState(false);
   const [reprocessingTicket, setReprocessingTicket] = useState<TicketMovimentacao | null>(null);
   const [reprocessing, setReprocessing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -2173,27 +2255,56 @@ function MovimentacoesSuporteTab() {
     setEditForm({
       status_mapeamento: ticket.status_mapeamento || 'pendente',
       observacao_sales_ops: observacao,
+      nome_cliente_informado: ticket.nome_cliente_informado || '',
+      sobrenome_cliente_informado: ticket.sobrenome_cliente_informado || '',
+      email_cliente_informado: ticket.email_cliente_informado || '',
+      telefone_cliente_informado: ticket.telefone_cliente_informado || '',
+      cpf_cliente_informado: ticket.cpf_cliente_informado || '',
+      origem_cliente_informada: ticket.origem_cliente_informada || '',
     });
   };
 
   const closeEditModal = () => {
     setEditingTicket(null);
-    setEditForm({ status_mapeamento: '', observacao_sales_ops: '' });
+    setEditForm({
+      status_mapeamento: '',
+      observacao_sales_ops: '',
+      nome_cliente_informado: '',
+      sobrenome_cliente_informado: '',
+      email_cliente_informado: '',
+      telefone_cliente_informado: '',
+      cpf_cliente_informado: '',
+      origem_cliente_informada: '',
+    });
   };
 
   const saveEdit = async () => {
     if (!editingTicket) return;
     setSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`, {
-        method: 'PATCH',
-        headers: getCsrfHeaders(),
-        credentials: 'include',
-        body: JSON.stringify({
-          status_mapeamento: editForm.status_mapeamento,
-          observacao_sales_ops: editForm.observacao_sales_ops,
-        }),
-      });
+      const payload: Record<string, unknown> = {
+        nome_cliente_informado: editForm.nome_cliente_informado,
+        sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+        email_cliente_informado: editForm.email_cliente_informado,
+        telefone_cliente_informado: editForm.telefone_cliente_informado,
+        cpf_cliente_informado: editForm.cpf_cliente_informado,
+        origem_cliente_informada: editForm.origem_cliente_informada,
+        observacao_sales_ops: editForm.observacao_sales_ops,
+      };
+      // Link Hub só altera status pelo botão "Concluir".
+      if (editingTicket.crm_origem !== 'HUBSPOT_LINK') {
+        payload.status_mapeamento = editForm.status_mapeamento;
+      }
+
+      const res = await fetch(
+        `${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`,
+        {
+          method: 'PATCH',
+          headers: getCsrfHeaders(),
+          credentials: 'include',
+          body: JSON.stringify(payload),
+        }
+      );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Erro ao atualizar');
 
@@ -2209,7 +2320,15 @@ function MovimentacoesSuporteTab() {
         }
         return {
           ...t,
-          status_mapeamento: editForm.status_mapeamento,
+          status_mapeamento: editingTicket.crm_origem === 'HUBSPOT_LINK'
+            ? t.status_mapeamento
+            : editForm.status_mapeamento,
+          nome_cliente_informado: editForm.nome_cliente_informado,
+          sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+          email_cliente_informado: editForm.email_cliente_informado,
+          telefone_cliente_informado: editForm.telefone_cliente_informado,
+          cpf_cliente_informado: editForm.cpf_cliente_informado,
+          origem_cliente_informada: editForm.origem_cliente_informada,
           observacao_sales_ops: novoObservacao,
         };
       }));
@@ -2220,6 +2339,69 @@ function MovimentacoesSuporteTab() {
       setMessage({ text: err.message, type: "error" });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleConcluir = async () => {
+    if (!editingTicket) return;
+    if (!confirm('Deseja concluir este caso? O status será alterado para "Concluído".')) {
+      return;
+    }
+    setConcluindo(true);
+    try {
+      const payload: Record<string, unknown> = {
+        nome_cliente_informado: editForm.nome_cliente_informado,
+        sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+        email_cliente_informado: editForm.email_cliente_informado,
+        telefone_cliente_informado: editForm.telefone_cliente_informado,
+        cpf_cliente_informado: editForm.cpf_cliente_informado,
+        origem_cliente_informada: editForm.origem_cliente_informada,
+        observacao_sales_ops: editForm.observacao_sales_ops,
+        status_mapeamento: 'concluido',
+      };
+
+      const res = await fetch(
+        `${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`,
+        {
+          method: 'PATCH',
+          headers: getCsrfHeaders(),
+          credentials: 'include',
+          body: JSON.stringify(payload),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Erro ao concluir');
+
+      setTickets(prev => prev.map(t => {
+        if (t.id_ticket_movimentacao !== editingTicket.id_ticket_movimentacao) return t;
+        let novoObservacao;
+        try {
+          const current = JSON.parse(t.observacao_sales_ops || '{}');
+          current.observacao = editForm.observacao_sales_ops;
+          novoObservacao = JSON.stringify(current);
+        } catch {
+          novoObservacao = JSON.stringify({ observacao: editForm.observacao_sales_ops });
+        }
+        return {
+          ...t,
+          status_mapeamento: 'concluido',
+          nome_cliente_informado: editForm.nome_cliente_informado,
+          sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+          email_cliente_informado: editForm.email_cliente_informado,
+          telefone_cliente_informado: editForm.telefone_cliente_informado,
+          cpf_cliente_informado: editForm.cpf_cliente_informado,
+          origem_cliente_informada: editForm.origem_cliente_informada,
+          observacao_sales_ops: novoObservacao,
+        };
+      }));
+
+      setMessage({ text: 'Caso concluído com sucesso.', type: 'success' });
+      closeEditModal();
+      setTimeout(() => { carregarTickets(); }, 1500);
+    } catch (err: any) {
+      setMessage({ text: err.message, type: 'error' });
+    } finally {
+      setConcluindo(false);
     }
   };
 
@@ -2308,8 +2490,6 @@ function MovimentacoesSuporteTab() {
     return grupos;
   }, [filteredTickets]);
 
-  // Colunas ocultas (ver MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS) voltam a aparecer
-  // sozinhas assim que algum ticket cai nelas, e somem de novo quando esvaziam.
   const colunasExibidas = MOVIMENTACOES_STATUS_COLUMNS.filter(coluna =>
     MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS.includes(coluna) || (ticketsPorColuna[coluna]?.length || 0) > 0
   );
@@ -2415,6 +2595,10 @@ function MovimentacoesSuporteTab() {
         title={`Movimentação #${editingTicket?.id_ticket_movimentacao || ''}`}
         onSave={saveEdit}
         saving={saving}
+        onConcluir={handleConcluir}
+        concluindo={concluindo}
+        concluirDisabled={editingTicket?.status_mapeamento === 'concluido'}
+        concluirTitle={editingTicket?.status_mapeamento === 'concluido' ? 'Este caso já está concluído.' : undefined}
       >
         {editingTicket && (() => {
           const produtoInterno = (() => {
@@ -2429,32 +2613,76 @@ function MovimentacoesSuporteTab() {
           const podeReprocessar = STATUS_REPROCESSAVEIS.has(
             String(editingTicket.status_mapeamento || '').toLowerCase()
           );
+
           return (
             <div className="space-y-3 mb-4 pb-4 border-b border-[#e2e8f0] text-sm">
-              <div>
-                <div className="text-xs text-[#94a3b8] mb-0.5">Cliente</div>
-                <div className="text-[#0f172a] font-medium">
-                  {editingTicket.nome_cliente_informado} {editingTicket.sobrenome_cliente_informado}
+              <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
+                Informações do Cliente
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-[#94a3b8] mb-0.5">Nome</label>
+                  <input
+                    type="text"
+                    value={editForm.nome_cliente_informado}
+                    onChange={e => setEditForm(prev => ({ ...prev, nome_cliente_informado: e.target.value }))}
+                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                    placeholder="Nome do cliente"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#94a3b8] mb-0.5">Sobrenome</label>
+                  <input
+                    type="text"
+                    value={editForm.sobrenome_cliente_informado}
+                    onChange={e => setEditForm(prev => ({ ...prev, sobrenome_cliente_informado: e.target.value }))}
+                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                    placeholder="Sobrenome do cliente"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#94a3b8] mb-0.5">Telefone</label>
+                  <input
+                    type="text"
+                    value={editForm.telefone_cliente_informado}
+                    onChange={e => setEditForm(prev => ({ ...prev, telefone_cliente_informado: e.target.value }))}
+                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                    placeholder="+55-11-90000-0000"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#94a3b8] mb-0.5">E-mail</label>
+                  <input
+                    type="email"
+                    value={editForm.email_cliente_informado}
+                    onChange={e => setEditForm(prev => ({ ...prev, email_cliente_informado: e.target.value }))}
+                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                    placeholder="cliente@email.com"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#94a3b8] mb-0.5">CPF</label>
+                  <input
+                    type="text"
+                    value={editForm.cpf_cliente_informado}
+                    onChange={e => setEditForm(prev => ({ ...prev, cpf_cliente_informado: e.target.value }))}
+                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                    placeholder="000.000.000-00"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-[#94a3b8] mb-0.5">Origem</label>
+                  <input
+                    type="text"
+                    value={editForm.origem_cliente_informada}
+                    onChange={e => setEditForm(prev => ({ ...prev, origem_cliente_informada: e.target.value }))}
+                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                    placeholder="Discadora, CAT, Indicação..."
+                  />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">Telefone</div>
-                  <div className="text-[#0f172a]">{editingTicket.telefone_cliente_informado || "—"}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">E-mail</div>
-                  <div className="text-[#0f172a] break-all">{editingTicket.email_cliente_informado || "—"}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">CPF</div>
-                  <div className="text-[#0f172a]">{editingTicket.cpf_cliente_informado || "—"}</div>
-                </div>
-                <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">Origem</div>
-                  <div className="text-[#0f172a]">{editingTicket.origem_cliente_informada || "—"}</div>
-                </div>
-              </div>
+
               <div>
                 <div className="text-xs text-[#94a3b8] mb-0.5">Equipe que precisa cadastrar</div>
                 <div className="text-[#0f172a] font-medium">
@@ -2462,18 +2690,23 @@ function MovimentacoesSuporteTab() {
                   {editingTicket.colaborador_destino_nome ? ` / ${editingTicket.colaborador_destino_nome}` : ''}
                 </div>
               </div>
+
               {produtoInterno && (
                 <div>
                   <div className="text-xs text-[#94a3b8] mb-0.5">Produto</div>
                   <div className="text-[#0f172a]">{maskProduct(produtoInterno)}</div>
                 </div>
               )}
+
               {editingTicket.motivo_solicitacao && (
                 <div>
                   <div className="text-xs text-[#94a3b8] mb-0.5">Motivo</div>
-                  <div className="text-[#0f172a] whitespace-pre-wrap break-words">{editingTicket.motivo_solicitacao}</div>
+                  <div className="text-[#0f172a] whitespace-pre-wrap break-words">
+                    {editingTicket.motivo_solicitacao}
+                  </div>
                 </div>
               )}
+
               {podeReprocessar && (
                 <button
                   type="button"
@@ -2486,27 +2719,38 @@ function MovimentacoesSuporteTab() {
             </div>
           );
         })()}
+
         <div>
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
-          <select
-            value={editForm.status_mapeamento}
-            onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
-            className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
-          >
-            <option value="pendente">Pendente</option>
-            <option value="processando">Processando</option>
-            <option value="concluido">Concluído</option>
-            <option value="suporte">Suporte</option>
-            <option value="aviso">Aviso</option>
-            <option value="erro">Erro</option>
-          </select>
+          {editingTicket?.crm_origem === 'HUBSPOT_LINK' ? (
+            <div className="px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm bg-[#f8fafc] text-[#475569]">
+              <strong className="capitalize">{editForm.status_mapeamento}</strong>
+              <span className="text-xs text-[#94a3b8] ml-2">
+                — use o botão <strong>Concluir</strong> para finalizar manualmente
+              </span>
+            </div>
+          ) : (
+            <select
+              value={editForm.status_mapeamento}
+              onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
+              className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
+            >
+              <option value="pendente">Pendente</option>
+              <option value="processando">Processando</option>
+              <option value="concluido">Concluído</option>
+              <option value="suporte">Suporte</option>
+              <option value="aviso">Aviso</option>
+              <option value="erro">Erro</option>
+            </select>
+          )}
         </div>
+
         <div>
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Observação SalesOps</label>
           <textarea
             value={editForm.observacao_sales_ops}
             onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
-            rows={5}
+            rows={4}
             className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
             placeholder="Digite a observação..."
           />

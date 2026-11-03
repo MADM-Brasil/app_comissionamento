@@ -17,6 +17,15 @@
 //   - Quinquênio/Quinqueino/Concomitante(s) → considera Quinquênio e Base de Leads.
 //   - Isenção de IR                        → considera Isenção de IR e Base de Leads.   // [ISENÇÃO IR]
 //   - Cards em outros pipelines são ignorados nesta movimentação.
+//
+// Novas APIs e retornos enriquecidos com nomes de pipeline/etapa:
+//   - getDealMovementContext agora devolve { pipelineNome, stageNome }.
+//   - reassignDealForLinkHubMovement / reassignDealAndContactsOwner devolvem
+//     também { pipelineNome, stageNome, previousPipelineNome, previousStageNome }.
+//   - validateFinalAssignment devolve deal.pipelineNome / deal.stageNome.
+//   - getContactDealsWithNames(contactId) é a versão da lista com nomes.
+//   - O cache de nomes vive 5 min em memória; fetchPipelineNames só bate na
+//     API na 1ª vez por pipeline (ou se o cache expirar).
 
 const API_ORIGIN = 'https://api.hubapi.com';
 
@@ -53,11 +62,6 @@ const STAGE_QUINQUENIO_EM_CONTATO_ID = settingNumeric(
   'HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID', '1419898635'
 );
 
-// [ISENÇÃO IR] Pipeline dedicado da Equipe Leticia Mathias.
-// O ID do pipeline está confirmado (946074910). O ID da ETAPA de destino
-// NÃO — precisa ser preenchido via env ou como default abaixo antes de rodar
-// em produção. Enquanto vazio, o worker falha em `id(finalStage, 'Etapa')`
-// com `Etapa inválido` (fail-safe: não move para lugar errado).
 const PIPELINE_ISENCAO_IR_ID = settingNumeric(
   'HUBSPOT_PIPELINE_ISENCAO_IR_ID', '946074910'
 );
@@ -69,14 +73,14 @@ export const HUBSPOT_PIPELINE_BASE_LEADS_ID = PIPELINE_BASE_LEADS_ID;
 export const HUBSPOT_PIPELINE_CLOSER_ID = PIPELINE_CLOSER_ID;
 export const HUBSPOT_PIPELINE_JURIDICO_AUDITORIA_ID = PIPELINE_JURIDICO_AUDITORIA_ID;
 export const HUBSPOT_PIPELINE_QUINQUENIO_ID = PIPELINE_QUINQUENIO_ID;
-export const HUBSPOT_PIPELINE_ISENCAO_IR_ID = PIPELINE_ISENCAO_IR_ID;             // [ISENÇÃO IR]
+export const HUBSPOT_PIPELINE_ISENCAO_IR_ID = PIPELINE_ISENCAO_IR_ID;
 export const HUBSPOT_PORTAL_ID_CONFIGURED = HUBSPOT_PORTAL_ID;
 export const HUBSPOT_STAGE_EM_CONTATO_ID = STAGE_EM_CONTATO_ID;
 export const HUBSPOT_STAGE_DESQUALIFICADO_ID = STAGE_DESQUALIFICADO_ID;
 export const HUBSPOT_STAGE_COLETA_DOCUMENTACAO_ID = STAGE_COLETA_DOCUMENTACAO_ID;
 export const HUBSPOT_STAGE_ENTRADA_ID = STAGE_ENTRADA_ID;
 export const HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID = STAGE_QUINQUENIO_EM_CONTATO_ID;
-export const HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID = STAGE_ISENCAO_IR_EM_CONTATO_ID; // [ISENÇÃO IR]
+export const HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID = STAGE_ISENCAO_IR_EM_CONTATO_ID;
 
 const CONTACT_PROPERTIES = ['email','firstname','lastname','phone','hs_whatsapp_phone_number','contact_cpf','contact_fonte','contact_produto','hubspot_owner_id'];
 const DEAL_PROPERTIES = ['dealname','pipeline','dealstage','hubspot_owner_id','notes_last_updated','motivo_da_perda','hs_lastmodifieddate','produto'];
@@ -92,8 +96,7 @@ function isQuinquenioOuConcomitante(produto) {
 }
 
 // [ISENÇÃO IR] Detecta "Isenção de IR Aposentadoria" e variações
-// (com/sem acento, com/sem hífen, caixa livre). Casa quando as palavras
-// "isencao" E "ir" aparecem no valor normalizado.
+
 function isIsencaoIR(produto) {
   const normalized = optionalText(produto)
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -155,7 +158,7 @@ const PIPELINE_NAMES = {
   [PIPELINE_CLOSER_ID]: 'Closer',
   [PIPELINE_JURIDICO_AUDITORIA_ID]: 'Jurídico Auditoria de Ganho',
   [PIPELINE_QUINQUENIO_ID]: 'Quinquenio/concomitante',
-  [PIPELINE_ISENCAO_IR_ID]: 'Isenção de IR Aposentadoria',   // [ISENÇÃO IR]
+  [PIPELINE_ISENCAO_IR_ID]: 'Isenção de IR Aposentadoria',
   '905179471': 'PRO',
   '926561825': 'Fator K',
 };
@@ -166,8 +169,83 @@ const STAGE_NAMES = {
   [STAGE_COLETA_DOCUMENTACAO_ID]: 'Coleta de documentação',
   [STAGE_ENTRADA_ID]: 'Entrada',
   [STAGE_QUINQUENIO_EM_CONTATO_ID]: 'Em contato',
-  [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 'Em Contato',   // [ISENÇÃO IR] rótulo provisório
+  [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 'Em Contato',
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Resolvedor dinâmico de nomes de pipeline/etapa (com cache em memória).
+// Ordem de precedência:
+//   1) cache (5 min)
+//   2) chamada à API /crm/v3/pipelines/deals/:pipelineId (alimenta o cache)
+//   3) mapas estáticos PIPELINE_NAMES / STAGE_NAMES
+//   4) fallback final = ID cru (melhor que null para UI)
+// ─────────────────────────────────────────────────────────────────────────────
+const pipelineNameCache = new Map();
+const PIPELINE_NAME_CACHE_TTL_MS = 5 * 60_000;
+
+async function fetchPipelineNames(pipelineId) {
+  const pId = String(pipelineId);
+  const cached = pipelineNameCache.get(pId);
+  if (cached && cached.expiresAt > Date.now()) return cached;
+
+  try {
+    const data = await request(`/crm/v3/pipelines/deals/${id(pId)}`);
+    const stageNames = new Map();
+    for (const s of (data.stages || [])) {
+      stageNames.set(String(s.id), s.label || STAGE_NAMES[String(s.id)] || String(s.id));
+    }
+    const entry = {
+      expiresAt: Date.now() + PIPELINE_NAME_CACHE_TTL_MS,
+      pipelineNome: data.label || PIPELINE_NAMES[pId] || pId,
+      stageNames,
+    };
+    pipelineNameCache.set(pId, entry);
+    return entry;
+  } catch (err) {
+    console.warn(
+      `[hubspot] Não foi possível resolver nomes do pipeline ${pId}: ${err.message}`,
+    );
+    // Cache negativo curto (30s) para não martelar a API em caso de falha.
+    const entry = {
+      expiresAt: Date.now() + 30_000,
+      pipelineNome: PIPELINE_NAMES[pId] || pId,
+      stageNames: new Map(),
+    };
+    pipelineNameCache.set(pId, entry);
+    return entry;
+  }
+}
+
+async function resolveDealNames(pipelineId, stageId) {
+  if (pipelineId == null || stageId == null) {
+    return { pipelineNome: null, stageNome: null };
+  }
+  const pId = String(pipelineId);
+  const sId = String(stageId);
+
+  const { pipelineNome, stageNames } = await fetchPipelineNames(pId);
+  return {
+    pipelineNome,
+    stageNome: stageNames.get(sId) ?? STAGE_NAMES[sId] ?? sId,
+  };
+}
+
+async function enrichDealsWithNames(deals = []) {
+  if (!Array.isArray(deals) || deals.length === 0) return deals;
+  const uniquePipelines = [...new Set(deals.map((d) => String(d.pipeline)).filter(Boolean))];
+  await Promise.all(uniquePipelines.map((pId) => fetchPipelineNames(pId)));
+
+  return deals.map((d) => {
+    const pId = String(d.pipeline || '');
+    const sId = String(d.stage || '');
+    const entry = pipelineNameCache.get(pId);
+    return {
+      ...d,
+      pipelineNome: entry?.pipelineNome ?? PIPELINE_NAMES[pId] ?? (pId || null),
+      stageNome: entry?.stageNames?.get(sId) ?? STAGE_NAMES[sId] ?? (sId || null),
+    };
+  });
+}
 
 const RULE_MESSAGES = Object.freeze({
   created_and_moved: 'Card criado na Base de Leads e movido para o destino (Em Contato).',
@@ -349,6 +427,13 @@ export async function getContactDeals(contactId) {
   return getDealsByIds(await associationIds('contacts', contactId, 'deals'));
 }
 
+// Versão da lista de cards do contato enriquecida com nomes de pipeline/etapa.
+// Útil para a página de suporte — não altera a função getContactDeals original.
+export async function getContactDealsWithNames(contactId) {
+  const deals = await getContactDeals(contactId);
+  return enrichDealsWithNames(deals);
+}
+
 function normalizePhone(value) { return optionalText(value).replace(/\D/g, ''); }
 
 function nationalPhone(value) {
@@ -412,7 +497,7 @@ function validateContact(contact, input) {
   if (input.phone && phones.length && !phones.some(phone => phonesMatch(phone, input.phone))) divergences.push('telefone');
   if (input.cpf && props.contact_cpf && normalizePhone(props.contact_cpf) !== input.cpf) divergences.push('CPF');
   return { found: true, divergente: divergences.length > 0, contact,
-    ...(divergences.length ? { motivo: `Dados divergentes do cadastro: ${divergences.join(', ')}` } : {}) };
+    ...(divergences.length ? { motivo: `Informações registradas estão diferentes no card localizado, valide: ${divergences.join(', ')}` } : {}) };
 }
 
 export async function findContactAndValidate({ email, phone, cpf } = {}) {
@@ -488,17 +573,17 @@ export async function buscarClienteResumo({ email, phone, cpf } = {}) {
     }
   }
 
-  let pipelineNome = negocioRecente ? (PIPELINE_NAMES[negocioRecente.pipeline] || negocioRecente.pipeline) : null;
-  let etapaNome = negocioRecente ? (STAGE_NAMES[negocioRecente.stage] || negocioRecente.stage) : null;
+  // Resolve nomes com cache em memória — sem fetch repetido por clique.
+  let pipelineNome = negocioRecente?.pipeline
+    ? (PIPELINE_NAMES[String(negocioRecente.pipeline)] || String(negocioRecente.pipeline))
+    : null;
+  let etapaNome = negocioRecente?.stage
+    ? (STAGE_NAMES[String(negocioRecente.stage)] || String(negocioRecente.stage))
+    : null;
   if (negocioRecente?.pipeline) {
-    try {
-      const pipelineInfo = await request(`/crm/v3/pipelines/deals/${id(negocioRecente.pipeline)}`);
-      pipelineNome = pipelineInfo.label || pipelineNome;
-      const stageInfo = (pipelineInfo.stages || []).find(s => String(s.id) === String(negocioRecente.stage));
-      if (stageInfo?.label) etapaNome = stageInfo.label;
-    } catch {
-      // mantém os nomes conhecidos (mapa estático) ou o ID puro como último recurso
-    }
+    const resolved = await resolveDealNames(negocioRecente.pipeline, negocioRecente.stage);
+    if (resolved.pipelineNome) pipelineNome = resolved.pipelineNome;
+    if (resolved.stageNome) etapaNome = resolved.stageNome;
   }
 
   return {
@@ -661,7 +746,7 @@ function temporalCheck(deal) {
     [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
     [STAGE_ENTRADA_ID]: 24,
     [STAGE_EM_CONTATO_ID]: 24,
-    [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 24,   // [ISENÇÃO IR]
+    [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 24,   
   };
 
   const currentStage = String(deal.stage ?? '');
@@ -698,16 +783,6 @@ export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, 
   return withLocks([`contact:${id(contactId)}`], async () => {
     const destination = movementDestination(produto);
 
-    // ─────────────────────────────────────────────────────────────
-    // Busca orientada pelo produto:
-    //   - Auxílio (e demais produtos comuns):
-    //       considera apenas cards no pipeline Closer e na Base de Leads.
-    //   - Quinquênio / Quinqueino / Concomitante(s):
-    //       considera apenas cards no pipeline Quinquênio e na Base de Leads.
-    //   - Isenção de IR:                                           // [ISENÇÃO IR]
-    //       considera apenas cards no pipeline Isenção e na Base de Leads.
-    // Cards em outros pipelines são ignorados nesta movimentação.
-    // ─────────────────────────────────────────────────────────────
 const allDeals = await getContactDeals(contactId);
 
 // Bloqueia antes de qualquer criação, movimentação ou sincronização
@@ -722,7 +797,7 @@ if (negocioJuridico) {
     ruleApplied: 'contact_has_juridico_deal',
     message:
       'Movimentação bloqueada: o contato possui um negócio no pipeline ' +
-      'Jurídico Auditoria de Ganho. Encaminhe o caso para validação do coordenador.',
+      'Jurídico Auditoria de Ganho. Encaminhe o caso para validação do Juridico.',
   });
 }
 
@@ -851,8 +926,26 @@ export async function validateFinalAssignment(contactId, expectedOwnerId, expect
     String(contactOwnerId) === String(expectedOwnerId) &&
     String(target.pipeline) === expectedPipeline &&
     (expectedStage === null || String(target.stage) === expectedStage);
-  return { ok, resolvedBy: expectedDealId ? 'expected_deal_id' : 'unique_associated_deal', contactOwnerId, deal: target, lastUpdatedAt: target.lastModifiedDate,
-    details: { dealPipeline: target.pipeline, dealStage: target.stage, dealOwnerId: target.ownerId, contactOwnerId, associatedDeals: deals } };
+
+  const { pipelineNome, stageNome } = await resolveDealNames(target.pipeline, target.stage);
+  const enrichedAssociatedDeals = await enrichDealsWithNames(deals);
+
+  return {
+    ok,
+    resolvedBy: expectedDealId ? 'expected_deal_id' : 'unique_associated_deal',
+    contactOwnerId,
+    deal: { ...target, pipelineNome, stageNome },
+    lastUpdatedAt: target.lastModifiedDate,
+    details: {
+      dealPipeline: target.pipeline,
+      dealPipelineNome: pipelineNome,
+      dealStage: target.stage,
+      dealStageNome: stageNome,
+      dealOwnerId: target.ownerId,
+      contactOwnerId,
+      associatedDeals: enrichedAssociatedDeals,
+    },
+  };
 }
 
 export async function getDealMovementContext(dealId, portalId) {
@@ -866,7 +959,17 @@ export async function getDealMovementContext(dealId, portalId) {
       code: 'PIPELINE_NOT_ALLOWED',
     });
   }
-  return { dealId: deal.id, dealName: deal.dealName || '', pipeline: String(deal.pipeline), stage: String(deal.stage || ''), ownerId: String(deal.ownerId || ''), lastModifiedDate: deal.lastModifiedDate };
+  const { pipelineNome, stageNome } = await resolveDealNames(deal.pipeline, deal.stage);
+  return {
+    dealId: deal.id,
+    dealName: deal.dealName || '',
+    pipeline: String(deal.pipeline),
+    pipelineNome,
+    stage: String(deal.stage || ''),
+    stageNome,
+    ownerId: String(deal.ownerId || ''),
+    lastModifiedDate: deal.lastModifiedDate,
+  };
 }
 
 function assertContext(expected, actual) {
@@ -940,10 +1043,33 @@ async function reassignWithContext(dealId, ownerId, portalId, expectedCurrentCon
         }
         const finalContacts = await associationIds('deals', dealId, 'contacts');
         if (finalContacts.length !== 1 || finalContacts[0] !== contactId) throw hubError('Associação final divergente.');
-        return { dealId: String(dealId), dealName: finalContext.dealName, pipeline: finalContext.pipeline, stage: finalContext.stage,
-          previousDealOwnerId: context.ownerId, previousPipeline: context.pipeline, previousStage: context.stage,
-          previousContactOwners, contactIds, lastUpdatedAt: finalContext.lastModifiedDate,
-          ...(linkHub ? { movedFromBaseLeads: moveFromBase, produto: produto || null } : {}) };
+
+        // Resolve nomes do estado anterior e do estado atual (cache em memória).
+        const { pipelineNome: previousPipelineNome, stageNome: previousStageNome } =
+          await resolveDealNames(context.pipeline, context.stage);
+
+        return {
+          dealId: String(dealId),
+          dealName: finalContext.dealName,
+
+          // Localização atual (após a movimentação)
+          pipeline: finalContext.pipeline,
+          pipelineNome: finalContext.pipelineNome,
+          stage: finalContext.stage,
+          stageNome: finalContext.stageNome,
+
+          // Localização anterior (para UI mostrar "antes → depois")
+          previousDealOwnerId: context.ownerId,
+          previousPipeline: context.pipeline,
+          previousPipelineNome,
+          previousStage: context.stage,
+          previousStageNome,
+
+          previousContactOwners,
+          contactIds,
+          lastUpdatedAt: finalContext.lastModifiedDate,
+          ...(linkHub ? { movedFromBaseLeads: moveFromBase, produto: produto || null } : {}),
+        };
       } catch (error) {
         error.partialResult = { dealId: String(dealId), dealWriteAttempted, dealUpdated, dealOutcomeUnknown: Boolean(error.outcomeUnknown && !dealUpdated),
           attemptedContactIds, completedContactIds, unconfirmedContactIds: contactIds.filter(v => !completedContactIds.includes(v)),

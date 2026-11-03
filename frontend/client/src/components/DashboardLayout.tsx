@@ -19,6 +19,7 @@ import {
   EyeOff,
   Bell,
   CircleHelp,
+  Brain,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { logout } from "@/lib/auth";
@@ -28,10 +29,11 @@ import logoBranca from "./img/LogoBranca.png";
 import {
   getUserPermissions,
   isAssessorRestrito,
-  resolveAccessUser,               // [NOVO] enriquece nome_equipe/unidade_id
+  resolveAccessUser,
+  getEffectiveAccessLevel,           // [NOVO]
+  LEVELS,                            // [NOVO] importado direto do módulo
   RESTRICTED_ASSESSOR_ALLOWED_PATHS,
 } from "@/lib/accessControl";
-import { useAccessControl } from "@/hooks/useAccessControl";
 
 type NavChild = { path: string; label: string; icon: React.ComponentType<any> };
 type NavItem =
@@ -88,17 +90,24 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     [currentUser, collaborators],
   );
 
-  // Obtém nível de acesso (cargo/status já vêm no currentUser,
-  // então este hook funciona mesmo sem enriquecimento).
-  const { getAccessLevel, LEVELS } = useAccessControl();
-  const userLevel = getAccessLevel();
+  // [ALTERADO] Usa nível efetivo (considera whitelist ASSESSOR_PLUS).
+  // Antes: `useAccessControl().getAccessLevel()` — só enxergava cargo.
+  const userLevel = useMemo(
+    () => getEffectiveAccessLevel(accessUser),
+    [accessUser],
+  );
+
   const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
 
-  // [NOVO] Nível JURIDICO (Analista Jurídico / Analista).
+  // Nível JURIDICO (Analista Jurídico / Analista).
   const isJuridicoUser = userLevel === LEVELS.JURIDICO;
 
-  // Suporte é acessível por qualquer usuário >= SUPERVISAO
-  // OU pelo nível JURIDICO (que só pode ver essa página).
+  // [NOVO] Nível ASSESSOR_PLUS — suporte-only com permissões de coordenador.
+  const isAssessorPlusUser = userLevel === LEVELS.ASSESSOR_PLUS;
+
+  // Suporte é acessível por qualquer usuário >= SUPERVISAO,
+  // por JURIDICO (que só pode ver essa página) e por ASSESSOR_PLUS
+  // (que, por design do renumbering, é >= SUPERVISAO).
   const canSeeSuporte =
     userLevel >= LEVELS.SUPERVISAO || isJuridicoUser;
 
@@ -129,7 +138,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
-  // [CHANGE] usa accessUser (enriquecido) em vez do currentUser cru.
+  // Usa accessUser (enriquecido) em vez do currentUser cru.
   const permissions = useMemo(
     () => getUserPermissions(accessUser),
     [accessUser],
@@ -222,10 +231,11 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
     const dashboardChildren: NavChild[] = [];
     if (permissions.canViewTeam && permissions.canAccessReports) {
-      dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
-      dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
-      dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
       dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
+      dashboardChildren.push({ path: "/inte_comerce", label: "Int. Comercial", icon: Brain });
+      dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
+      dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+      dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
     }
     if (dashboardChildren.length > 0) {
       items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
@@ -239,9 +249,10 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     }
 
-    // [NOVO] JURIDICO: apenas "Suporte" no menu — defesa em profundidade,
-    // independente de eventuais configurações futuras de permissão.
-    if (isJuridicoUser) {
+    // [ATUALIZADO] Suporte-only (JURIDICO e ASSESSOR_PLUS): apenas "Suporte".
+    // Defesa em profundidade — independente de eventuais configurações
+    // futuras de permissão.
+    if (isJuridicoUser || isAssessorPlusUser) {
       return items.filter(
         (item) => "path" in item && item.path === "/suporte"
       );
@@ -258,7 +269,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
 
     return items;
-  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser, isAssessorPlusUser]);
 
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
@@ -274,6 +285,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
+      flat.push({ path: "/inte_comerce", label: "Int. Comercial", icon: Brain });
       flat.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
     }
@@ -287,8 +299,8 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     if (permissions.canAccessConfiguration)
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
 
-    // [NOVO] JURIDICO: apenas "Suporte" na navegação inferior.
-    if (isJuridicoUser) {
+    // [ATUALIZADO] Suporte-only (JURIDICO e ASSESSOR_PLUS): apenas "Suporte".
+    if (isJuridicoUser || isAssessorPlusUser) {
       return flat.filter((item) => item.path === "/suporte");
     }
 
@@ -298,7 +310,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
 
     return flat.slice(0, 5);
-  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser, isAssessorPlusUser]);
 
   // Efeitos
   useEffect(() => setManualCloseChild(false), [location]);
@@ -392,8 +404,9 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
           sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
-        {/* Logo — oculto para JURIDICO (mantém apenas o botão de fechar no mobile) */}
-        {!isJuridicoUser ? (
+        {/* Logo — oculto para perfis "suporte-only" (JURIDICO e ASSESSOR_PLUS).
+            Mantém apenas o botão de fechar no mobile. */}
+        {!(isJuridicoUser || isAssessorPlusUser) ? (
           <div className="flex items-center gap-3 px-5 py-5 border-b border-[#e2e8f0]">
             <img src={logoBranca} alt="MADM Brasil" className="w-10 h-10 object-contain" />
             <div>
@@ -410,8 +423,8 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
             </button>
           </div>
         ) : (
-          // JURIDICO: sem logo/título/subtítulo. Mantém apenas o botão de
-          // fechar (mobile) para não quebrar a UX do menu lateral.
+          // Perfis "suporte-only": sem logo/título/subtítulo. Mantém apenas o
+          // botão de fechar (mobile) para não quebrar a UX do menu lateral.
           <div className="flex items-center justify-end px-3 py-2 border-b border-[#e2e8f0] lg:hidden">
             <button
               type="button"

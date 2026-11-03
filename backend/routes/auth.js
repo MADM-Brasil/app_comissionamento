@@ -13,6 +13,12 @@ console.log('✅ [AUTH] Módulo de autenticação carregado');
 // AUTORIZAÇÃO DE CARGO — fonte única de verdade: access-control.js
 // Regra: nível >= JURIDICO (inclui Analista/Coordenador/Supervisor
 // Jurídico, Assessor, Supervisão, Coordenador, Admin, Super Admin).
+//
+// [CHANGELOG] ASSESSOR_PLUS não aparece aqui de propósito: a promoção
+// é por E-MAIL, não por cargo. O assessor whitelisted continua tendo
+// `cargo = "assessor"`, que resolve para LEVELS.ASSESSOR (2) e passa
+// neste guard. A promoção real (nível 4) é aplicada depois, em
+// `buildPublicUser`, via `getEffectiveAccessLevel(row)`.
 // ============================================================
 function cargoPermitido(cargo, status) {
   if (!cargo) return false;
@@ -28,8 +34,20 @@ function saveSession(req) {
   });
 }
 
+// ============================================================
+// buildPublicUser
+// ------------------------------------------------------------
+//  [CHANGELOG] Usa `getEffectiveAccessLevel(row)` para que o
+//  `accessLevel` retornado ao frontend já reflita a promoção
+//  ASSESSOR_PLUS (whitelist ASSESSOR_PLUS_EMAILS) quando aplicável.
+//
+//  `row` precisa conter `email`, `cargo` e `status` para que a
+//  whitelist seja consultada. Todos os fluxos que chamam esta
+//  função (`/verify-2fa`) entregam o `req.session.tempUser`, que é
+//  montado em `/login` com esses campos vindos da view.
+// ============================================================
 function buildPublicUser(row) {
-  const level = accessControl.getAccessLevel(row.cargo, row.status);
+  const level = accessControl.getEffectiveAccessLevel(row);
   const levelName = accessControl.getLevelName(level);
   return {
     id: row.id_assessor ?? row.id ?? null,
@@ -131,6 +149,9 @@ router.post('/login', async (req, res) => {
       console.log('🔑 Sessão padrão de 1 dia (rememberMe desativado)');
     }
 
+    // tempUser precisa carregar `email`/`cargo`/`status` porque
+    // `buildPublicUser` (chamado em /verify-2fa) os usa para
+    // resolver o nível efetivo (whitelist ASSESSOR_PLUS).
     req.session.tempUser = {
       id_assessor: user.id_assessor,
       email: user.email,
@@ -187,8 +208,15 @@ router.post('/verify-2fa', async (req, res) => {
   const accessToken = crypto.randomBytes(32).toString('hex');
   await saveSession(req);
 
-  console.log(`✅ [2FA] usuário autenticado: ${user.email} (cargo=${user.cargo})`);
-  return res.json({ success: true, accessToken, user: buildPublicUser(user) });
+  // [CHANGELOG] `buildPublicUser` agora aplica `getEffectiveAccessLevel`,
+  // devolvendo `accessLevel: "ASSESSOR PLUS"` quando o e-mail do
+  // colaborador estiver em ASSESSOR_PLUS_EMAILS (e o cargo for assessor).
+  const publicUser = buildPublicUser(user);
+  console.log(
+    `✅ [2FA] usuário autenticado: ${user.email} ` +
+    `(cargo=${user.cargo}, accessLevel=${publicUser.accessLevel})`
+  );
+  return res.json({ success: true, accessToken, user: publicUser });
 });
 
 router.post('/resend-code', async (req, res) => {

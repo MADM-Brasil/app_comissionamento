@@ -1,85 +1,119 @@
 // src/hooks/useAccessControl.ts
-import { useAppStore } from '@/lib/dataStore';
+// ─────────────────────────────────────────────────────────────
+// Hook centralizador para consultar nível/permissões do usuário logado.
+//
+// Histórico:
+//   • Antes do ASSESSOR_PLUS, `getAccessLevel()` era suficiente porque
+//     o nível efetivo coincidia com o nível do cargo.
+//   • Com o ASSESSOR_PLUS (whitelist por e-mail), é preciso uma versão
+//     que enxergue essa promoção → `getEffectiveAccessLevel()`.
+//   • `getAccessLevel()` foi MANTIDO por compatibilidade (semântica
+//     "crua": só olha cargo/status). Use `getEffectiveAccessLevel()`
+//     em qualquer decisão de acesso real (menu, guard, abas etc).
+// ─────────────────────────────────────────────────────────────
+
+import { useCallback, useMemo } from "react";
+import { useAppStore } from "@/lib/dataStore";
 import {
   LEVELS,
-  getAccessLevel as getLevel,
-  hasPermission as checkPermission, 
-  getUserPermissions as getPermissions, 
-  getUIConfig as getUIConfigFromLib,
-  filterTeamData as filterTeam,
-  getFilterRestrictions,
-} from '@/lib/accessControl';
+  getAccessLevel as resolveAccessLevel,
+  getEffectiveAccessLevel as resolveEffectiveAccessLevel,
+  isAssessorPlusUser,
+  getUserPermissions,
+  resolveAccessUser,
+} from "@/lib/accessControl";
 
-/**
- * Normaliza o objeto do usuário para garantir que a propriedade 'cargo' exista,
- * independentemente de o store ainda enviar o campo como 'grupo'.
- */
-function normalizeUser(raw: any) {
-  if (!raw) return raw;
-  // Se a view nova já traz 'cargo', nada a fazer.
-  if (raw.cargo !== undefined) return raw;
-  // Senão, mapeia 'grupo' → 'cargo'.
-  if (raw.grupo !== undefined) {
-    return { ...raw, cargo: raw.grupo };
-  }
-  return raw;
-}
+type Level = typeof LEVELS[keyof typeof LEVELS];
 
 export function useAccessControl() {
-  const currentUserRaw = useAppStore((state) => state.currentUser);
-  const currentUser = normalizeUser(currentUserRaw);
+  const currentUser = useAppStore((s) => s.currentUser);
+  const collaborators = useAppStore((s) => s.collaborators);
 
-  if (process.env.NODE_ENV === 'development') {
-    console.log('🔐 [useAccessControl] currentUser:', currentUser);
-  }
+  // ─────────────────────────────────────────────────────────
+  // Usuário enriquecido (nome_equipe / unidade_id vindos de
+  // `collaborators` quando o payload do /auth/me não os traz).
+  // ─────────────────────────────────────────────────────────
+  const accessUser = useMemo(
+    () => resolveAccessUser(currentUser, collaborators),
+    [currentUser, collaborators],
+  );
 
-  const getAccessLevel = () => {
-    if (!currentUser) return LEVELS.ASSESSOR;
-    const level = getLevel(currentUser.cargo);
-    console.log(`🔐 getAccessLevel: cargo="${currentUser.cargo}", nível=${level}`);
-    return level;
-  };
+  // ─────────────────────────────────────────────────────────
+  // Nível CRU — só olha cargo/status. Ignora a whitelist
+  // ASSESSOR_PLUS. Mantido por compatibilidade com telas que
+  // dependiam exclusivamente do cargo (ex.: exibir
+  // `currentUser.cargo` traduzido em rótulo).
+  //
+  // Sem argumentos → resolve para o usuário logado.
+  // Com argumentos → resolve para o cargo/status informados.
+  // ─────────────────────────────────────────────────────────
+  const getAccessLevel = useCallback(
+    (cargo?: string, status?: string): Level => {
+      if (cargo === undefined && status === undefined) {
+        return resolveAccessLevel(accessUser?.cargo, accessUser?.status);
+      }
+      return resolveAccessLevel(cargo, status);
+    },
+    [accessUser],
+  );
 
-  const hasPermission = (permission: string) => {
-    if (!currentUser) return false;
-    // A função checkPermission agora espera um keyof Permissions; podemos afirmar que a string é válida.
-    const result = checkPermission(currentUser, permission as any);
-    console.log(`🔐 hasPermission(${permission}): ${result}`);
-    return result;
-  };
+  // ─────────────────────────────────────────────────────────
+  // Nível EFETIVO — considera a whitelist ASSESSOR_PLUS.
+  //
+  // Sem argumentos → resolve para o usuário logado (inclui a
+  // promoção por e-mail).
+  // Com argumentos → resolve apenas para o cargo/status
+  // informados (sem promoção — não há `email` no contexto).
+  //
+  // **Prefira esta versão** em qualquer decisão de acesso.
+  // ─────────────────────────────────────────────────────────
+  const getEffectiveAccessLevel = useCallback(
+    (cargo?: string, status?: string): Level => {
+      if (cargo === undefined && status === undefined) {
+        return resolveEffectiveAccessLevel(accessUser);
+      }
+      return resolveEffectiveAccessLevel({ cargo, status });
+    },
+    [accessUser],
+  );
 
-  const getUserPermissions = () => {
-    if (!currentUser) return null;
-    return getPermissions(currentUser);
-  };
+  // ─────────────────────────────────────────────────────────
+  // Permissões (flags) do usuário logado.
+  // Já refletem ASSESSOR_PLUS, bloqueio de comissões, restrição
+  // de assessor de Unidade 3 / Equipe Felipe etc.
+  // ─────────────────────────────────────────────────────────
+  const permissions = useMemo(
+    () => getUserPermissions(accessUser ?? undefined),
+    [accessUser],
+  );
 
-  const getUIConfig = () => {
-    if (!currentUser) return null;
-    return getUIConfigFromLib(currentUser);
-  };
-
-  const getFilterRestrictionsSafe = () => {
-    if (!currentUser) {
-      return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
-    }
-    const restrictions = getFilterRestrictions(currentUser);
-    console.log('🔐 getFilterRestrictions:', restrictions);
-    return restrictions;
-  };
-
-  const filterTeamDataSafe = (teamMembers: any[]) => { 
-    if (!currentUser) return [];
-    return filterTeam(teamMembers, currentUser);
-  };
+  // ─────────────────────────────────────────────────────────
+  // Atalho: o usuário logado é um ASSESSOR_PLUS?
+  // (cargo === assessor E e-mail na whitelist)
+  // ─────────────────────────────────────────────────────────
+  const isAssessorPlus = useMemo(
+    () => isAssessorPlusUser(accessUser),
+    [accessUser],
+  );
 
   return {
-    currentUser,
-    hasPermission,
-    getUserPermissions,
-    getUIConfig,
-    getFilterRestrictions: getFilterRestrictionsSafe,
-    filterTeamData: filterTeamDataSafe,
-    getAccessLevel,
+    // Constantes
     LEVELS,
+
+    // Usuário (nome legado `currentUser` + alias `accessUser`)
+    currentUser: accessUser,
+    accessUser,
+
+    // Permissões pré-computadas
+    permissions,
+
+    // Resolvedores de nível
+    getAccessLevel,
+    getEffectiveAccessLevel,
+
+    // Atalhos de perfil
+    isAssessorPlus,
   };
 }
+
+export default useAccessControl;

@@ -48,10 +48,6 @@ const isExcludedTeam = (teamName: string): boolean => {
 
 // =====================================================================
 // PRODUTO — espelha backend/config/teamProducts.js
-// ---------------------------------------------------------------------
-// Nomes internos (usados pelo HubSpot) → rótulos visíveis na UI.
-// A regra do frontend aceita os rótulos como valor selecionado para
-// manter compatibilidade com o resto do app (Visao_geral).
 // =====================================================================
 const PRODUCT = Object.freeze({
   QUINQUENIO:       'quinquenio',

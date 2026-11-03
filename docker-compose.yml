@@ -14,6 +14,8 @@ services:
       PORT: 3007
       FRONTEND_URL: ${FRONTEND_URL:-https://comissionamento.madmbrasil.com.br}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://comissionamento.madmbrasil.com.br}
+      # URL pública usada nos links dos anexos dos reportes.
+      SUPPORT_PUBLIC_BASE_URL: ${SUPPORT_PUBLIC_BASE_URL:-https://comissionamento.madmbrasil.com.br}
 
       # Email (usado no 2FA e recuperação de senha)
       EMAIL_HOST: ${EMAIL_HOST}
