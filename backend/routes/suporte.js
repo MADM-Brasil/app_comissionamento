@@ -19,6 +19,22 @@
 //     produto fora do resolveTeamProduct.
 //
 // Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
+//
+// ─── [CHANGELOG ASSESSOR_PLUS] ──────────────────────────────────────
+// O nível ASSESSOR_PLUS (promoção por e-mail, whitelist ASSESSOR_PLUS_EMAILS)
+// foi criado como "Suporte com permissões de coordenador". Para reconhecê-lo
+// sem perder a whitelist, o middleware principal passou a usar
+// `accessControl.getEffectiveAccessLevel(actor)` em vez de
+// `getAccessLevel(actor.cargo, actor.status)`.
+//
+// Impacto nas rotas:
+//   • Escopo, Busca Cliente, Movimentar, Reportar → liberados (ASSESSOR_PLUS ≥ SUPERVISAO).
+//   • SalesOps (`requireAdmin`) → continuam bloqueados (ASSESSOR_PLUS < ADMINISTRATIVO).
+//   • `validateHubSpotMovementAccess` → já cobre ASSESSOR_PLUS internamente;
+//     `enforceDestinationSameTeam: true` continua só afetando supervisores,
+//     então ASSESSOR_PLUS herda a liberdade de destino do coordenador.
+//   • `supervisorDeveTravarEquipe` / `deveOcultarEquipesReservadas` → retornam
+//     `false` para ASSESSOR_PLUS (cargo = assessor, não supervisor).
 
 import express from 'express';
 import { createHash, randomUUID } from 'crypto';
@@ -30,7 +46,7 @@ import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
 import { HUBSPOT_PORTAL_ID_CONFIGURED, buscarClienteResumo } from '../services/hubspot.js';
 import {
-  accessControl,                    // necessário para LEVELS.JURIDICO e getAccessLevel
+  accessControl,                    // singleton — expõe getEffectiveAccessLevel, LEVELS, etc.
   getActiveSupportUser,
   isSupportAdmin,
   isSupportCoordinatorOrAbove,
@@ -205,14 +221,24 @@ const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, r
 // ============================================================
 // Middleware principal de autenticação.
 //
-// Aceita JURIDICO além de SUPERVISAO+. O nível JURIDICO
-// (Analista Jurídico / Coordenador Jurídico / Supervisor Jurídico /
-// Analista) é liberado APENAS para consultar a Busca Cliente — todas
-// as demais rotas são bloqueadas logo abaixo pelo middleware
-// `requireNonJuridico`.
+// Aceita JURIDICO, SUPERVISAO+ e ASSESSOR_PLUS.
 //
-// Marca `req.supportIsJuridico` para os handlers consultarem quando
-// precisarem aplicar regras específicas (ex.: buscar-cliente).
+// [CHANGELOG] Antes usava `getAccessLevel(actor.cargo, actor.status)`,
+// que ignora a whitelist ASSESSOR_PLUS_EMAILS e fazia um assessor
+// promovido cair em `LEVELS.ASSESSOR` (2), recebendo 403 logo aqui
+// ("Perfil sem acesso à página de Suporte.").
+//
+// Agora usa `getEffectiveAccessLevel(actor)`, que aplica a promoção:
+//   • cargo "assessor" + e-mail na whitelist → nível 4 (ASSESSOR_PLUS)
+//   • cargo "assessor" (fora)                → nível 2 (bloqueado abaixo)
+//   • juridico                               → nível 1 (marcado `req.supportIsJuridico`)
+//   • supervisor/coordenador/admin           → nível >= 3 (liberado)
+//
+// Marca também `req.supportIsAssessorPlus` para handlers/workers
+// consultarem quando precisarem de regras específicas (por ora, nenhum
+// usa — todas as decisões passam por `isSupportSupervisor`/
+// `isSupportAdmin`/`validateHubSpotMovementAccess`, que já distinguem
+// corretamente ASSESSOR_PLUS de supervisor e de admin).
 // ============================================================
 router.use(asyncRoute(async (req, res, next) => {
   const requesterEmail = email(req.session?.userId, 'Identidade da sessão');
@@ -221,8 +247,10 @@ router.use(asyncRoute(async (req, res, next) => {
   const actor = await getActiveSupportUser(requesterEmail);
   if (!actor) throw fail(403, 'Perfil sem acesso à página de Suporte.');
 
-  const level = accessControl.getAccessLevel(actor.cargo, actor.status);
+  // [CHANGELOG] Nível efetivo — reconhece ASSESSOR_PLUS por e-mail.
+  const level = accessControl.getEffectiveAccessLevel(actor);
   const isJuridico = level === accessControl.LEVELS.JURIDICO;
+  const isAssessorPlus = level === accessControl.LEVELS.ASSESSOR_PLUS;
   const isSupervisorOrAbove = level >= accessControl.LEVELS.SUPERVISAO;
 
   if (!isSupervisorOrAbove && !isJuridico) {
@@ -231,6 +259,7 @@ router.use(asyncRoute(async (req, res, next) => {
 
   req.supportActor = { ...actor, email: email(actor.email, 'E-mail do usuário', true) };
   req.supportIsJuridico = isJuridico;
+  req.supportIsAssessorPlus = isAssessorPlus;
   next();
 }));
 
@@ -243,6 +272,9 @@ function requireNonJuridico(req, res, next) {
   next();
 }
 
+// [NOTA] `requireAdmin` continua usando `isSupportAdmin(cargo)` de propósito:
+// ASSESSOR_PLUS NÃO é admin (nível 4 < 6), então rotas SalesOps permanecem
+// bloqueadas. Não troque por `getEffectiveAccessLevel` sem revisar a regra.
 function requireAdmin(req) {
   if (!isSupportAdmin(req.supportActor.cargo)) throw fail(403, 'Sem permissão para esta operação.');
 }
@@ -270,6 +302,10 @@ async function destinationFor(req, enforceEmail = false, { enforceDestinationSam
 // Supervisor em unidade travada (2,3,4,5) OU pertencente a uma equipe
 // reservada (Equipe Tatiane) → destino travado na própria equipe.
 // Coordenador/Admin não são afetados.
+//
+// [NOTA] Para ASSESSOR_PLUS `isSupportSupervisor` retorna `false` (cargo =
+// "assessor"), então a função retorna `false` — comportamento de
+// coordenador, conforme especificado.
 function supervisorDeveTravarEquipe(actor) {
   if (!isSupportSupervisor(actor?.cargo)) return false;
 
@@ -282,6 +318,9 @@ function supervisorDeveTravarEquipe(actor) {
 
 // Supervisor de unidade 1 que NÃO pertence a uma equipe reservada → não deve
 // ver equipes reservadas (ex.: Equipe Tatiane) na lista de destino.
+//
+// [NOTA] Para ASSESSOR_PLUS, mesma lógica de `supervisorDeveTravarEquipe`:
+// `isSupportSupervisor` é `false` → retorna `false` (nenhuma equipe oculta).
 function deveOcultarEquipesReservadas(actor) {
   if (!isSupportSupervisor(actor?.cargo)) return false;
 
@@ -417,6 +456,8 @@ router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
     success: true,
     debug: {
       supportActorCompleto: actor,
+      supportLevel: accessControl.getEffectiveAccessLevel(actor),
+      supportIsAssessorPlus: !!req.supportIsAssessorPlus,
       calculo: {
         isAdmin,
         ehHO,
@@ -449,12 +490,14 @@ router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
 // Regra de unidade:
 //   - Admin → sem filtro.
 //   - HO (unidade_id = 4) → sem filtro (HO vê todas as unidades).
-//   - Coordenador / Supervisor com unidade_id (1, 2, 3) → apenas da própria unidade.
+//   - Coordenador / Supervisor / ASSESSOR_PLUS com unidade_id (1, 2, 3)
+//     → apenas da própria unidade.
 //   - Sem unidade_id → fallback sem filtro (com aviso no log).
 //
 // Regra de equipes reservadas (Equipe Tatiane):
 //   - Supervisor fora da equipe reservada na unidade 1 → não vê a equipe
-//     reservada na lista.
+//     reservada na lista. ASSESSOR_PLUS NÃO é afetado por esta regra
+//     (isSupportSupervisor retorna false), igual ao coordenador.
 //
 // Fonte: view_app_metricas_assessores (mês corrente) JOIN view_app_colaboradores.
 //  - m.data_metrica do mês corrente garante apenas colaboradores do mês.
@@ -545,8 +588,12 @@ router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
     });
   }
 
+  // [CHANGELOG] Log inclui `level` e `isAssessorPlus` para facilitar
+  // diagnosticar em produção (basta ler uma linha).
+  const effectiveLevel = accessControl.getEffectiveAccessLevel(actor);
   console.log(
     `[suporte/escopo] user=${actor.email} cargo=${actor.cargo} ` +
+    `level=${effectiveLevel} isAssessorPlus=${!!req.supportIsAssessorPlus} ` +
     `unidade_id=${unidadeId} ehHO=${ehHO} isAdmin=${isAdmin} aplicarFiltro=${aplicarFiltroUnidade} ` +
     `travaEquipe=${supervisorDeveTravarEquipe(actor)} ocultaReservadas=${ocultarEquipesReservadas} ` +
     `mes=${dataMetrica} equipes=${equipesSet.size} assessores=${assessores.length}`
@@ -588,7 +635,7 @@ router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
 //
 // Regra antiga (mantida para supervisor):
 //   - Supervisor só enxerga detalhes/link de clientes da própria equipe.
-//   - Coordenador/Admin não são afetados.
+//   - Coordenador/Admin/ASSESSOR_PLUS não são afetados.
 // ---------------------- Busca de cliente na HubSpot ----------------------
 router.get('/buscar-cliente', asyncRoute(async (req, res) => {
   const telefone = text(req.query.telefone, 'Telefone');
@@ -649,6 +696,9 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
         },
       });
     }
+    // [NOTA] `isSupportSupervisor` retorna `false` para ASSESSOR_PLUS
+    // (cargo = "assessor"), então ASSESSOR_PLUS cai no caminho normal
+    // (payload completo), igual ao coordenador.
     if (isSupportSupervisor(actor.cargo)) {
       // Supervisor: bloqueia (comportamento original).
       return res.json({
@@ -661,7 +711,8 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
         },
       });
     }
-    // Coordenador/Admin: cai no caminho normal (payload completo sem marca).
+    // Coordenador/Admin/ASSESSOR_PLUS: cai no caminho normal
+    // (payload completo sem marca).
   }
 
   res.json({ success: true, data: resultado });
@@ -673,6 +724,7 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
 //
 // JURIDICO: permitido (é o único caso em que JURIDICO pode criar
 // um ticket — para escalar duplicados ao time de Suporte).
+// ASSESSOR_PLUS: permitido (herda o acesso do coordenador).
 // ---------------------- Encaminhar caso ao Suporte ----------------------
 router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
   const telefone = text(req.body?.telefone, 'Telefone');
@@ -723,7 +775,7 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Movimentação normal (CRM) ----------------------
-// Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO. Liberado para ASSESSOR_PLUS (regras de coordenador).
 router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const body = req.body;
 
@@ -780,7 +832,8 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
 
   // Supervisor em unidade travada (2,3,4,5) OU pertencente à Equipe Tatiane
   // → destino obrigatoriamente na própria equipe. Coordenador/Admin e demais
-  // supervisores seguem o fluxo antigo.
+  // supervisores seguem o fluxo antigo. ASSESSOR_PLUS não é supervisor
+  // (isSupportSupervisor retorna false), então cai no fluxo livre.
   const destination = await destinationFor(req, false, {
     enforceDestinationSameTeam: supervisorDeveTravarEquipe(req.supportActor),
   });
@@ -878,7 +931,12 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
 }));
 
 // ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
-// Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO. Liberado para ASSESSOR_PLUS (regras de coordenador).
+//
+// [NOTA] `enforceDestinationSameTeam: true` afeta APENAS supervisores
+// (dentro de `validateHubSpotMovementAccess`). Para ASSESSOR_PLUS (não
+// supervisor) a flag é ignorada — comportamento de coordenador: livre
+// para qualquer equipe.
 router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async (req, res) => {
   const { links } = req.body;
   if (!Array.isArray(links) || links.length < 1 || links.length > 50) {
@@ -898,7 +956,7 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
 
   // Regra do fluxo Link Hub:
   //   - Supervisor só pode direcionar para a própria equipe (qualquer unidade).
-  //   - Coordenador/Admin não são afetados por esta restrição.
+  //   - Coordenador/Admin/ASSESSOR_PLUS não são afetados por esta restrição.
   const destination = await destinationFor(req, true, { enforceDestinationSameTeam: true });
   const actor = req.supportActor;
 
@@ -1033,6 +1091,11 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
 
 // ---------------------- Histórico unificado ----------------------
 // Bloqueado para JURIDICO.
+//
+// [NOTA] `historyScope` continua retornando apenas os tickets do próprio
+// solicitante para quem não é admin. ASSESSOR_PLUS cai nessa regra —
+// comportamento idêntico ao coordenador (só vê os próprios tickets,
+// a menos que seja admin).
 router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
   const status = text(req.query.status_mapeamento, 'Status', { max: 40 }) || null;
@@ -1101,7 +1164,7 @@ router.get('/ticket-suporte', requireNonJuridico, asyncRoute(async (req, res) =>
 //   - Resposta inclui `anexos_com_link` e `anexos_sem_link`
 //     para o frontend detectar o fallback se quiser avisar.
 //
-// Bloqueado para JURIDICO.
+// Bloqueado para JURIDICO. Liberado para ASSESSOR_PLUS.
 // ============================================================
 router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), asyncRoute(async (req, res) => {
   const title = text(req.body.titulo, 'Título', { required: true, max: 500 });
@@ -1201,52 +1264,180 @@ router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), 
 
 // ---------------------- Edição manual (SalesOps) ----------------------
 // JURIDICO: bloqueado por `requireAdmin` (JURIDICO < ADMINISTRATIVO).
+// ASSESSOR_PLUS: bloqueado por `requireAdmin` (ASSESSOR_PLUS < ADMINISTRATIVO).
+//
+// [NOVO] Agora aceita também edição dos campos do cliente:
+//   - nome_cliente_informado, sobrenome_cliente_informado, email_cliente_informado,
+//     telefone_cliente_informado, cpf_cliente_informado, origem_cliente_informada
+//
+// [NOVO] Para tickets HUBSPOT_LINK, o único status permitido manualmente é
+//   `concluido` (força conclusão independentemente do processamento).
+//   Qualquer outro status continua bloqueado (é responsabilidade do worker).
+//   Ao concluir manualmente, grava `conclusao_manual` e `processado=true`
+//   no JSON, e limpa `_worker.processando_desde` — assim o worker não
+//   reenfileira o ticket.
 router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
+
   const hasStatus = req.body.status_mapeamento !== undefined;
   const hasObservation = req.body.observacao_sales_ops !== undefined;
-  if (!hasStatus && !hasObservation) throw fail(400, 'Nenhum campo para atualizar.');
-  const status = hasStatus ? text(req.body.status_mapeamento, 'Status', { required: true, max: 40 }) : null;
-  if (hasStatus && !Object.hasOwn(STATUS_MAP, status)) throw fail(400, 'Status de movimentação inválido.');
-  const observation = hasObservation ? text(req.body.observacao_sales_ops, 'Observação', { max: 10000 }) : null;
+
+  // ─── Campos editáveis do cliente ────────────────────────────────────
+  const clientFieldNames = [
+    'nome_cliente_informado',
+    'sobrenome_cliente_informado',
+    'email_cliente_informado',
+    'telefone_cliente_informado',
+    'cpf_cliente_informado',
+    'origem_cliente_informada',
+  ];
+  const clientUpdates = [];
+  for (const field of clientFieldNames) {
+    if (req.body[field] === undefined) continue;
+    let value;
+    if (field === 'email_cliente_informado') {
+      value = email(req.body[field], 'E-mail do cliente') || null;
+    } else if (field === 'origem_cliente_informada') {
+      value = nullable(req.body[field], 'Origem');
+    } else if (field === 'cpf_cliente_informado') {
+      value = text(req.body[field], 'CPF', { max: 30 }) || null;
+    } else if (field === 'telefone_cliente_informado') {
+      value = text(req.body[field], 'Telefone', { max: 50 }) || null;
+    } else if (field === 'nome_cliente_informado') {
+      value = text(req.body[field], 'Nome', { max: 500 }) || null;
+    } else if (field === 'sobrenome_cliente_informado') {
+      value = text(req.body[field], 'Sobrenome', { max: 500 }) || null;
+    }
+    clientUpdates.push({ field, value });
+  }
+
+  if (!hasStatus && !hasObservation && clientUpdates.length === 0) {
+    throw fail(400, 'Nenhum campo para atualizar.');
+  }
+
+  const status = hasStatus
+    ? text(req.body.status_mapeamento, 'Status', { required: true, max: 40 })
+    : null;
+  if (hasStatus && !Object.hasOwn(STATUS_MAP, status)) {
+    throw fail(400, 'Status de movimentação inválido.');
+  }
+  const observation = hasObservation
+    ? text(req.body.observacao_sales_ops, 'Observação', { max: 10000 })
+    : null;
+
   const payload = await transaction(async client => {
-    const current = await client.query(`
-      SELECT id_ticket_movimentacao, ticket_id, crm_origem, observacao_sales_ops
-      FROM app_comissionamento.tickets_movimentacao_lead WHERE id_ticket_movimentacao = $1 FOR UPDATE`, [id]);
+    const current = await client.query(
+      `SELECT id_ticket_movimentacao, ticket_id, crm_origem, observacao_sales_ops
+         FROM app_comissionamento.tickets_movimentacao_lead
+        WHERE id_ticket_movimentacao = $1
+        FOR UPDATE`,
+      [id]
+    );
     if (!current.rowCount) throw fail(404, 'Ticket de movimentação não encontrado.');
     const movement = current.rows[0];
-    if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT && hasStatus) {
-      throw fail(409, 'O status de uma execução Link Hub deve ser confirmado pelo processamento, não alterado manualmente.');
+
+    // [NOVO] HUBSPOT_LINK: só permite 'concluido' como override manual.
+    if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT && hasStatus && status !== 'concluido') {
+      throw fail(
+        409,
+        'O status de uma execução Link Hub só pode ser alterado manualmente para "concluido". ' +
+        'Os demais status devem ser confirmados pelo processamento automático.'
+      );
     }
+
     const previous = movement.observacao_sales_ops;
     const metadata = parseJsonObject(previous);
-    if (typeof previous === 'string' && previous.trim() && !Object.keys(metadata).length) metadata.observacao_anterior = previous;
+    if (typeof previous === 'string' && previous.trim() && !Object.keys(metadata).length) {
+      metadata.observacao_anterior = previous;
+    }
     if (hasObservation) metadata.observacao = observation;
-    if (hasStatus) metadata.ultima_alteracao_manual = { usuario: req.supportActor.email, status, em: new Date().toISOString() };
-    await client.query(`
-      UPDATE app_comissionamento.tickets_movimentacao_lead
-      SET status_mapeamento = CASE WHEN $2::boolean THEN $3 ELSE status_mapeamento END,
-          analisado_em = CASE WHEN $2::boolean THEN NOW() ELSE analisado_em END,
-          observacao_sales_ops = $4, atualizado_em = NOW()
-      WHERE id_ticket_movimentacao = $1`, [id, hasStatus, status, JSON.stringify(metadata)]);
-    const support = await client.query(`
-      UPDATE app_comissionamento.tickets_suporte
-      SET status = CASE WHEN $2::boolean THEN $3 ELSE status END,
-          concluido_em = CASE WHEN $2::boolean THEN CASE WHEN $4::boolean THEN NOW() ELSE NULL END ELSE concluido_em END,
-          atualizado_em = NOW()
-      WHERE id_ticket = $1 RETURNING titulo, metadados->>'solicitante_email' AS solicitante_email`,
-    [movement.ticket_id, hasStatus, hasStatus ? STATUS_MAP[status] : null, status === 'concluido']);
+    if (hasStatus) {
+      metadata.ultima_alteracao_manual = {
+        usuario: req.supportActor.email,
+        status,
+        em: new Date().toISOString(),
+      };
+      // [NOVO] Conclusão manual via Link Hub — deixa rastro para auditoria
+      // e evita que o worker reprocesse o ticket.
+      if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT && status === 'concluido') {
+        metadata.conclusao_manual = {
+          usuario: req.supportActor.email,
+          em: new Date().toISOString(),
+        };
+        metadata.processado = true;
+        const worker = metadata._worker || {};
+        metadata._worker = {
+          ...worker,
+          processando_desde: null,
+          concluido_em: new Date().toISOString(),
+        };
+      }
+    }
+
+    const params = [];
+    const sets = [];
+
+    if (hasStatus) {
+      params.push(status);
+      sets.push(`status_mapeamento = $${params.length}`);
+      sets.push(`analisado_em = NOW()`);
+    }
+
+    if (hasObservation || hasStatus) {
+      params.push(JSON.stringify(metadata));
+      sets.push(`observacao_sales_ops = $${params.length}`);
+    }
+
+    for (const { field, value } of clientUpdates) {
+      params.push(value);
+      sets.push(`${field} = $${params.length}`);
+    }
+
+    sets.push('atualizado_em = NOW()');
+    params.push(id);
+
+    await client.query(
+      `UPDATE app_comissionamento.tickets_movimentacao_lead
+          SET ${sets.join(', ')}
+        WHERE id_ticket_movimentacao = $${params.length}`,
+      params
+    );
+
+    const support = await client.query(
+      `UPDATE app_comissionamento.tickets_suporte
+          SET status = CASE WHEN $2::boolean THEN $3 ELSE status END,
+              concluido_em = CASE WHEN $2::boolean
+                                   THEN CASE WHEN $4::boolean THEN NOW() ELSE NULL END
+                                   ELSE concluido_em END,
+              atualizado_em = NOW()
+        WHERE id_ticket = $1
+        RETURNING titulo, metadados->>'solicitante_email' AS solicitante_email`,
+      [movement.ticket_id, hasStatus, hasStatus ? STATUS_MAP[status] : null, status === 'concluido']
+    );
     if (!support.rowCount) throw fail(409, 'Ticket base ausente; atualização cancelada.');
-    return { tipo: 'info', titulo: 'Atualização da movimentação', destinatario: support.rows[0].solicitante_email,
-      mensagem: `Sua solicitação "${support.rows[0].titulo}" foi atualizada.\nStatus: ${hasStatus ? STATUS_MAP[status] : 'inalterado'}.\nObservação: ${hasObservation ? observation : 'inalterada'}`,
-      data: new Date().toISOString() };
+
+    return {
+      tipo: 'info',
+      titulo: 'Atualização da movimentação',
+      destinatario: support.rows[0].solicitante_email,
+      mensagem:
+        `Sua solicitação "${support.rows[0].titulo}" foi atualizada.\n` +
+        `Status: ${hasStatus ? STATUS_MAP[status] : 'inalterado'}.\n` +
+        `Observação: ${hasObservation ? observation : 'inalterada'}`,
+      data: new Date().toISOString(),
+    };
   });
+
   notify(payload);
-  res.json({ success: true, message: 'Ticket atualizado. Alteração manual de status não comprova execução no HubSpot.' });
+  res.json({
+    success: true,
+    message: 'Ticket atualizado. Alteração manual de status não comprova execução no HubSpot.',
+  });
 }));
 
 // JURIDICO: bloqueado por `requireAdmin`.
+// ASSESSOR_PLUS: bloqueado por `requireAdmin`.
 router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
@@ -1292,6 +1483,8 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
 //     suportada por esta rota.
 //
 // JURIDICO: bloqueado por `requireAdmin`.
+// ASSESSOR_PLUS: bloqueado por `requireAdmin` (regra de coordenador,
+// não de admin — só quem vê SalesOps reprocessa).
 router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);

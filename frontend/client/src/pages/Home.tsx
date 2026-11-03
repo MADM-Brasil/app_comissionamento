@@ -29,7 +29,7 @@ import {
 } from "@/lib/api";
 
 // ============================================================
-// FETCH LOCAL — LEADS RECEBIDOS (modo série temporal)
+// FETCH LOCAL — LEADS RECEBIDOS
 // ============================================================
 async function fetchLeadsRecebidosDaily(params: {
   start?: string | null;

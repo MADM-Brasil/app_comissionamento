@@ -10,6 +10,7 @@ import { PeriodProvider } from '@/contexts/period';
 import Home from "./pages/Home";
 import Comissoes from "./pages/Comissoes";
 import Funil from "./pages/Funil";
+import Inte_comerce from "./pages/Inte_comerce";
 import Analytics from "./pages/Analytics";
 import Ranking from "./pages/Ranking";
 import Configuration from "./pages/Configuration";
@@ -39,29 +40,28 @@ import {
  * (definida em `getDefaultLandingPage`):
  *   • Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → /home
  *   • JURIDICO                                                          → /suporte
+ *   • ASSESSOR_PLUS                                                     → /suporte
  *   • Supervisor fora da UNIDADE 3 / equipes liberadas                  → /suporte
  *   • Demais                                                            → /
+ *
+ * [CHANGELOG] Passa o `accessUser` (enriquecido via `resolveAccessUser`)
+ * para `getDefaultLandingPage`, garantindo que `nome_equipe`/`unidade_id`
+ * estejam presentes mesmo quando o payload do `/auth/me` não os trouxer.
  */
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const currentUser = useAppStore((s) => s.currentUser);
+  const collaborators = useAppStore((s) => s.collaborators);
+  const accessUser = useMemo(
+    () => resolveAccessUser(currentUser, collaborators),
+    [currentUser, collaborators],
+  );
+
   if (currentUser?.email) {
-    return <Redirect to={getDefaultLandingPage(currentUser)} />;
+    return <Redirect to={getDefaultLandingPage(accessUser ?? currentUser)} />;
   }
   return <>{children}</>;
 }
 
-/**
- * Decisão de landing para a rota "/":
- *   • Assessor unidade 3 (ou equipe liberada) → /home
- *   • Demais                                   → <Suporte />
- *
- * ⚠️ JURIDICO nunca chega aqui — o guard `ProtectedRouteWithPermission`
- *    (permission="canAccessDashboard") já redireciona para "/suporte"
- *    antes deste componente ser avaliado.
- *
- * ⚠️ Usa `resolveAccessUser` para não depender de `currentUser.nome_equipe`
- *    (pode faltar dependendo da origem do payload).
- */
 function LandingRedirect() {
   const currentUser = useAppStore((s) => s.currentUser);
   const collaborators = useAppStore((s) => s.collaborators);
@@ -79,22 +79,22 @@ function LandingRedirect() {
 /**
  * Guard genérico de permissão.
  *
- * ⚠️ CORREÇÃO: usa `resolveAccessUser(currentUser, collaborators)` —
- *    o mesmo enrichment aplicado pelo DashboardLayout.
- *
- * Sem isso, `getUserPermissions(currentUser)` enxergava apenas o payload
- * bruto do `/auth/me` (que, em sessões antigas ou fluxos legados, pode não
- * trazer `nome_equipe`/`unidade_id`). Sem esses campos:
+ * Enriquece o usuário com `resolveAccessUser` antes de chamar
+ * `getUserPermissions`. Sem isso, `getUserPermissions(currentUser)`
+ * enxergava apenas o payload bruto do `/auth/me` (que, em sessões
+ * antigas ou fluxos legados, pode não trazer `nome_equipe`/`unidade_id`).
+ * Sem esses campos:
  *   • canSeeHomeComissoes → false
  *   • canAccessDashboard / canAccessComissoes → false
  *   • guard retorna "Acesso não autorizado"
  *
- * É exatamente o sintoma observado em supervisores da Equipe Felipe
- * (equipe liberada depende 100% de `nome_equipe` bater com a lista).
+ * Enquanto `collaborators` ainda não carregou E o payload não trouxe
+ * os campos, renderizamos um loader curto em vez de negar — evita o
+ * "flash" de acesso negado na primeira renderização.
  *
- * Enquanto `collaborators` ainda não carregou E o payload não trouxe os
- * campos, renderizamos um loader curto em vez de negar — evita o "flash"
- * de acesso negado na primeira renderização.
+ * [CHANGELOG] Perfis "suporte-only" (JURIDICO e ASSESSOR_PLUS) são
+ * redirecionados para /suporte quando tentam acessar rotas sem a
+ * permissão exigida.
  */
 function ProtectedRouteWithPermission({
   permission,
@@ -129,8 +129,12 @@ function ProtectedRouteWithPermission({
   const perms = getUserPermissions(accessUser ?? undefined);
 
   if (!perms[permission]) {
-    // JURIDICO: qualquer rota protegida leva a "/suporte".
-    if (perms.level === LEVELS.JURIDICO) {
+    // [CHANGELOG] JURIDICO e ASSESSOR_PLUS: qualquer rota protegida
+    // leva para "/suporte".
+    if (
+      perms.level === LEVELS.JURIDICO ||
+      perms.level === LEVELS.ASSESSOR_PLUS
+    ) {
       return <Redirect to="/suporte" />;
     }
 
@@ -219,6 +223,13 @@ function Router() {
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
+      <Route path="/inte_comerce">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canAccessReports">
+            <Inte_comerce />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
       <Route path="/analytics">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessReports">
@@ -287,7 +298,13 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Suporte */}
+      {/* Suporte
+          Mantém <ProtectedRoute> (apenas autenticação). A própria página
+          <Suporte /> decide abas/features via `useAccessControl()` e
+          `getEffectiveAccessLevel`. Trocar para
+          `<ProtectedRouteWithPermission permission="canAccessSuporte">`
+          é seguro (JURIDICO, ASSESSOR_PLUS e SUPERVISAO+ têm a flag),
+          mas preserva-se o comportamento atual para minimizar mudanças. */}
       <Route path="/suporte">
         <PeriodProvider>
           <ProtectedRoute>

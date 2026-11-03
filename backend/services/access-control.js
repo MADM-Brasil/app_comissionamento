@@ -2,15 +2,15 @@
 // Sistema de Controle de Acesso unificado (backend).
 // Fonte única de verdade: CARGO_LEVELS.
 //
-// As chaves de CARGO_LEVELS devem estar SEMPRE normalizadas
-// (minúsculas, sem acentos), porque getAccessLevel() aplica
-// normalize() ao cargo antes da lookup.
-//
-// Para alterar o nível de um cargo individualmente em runtime:
-//   import { accessControl } from './access-control.js';
-//   accessControl.setCargoLevel('desenvolvedor', accessControl.LEVELS.SUPERVISAO);
-//
-// Para alterar permanentemente: edite o objeto CARGO_LEVELS abaixo.
+// [CHANGELOG 2026-XX] Nível novo: ASSESSOR_PLUS.
+//   • Inserido entre SUPERVISAO e COORDENADOR → renumerado.
+//   • Herda as MESMAS permissões de Suporte do COORDENADOR
+//     (busca cliente + movimentar + reportar; SalesOps bloqueado).
+//   • Sem acesso a Dashboard / Comissões / Ranking / Config / Reports / Equipe.
+//   • Promoção por whitelist de e-mail (ASSESSOR_PLUS_EMAILS) — só afeta
+//     usuários cujo cargo resolva para ASSESSOR.
+//   • Renumeração: NONE=0, JURIDICO=1, ASSESSOR=2, SUPERVISAO=3,
+//                  ASSESSOR_PLUS=4, COORDENADOR=5, ADMINISTRATIVO=6, SUPER_ADMIN=7.
 
 import { pool } from './db.js';
 
@@ -21,9 +21,10 @@ class AccessControl {
       JURIDICO: 1,
       ASSESSOR: 2,
       SUPERVISAO: 3,
-      COORDENADOR: 4,
-      ADMINISTRATIVO: 5,
-      SUPER_ADMIN: 6,
+      ASSESSOR_PLUS: 4,     // [NOVO]
+      COORDENADOR: 5,
+      ADMINISTRATIVO: 6,
+      SUPER_ADMIN: 7,
     });
 
     this.CARGO_LEVELS = {
@@ -81,22 +82,26 @@ class AccessControl {
     this.HOME_COMISSOES_ALLOWED_TEAMS = new Set(
       this.HOME_COMISSOES_ALLOWED_TEAM_NAMES.map((t) => this.normalize(t))
     );
-
-    // ─────────────────────────────────────────────────────────
-    // [NOVO] Bloqueio individual da página de Comissões
-    //
-    // E-mails que NÃO podem acessar /comissoes nem consumir a API
-    // de comissões, mesmo que a regra geral (unidade 3 ou equipe
-    // liberada) os liberasse.
-    //
-    // ⚠️ Substitua o e-mail de exemplo pelo e-mail REAL do supervisor.
-    // A comparação usa this.normalize (trim + lowercase + sem acento).
-    // ─────────────────────────────────────────────────────────
     this.COMISSOES_BLOCKED_EMAILS = [
-      'wallace.batista@madmbrasil.com.br', // ← TROQUE PELO E-MAIL REAL
+      'wallace.batista@madmbrasil.com.br',
     ];
     this.COMISSOES_BLOCKED_EMAILS_SET = new Set(
       this.COMISSOES_BLOCKED_EMAILS.map((e) => this.normalize(e))
+    );
+
+    // [NOVO] Assessores promovidos para ASSESSOR_PLUS.
+    // Mesma mecânica do COMISSOES_BLOCKED_EMAILS — whitelist por e-mail.
+    // Só tem efeito se o cargo do usuário resolver para LEVELS.ASSESSOR.
+    // Herda as MESMAS permissões de Suporte do COORDENADOR.
+    this.ASSESSOR_PLUS_EMAILS = [
+      'larissa.tayna@madmbrasil.com.br',
+      'alessandra.grob@madmbrasil.com.br',
+      'igor.santos@madmbrasil.com.br',
+      'tayane.jesus@madmbrasil.com.br',
+      'bianca.ferreira@madmbrasil.com.br',
+    ];
+    this.ASSESSOR_PLUS_EMAILS_SET = new Set(
+      this.ASSESSOR_PLUS_EMAILS.map((e) => this.normalize(e))
     );
 
     this.PERMISSIONS = {
@@ -158,6 +163,23 @@ class AccessControl {
         canAccessSuporteSalesOps: false,
       },
 
+
+      // Suporte com as MESMAS regras do COORDENADOR; todo o resto bloqueado.
+      [this.LEVELS.ASSESSOR_PLUS]: {
+        canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
+        canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+        canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
+        canExportData: true, filterLocked: false, lockedTeam: false,
+        lockedCollaborator: false,
+        description: 'Suporte com permissões de coordenador (somente Suporte)',
+
+        canAccessSuporte: true,
+        canAccessSuporteBuscaCliente: true,
+        canAccessSuporteMovimentar: true,
+        canAccessSuporteReportar: true,
+        canAccessSuporteSalesOps: false,
+      },
+
       [this.LEVELS.COORDENADOR]: {
         canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
@@ -208,12 +230,13 @@ class AccessControl {
   }
 
   get HOME_COMISSOES_ALLOWED_LEVELS() {
+    // Após renumeração: [2, 3, 5]. ASSESSOR_PLUS (4) fica de fora por design.
     return [this.LEVELS.ASSESSOR, this.LEVELS.SUPERVISAO, this.LEVELS.COORDENADOR];
   }
 
   isUnit3HomeComissoesUser(user) {
     if (!user) return false;
-    const level = this.getAccessLevel(user.cargo, user.status);
+    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
     if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
     const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
     if (unidade === this.HOME_COMISSOES_ALLOWED_UNIT) return true;
@@ -227,10 +250,35 @@ class AccessControl {
     return this.HOME_COMISSOES_ALLOWED_TEAMS.has(team);
   }
 
-  /** [NOVO] Retorna `true` quando o e-mail do usuário está bloqueado de /comissoes. */
+  /** Retorna `true` quando o e-mail do usuário está bloqueado de /comissoes. */
   isComissoesBlockedByEmail(user) {
     if (!user?.email) return false;
     return this.COMISSOES_BLOCKED_EMAILS_SET.has(this.normalize(user.email));
+  }
+
+  /**
+   * [NOVO] Retorna `true` para usuários cujo cargo resolve para ASSESSOR
+   * e cujo e-mail está em ASSESSOR_PLUS_EMAILS.
+   *
+   * Efeito: nível efetivo promovido para LEVELS.ASSESSOR_PLUS
+   * (Suporte com permissões de coordenador; todo o resto bloqueado).
+   */
+  isAssessorPlusUser(user) {
+    if (!user?.email) return false;
+    if (!this.ASSESSOR_PLUS_EMAILS_SET.has(this.normalize(user.email))) return false;
+    // A promoção só vale para quem já é assessor.
+    return this.getAccessLevel(user.cargo, user.status) === this.LEVELS.ASSESSOR;
+  }
+
+  /**
+   * [NOVO] Nível efetivo do usuário (considera a whitelist de ASSESSOR_PLUS).
+   * Use SEMPRE que precisar do "comportamento real" — não apenas cargo.
+   */
+  getEffectiveAccessLevel(user) {
+    const baseLevel = this.getAccessLevel(user?.cargo, user?.status);
+    if (baseLevel !== this.LEVELS.ASSESSOR) return baseLevel;
+    if (this.isAssessorPlusUser(user)) return this.LEVELS.ASSESSOR_PLUS;
+    return baseLevel;
   }
 
   isUnit3AssessorOrSupervisor(user) {
@@ -239,7 +287,7 @@ class AccessControl {
 
   canSeeHomeComissoes(user) {
     if (!user) return false;
-    const level = this.getAccessLevel(user.cargo, user.status);
+    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
     if (level >= this.LEVELS.ADMINISTRATIVO) return true;
     return this.isUnit3HomeComissoesUser(user);
   }
@@ -247,12 +295,16 @@ class AccessControl {
   getDefaultLandingPage(user) {
     if (!user) return '/login';
 
+    // Preserva a ordem original: quem é "unit3/Eq Felipe" cai em /home.
+    // ASSESSOR_PLUS tem nível efetivo 4, que NÃO está em HOME_COMISSOES_ALLOWED_LEVELS,
+    // portanto cai no bloco abaixo e é redirecionado para /suporte.
     if (this.isUnit3HomeComissoesUser(user)) return '/home';
 
-    const level = this.getAccessLevel(user.cargo, user.status);
+    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
 
-    if (level === this.LEVELS.JURIDICO)   return '/suporte';
-    if (level === this.LEVELS.SUPERVISAO) return '/suporte';
+    if (level === this.LEVELS.JURIDICO)      return '/suporte';
+    if (level === this.LEVELS.ASSESSOR_PLUS) return '/suporte';
+    if (level === this.LEVELS.SUPERVISAO)    return '/suporte';
 
     return '/';
   }
@@ -262,8 +314,9 @@ class AccessControl {
   }
 
   setCargoLevel(cargo, level) {
-    if (typeof level !== 'number' || level < 0 || level > 6) {
-      throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–6.`);
+    // [ALTERADO] limite superior agora é 7 (SUPER_ADMIN).
+    if (typeof level !== 'number' || level < 0 || level > 7) {
+      throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–7.`);
     }
     this.CARGO_LEVELS[this.normalize(cargo)] = level;
     console.log(`[accessControl] setCargoLevel("${cargo}") → ${level}`);
@@ -315,6 +368,15 @@ class AccessControl {
     return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;
   }
 
+  /**
+   * [NOVO] Variante que enxerga ASSESSOR_PLUS (precisa do user completo,
+   * não só cargo/status). Use em rotas que já carregaram o user da view.
+   */
+  canAccessSupportByUser(user) {
+    const level = this.getEffectiveAccessLevel(user);
+    return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;
+  }
+
   canAccessSuportePage(cargo, status) {
     return this.canAccessSupport(cargo, status);
   }
@@ -343,12 +405,12 @@ class AccessControl {
   }
 
   getUserPermissions(user) {
-    const level = this.getAccessLevel(user?.cargo, user?.status);
+    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
     const perms = this.PERMISSIONS[level];
 
     const allowHomeComissoes = this.canSeeHomeComissoes(user);
 
-    // [NOVO] Bloqueio individual da página de Comissões.
+    // Bloqueio individual da página de Comissões.
     const bloqueadoComissoes = this.isComissoesBlockedByEmail(user);
 
     return {
@@ -360,7 +422,6 @@ class AccessControl {
       unidade_id: user?.unidade_id,
       ...perms,
       canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
-      // [NOVO] canAccessComissoes respeita a lista de bloqueio individual.
       canAccessComissoes:
         perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
     };
@@ -372,6 +433,7 @@ class AccessControl {
       [this.LEVELS.JURIDICO]: 'JURIDICO',
       [this.LEVELS.ASSESSOR]: 'ASSESSOR',
       [this.LEVELS.SUPERVISAO]: 'SUPERVISAO',
+      [this.LEVELS.ASSESSOR_PLUS]: 'ASSESSOR PLUS',
       [this.LEVELS.COORDENADOR]: 'COORDENADOR',
       [this.LEVELS.ADMINISTRATIVO]: 'ADMINISTRATIVO',
       [this.LEVELS.SUPER_ADMIN]: 'SUPER ADMIN',
@@ -381,8 +443,11 @@ class AccessControl {
 
   filterTeamData(teamMembers, currentUser) {
     if (!currentUser || !teamMembers) return [];
-    const userLevel = this.getAccessLevel(currentUser.cargo, currentUser.status);
-    if (userLevel >= this.LEVELS.COORDENADOR) return teamMembers;
+    const userLevel = this.getEffectiveAccessLevel(currentUser);   // [ALTERADO]
+    // [NOVO] ASSESSOR_PLUS herda a visão de coordenador.
+    if (userLevel >= this.LEVELS.COORDENADOR || userLevel === this.LEVELS.ASSESSOR_PLUS) {
+      return teamMembers;
+    }
     if (userLevel === this.LEVELS.SUPERVISAO) {
       return teamMembers.filter(m => m.nome_equipe === currentUser.nome_equipe);
     }
@@ -396,13 +461,14 @@ class AccessControl {
     if (!user) {
       return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
     }
-    const level = this.getAccessLevel(user.cargo, user.status);
+    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
     if (level === this.LEVELS.ASSESSOR) {
       return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: true, collaboratorName: user.nome ?? null };
     }
     if (level === this.LEVELS.SUPERVISAO) {
       return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: false, collaboratorName: null };
     }
+    // ASSESSOR_PLUS cai aqui: filtros livres (regra de coordenador).
     return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
   }
 
@@ -422,6 +488,9 @@ class AccessControl {
 
   getMenuItems(permissions) {
     const items = [];
+    // Mantido: JURIDICO e qualquer perfil "só Suporte" (canAccessSuporte &&
+    // !canAccessDashboard) retornam APENAS o item Suporte. Isso cobre o
+    // ASSESSOR_PLUS naturalmente (todas as outras flags são false).
     if (
       permissions.level === this.LEVELS.JURIDICO ||
       (permissions.canAccessSuporte && !permissions.canAccessDashboard)
@@ -470,9 +539,15 @@ class AccessControl {
     const requester = await this.getActiveSupportUser(requesterEmail, db);
     if (!requester) return { status: 403, error: 'Usuário ativo não encontrado.' };
 
-    const isSupervisor = this.isSupervisor(requester.cargo, requester.status);
-    if (!isSupervisor && !this.isCoordinatorOrAbove(requester.cargo, requester.status)) {
-      return { status: 403, error: 'Somente supervisores e coordenadores podem movimentar cards por Link Hub.' };
+    const isSupervisor   = this.isSupervisor(requester.cargo, requester.status);
+    const isCoordOrAbove = this.isCoordinatorOrAbove(requester.cargo, requester.status);
+    const isAssessorPlus = this.isAssessorPlusUser(requester);   // [NOVO]
+
+    if (!isSupervisor && !isCoordOrAbove && !isAssessorPlus) {
+      return {
+        status: 403,
+        error: 'Somente supervisores, coordenadores e assessores autorizados podem movimentar cards por Link Hub.',
+      };
     }
 
     const destinationResult = await db.query(
@@ -603,3 +678,9 @@ export const isUnit3AssessorOrSupervisor = (user) => instance.isUnit3HomeComisso
 export const isHomeComissoesTeam = (user) => instance.isHomeComissoesTeam(user);
 export const canSeeHomeComissoes = (user) => instance.canSeeHomeComissoes(user);
 export const getDefaultLandingPage = (user) => instance.getDefaultLandingPage(user);
+
+// [NOVO] Assessor promovido por e-mail para ASSESSOR_PLUS
+export const ASSESSOR_PLUS_EMAILS = [...instance.ASSESSOR_PLUS_EMAILS];
+export const isAssessorPlusUser = (user) => instance.isAssessorPlusUser(user);
+export const getEffectiveAccessLevel = (user) => instance.getEffectiveAccessLevel(user);
+export const canAccessSupportByUser = (user) => instance.canAccessSupportByUser(user);

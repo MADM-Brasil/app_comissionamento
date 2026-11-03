@@ -15,6 +15,7 @@ import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 import authRoutes from './routes/auth.js';
 import colaboradoresRoutes from './routes/colaboradores.js';
 import metricsRouter from './routes/metrics.js';
+import inteComerceRoutes from './routes/inte_comerce.js';
 import tabelaComissoesRoutes from './routes/tabela-comissoes.js';
 import adminRoutes from './routes/admin.js';
 import userRouter from './routes/user.js';
@@ -30,6 +31,49 @@ import { startLinkHubBatchQueue } from './services/linkHubBatchQueue.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ============================================================
+// REDE DE SEGURANÇA GLOBAL
+// ------------------------------------------------------------
+// Workers de background (linkHubBatchQueue, notificationEngine,
+// ticketQueue) fazem `pool.query` fora do ciclo de request/response.
+// Se uma dessas queries falhar (ex.: "Connection terminated due to
+// connection timeout" após o Postgres fechar uma conexão ociosa),
+// a promise rejeitada não tem nenhum `.catch` — e, por padrão, Node
+// 22 encerra o processo em `unhandledRejection`.
+//
+// Aqui logamos e SEGUIMOS VIVOS. Os workers já têm try/catch por
+// ciclo (ver linkHubBatchQueue.js); esta rede cobre qualquer outra
+// promise esquecida em qualquer serviço.
+// ============================================================
+const fatalTimestamps = [];
+const FATAL_WINDOW_MS = 60_000;
+const FATAL_THRESHOLD = 5;
+
+function recordFatal(kind, err) {
+  const now = Date.now();
+  fatalTimestamps.push(now);
+  while (fatalTimestamps.length && now - fatalTimestamps[0] > FATAL_WINDOW_MS) {
+    fatalTimestamps.shift();
+  }
+  console.error(`[fatal:${kind}]`, err && err.stack ? err.stack : err);
+  if (fatalTimestamps.length >= FATAL_THRESHOLD) {
+    console.error(
+      `[fatal] ${FATAL_THRESHOLD} erros não tratados em ${FATAL_WINDOW_MS / 1000}s — encerrando para evitar loop.`
+    );
+    process.exit(1);
+  }
+}
+
+process.on('unhandledRejection', (reason) => recordFatal('unhandledRejection', reason));
+process.on('uncaughtException', (err) => recordFatal('uncaughtException', err));
+
+// Listener no pool: o pg-pool emite 'error' quando uma conexão ociosa
+// morre. Sem esse listener, o EventEmitter lança e derruba o processo.
+// (Ideal também ter em db.js; aqui é redundância inofensiva.)
+pool.on('error', (err) => {
+  console.error('[db] conexão ociosa caiu:', err?.message || err);
+});
+
 const app = express();
 const PORT = process.env.PORT || 3007;
 const isProduction = process.env.NODE_ENV === 'production';
@@ -37,9 +81,6 @@ const isProduction = process.env.NODE_ENV === 'production';
 // ============================================================
 // CONFIGURAÇÃO DE COOKIES
 // ============================================================
-// COOKIE_SECURE:
-//   true  → cookies só via HTTPS (produção atrás de Traefik/Dokploy).
-//   false → sem flag Secure (dev local / proxy sem X-Forwarded-Proto).
 const cookieSecure = process.env.COOKIE_SECURE === 'true';
 console.log(`[boot] NODE_ENV       = ${process.env.NODE_ENV || 'development'}`);
 console.log(`[boot] PORT           = ${PORT}`);
@@ -60,10 +101,6 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 
 console.log(`[boot] ALLOWED_ORIGINS = ${allowedOrigins.join(', ')}`);
 
-/**
- * Suporta wildcards no estilo "https://*.dominio.com".
- * Necessário porque o pacote `cors` faz comparação literal por padrão.
- */
 function originMatches(origin, pattern) {
   if (pattern === origin) return true;
   if (!pattern.includes('*')) return false;
@@ -75,7 +112,6 @@ function originMatches(origin, pattern) {
 
 app.use(cors({
   origin(origin, callback) {
-    // Sem origin = curl, health check interno, same-origin. Permitir.
     if (!origin) return callback(null, true);
     const ok = allowedOrigins.some((pattern) => originMatches(origin, pattern));
     if (ok) return callback(null, true);
@@ -135,7 +171,6 @@ app.use((req, res, next) => {
 // ============================================================
 // CSRF — Double Submit Cookie
 // ============================================================
-// Gera o token para todas as requisições (mesmo em GET /).
 app.use((req, res, next) => {
   if (!req.cookies?.['csrf-token']) {
     const token = crypto.randomBytes(32).toString('hex');
@@ -152,10 +187,6 @@ app.use((req, res, next) => {
   next();
 });
 
-/**
- * Verificação CSRF — aplicada apenas às rotas protegidas (depois das públicas).
- * Ignora métodos seguros (GET/HEAD/OPTIONS).
- */
 function csrfProtection(req, res, next) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
   const token = req.headers['x-csrf-token'] || req.body?._csrf;
@@ -189,7 +220,6 @@ app.use(session({
 
 // ============================================================
 // LOG DE DIAGNÓSTICO DE AUTENTICAÇÃO
-// Mostra sid, estado de autenticação e cookies em cada request /api.
 // ============================================================
 app.use((req, res, next) => {
   const reqPath = req.path || '';
@@ -211,44 +241,17 @@ app.use((req, res, next) => {
 // ============================================================
 // ROTAS PÚBLICAS — NÃO exigem sessão nem CSRF
 // ============================================================
-
-// Health checks — precisam vir ANTES dos middlewares de proteção.
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
-// CSRF token (usado pelo frontend antes do login).
 app.get('/api/csrf-token', (req, res) => {
   res.json({ csrfToken: req.csrfToken });
 });
 
-// Autenticação (login, 2FA, logout, recuperação de senha, /me).
-// Toda a lógica vive em routes/auth.js.
 app.use('/api/auth', authRoutes);
 
 // ============================================================
 // ARQUIVOS ESTÁTICOS (uploads) — PÚBLICOS, porém inavegáveis
-// ------------------------------------------------------------
-// [CORRIGIDO] Movido para ANTES do middleware de autenticação.
-//
-// Motivo: os arquivos de /uploads/suporte/* são referenciados em
-// notificações do Microsoft Teams (via `teams_notificador`). O
-// Teams NÃO possui sessão do sistema — logo, se estivéssemos atrás
-// do middleware de auth, o clique no link no Teams retornaria 401.
-//
-// Segurança:
-//  - Os nomes dos arquivos são `randomUUID()` gerados pelo Multer
-//    (122 bits de entropia) — impossível adivinhar.
-//  - `express.static` NÃO faz directory listing.
-//  - Content-Type é derivado da extensão; arquivos fora da lista
-//    branca do Multer já são rejeitados no upload.
-//  - CORS/CSP continuam valendo para contextos de página; aqui
-//    apenas servimos o binário.
-//
-// Headers aplicados apenas em /uploads/*:
-//  - Cross-Origin-Resource-Policy: cross-origin → permite preview
-//    de imagem/PDF embutido pelo Teams (fora da CSP da página).
-//  - Cache-Control: public, max-age=86400, immutable → arquivos
-//    têm nome imutável (UUID), cachear 1 dia é seguro.
 // ============================================================
 app.use(
   '/uploads',
@@ -266,7 +269,7 @@ app.use(
 );
 
 // ============================================================
-// MIDDLEWARES DE PROTEÇÃO (aplicados a tudo abaixo)
+// MIDDLEWARES DE PROTEÇÃO
 // ============================================================
 app.use(csrfProtection);
 app.use((req, res, next) => {
@@ -322,6 +325,7 @@ app.get('/api/metricas-assessores', async (req, res) => {
 });
 
 app.use('/api', colaboradoresRoutes);
+app.use('/api/metrics/inte-comerce', inteComerceRoutes);
 app.use('/api/metrics', metricsRouter);
 app.use('/api/tabela-comissoes', tabelaComissoesRoutes);
 app.use('/api/campanhas', campanhasRoutes);
