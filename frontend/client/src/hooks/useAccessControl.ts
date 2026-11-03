@@ -21,9 +21,11 @@ import {
   isAssessorPlusUser,
   getUserPermissions,
   resolveAccessUser,
+  type Permissions,
 } from "@/lib/accessControl";
 
 type Level = typeof LEVELS[keyof typeof LEVELS];
+type PermissionName = keyof Permissions | "canViewOwnData";
 
 export function useAccessControl() {
   const currentUser = useAppStore((s) => s.currentUser);
@@ -87,6 +89,16 @@ export function useAccessControl() {
     [accessUser],
   );
 
+  const hasPermission = useCallback(
+    (permission: PermissionName): boolean => {
+      if (permission === "canViewOwnData") {
+        return permissions.canAccessComissoes;
+      }
+      return permissions[permission];
+    },
+    [permissions],
+  );
+
   // ─────────────────────────────────────────────────────────
   // Atalho: o usuário logado é um ASSESSOR_PLUS?
   // (cargo === assessor E e-mail na whitelist)
@@ -106,6 +118,7 @@ export function useAccessControl() {
 
     // Permissões pré-computadas
     permissions,
+    hasPermission,
 
     // Resolvedores de nível
     getAccessLevel,
