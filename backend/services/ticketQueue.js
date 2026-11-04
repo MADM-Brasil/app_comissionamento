@@ -74,7 +74,7 @@ const RULE_LABELS = Object.freeze({
   owner_missing: 'Responsável destino não informado.',
   missing_email: 'Campos pendentes: preencha e-mail para tentar novamente.',
   invalid_email: 'E-mail inválido. Corrija e reenvie.',
-  contact_data_mismatch: 'Dados divergentes do cadastro. Aguardando suporte.',
+  contact_data_mismatch: 'Dados divergentes do cadastro da HubSpot. Valide as informações registradas.',
   // Cobre Quinquênio E Isenção de IR (produto exige pipeline dedicado).
   // [ISENÇÃO IR]
   product_pipeline_routing: 'Produto exige pipeline dedicado; movimentação executada.',
