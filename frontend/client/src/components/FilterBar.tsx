@@ -14,6 +14,7 @@ interface FilterBarProps {
     produto: string;
   }) => void;
   showColaboradorFilter?: boolean;
+  showProdutoFilter?: boolean;
   className?: string;
   initialEquipe?: string;
   initialColaborador?: string;
@@ -37,7 +38,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
-  'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice'
+  'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice','Equipe Debora','Equipe Curitiba'
 ];
 
 const isExcludedTeam = (teamName: string): boolean => {
@@ -166,6 +167,7 @@ function getStoredFilters(): StoredFilters {
 export default function FilterBar({
   onFilterChange,
   showColaboradorFilter = true,
+  showProdutoFilter = true,
   className,
   initialEquipe = "todas",
   initialColaborador = "todos",
@@ -925,7 +927,7 @@ export default function FilterBar({
           )}
 
           {/* Select Produto — segue a mesma regra do Suporte */}
-          <div className="flex-1">
+          {showProdutoFilter && <div className="flex-1">
             <label htmlFor="filterProduto" className="block text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
               <Package className="w-3 h-3" /> Produto
             </label>
@@ -975,7 +977,7 @@ export default function FilterBar({
                 ))}
               </select>
             )}
-          </div>
+          </div>}
 
           {/* Botão Limpar */}
           {hasActiveFilters && (

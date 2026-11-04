@@ -10,7 +10,7 @@ import { PeriodProvider } from '@/contexts/period';
 import Home from "./pages/Home";
 import Comissoes from "./pages/Comissoes";
 import Funil from "./pages/Funil";
-import Inte_comerce from "./pages/Inte_comerce";
+import Tabulacoes from "./pages/Tabulacoes";
 import Analytics from "./pages/Analytics";
 import Ranking from "./pages/Ranking";
 import Configuration from "./pages/Configuration";
@@ -224,9 +224,12 @@ function Router() {
         </PeriodProvider>
       </Route>
       <Route path="/inte_comerce">
+        <Redirect to="/tabulacoes" />
+      </Route>
+      <Route path="/tabulacoes">
         <PeriodProvider>
           <ProtectedRouteWithPermission permission="canAccessReports">
-            <Inte_comerce />
+            <Tabulacoes />
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>

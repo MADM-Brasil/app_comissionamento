@@ -267,8 +267,8 @@ function RecomendacoesCard({
           targetName: c.name,
           targetEmail: c.email,
           authorId: currentUser.id,
-          authorName: currentUser.nome,
-          authorCargo: currentUser.cargo,
+          authorName: currentUser.nome ?? currentUser.email ?? "Usuário",
+          authorCargo: currentUser.cargo ?? "Não informado",
           text: txt,
           priority: newRecPriority,
         });
@@ -473,7 +473,7 @@ export default function Inte_comerce() {
   const [collabTable, setCollabTable] = useState<InteComerceCollaborator[]>([]);
   const [teamTable, setTeamTable] = useState<InteComerceTeam[]>([]);
 
-  // ── Carregamento (7 chamadas em paralelo, uma por query SAFRA)
+  // ── Carregamento dos indicadores e da tabela selecionada
   const reloadData = useCallback(async () => {
     if (!currentStartDate || !currentEndDate) return;
     setLoading(true);
@@ -486,29 +486,33 @@ export default function Inte_comerce() {
       produto,
     };
     try {
-      const [o, s, f, r, d, c, t] = await Promise.all([
-        fetchInteComerceOverview(params),
-        fetchInteComerceStrategic(params),
-        fetchInteComerceFunnel(params),
-        fetchInteComerceDisqualify(params),
-        fetchInteComerceDaily(params),
-        fetchInteComerceCollaborators(params),
-        fetchInteComerceTeams(params),
-      ]);
+      const o = await fetchInteComerceOverview(params);
       setOverview(o || EMPTY_OVERVIEW);
+
+      const s = await fetchInteComerceStrategic(params);
       setStrategic(s || EMPTY_STRATEGIC);
+
+      const f = await fetchInteComerceFunnel(params);
       setFunnel(f || EMPTY_FUNNEL);
+
+      const r = await fetchInteComerceDisqualify(params);
       setReasons(r || []);
+
+      const d = await fetchInteComerceDaily(params);
       setDaily(d || []);
-      setCollabTable(c || []);
-      setTeamTable(t || []);
+
+      if (grouping === "team") {
+        setTeamTable((await fetchInteComerceTeams(params)) || []);
+      } else {
+        setCollabTable((await fetchInteComerceCollaborators(params)) || []);
+      }
     } catch (err: any) {
       console.error("Erro ao carregar Inte_comerce:", err);
       setError(err.message || "Falha ao carregar dados.");
     } finally {
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, equipe, colaboradorId, produto]);
+  }, [currentStartDate, currentEndDate, equipe, colaboradorId, produto, grouping]);
 
   useEffect(() => {
     void reloadData();

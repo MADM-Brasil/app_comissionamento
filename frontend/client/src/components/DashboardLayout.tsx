@@ -19,7 +19,7 @@ import {
   EyeOff,
   Bell,
   CircleHelp,
-  Brain,
+  Phone,
 } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { logout } from "@/lib/auth";
@@ -30,8 +30,8 @@ import {
   getUserPermissions,
   isAssessorRestrito,
   resolveAccessUser,
-  getEffectiveAccessLevel,           // [NOVO]
-  LEVELS,                            // [NOVO] importado direto do módulo
+  getEffectiveAccessLevel,
+  LEVELS,
   RESTRICTED_ASSESSOR_ALLOWED_PATHS,
 } from "@/lib/accessControl";
 
@@ -232,7 +232,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     const dashboardChildren: NavChild[] = [];
     if (permissions.canViewTeam && permissions.canAccessReports) {
       dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
-      dashboardChildren.push({ path: "/inte_comerce", label: "Int. Comercial", icon: Brain });
+      dashboardChildren.push({ path: "/tabulacoes", label: "Não Tabuladas", icon: Phone });
       dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
       dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
@@ -285,7 +285,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
-      flat.push({ path: "/inte_comerce", label: "Int. Comercial", icon: Brain });
+      flat.push({ path: "/tabulacoes", label: "Tabulações", icon: Phone });
       flat.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
     }
