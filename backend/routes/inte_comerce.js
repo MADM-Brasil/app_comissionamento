@@ -3,6 +3,34 @@ import express from 'express';
 import db from '../services/db.js';
 
 const router = express.Router();
+const ANALYTICS_STATEMENT_TIMEOUT_MS = 55_000;
+const ANALYTICS_QUERY_TIMEOUT_MS = ANALYTICS_STATEMENT_TIMEOUT_MS + 3_000;
+
+async function analyticsQuery(text, values) {
+  const client = await db.pool.connect();
+  let releaseError;
+  try {
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL statement_timeout = '${ANALYTICS_STATEMENT_TIMEOUT_MS}ms'`);
+    const result = await client.query({
+      text,
+      values,
+      query_timeout: ANALYTICS_QUERY_TIMEOUT_MS,
+    });
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      releaseError = rollbackError;
+      console.error('Falha ao reverter consulta analítica:', rollbackError);
+    }
+    throw error;
+  } finally {
+    client.release(releaseError);
+  }
+}
 
 function requireAuth(req, res, next) {
   if (!req.session.isAuthenticated || !req.session.userId) {
@@ -14,16 +42,53 @@ function requireAuth(req, res, next) {
 function readParams(req) {
   const { start, end, equipe, colaboradorId } = req.query;
   if (!start || !end) return null;
+  if (typeof start !== 'string' || typeof end !== 'string') {
+    return { error: 'start e end devem estar no formato YYYY-MM-DD.' };
+  }
   const colabNum =
     colaboradorId != null && String(colaboradorId).trim() !== ''
       ? Number(colaboradorId)
       : null;
-  return {
+
+  const params = {
     inicio: start,
     fim_exclusivo: end,
     equipe: equipe && equipe !== 'todas' ? equipe : null,
     colaborador_id: Number.isFinite(colabNum) ? colabNum : null,
   };
+
+  const validDate = (value) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  };
+  if (!validDate(start) || !validDate(end) || end <= start) {
+    return { error: 'Período inválido. Use datas válidas no formato YYYY-MM-DD e end posterior a start.' };
+  }
+
+  const dateParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const todayParts = Object.fromEntries(dateParts.map(({ type, value }) => [type, value]));
+  const year = Number(todayParts.year);
+  const month = Number(todayParts.month);
+  const day = Number(todayParts.day);
+  const targetMonth = month - 2;
+  const minDateYear = year + Math.floor((targetMonth - 1) / 12);
+  const minDateMonth = ((targetMonth - 1) % 12 + 12) % 12 + 1;
+  const daysInMinDateMonth = new Date(Date.UTC(minDateYear, minDateMonth, 0)).getUTCDate();
+  const minDate = `${minDateYear}-${String(minDateMonth).padStart(2, '0')}-${String(Math.min(day, daysInMinDateMonth)).padStart(2, '0')}`;
+  const tomorrow = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+  if (start < minDate || end > tomorrow) {
+    return {
+      error: `Este relatório permite consultar somente os últimos dois meses (${minDate} até hoje).`,
+    };
+  }
+
+  return params;
 }
 
 // CTE base — usa CURRENT_TIMESTAMP como as_of (produção).
@@ -39,15 +104,122 @@ WITH p AS (
   FROM p
 )`;
 
-const CTE_COORTE = CTE_BASE + `,
-coorte AS (
-  SELECT c.* FROM ops.v_bi_v6_coortes c CROSS JOIN limites p
-  WHERE c.data_recebimento_corporativo >= p.t0
-    AND c.data_recebimento_corporativo < p.t1
-    AND c.data_recebimento_corporativo <= p.as_of
-    AND (p.equipe IS NULL OR (c.recebido_primeiro_assessor_em <= p.as_of AND c.equipe_primeiro_assessor_atual = p.equipe))
-    AND (p.colaborador_id IS NULL OR (c.recebido_primeiro_assessor_em <= p.as_of AND c.primeiro_assessor_id = p.colaborador_id))
+const CTE_EVENTOS = `,
+eventos AS (
+  SELECT e.deal_id, e.ocorrido_em, e.colaborador_id, e.equipe_atual, e.tipo
+  FROM ops.v_bi_v6_eventos e CROSS JOIN limites p
+  WHERE e.ocorrido_em >= p.t0
+    AND e.ocorrido_em <= p.as_of
+    AND e.tipo IN (
+      'RECEBIDO_CORPORATIVO', 'RECEBIDO_ASSESSOR', 'TRABALHADO_PROXY',
+      'EM_CONTATO', 'COLETA', 'CONTRATO', 'EMITIDO_ORIGINAL',
+      'ASSINADO_ORIGINAL', 'GANHO', 'PROTOCOLADO', 'DESQUALIFICADO'
+    )
 )`;
+
+function cteCoorte(params) {
+  const filters = [];
+  if (params.equipe) {
+    filters.push('AND pa.equipe_atual = $3::text');
+  }
+  if (params.colaborador_id != null) {
+    filters.push('AND pa.colaborador_id = $4::bigint');
+  }
+
+  return CTE_BASE + CTE_EVENTOS + `,
+recebimentos_corporativos AS (
+  SELECT e.deal_id, MIN(e.ocorrido_em) AS recebido_em
+  FROM eventos e CROSS JOIN limites p
+  WHERE e.tipo = 'RECEBIDO_CORPORATIVO'
+    AND e.ocorrido_em < p.t1
+  GROUP BY e.deal_id
+),
+primeiro_assessor AS (
+  SELECT DISTINCT ON (e.deal_id)
+         e.deal_id, e.colaborador_id, e.equipe_atual, e.ocorrido_em
+  FROM eventos e
+  JOIN recebimentos_corporativos r
+    ON r.deal_id = e.deal_id AND e.ocorrido_em >= r.recebido_em
+  WHERE e.tipo = 'RECEBIDO_ASSESSOR'
+  ORDER BY e.deal_id, e.ocorrido_em, e.colaborador_id NULLS LAST, e.equipe_atual
+),
+coorte_filtrada AS (
+  SELECT r.deal_id, r.recebido_em
+  FROM recebimentos_corporativos r
+  LEFT JOIN primeiro_assessor pa ON pa.deal_id = r.deal_id
+  WHERE true ${filters.join(' ')}
+),
+coorte AS (
+  SELECT c.deal_id,
+         c.recebido_em AS data_recebimento_corporativo,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'TRABALHADO_PROXY' AND e.ocorrido_em >= c.recebido_em
+         ) AS primeiro_trabalho_em,
+         BOOL_OR(e.tipo = 'EM_CONTATO') AS chegou_em_contato,
+         BOOL_OR(e.tipo = 'EM_CONTATO' AND e.ocorrido_em <= c.recebido_em) AS ja_em_contato_ao_receber,
+         MIN(e.ocorrido_em) FILTER (WHERE e.tipo = 'EM_CONTATO') AS primeiro_em_contato_em,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'COLETA' AND e.ocorrido_em >= c.recebido_em
+         ) AS primeira_coleta_em,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'CONTRATO' AND e.ocorrido_em >= c.recebido_em
+         ) AS primeiro_contrato_em,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'DESQUALIFICADO' AND e.ocorrido_em >= c.recebido_em
+         ) AS primeira_desqualificacao_em,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'EMITIDO_ORIGINAL' AND e.ocorrido_em >= c.recebido_em
+         ) AS primeira_emissao_original_em,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'ASSINADO_ORIGINAL' AND e.ocorrido_em >= c.recebido_em
+         ) AS primeira_assinatura_original_em,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'GANHO' AND e.ocorrido_em >= c.recebido_em
+         ) AS data_ganho,
+         MIN(e.ocorrido_em) FILTER (
+           WHERE e.tipo = 'PROTOCOLADO' AND e.ocorrido_em >= c.recebido_em
+         ) AS data_protocolo
+  FROM coorte_filtrada c
+  LEFT JOIN eventos e
+    ON e.deal_id = c.deal_id
+  GROUP BY c.deal_id, c.recebido_em
+)`;
+}
+
+function cteRecebimentosAssessores(params) {
+  const filters = [];
+  if (params.equipe) filters.push('AND e.equipe_atual = $3::text');
+  if (params.colaborador_id != null) filters.push('AND e.colaborador_id = $4::bigint');
+
+  return CTE_BASE + CTE_EVENTOS + `,
+recebimentos AS (
+  SELECT DISTINCT ON (
+           e.deal_id, e.colaborador_id,
+           (e.ocorrido_em AT TIME ZONE 'America/Sao_Paulo')::date
+         )
+         e.deal_id, e.colaborador_id, e.equipe_atual, e.ocorrido_em AS recebido_em
+  FROM eventos e CROSS JOIN limites p
+  WHERE e.tipo = 'RECEBIDO_ASSESSOR'
+    AND e.ocorrido_em < p.t1
+    ${filters.join('\n    ')}
+  ORDER BY e.deal_id, e.colaborador_id,
+           (e.ocorrido_em AT TIME ZONE 'America/Sao_Paulo')::date,
+           e.ocorrido_em
+),
+marcos AS (
+  SELECT r.deal_id, r.colaborador_id, r.equipe_atual, r.recebido_em,
+         BOOL_OR(e.tipo = 'TRABALHADO_PROXY') AS trabalhou_na_posse,
+         BOOL_OR(e.tipo = 'EM_CONTATO') AS contatou_etapa,
+         BOOL_OR(e.tipo = 'ASSINADO_ORIGINAL') AS assinou_apos_receber,
+         BOOL_OR(e.tipo = 'GANHO') AS ganhou_apos_receber,
+         BOOL_OR(e.tipo = 'COLETA') AS coletou_apos_receber,
+         BOOL_OR(e.tipo = 'PROTOCOLADO') AS protocolou_apos_receber
+  FROM recebimentos r
+  LEFT JOIN eventos e
+    ON e.deal_id = r.deal_id AND e.ocorrido_em >= r.recebido_em
+  GROUP BY r.deal_id, r.colaborador_id, r.equipe_atual, r.recebido_em
+)`;
+}
 
 /* ============================================================
  * K01A | SAFRA | sete cards
@@ -55,8 +227,9 @@ coorte AS (
 router.get('/overview', requireAuth, async (req, res) => {
   const params = readParams(req);
   if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+  if (params.error) return res.status(400).json({ success: false, error: params.error });
   try {
-    const r = await db.query(CTE_COORTE + `
+    const r = await analyticsQuery(cteCoorte(params) + `
       SELECT
         COUNT(*)::int AS recebidos,
         COUNT(*) FILTER (WHERE primeiro_trabalho_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS trabalhados_proxy,
@@ -80,8 +253,9 @@ router.get('/overview', requireAuth, async (req, res) => {
 router.get('/strategic', requireAuth, async (req, res) => {
   const params = readParams(req);
   if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+  if (params.error) return res.status(400).json({ success: false, error: params.error });
   try {
-    const r = await db.query(CTE_COORTE + `,
+    const r = await analyticsQuery(cteCoorte(params) + `,
       cnt AS (
         SELECT
           COUNT(*)::int AS recebidos,
@@ -111,8 +285,9 @@ router.get('/strategic', requireAuth, async (req, res) => {
 router.get('/funnel', requireAuth, async (req, res) => {
   const params = readParams(req);
   if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+  if (params.error) return res.status(400).json({ success: false, error: params.error });
   try {
-    const r = await db.query(CTE_COORTE + `
+    const r = await analyticsQuery(cteCoorte(params) + `
       SELECT
         COUNT(*)::int AS recebidos,
         COUNT(*) FILTER (WHERE primeiro_trabalho_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS trabalhados,
@@ -140,16 +315,19 @@ router.get('/funnel', requireAuth, async (req, res) => {
 router.get('/disqualify-reasons', requireAuth, async (req, res) => {
   const params = readParams(req);
   if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+  if (params.error) return res.status(400).json({ success: false, error: params.error });
   try {
-    const r = await db.query(CTE_COORTE + `,
+    const r = await analyticsQuery(cteCoorte(params) + `,
       casos AS (
-        SELECT c.deal_id, c.motivo_perda_atual AS motivo
-        FROM coorte c CROSS JOIN limites p
+        SELECT c.deal_id, d.motivo_perda AS motivo
+        FROM coorte c
+        JOIN core.deals d ON d.deal_id = c.deal_id
+        CROSS JOIN limites p
         WHERE c.primeira_desqualificacao_em BETWEEN c.data_recebimento_corporativo AND p.as_of
       )
-      SELECT COALESCE(NULLIF(BTRIM(motivo), ''), '(SEM MOTIVO)') AS motivo,
-             COUNT(DISTINCT deal_id)::int AS deals_desqualificados
-      FROM casos GROUP BY 1
+      SELECT COALESCE(NULLIF(BTRIM(c.motivo), ''), '(SEM MOTIVO)') AS motivo,
+             COUNT(DISTINCT c.deal_id)::int AS deals_desqualificados
+      FROM casos c GROUP BY 1
       ORDER BY deals_desqualificados DESC, motivo
     `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
     res.json({ success: true, data: r.rows });
@@ -165,8 +343,9 @@ router.get('/disqualify-reasons', requireAuth, async (req, res) => {
 router.get('/daily', requireAuth, async (req, res) => {
   const params = readParams(req);
   if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+  if (params.error) return res.status(400).json({ success: false, error: params.error });
   try {
-    const r = await db.query(CTE_COORTE + `,
+    const r = await analyticsQuery(cteCoorte(params) + `,
       dias AS (
         SELECT g::date AS dia FROM limites p
         CROSS JOIN LATERAL generate_series(p.inicio, p.fim_exclusivo - 1, INTERVAL '1 day') g
@@ -195,54 +374,28 @@ router.get('/daily', requireAuth, async (req, res) => {
 
 /* ============================================================
  * K05A | SAFRA | tabela por colaborador
- * (coleta + protocolados agregados a partir de v_bi_v6_coortes)
+ * Indicadores posteriores calculados pelos eventos do Deal após o recebimento.
  * ============================================================ */
 router.get('/collaborators', requireAuth, async (req, res) => {
   const params = readParams(req);
   if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+  if (params.error) return res.status(400).json({ success: false, error: params.error });
   try {
-    const r = await db.query(CTE_BASE + `,
-      recebimentos AS (
-        SELECT DISTINCT ON (a.deal_id, a.colaborador_id, (a.recebido_em AT TIME ZONE 'America/Sao_Paulo')::date)
-          a.deal_id, a.colaborador_id, a.colaborador, a.equipe_atual, a.recebido_em,
-          a.primeira_mudanca_etapa_em, a.etapa_ao_receber
-        FROM ops.v_bi_v6_atribuicoes a CROSS JOIN limites p
-        WHERE a.cargo = 'Assessor' AND a.recebido_em >= p.t0 AND a.recebido_em < p.t1
-          AND a.recebido_em <= p.as_of
-          AND (p.equipe IS NULL OR a.equipe_atual = p.equipe)
-          AND (p.colaborador_id IS NULL OR a.colaborador_id = p.colaborador_id)
-        ORDER BY a.deal_id, a.colaborador_id, (a.recebido_em AT TIME ZONE 'America/Sao_Paulo')::date, a.recebido_em
-      ),
-      marcos AS (
-        SELECT r.*,
-          (r.primeira_mudanca_etapa_em BETWEEN r.recebido_em AND p.as_of) AS trabalhou_na_posse,
-          (r.etapa_ao_receber = 6650 OR EXISTS (
-            SELECT 1 FROM core.historico_movimentacoes h
-            WHERE h.deal_id = r.deal_id AND h.crm_origem = 'HUBSPOT' AND h.tipo_movimentacao = 'MUDANCA_ETAPA'
-              AND h.etapa_nova_id = 6650 AND h.data_movimentacao BETWEEN r.recebido_em AND p.as_of
-          )) AS contatou_etapa,
-          (s.primeira_assinatura_original_em BETWEEN r.recebido_em AND p.as_of) AS assinou_apos_receber,
-          (d.data_ganho BETWEEN r.recebido_em AND p.as_of) AS ganhou_apos_receber,
-          (cc.primeira_coleta_em BETWEEN r.recebido_em AND p.as_of) AS coletou_apos_receber,
-          (cc.data_protocolo BETWEEN r.recebido_em AND p.as_of) AS protocolou_apos_receber
-        FROM recebimentos r CROSS JOIN limites p
-        JOIN core.deals d ON d.deal_id = r.deal_id
-        LEFT JOIN ops.v_bi_v6_assinaturas_originais s ON s.deal_id = r.deal_id
-        LEFT JOIN ops.v_bi_v6_coortes cc ON cc.deal_id = r.deal_id
-      )
-      SELECT colaborador_id::text AS colaborador_id,
-             colaborador,
-             equipe_atual,
+    const r = await analyticsQuery(cteRecebimentosAssessores(params) + `
+      SELECT m.colaborador_id::text AS colaborador_id,
+             COALESCE(c.nome, '(SEM ATRIBUICAO)') AS colaborador,
+             COALESCE(m.equipe_atual, '(SEM EQUIPE)') AS equipe_atual,
              COUNT(*)::int AS recebimentos_deal_dia,
-             COUNT(*) FILTER (WHERE trabalhou_na_posse)::int AS trabalhados,
-             COUNT(*) FILTER (WHERE contatou_etapa)::int AS em_contato,
-             COUNT(DISTINCT CASE WHEN coletou_apos_receber THEN deal_id END)::int AS coleta,
-             COUNT(*) FILTER (WHERE assinou_apos_receber)::int AS assinados,
-             COUNT(*) FILTER (WHERE ganhou_apos_receber)::int AS ganhos,
-             COUNT(DISTINCT CASE WHEN protocolou_apos_receber THEN deal_id END)::int AS protocolados,
+             COUNT(*) FILTER (WHERE m.trabalhou_na_posse)::int AS trabalhados,
+             COUNT(*) FILTER (WHERE m.contatou_etapa)::int AS em_contato,
+             COUNT(DISTINCT m.deal_id) FILTER (WHERE m.coletou_apos_receber)::int AS coleta,
+             COUNT(*) FILTER (WHERE m.assinou_apos_receber)::int AS assinados,
+             COUNT(*) FILTER (WHERE m.ganhou_apos_receber)::int AS ganhos,
+             COUNT(DISTINCT m.deal_id) FILTER (WHERE m.protocolou_apos_receber)::int AS protocolados,
              NULL::numeric AS pct_olos_pendente,
              NULL::numeric AS pct_hubspot_pendente
-      FROM marcos
+      FROM marcos m
+      LEFT JOIN core.colaboradores c ON c.colaborador_id = m.colaborador_id
       GROUP BY 1, 2, 3
       ORDER BY assinados DESC, recebimentos_deal_dia DESC
     `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
@@ -259,45 +412,19 @@ router.get('/collaborators', requireAuth, async (req, res) => {
 router.get('/teams', requireAuth, async (req, res) => {
   const params = readParams(req);
   if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+  if (params.error) return res.status(400).json({ success: false, error: params.error });
   try {
-    const r = await db.query(CTE_BASE + `,
-      rec AS (
-        SELECT DISTINCT ON (a.deal_id, a.colaborador_id, (a.recebido_em AT TIME ZONE 'America/Sao_Paulo')::date)
-          a.deal_id, a.colaborador_id, a.equipe_atual, a.recebido_em, a.primeira_mudanca_etapa_em, a.etapa_ao_receber
-        FROM ops.v_bi_v6_atribuicoes a CROSS JOIN limites p
-        WHERE a.cargo = 'Assessor' AND a.recebido_em >= p.t0 AND a.recebido_em < p.t1
-          AND a.recebido_em <= p.as_of
-          AND (p.equipe IS NULL OR a.equipe_atual = p.equipe)
-          AND (p.colaborador_id IS NULL OR a.colaborador_id = p.colaborador_id)
-        ORDER BY a.deal_id, a.colaborador_id, (a.recebido_em AT TIME ZONE 'America/Sao_Paulo')::date, a.recebido_em
-      ),
-      fatos AS (
-        SELECT r.*,
-          (r.primeira_mudanca_etapa_em BETWEEN r.recebido_em AND p.as_of) AS trabalhou,
-          (r.etapa_ao_receber = 6650 OR EXISTS (
-            SELECT 1 FROM core.historico_movimentacoes h
-            WHERE h.deal_id = r.deal_id AND h.crm_origem = 'HUBSPOT' AND h.tipo_movimentacao = 'MUDANCA_ETAPA'
-              AND h.etapa_nova_id = 6650 AND h.data_movimentacao BETWEEN r.recebido_em AND p.as_of
-          )) AS contatou,
-          (s.primeira_assinatura_original_em BETWEEN r.recebido_em AND p.as_of) AS assinou,
-          (d.data_ganho BETWEEN r.recebido_em AND p.as_of) AS ganhou,
-          (cc.primeira_coleta_em BETWEEN r.recebido_em AND p.as_of) AS coletou,
-          (cc.data_protocolo BETWEEN r.recebido_em AND p.as_of) AS protocolou
-        FROM rec r CROSS JOIN limites p
-        JOIN core.deals d ON d.deal_id = r.deal_id
-        LEFT JOIN ops.v_bi_v6_assinaturas_originais s ON s.deal_id = r.deal_id
-        LEFT JOIN ops.v_bi_v6_coortes cc ON cc.deal_id = r.deal_id
-      )
+    const r = await analyticsQuery(cteRecebimentosAssessores(params) + `
       SELECT COALESCE(equipe_atual, '(SEM EQUIPE)') AS equipe,
              COUNT(*)::int AS recebimentos_assessor_deal_dia,
              COUNT(DISTINCT deal_id)::int AS deals_unicos_da_equipe,
-             COUNT(DISTINCT deal_id) FILTER (WHERE trabalhou)::int AS trabalhados,
-             COUNT(DISTINCT deal_id) FILTER (WHERE contatou)::int AS em_contato,
-             COUNT(DISTINCT deal_id) FILTER (WHERE coletou)::int AS coleta,
-             COUNT(DISTINCT deal_id) FILTER (WHERE assinou)::int AS assinados,
-             COUNT(DISTINCT deal_id) FILTER (WHERE ganhou)::int AS ganhos,
-             COUNT(DISTINCT deal_id) FILTER (WHERE protocolou)::int AS protocolados
-      FROM fatos
+             COUNT(DISTINCT deal_id) FILTER (WHERE trabalhou_na_posse)::int AS trabalhados,
+             COUNT(DISTINCT deal_id) FILTER (WHERE contatou_etapa)::int AS em_contato,
+             COUNT(DISTINCT deal_id) FILTER (WHERE coletou_apos_receber)::int AS coleta,
+             COUNT(DISTINCT deal_id) FILTER (WHERE assinou_apos_receber)::int AS assinados,
+             COUNT(DISTINCT deal_id) FILTER (WHERE ganhou_apos_receber)::int AS ganhos,
+             COUNT(DISTINCT deal_id) FILTER (WHERE protocolou_apos_receber)::int AS protocolados
+      FROM marcos
       GROUP BY 1
       ORDER BY assinados DESC
     `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);

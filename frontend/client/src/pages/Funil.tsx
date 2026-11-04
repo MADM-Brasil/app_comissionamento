@@ -39,7 +39,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
-  'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice'
+  'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice','Equipe Debora','Equipe Curitiba'
 ];
 
 const EXCLUDED_CARGOS = [
@@ -66,7 +66,7 @@ const EXCLUDED_CARGOS = [
 // (EQUIPES_TRAVADAS_DESTINO).
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
  
-const normalize = (str: string): string =>
+const normalize = (str: string | undefined): string =>
   (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 const normalizeKey = (str: string | undefined | null): string =>
