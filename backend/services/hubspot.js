@@ -1,32 +1,3 @@
-// Serviço completo — ES modules, Node.js 18+.
-// Correção: defaults de Coleta/Entrada confirmados no Closer desta conta.
-// Variáveis de ambiente não vazias E numéricas continuam tendo precedência.
-// Qualquer valor inválido (vazio, não numérico, com lixo) é ignorado e o
-// default é usado — evitando o erro "HUBSPOT_STAGE_*_ID inválido" em runtime.
-// Autorização de usuário/equipe continua sendo responsabilidade dos workers.
-// Locks locais não substituem reserva exclusiva e locks distribuídos.
-//
-// Roteamento por produto (3 pipelines agora):
-//   - Quinquênio / Quinquenio / Quinqueino / Concomitante(s) → Quinquênio / Em contato.
-//   - Isenção de IR Aposentadoria (ISENCAO_IR)             → Isenção de IR / Em Contato.   // [ISENÇÃO IR]
-//   - Demais produtos (incl. Auxílio)                       → Closer / Em Contato.
-//   - Produto é passado pelo worker; não é inferido do nome do cliente.
-//
-// Busca orientada por produto (garantirLeadNoCloser):
-//   - Auxílio e demais produtos comuns → considera Closer e Base de Leads.
-//   - Quinquênio/Quinqueino/Concomitante(s) → considera Quinquênio e Base de Leads.
-//   - Isenção de IR                        → considera Isenção de IR e Base de Leads.   // [ISENÇÃO IR]
-//   - Cards em outros pipelines são ignorados nesta movimentação.
-//
-// Novas APIs e retornos enriquecidos com nomes de pipeline/etapa:
-//   - getDealMovementContext agora devolve { pipelineNome, stageNome }.
-//   - reassignDealForLinkHubMovement / reassignDealAndContactsOwner devolvem
-//     também { pipelineNome, stageNome, previousPipelineNome, previousStageNome }.
-//   - validateFinalAssignment devolve deal.pipelineNome / deal.stageNome.
-//   - getContactDealsWithNames(contactId) é a versão da lista com nomes.
-//   - O cache de nomes vive 5 min em memória; fetchPipelineNames só bate na
-//     API na 1ª vez por pipeline (ou se o cache expirar).
-
 const API_ORIGIN = 'https://api.hubapi.com';
 
 // ---------------------------------------------------------------------------
@@ -314,7 +285,20 @@ async function request(endpoint, { method = 'GET', body, readOnly = false, attem
       const raw = await response.text();
       let data;
       try { data = raw ? JSON.parse(raw) : {}; }
-      catch { throw hubError('Resposta não JSON recebida do HubSpot.', { httpStatus: response.status, retryable: safe, outcomeUnknown: !safe }); }
+      catch {
+        const retryable = response.status === 429 || response.status >= 500;
+        const error = hubError(`Resposta não JSON recebida do HubSpot (HTTP ${response.status}).`, {
+          httpStatus: response.status,
+          retryable: safe && retryable,
+          outcomeUnknown: !safe,
+        });
+        if (safe && retryable && attempt + 1 < totalAttempts) {
+          clearTimeout(timer);
+          await sleep(retryDelay(response, attempt));
+          continue;
+        }
+        throw error;
+      }
       if (!response.ok) {
         const retryable = response.status === 429 || response.status >= 500;
         const error = hubError(`HubSpot retornou HTTP ${response.status}.`, {
@@ -731,16 +715,6 @@ function hoursSince(value) {
   return !Number.isFinite(timestamp) || timestamp > Date.now() ? null : (Date.now() - timestamp) / 3600000;
 }
 
-// ---------------------------------------------------------------------------
-// temporalCheck — regra de prazo por etapa.
-// As regras de 24/72h foram originalmente definidas para o Closer. Para o
-// pipeline Quinquênio o time decidiu não estender automaticamente (ver
-// comentário original). Para Isenção de IR (Equipe Leticia Mathias), a etapa
-// de destino segue o MESMO prazo de 24h do Closer "Em Contato", para que
-// um card já parado ali há mais de um dia possa ser reatribuído. Se o
-// negócio definir outro prazo, ajuste apenas o mapa `required`.
-// [ISENÇÃO IR]
-// ---------------------------------------------------------------------------
 function temporalCheck(deal) {
   const required = {
     [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
@@ -771,10 +745,15 @@ function temporalCheck(deal) {
   return { allowed, reason, requiredHours: requiredHours ?? null, hoursSinceNote: hours, lastUpdated: deal.lastModifiedDate || null };
 }
 
-function assignmentResult(deal, extras = {}) {
+async function assignmentResult(deal, extras = {}) {
+  const resolvedNames = deal?.pipeline && deal?.stage
+    ? await resolveDealNames(deal.pipeline, deal.stage)
+    : { pipelineNome: null, stageNome: null };
+
   return { blocked: false, dealId: deal?.id || null, pipeline: deal?.pipeline || null, stage: deal?.stage || null,
-    pipelineNome: PIPELINE_NAMES[deal?.pipeline] || deal?.pipeline || null,
-    stageNome: STAGE_NAMES[deal?.stage] || deal?.stage || null, lastUpdatedAt: deal?.lastModifiedDate || null, ...extras };
+    pipelineNome: resolvedNames.pipelineNome || PIPELINE_NAMES[deal?.pipeline] || deal?.pipeline || null,
+    stageNome: resolvedNames.stageNome || STAGE_NAMES[deal?.stage] || deal?.stage || null,
+    lastUpdatedAt: deal?.lastModifiedDate || null, ...extras };
 }
 
 export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '', produto = null) {

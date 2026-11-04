@@ -32,7 +32,7 @@ export function broadcastNotification(notification) {
  * Endpoint SSE – os clientes se conectam aqui para receber notificações em tempo real.
  * Rota: GET /api/notificacoes/stream
  */
-router.get('/stream', (req, res) => {
+router.get('/stream', (_req, res) => {
   // Cabeçalhos obrigatórios para SSE
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -47,14 +47,26 @@ router.get('/stream', (req, res) => {
   // Adiciona a conexão ao conjunto
   sseClients.add(res);
 
-  const removeClient = () => sseClients.delete(res);
+  let heartbeat;
+  const removeClient = () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  };
+
+  heartbeat = setInterval(() => {
+    if (res.destroyed || res.writableEnded) {
+      removeClient();
+      return;
+    }
+    try {
+      res.write(': keep-alive\n\n');
+    } catch (error) {
+      removeClient();
+      console.warn('⚠️ Cliente SSE desconectado durante o heartbeat:', error.message);
+    }
+  }, 25000);
   res.on('close', removeClient);
   res.on('error', removeClient);
-
-  // Remove a conexão quando o cliente desconectar
-  req.on('close', () => {
-    removeClient();
-  });
 });
 
 export default router;
