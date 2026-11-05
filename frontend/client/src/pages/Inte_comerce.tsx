@@ -76,6 +76,7 @@ type FiltersState = {
   colaborador: string;
   colaboradorId?: string | number;
   produto: string;
+  unidadeId?: number;
 };
 
 const STAT_CARDS: {
@@ -455,6 +456,7 @@ export default function Inte_comerce() {
     equipe: "todas",
     colaborador: "todos",
     produto: "Todos",
+    unidadeId: undefined,
   });
   const { equipe, colaborador, colaboradorId, produto } = filters;
 
@@ -484,6 +486,7 @@ export default function Inte_comerce() {
       equipe: equipe !== "todas" ? equipe : undefined,
       colaboradorId,
       produto,
+      unidadeId: filters.unidadeId,
     };
     try {
       const o = await fetchInteComerceOverview(params);
@@ -512,7 +515,7 @@ export default function Inte_comerce() {
     } finally {
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, equipe, colaboradorId, produto, grouping]);
+  }, [currentStartDate, currentEndDate, equipe, colaboradorId, produto, filters.unidadeId, grouping]);
 
   useEffect(() => {
     void reloadData();
@@ -524,7 +527,8 @@ export default function Inte_comerce() {
         prev.equipe === rawFilters.equipe &&
         prev.colaborador === rawFilters.colaborador &&
         String(prev.colaboradorId ?? "") === String(rawFilters.colaboradorId ?? "") &&
-        prev.produto === rawFilters.produto
+        prev.produto === rawFilters.produto &&
+        prev.unidadeId === rawFilters.unidadeId
       )
         return prev;
       return rawFilters;

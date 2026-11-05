@@ -15,6 +15,7 @@ import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 import authRoutes from './routes/auth.js';
 import colaboradoresRoutes from './routes/colaboradores.js';
 import metricsRouter from './routes/metrics.js';
+import inteComerceRoutes from './routes/inte_comerce.js';
 import tabelaComissoesRoutes from './routes/tabela-comissoes.js';
 import adminRoutes from './routes/admin.js';
 import userRouter from './routes/user.js';
@@ -326,6 +327,7 @@ app.get('/api/metricas-assessores', async (req, res) => {
 
 app.use('/api', colaboradoresRoutes);
 app.use('/api/metrics', metricsRouter);
+app.use('/api/metrics/inte-comerce', inteComerceRoutes);
 app.use('/api/tabela-comissoes', tabelaComissoesRoutes);
 app.use('/api/campanhas', campanhasRoutes);
 app.use('/api/admin', adminRoutes);

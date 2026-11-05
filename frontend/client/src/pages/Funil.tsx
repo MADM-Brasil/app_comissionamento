@@ -381,6 +381,7 @@ export default function Funil() {
     colaborador: string;
     colaboradorId?: string | number;
     produto: string;
+    unidadeId?: number;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
   const [loading, setLoading] = useState(true);
@@ -476,12 +477,14 @@ export default function Funil() {
           colaboradorNome: colaboradorApi,
           colaboradorId: colaboradorIdApi,
           produto: produtoApi,
+          unidadeId: filters.unidadeId,
         }),
         loadRawMetrics({
           equipeNome: equipeApi,
           colaboradorNome: colaboradorApi,
           colaboradorId: colaboradorIdApi,
           produto: produtoApi,
+          unidadeId: filters.unidadeId,
         }),
         loadWeeklyPerformanceData(),
       ]);
@@ -492,7 +495,8 @@ export default function Funil() {
       const filtersChanged =
         filters.equipe !== lastFiltersRef.current.equipe ||
         filters.colaborador !== lastFiltersRef.current.colaborador ||
-        filters.produto !== lastFiltersRef.current.produto;
+        filters.produto !== lastFiltersRef.current.produto ||
+        filters.unidadeId !== lastFiltersRef.current.unidadeId;
 
       const shouldFetchLeads = datesChanged || filtersChanged ||
         (leadsStageData.length === 0) ||
@@ -509,7 +513,15 @@ export default function Funil() {
             colaboradorId: colaboradorIdApi,
             produto: produtoApi,
           });
-          setLeadsStageData(stagesData);
+          const unitCollaborators = filters.unidadeId == null
+            ? null
+            : rawCollaborators.filter((collaborator) => Number(collaborator.unidadeId) === filters.unidadeId);
+          const allowedNames = unitCollaborators
+            ? new Set(unitCollaborators.map((collaborator) => normalizeKey(collaborator.name)))
+            : null;
+          setLeadsStageData(allowedNames
+            ? stagesData.filter((row) => allowedNames.has(normalizeKey(row.colaborador)))
+            : stagesData);
           lastFetchLeads.current = Date.now();
         } catch (err) {
           console.error("Erro ao buscar leads por etapa:", err);
@@ -559,7 +571,9 @@ export default function Funil() {
       return scopedCollaborators.filter(c => c.equipeNome === supervisorSelectedTeam);
     }
 
-    let filtered = [...scopedCollaborators];
+    let filtered = filters.unidadeId == null
+      ? [...scopedCollaborators]
+      : scopedCollaborators.filter((c) => Number(c.unidadeId) === filters.unidadeId);
     if (filters.equipe !== "todas") {
       filtered = filtered.filter(c => c.equipeNome === filters.equipe);
     }

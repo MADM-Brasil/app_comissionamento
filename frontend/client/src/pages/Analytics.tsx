@@ -219,6 +219,7 @@ export default function Analytics() {
     colaborador: string;
     colaboradorId?: string | number;
     produto: string;
+    unidadeId?: number;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
   const [loading, setLoading] = useState(true);
@@ -373,8 +374,8 @@ export default function Analytics() {
       const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
 
       await Promise.all([
-        loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi),
-        loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi }),
+        loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi, filters.unidadeId),
+        loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi, unidadeId: filters.unidadeId }),
         loadWeeklyPerformanceData(),
       ]);
 
@@ -389,7 +390,7 @@ export default function Analytics() {
       if (showRefreshing) setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, getEffectiveFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
+  }, [currentStartDate, currentEndDate, getEffectiveFilterParams, filters.unidadeId, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData]);
 
   const handleFilterChange = useCallback((rawFilters: typeof filters) => {
     let newFilters = rawFilters;
@@ -547,10 +548,11 @@ export default function Analytics() {
     }
     return scopedCollaborators.filter(c =>
       !isExcludedTeam(c.equipeNome)
+      && (filters.unidadeId == null || Number(c.unidadeId) === filters.unidadeId)
       && (equipe === "todas" || c.equipeNome === equipe)
       && (colaborador === "todos" || c.name === colaborador)
     );
-  }, [scopedCollaborators, equipe, colaborador, isSupervisorSelected, supervisorSelectedTeam]);
+  }, [scopedCollaborators, equipe, colaborador, filters.unidadeId, isSupervisorSelected, supervisorSelectedTeam]);
 
   const baseCollaborators = useMemo(() => filteredCollaborators.filter(c => {
     const g = (c.grupo || '').trim().toLowerCase();

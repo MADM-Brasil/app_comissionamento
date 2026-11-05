@@ -12,9 +12,11 @@ interface FilterBarProps {
     colaborador: string;
     colaboradorId?: string | number;
     produto: string;
+    unidadeId?: number;
   }) => void;
   showColaboradorFilter?: boolean;
   showProdutoFilter?: boolean;
+  showUnitFilter?: boolean;
   className?: string;
   initialEquipe?: string;
   initialColaborador?: string;
@@ -146,6 +148,7 @@ interface StoredFilters {
   colaborador: string;
   produto: string;
   searchTerm: string;
+  unidadeId?: number;
 }
 
 function getStoredFilters(): StoredFilters {
@@ -158,6 +161,10 @@ function getStoredFilters(): StoredFilters {
         colaborador: parsed.colaborador || "todos",
         produto: parsed.produto || "Todos",
         searchTerm: parsed.searchTerm || "",
+        unidadeId:
+          parsed.unidadeId != null && Number.isInteger(Number(parsed.unidadeId))
+            ? Number(parsed.unidadeId)
+            : undefined,
       };
     }
   } catch { /* ignore */ }
@@ -168,6 +175,7 @@ export default function FilterBar({
   onFilterChange,
   showColaboradorFilter = true,
   showProdutoFilter = true,
+  showUnitFilter = true,
   className,
   initialEquipe = "todas",
   initialColaborador = "todos",
@@ -175,7 +183,7 @@ export default function FilterBar({
   onRefresh,
 }: FilterBarProps) {
   const { collaborators, equipeConfigs, setCollaborators, setEquipeConfigs } = useAppStore();
-  const { currentUser, getAccessLevel, LEVELS } = useAccessControl();
+  const { currentUser, getAccessLevel, getEffectiveAccessLevel, LEVELS } = useAccessControl();
 
   const setSelectedCollaboratorEmail = useAppStore((state) => (state as any).setSelectedCollaboratorEmail);
 
@@ -193,7 +201,7 @@ export default function FilterBar({
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
-  const userLevel = getAccessLevel();
+  const userLevel = getEffectiveAccessLevel();
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
@@ -206,6 +214,11 @@ export default function FilterBar({
     ?? (currentUser as any)?.unidadeId
     ?? null;
   const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
+  const isUnitRestricted = userLevel < LEVELS.ADMINISTRATIVO && userUnidade !== 4;
+  const initialUnit = isUnitRestricted
+    ? userUnidade ?? "todas"
+    : initialStored.unidadeId ?? "todas";
+  const [selectedUnit, setSelectedUnit] = useState<number | "todas">(initialUnit);
 
   // ============================================================
   // EQUIPE DO USUÁRIO
@@ -435,6 +448,35 @@ export default function FilterBar({
     }
   }, [currentUser, isAssessor, isSupervisor, userTeam, selectedEquipe]);
 
+  useEffect(() => {
+    if (!showUnitFilter || !isUnitRestricted) return;
+    if (userUnidade == null) {
+      if (selectedUnit !== "todas") setSelectedUnit("todas");
+      return;
+    }
+    if (selectedUnit !== userUnidade) {
+      setSelectedUnit(userUnidade);
+      setSelectedEquipe("todas");
+      setSelectedColaborador("todos");
+    }
+  }, [showUnitFilter, isUnitRestricted, userUnidade, selectedUnit]);
+
+  useEffect(() => {
+    if (!showUnitFilter || !isReady || selectedColaborador === "todos") return;
+    const selected = collaborators.find((c) => c.name === selectedColaborador);
+    if (!selected || (selectedUnit !== "todas" && selected.unidadeId !== selectedUnit)) {
+      setSelectedColaborador("todos");
+      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+    }
+  }, [
+    showUnitFilter,
+    isReady,
+    selectedColaborador,
+    selectedUnit,
+    collaborators,
+    setSelectedCollaboratorEmail,
+  ]);
+
   // ============================================================
   // COORDENADOR: revalida os valores persistidos contra o escopo
   // ============================================================
@@ -494,6 +536,15 @@ export default function FilterBar({
   const equipesDisponiveis = useMemo(() => {
     let nomes = equipeConfigs.map((eq) => eq.nome).filter((nome) => !isExcludedTeam(nome));
 
+    if (showUnitFilter && selectedUnit !== "todas") {
+      const unitTeams = new Set(
+        collaborators
+          .filter((collaborator) => collaborator.unidadeId === selectedUnit)
+          .map((collaborator) => normalize(collaborator.equipeNome)),
+      );
+      nomes = nomes.filter((nome) => unitTeams.has(normalize(nome)));
+    }
+
     if (isCoordenador) {
       if (!escopoData) {
         nomes = [];
@@ -513,6 +564,9 @@ export default function FilterBar({
     return ["todas", ...nomes];
   }, [
     equipeConfigs,
+    collaborators,
+    showUnitFilter,
+    selectedUnit,
     isAssessor,
     isSupervisor,
     isCoordenador,
@@ -539,6 +593,10 @@ export default function FilterBar({
           escopoData.colaboradores.has(normalize(c.email))
         );
       }
+    }
+
+    if (showUnitFilter && selectedUnit !== "todas") {
+      filtered = filtered.filter((c) => c.unidadeId === selectedUnit);
     }
 
     if (deveOcultarEquipesReservadas) {
@@ -577,6 +635,8 @@ export default function FilterBar({
     userTeam,
     escopoData,
     deveOcultarEquipesReservadas,
+    showUnitFilter,
+    selectedUnit,
   ]);
 
   const colaboradoresParaSelect = useMemo(() => {
@@ -585,8 +645,11 @@ export default function FilterBar({
     if (exists) return filteredColaboradores;
     const selected = collaborators.find(c => c.name === selectedColaborador);
     if (!selected) return filteredColaboradores;
+    if (showUnitFilter && selectedUnit !== "todas" && selected.unidadeId !== selectedUnit) {
+      return filteredColaboradores;
+    }
     return [selected, ...filteredColaboradores];
-  }, [filteredColaboradores, selectedColaborador, collaborators]);
+  }, [filteredColaboradores, selectedColaborador, collaborators, showUnitFilter, selectedUnit]);
 
   // ============================================================
   // NOTIFICA O PAI
@@ -600,7 +663,8 @@ export default function FilterBar({
     equipe: string,
     colaborador: string,
     produto: string,
-    _search?: string
+    _search?: string,
+    unidadeId: number | "todas" = selectedUnit,
   ) => {
     if (!isReady || !hasAppliedRestrictions) return;
 
@@ -625,6 +689,7 @@ export default function FilterBar({
       colaborador: finalColaborador,
       colaboradorId,
       produto,
+      unidadeId: unidadeId === "todas" ? undefined : unidadeId,
     });
   };
 
@@ -637,20 +702,27 @@ export default function FilterBar({
       colaborador: selectedColaborador,
       produto: selectedProduto,
       searchTerm,
+      unidadeId: selectedUnit === "todas" ? undefined : selectedUnit,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  }, [selectedEquipe, selectedColaborador, selectedProduto, searchTerm]);
+  }, [selectedEquipe, selectedColaborador, selectedProduto, searchTerm, selectedUnit]);
 
   // ============================================================
   // NOTIFICA O PAI APÓS READY + RESTRIÇÕES
   // ============================================================
-  const initialNotifyDone = useRef(false);
+  const lastNotifiedFilters = useRef<string | null>(null);
   useEffect(() => {
     if (!isReady || !hasAppliedRestrictions) return;
-    if (initialNotifyDone.current) return;
-    initialNotifyDone.current = true;
+    const signature = JSON.stringify([
+      selectedEquipe,
+      selectedColaborador,
+      selectedProduto,
+      selectedUnit,
+    ]);
+    if (lastNotifiedFilters.current === signature) return;
+    lastNotifiedFilters.current = signature;
     notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
-  }, [isReady, hasAppliedRestrictions, selectedEquipe, selectedColaborador, selectedProduto, searchTerm]);
+  }, [isReady, hasAppliedRestrictions, selectedEquipe, selectedColaborador, selectedProduto, selectedUnit, searchTerm]);
 
   // ============================================================
   // HANDLERS
@@ -699,6 +771,15 @@ export default function FilterBar({
     notifyParent(novaEquipe, nextColaborador, produtoFinal);
   };
 
+  const handleUnitChange = (value: string) => {
+    const unidadeId = value === "todas" ? "todas" : Number(value);
+    setSelectedUnit(unidadeId);
+    setSelectedEquipe("todas");
+    setSelectedColaborador("todos");
+    if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+    notifyParent("todas", "todos", selectedProduto, undefined, unidadeId);
+  };
+
   const handleColaboradorChange = (novoColaborador: string) => {
     setSelectedColaborador(novoColaborador);
 
@@ -743,6 +824,7 @@ export default function FilterBar({
       colaborador: finalColaborador,
       colaboradorId,
       produto: selectedProduto,
+      unidadeId: selectedUnit === "todas" ? undefined : selectedUnit,
     });
   };
 
@@ -760,10 +842,17 @@ export default function FilterBar({
     } else {
       setSelectedEquipe("todas");
       setSelectedColaborador("todos");
+      setSelectedUnit(isUnitRestricted && userUnidade != null ? userUnidade : "todas");
       setSearchTerm("");
       setSelectedProduto("Todos");
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
-      notifyParent("todas", "todos", "Todos");
+      notifyParent(
+        "todas",
+        "todos",
+        "Todos",
+        undefined,
+        isUnitRestricted && userUnidade != null ? userUnidade : "todas",
+      );
     }
   };
 
@@ -788,13 +877,27 @@ export default function FilterBar({
     return (
       selectedEquipe !== "todas" ||
       selectedColaborador !== "todos" ||
+      (showUnitFilter && selectedUnit !== "todas") ||
       searchTerm !== "" ||
       selectedProduto !== "Todos"
     );
-  }, [isReady, isAssessor, isSupervisor, selectedEquipe, selectedColaborador, searchTerm, selectedProduto]);
+  }, [isReady, isAssessor, isSupervisor, selectedEquipe, selectedColaborador, searchTerm, selectedProduto, showUnitFilter, selectedUnit]);
 
   const isEquipeDisabled = isAssessor || isSupervisor || loadingEquipes || !isReady;
   const isColaboradorDisabled = isAssessor || loadingCollaborators || !isReady;
+  const isUnitDisabled =
+    loadingCollaborators || !isReady || (isUnitRestricted && userUnidade == null);
+  const unitOptions = useMemo(() => {
+    const units = new Set(
+      collaborators
+        .map((collaborator) => collaborator.unidadeId)
+        .filter((id): id is number => id != null),
+    );
+    if (userUnidade != null) units.add(userUnidade);
+    return Array.from(units)
+      .filter((id) => !isUnitRestricted || id === userUnidade)
+      .sort((a, b) => a - b);
+  }, [collaborators, userUnidade, isUnitRestricted]);
   const isProdutoDisabled =
     isAssessor ||
     (!!produtoConfigEquipeAtual && !produtoConfigEquipeAtual.allowChange);
@@ -866,6 +969,43 @@ export default function FilterBar({
         )}
 
         <div className="flex flex-col sm:flex-row gap-3">
+          {showUnitFilter && (
+            <div className="flex-1">
+              <label htmlFor="filterUnidade" className="block text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
+                <Users className="w-3 h-3" /> Unidade
+              </label>
+              <select
+                id="filterUnidade"
+                value={
+                  selectedUnit === "todas" ||
+                  collaborators.some((collaborator) => collaborator.unidadeId === selectedUnit)
+                    ? selectedUnit
+                    : isUnitRestricted && userUnidade != null
+                      ? userUnidade
+                      : "todas"
+                }
+                onChange={(e) => handleUnitChange(e.target.value)}
+                disabled={isUnitDisabled}
+                className={cn(
+                  "w-full px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-[#09175b]/20",
+                  isUnitDisabled && "bg-gray-100 cursor-not-allowed",
+                )}
+                aria-label="Filtrar por unidade"
+                title="Selecione uma unidade para filtrar os dados de seus colaboradores"
+              >
+                {!isUnitRestricted && <option value="todas">Todas as unidades</option>}
+                {isUnitRestricted && userUnidade == null && (
+                  <option value="todas">Unidade não definida</option>
+                )}
+                {unitOptions.map((id) => (
+                    <option key={id} value={id}>
+                      {id === 1 ? "Osasco" : id === 2 ? "Ribeirão Preto" : id === 3 ? "Curitiba" : id === 4 ? "HO" : `Unidade ${id}`}
+                    </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Select Equipe */}
           <div className="flex-1">
             <label htmlFor="filterEquipe" className="block text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">

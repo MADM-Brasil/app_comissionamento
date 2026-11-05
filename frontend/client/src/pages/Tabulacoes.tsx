@@ -178,9 +178,9 @@ function StatusTag({ status }: { status: string }) {
 //  PÁGINA PRINCIPAL
 // ============================================================
 export default function Tabulacoes() {
-  const { currentStartDate, currentEndDate } = useAppStore();
+  const { currentStartDate, currentEndDate, collaborators } = useAppStore();
 
-  const [filters, setFilters] = useState({ equipe: "todas", colaborador: "todos" });
+  const [filters, setFilters] = useState<{ equipe: string; colaborador: string; unidadeId?: number }>({ equipe: "todas", colaborador: "todos" });
 
   const [view, setView] = useState<View>("gerencial");
   const [rows, setRows] = useState<NaoTabuladaRow[]>([]);
@@ -207,7 +207,16 @@ export default function Tabulacoes() {
         equipe: filters.equipe !== "todas" ? filters.equipe : undefined,
         colaborador: filters.colaborador !== "todos" ? filters.colaborador : undefined,
       });
-      setRows(data);
+      if (filters.unidadeId == null) {
+        setRows(data);
+      } else {
+        const allowedNames = new Set(
+          collaborators
+            .filter((collaborator) => Number(collaborator.unidadeId) === filters.unidadeId)
+            .map((collaborator) => collaborator.name.trim().toLocaleLowerCase()),
+        );
+        setRows(data.filter((row) => allowedNames.has(row.agente.trim().toLocaleLowerCase())));
+      }
     } catch (err: unknown) {
       console.error("Erro ao carregar tabulações:", err);
       setError(err instanceof Error ? err.message : "Falha ao carregar dados.");
@@ -215,17 +224,17 @@ export default function Tabulacoes() {
     } finally {
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, filters.equipe, filters.colaborador]);
+  }, [currentStartDate, currentEndDate, filters.equipe, filters.colaborador, filters.unidadeId, collaborators]);
 
   useEffect(() => {
     void reload();
   }, [reload]);
 
   const handleFilterChange = useCallback(
-    (raw: { equipe: string; colaborador: string; produto: string }) => {
+    (raw: { equipe: string; colaborador: string; produto: string; unidadeId?: number }) => {
       setFilters((prev) => {
-        if (prev.equipe === raw.equipe && prev.colaborador === raw.colaborador) return prev;
-        return { equipe: raw.equipe, colaborador: raw.colaborador };
+        if (prev.equipe === raw.equipe && prev.colaborador === raw.colaborador && prev.unidadeId === raw.unidadeId) return prev;
+        return { equipe: raw.equipe, colaborador: raw.colaborador, unidadeId: raw.unidadeId };
       });
     },
     [],
@@ -238,7 +247,7 @@ export default function Tabulacoes() {
   // ── Derivados
   const D = useMemo(() => calcular(rows), [rows]);
 
-  const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos";
+  const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.unidadeId != null;
 
   // ── Insights (paridade total com o HTML)
   const insights = useMemo(() => {
