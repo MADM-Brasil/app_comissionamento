@@ -1,6 +1,11 @@
 // backend/routes/inte_comerce.js
 import express from 'express';
 import db from '../services/db.js';
+import {
+  accessControl,
+  getActiveSupportUser,
+  isSupportAdmin,
+} from '../services/access-control.js';
 
 const router = express.Router();
 const ANALYTICS_STATEMENT_TIMEOUT_MS = 55_000;
@@ -32,11 +37,66 @@ async function analyticsQuery(text, values) {
   }
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   if (!req.session.isAuthenticated || !req.session.userId) {
     return res.status(401).json({ success: false, error: 'Não autenticado' });
   }
-  next();
+
+  try {
+    const actor = await getActiveSupportUser(req.session.userId);
+    if (!actor) {
+      return res.status(403).json({ success: false, error: 'Usuário ativo não encontrado.' });
+    }
+
+    const level = accessControl.getEffectiveAccessLevel(actor);
+    if (level < accessControl.LEVELS.COORDENADOR) {
+      return res.status(403).json({ success: false, error: 'Perfil sem acesso à Inteligência Comercial.' });
+    }
+
+    const unidadeUsuario = actor.unidade_id != null ? Number(actor.unidade_id) : null;
+    const requestedUnit = req.query.unidadeId;
+    const isAdmin = isSupportAdmin(actor.cargo);
+    if (
+      requestedUnit != null &&
+      (
+        typeof requestedUnit !== 'string' ||
+        !/^\d+$/.test(requestedUnit) ||
+        !Number.isSafeInteger(Number(requestedUnit)) ||
+        Number(requestedUnit) < 1
+      )
+    ) {
+      return res.status(400).json({ success: false, error: 'Unidade inválida.' });
+    }
+
+    const unidadeSelecionada = requestedUnit != null ? Number(requestedUnit) : null;
+    if (!isAdmin && unidadeUsuario !== 4) {
+      if (!Number.isInteger(unidadeUsuario)) {
+        return res.status(403).json({ success: false, error: 'Usuário sem unidade definida.' });
+      }
+      if (unidadeSelecionada != null && unidadeSelecionada !== unidadeUsuario) {
+        return res.status(403).json({ success: false, error: 'A unidade selecionada está fora do seu escopo.' });
+      }
+    }
+
+    const unidadeFiltro = !isAdmin && unidadeUsuario !== 4
+      ? unidadeUsuario
+      : unidadeSelecionada;
+    const result = await db.pool.query(
+      `SELECT DISTINCT id_assessor, unidade_id
+       FROM core.view_app_colaboradores
+       WHERE id_assessor IS NOT NULL
+         AND LOWER(TRIM(COALESCE(status, ''))) != 'desativado'
+         AND LOWER(TRIM(COALESCE(cargo, ''))) != 'desativado'`,
+    );
+    req.inteComerceActiveCollaboratorIds = result.rows.map((row) => String(row.id_assessor));
+    req.inteComerceColaboradorIds = result.rows
+      .filter((row) => unidadeFiltro == null || Number(row.unidade_id) === unidadeFiltro)
+      .map((row) => String(row.id_assessor));
+
+    next();
+  } catch (error) {
+    next(error);
+  }
 }
 
 function readParams(req) {
@@ -55,6 +115,8 @@ function readParams(req) {
     fim_exclusivo: end,
     equipe: equipe && equipe !== 'todas' ? equipe : null,
     colaborador_id: Number.isFinite(colabNum) ? colabNum : null,
+    colaborador_ids_escopo: req.inteComerceColaboradorIds,
+    colaborador_ids_ativos: req.inteComerceActiveCollaboratorIds,
   };
 
   const validDate = (value) => {
@@ -97,7 +159,9 @@ const CTE_BASE = `
 WITH p AS (
   SELECT $1::date AS inicio, $2::date AS fim_exclusivo,
          CURRENT_TIMESTAMP AS as_of,
-         $3::text AS equipe, $4::bigint AS colaborador_id
+         $3::text AS equipe, $4::bigint AS colaborador_id,
+         $5::bigint[] AS colaborador_ids_escopo,
+         $6::bigint[] AS colaborador_ids_ativos
 ), limites AS (
   SELECT p.*, (p.inicio::timestamp AT TIME ZONE 'America/Sao_Paulo') AS t0,
          (p.fim_exclusivo::timestamp AT TIME ZONE 'America/Sao_Paulo') AS t1
@@ -110,6 +174,10 @@ eventos AS (
   FROM ops.v_bi_v6_eventos e CROSS JOIN limites p
   WHERE e.ocorrido_em >= p.t0
     AND e.ocorrido_em <= p.as_of
+    AND (
+      e.colaborador_id IS NULL
+      OR e.colaborador_id = ANY($6::bigint[])
+    )
     AND e.tipo IN (
       'RECEBIDO_CORPORATIVO', 'RECEBIDO_ASSESSOR', 'TRABALHADO_PROXY',
       'EM_CONTATO', 'COLETA', 'CONTRATO', 'EMITIDO_ORIGINAL',
@@ -124,6 +192,9 @@ function cteCoorte(params) {
   }
   if (params.colaborador_id != null) {
     filters.push('AND pa.colaborador_id = $4::bigint');
+  }
+  if (params.colaborador_ids_escopo !== null) {
+    filters.push('AND pa.colaborador_id = ANY($5::bigint[])');
   }
 
   return CTE_BASE + CTE_EVENTOS + `,
@@ -141,6 +212,7 @@ primeiro_assessor AS (
   JOIN recebimentos_corporativos r
     ON r.deal_id = e.deal_id AND e.ocorrido_em >= r.recebido_em
   WHERE e.tipo = 'RECEBIDO_ASSESSOR'
+    AND e.colaborador_id = ANY($5::bigint[])
   ORDER BY e.deal_id, e.ocorrido_em, e.colaborador_id NULLS LAST, e.equipe_atual
 ),
 coorte_filtrada AS (
@@ -190,6 +262,9 @@ function cteRecebimentosAssessores(params) {
   const filters = [];
   if (params.equipe) filters.push('AND e.equipe_atual = $3::text');
   if (params.colaborador_id != null) filters.push('AND e.colaborador_id = $4::bigint');
+  if (params.colaborador_ids_escopo !== null) {
+    filters.push('AND e.colaborador_id = ANY($5::bigint[])');
+  }
 
   return CTE_BASE + CTE_EVENTOS + `,
 recebimentos AS (
@@ -239,7 +314,7 @@ router.get('/overview', requireAuth, async (req, res) => {
         COUNT(*) FILTER (WHERE data_protocolo BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS protocolados,
         COUNT(*) FILTER (WHERE primeira_desqualificacao_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS desqualificados
       FROM coorte
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
+    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
     res.json({ success: true, data: r.rows[0] || {} });
   } catch (err) {
     console.error('Erro /inte-comerce/overview:', err);
@@ -271,7 +346,7 @@ router.get('/strategic', requireAuth, async (req, res) => {
         ROUND(100.0 * assinados_que_ganharam / NULLIF(assinados, 0), 2)::numeric AS pct_assinados_ate_ganhos,
         NULL::numeric AS variacao_safra_sem_maturidade_equivalente
       FROM cnt
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
+    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
     res.json({ success: true, data: r.rows[0] || {} });
   } catch (err) {
     console.error('Erro /inte-comerce/strategic:', err);
@@ -301,7 +376,7 @@ router.get('/funnel', requireAuth, async (req, res) => {
         COUNT(*) FILTER (WHERE primeira_desqualificacao_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS desqualificados_saida,
         COUNT(*) FILTER (WHERE primeira_coleta_em IS NOT NULL AND NOT chegou_em_contato)::int AS coleta_sem_contato_observado
       FROM coorte
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
+    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
     res.json({ success: true, data: r.rows[0] || {} });
   } catch (err) {
     console.error('Erro /inte-comerce/funnel:', err);
@@ -329,7 +404,7 @@ router.get('/disqualify-reasons', requireAuth, async (req, res) => {
              COUNT(DISTINCT c.deal_id)::int AS deals_desqualificados
       FROM casos c GROUP BY 1
       ORDER BY deals_desqualificados DESC, motivo
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
+    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
     res.json({ success: true, data: r.rows });
   } catch (err) {
     console.error('Erro /inte-comerce/disqualify-reasons:', err);
@@ -364,7 +439,7 @@ router.get('/daily', requireAuth, async (req, res) => {
              ROUND(100.0 * a.assinados_ate_corte / NULLIF(a.recebidos, 0), 2)::numeric AS taxa_safra_pct
       FROM dias d LEFT JOIN agg a USING (dia)
       ORDER BY d.dia
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
+    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
     res.json({ success: true, data: r.rows });
   } catch (err) {
     console.error('Erro /inte-comerce/daily:', err);
@@ -398,7 +473,7 @@ router.get('/collaborators', requireAuth, async (req, res) => {
       LEFT JOIN core.colaboradores c ON c.colaborador_id = m.colaborador_id
       GROUP BY 1, 2, 3
       ORDER BY assinados DESC, recebimentos_deal_dia DESC
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
+    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
     res.json({ success: true, data: r.rows });
   } catch (err) {
     console.error('Erro /inte-comerce/collaborators:', err);
@@ -427,7 +502,7 @@ router.get('/teams', requireAuth, async (req, res) => {
       FROM marcos
       GROUP BY 1
       ORDER BY assinados DESC
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id]);
+    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
     res.json({ success: true, data: r.rows });
   } catch (err) {
     console.error('Erro /inte-comerce/teams:', err);

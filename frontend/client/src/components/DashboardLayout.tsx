@@ -230,15 +230,25 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/ranking", label: "Ranking", icon: Trophy });
 
     const dashboardChildren: NavChild[] = [];
+    if (userLevel >= LEVELS.COORDENADOR) {
+      dashboardChildren.push({ path: "/inte_comerce", label: "Comercial", icon: BarChart3,});
+    }
     if (permissions.canViewTeam && permissions.canAccessReports) {
-      dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
-      dashboardChildren.push({ path: "/tabulacoes", label: "Não Tabuladas", icon: Phone });
       dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
       dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
+      dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
     }
     if (dashboardChildren.length > 0) {
       items.push({ label: "Dashboard", icon: LayoutDashboard, children: dashboardChildren });
+    }
+
+    if (permissions.canViewTeam && permissions.canAccessReports) {
+      items.push({
+        label: "Discadora",
+        icon: Phone,
+        children: [{ path: "/tabulacoes", label: "Não Tabuladas", icon: Phone }],
+      });
     }
 
     if (canSeeSuporte) {
@@ -249,9 +259,6 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
       items.push({ path: "/configuration", label: "Configurações", icon: Settings });
     }
 
-    // [ATUALIZADO] Suporte-only (JURIDICO e ASSESSOR_PLUS): apenas "Suporte".
-    // Defesa em profundidade — independente de eventuais configurações
-    // futuras de permissão.
     if (isJuridicoUser || isAssessorPlusUser) {
       return items.filter(
         (item) => "path" in item && item.path === "/suporte"
@@ -269,7 +276,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
 
     return items;
-  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser, isAssessorPlusUser]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser, isAssessorPlusUser, userLevel]);
 
   const mobileNavItems = useMemo(() => {
     const flat: { path: string; label: string; icon: React.ComponentType<any> }[] = [];
@@ -285,9 +292,17 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
-      flat.push({ path: "/tabulacoes", label: "Tabulações", icon: Phone });
+      flat.push({ path: "/tabulacoes", label: "Não Tabuladas", icon: Phone });
       flat.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
       flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+    }
+
+    if (userLevel >= LEVELS.COORDENADOR) {
+      flat.push({
+        path: "/inte_comerce",
+        label: "Inteligência Comercial",
+        icon: BarChart3,
+      });
     }
 
     if (permissions.canAccessRanking)
@@ -310,21 +325,19 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     }
 
     return flat.slice(0, 5);
-  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser, isAssessorPlusUser]);
+  }, [permissions, canSeeSuporte, isAssessorRestritoUser, isJuridicoUser, isAssessorPlusUser, userLevel]);
 
   // Efeitos
   useEffect(() => setManualCloseChild(false), [location]);
 
   useEffect(() => {
-    const dashboardGroup = navItems.find(
+    const activeGroup = navItems.find(
       (item): item is Extract<NavItem, { children: NavChild[] }> =>
-        "children" in item && item.label === "Dashboard"
+        item.children?.some((child) => child.path === location) ?? false
     );
-    const isChildActive =
-      dashboardGroup?.children.some((child) => child.path === location) ?? false;
-    if (isChildActive && !manualCloseChild) {
-      setExpandedGroup("Dashboard");
-    } else if (!isChildActive) {
+    if (activeGroup && !manualCloseChild) {
+      setExpandedGroup(activeGroup.label);
+    } else if (!activeGroup) {
       setExpandedGroup(null);
     }
   }, [location, manualCloseChild, navItems]);
@@ -534,7 +547,7 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
             <LogOut className="w-4.5 h-4.5" />
             <span>Sair</span>
           </button>
-          <div className="text-[#94a3b8] text-xs text-center mt-2">MADM Brasil v1.5</div>
+          <div className="text-[#94a3b8] text-xs text-center mt-2">MADM Brasil v1.7</div>
         </div>
       </aside>
 

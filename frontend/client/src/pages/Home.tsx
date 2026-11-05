@@ -378,6 +378,7 @@ export default function Home() {
     colaborador: string;
     colaboradorId?: string | number;
     produto: string;
+    unidadeId?: number;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -455,21 +456,14 @@ export default function Home() {
   // FILTRO AUXILIAR DE UNIDADE — normalizado + fallback por colaborador
   // ============================================================
   const filterByUnitIfNeeded = useCallback((rows: any[]): any[] => {
-    const unitSet = equipesDaUnidade as Set<string> | null;
-    if (!unitSet) return rows;
-    if (unitSet.size === 0) return [];
-
-    // Nomes de equipe da unidade (normalizados)
-    const unitTeamsNorm = new Set<string>();
-    unitSet.forEach((t) => {
-      if (typeof t === 'string' && t.trim()) unitTeamsNorm.add(normalize(t));
+    const targetUnitId = filters.unidadeId ?? (isCoordenadorUser ? userUnidadeId : null);
+    if (targetUnitId == null) return rows;
+    const unitCollaborators = collaborators.filter((c) => {
+      const rawUnitId = c.unidadeId ?? (c as any).unidade_id;
+      return rawUnitId != null && Number(rawUnitId) === targetUnitId;
     });
-
-    // Fallback: nomes dos colaboradores da unidade (normalizados)
-    const unitCollabNorm = new Set<string>();
-    scopedCollaborators.forEach((c) => {
-      if (typeof c?.name === 'string' && c.name.trim()) unitCollabNorm.add(normalize(c.name));
-    });
+    const unitTeamsNorm = new Set(unitCollaborators.map((c) => normalize(c.equipeNome)));
+    const unitCollabNorm = new Set(unitCollaborators.map((c) => normalize(c.name)));
 
     return rows.filter((r: any) => {
       if (!r) return false;
@@ -488,7 +482,7 @@ export default function Home() {
 
       return false;
     });
-  }, [equipesDaUnidade, scopedCollaborators]);
+  }, [filters.unidadeId, isCoordenadorUser, userUnidadeId, collaborators]);
 
   // ============================================================
   // ESCOPO DO RANKING POR NÍVEL DE ACESSO
@@ -577,7 +571,7 @@ export default function Home() {
       colaboradorIdApi = undefined;
     }
 
-    return { equipeApi, colaboradorApi, colaboradorIdApi };
+    return { equipeApi, colaboradorApi, colaboradorIdApi, unidadeId: filters.unidadeId };
   }, [filters, isSupervisorSelected, selectedCollaborator, canUseFilterBar, currentUser, collaborators]);
 
   // ============================================================
@@ -622,11 +616,11 @@ export default function Home() {
     else setLoading(true);
 
     try {
-      const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
+      const { equipeApi, colaboradorApi, colaboradorIdApi, unidadeId } = getChartFilterParams();
       const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
 
-      await loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi);
-      await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi });
+      await loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi, unidadeId);
+      await loadRawMetrics({ equipeNome: equipeApi, colaboradorNome: colaboradorApi, colaboradorId: colaboradorIdApi, produto: produtoApi, unidadeId });
       await loadWeeklyPerformanceData();
 
       const [leadsRaw, ligacoesProdutivas] = await Promise.all([
@@ -730,6 +724,7 @@ export default function Home() {
         prev.colaborador === newFilters.colaborador &&
         String(prev.colaboradorId ?? "") === String(newFilters.colaboradorId ?? "") &&
         prev.produto === newFilters.produto
+        && prev.unidadeId === newFilters.unidadeId
       ) {
         return prev;
       }
@@ -817,7 +812,12 @@ export default function Home() {
   // FILTRO DE COLABORADORES (base para metas/totais)
   // ============================================================
   const filteredCollaborators = useMemo(() => {
-    const base = isCoordenadorUser ? scopedCollaborators : collaborators;
+    const targetUnitId = filters.unidadeId ?? (isCoordenadorUser ? userUnidadeId : null);
+    const base = (isCoordenadorUser ? scopedCollaborators : collaborators).filter((c) => {
+      if (targetUnitId == null) return true;
+      const rawUnitId = c.unidadeId ?? (c as any).unidade_id;
+      return rawUnitId != null && Number(rawUnitId) === targetUnitId;
+    });
     if (isSupervisorSelected && supervisorSelectedTeam) {
       return base.filter(c => c.equipeNome === supervisorSelectedTeam);
     }
@@ -826,7 +826,7 @@ export default function Home() {
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
       return true;
     });
-  }, [collaborators, scopedCollaborators, isCoordenadorUser, filters.equipe, filters.colaborador, isSupervisorSelected, supervisorSelectedTeam]);
+  }, [collaborators, scopedCollaborators, isCoordenadorUser, userUnidadeId, filters.equipe, filters.colaborador, filters.unidadeId, isSupervisorSelected, supervisorSelectedTeam]);
 
   const displayCollaborators = useMemo(() => filteredCollaborators.filter(c => {
     if (isDesativado(c)) return false;

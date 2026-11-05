@@ -277,6 +277,34 @@ function getDateRangeFromPeriod(period: Period, customStart?: string, customEnd?
 const normalizeNameKey = (str: string | undefined | null): string =>
   String(str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+function filterMetricRowsByUnit<T extends { colaborador?: string; equipe?: string }>(
+  rows: T[],
+  unidadeId: number | undefined,
+  collaborators: Collaborator[],
+): T[] {
+  if (unidadeId == null) return rows;
+  const collaboratorsByName = new Map<string, Collaborator[]>();
+  for (const collaborator of collaborators) {
+    const key = normalizeNameKey(collaborator.name);
+    const matches = collaboratorsByName.get(key) ?? [];
+    matches.push(collaborator);
+    collaboratorsByName.set(key, matches);
+  }
+
+  return rows.filter((row) => {
+    const matches = collaboratorsByName.get(normalizeNameKey(row.colaborador)) ?? [];
+    if (row.equipe) {
+      const team = normalizeNameKey(row.equipe);
+      return matches.some(
+        (collaborator) =>
+          collaborator.unidadeId === unidadeId &&
+          normalizeNameKey(collaborator.equipeNome) === team,
+      );
+    }
+    return matches.length === 1 && matches[0].unidadeId === unidadeId;
+  });
+}
+
 // ============================================================
 // ESTADOS INICIAIS
 // ============================================================
@@ -411,15 +439,15 @@ interface AppStore {
   updateCollaboratorTotals: (colaboradorId: string) => void;
   setPeriod: (period: Period) => void; setCustomDateRange: (start: string, end: string) => void; updateCurrentDates: () => void;
   loadCollaborators: () => Promise<void>; loadEquipeConfigs: () => Promise<void>;
-  loadCollaboratorsAndMetrics: (equipeNome?: string, colaboradorNome?: string, colaboradorId?: string | number, produto?: string) => Promise<void>;
-  loadMetricsForPeriod: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string }) => Promise<void>;
+  loadCollaboratorsAndMetrics: (equipeNome?: string, colaboradorNome?: string, colaboradorId?: string | number, produto?: string, unidadeId?: number) => Promise<void>;
+  loadMetricsForPeriod: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string; unidadeId?: number }) => Promise<void>;
   loadWeeklyPerformanceData: () => Promise<void>;
   loadLeadsByStage: (equipeNome?: string, colaboradorNome?: string, produto?: string) => Promise<{ colaborador: string; etapa_lead: string; total: number }[]>;
   updateKpiFromMetrics: () => void;
   updateCollaboratorWeights: (id: string, weights: Partial<Pick<Collaborator, 'pesoDiarioAssinados' | 'pesoDiarioGanhos' | 'pesoSemanalAssinados' | 'pesoSemanalGanhos' | 'pesoMensalAssinados' | 'pesoMensalGanhos' | 'bonusPorCiclo'>>) => void;
   recalculateHierarchyWeights: () => Promise<void>;
   getCollaboratorsWithHierarchy: () => Collaborator[];
-  loadRawMetrics: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string }) => Promise<void>;
+  loadRawMetrics: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string; unidadeId?: number }) => Promise<void>;
   updateKpiFromRawMetrics: () => void;
 }
 
@@ -829,12 +857,12 @@ export const useAppStore = create<AppStore>()(
         } catch (err) { console.error('Erro ao carregar configurações de equipe:', err); }
       },
 
-      loadCollaboratorsAndMetrics: async (equipeNome, colaboradorNome, colaboradorId, produto) => {
+      loadCollaboratorsAndMetrics: async (equipeNome, colaboradorNome, colaboradorId, produto, unidadeId) => {
         if (get().collaborators.length === 0) { await get().loadCollaborators(); await get().loadEquipeConfigs(); }
         await get().loadTabelaComissoes();
         const mesAtual = get().currentStartDate?.substring(0, 7);
         if (mesAtual) await get().loadCampaigns(mesAtual);
-        await get().loadMetricsForPeriod({ equipeNome, colaboradorNome, colaboradorId, produto });
+        await get().loadMetricsForPeriod({ equipeNome, colaboradorNome, colaboradorId, produto, unidadeId });
         await get().loadWeeklyPerformanceData();
       },
 
@@ -857,15 +885,23 @@ export const useAppStore = create<AppStore>()(
           if (!start || !end) return;
           if (collaborators.length === 0) await get().loadCollaborators();
 
-          const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
+          const { equipeNome, colaboradorNome, colaboradorId, produto, unidadeId } = params;
           const apiParams = { start, end, equipe: equipeNome, colaborador: colaboradorNome, colaboradorId, produto };
-          const [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
+          let [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
             fetchEmitidos(apiParams),
             fetchAssinados(apiParams),
             fetchProtocolados(apiParams),
             fetchGanhos(apiParams),
             fetchPerdidos(apiParams),
           ]);
+          if (unidadeId != null) {
+            const activeCollaborators = get().collaborators;
+            emitidos = filterMetricRowsByUnit(emitidos, unidadeId, activeCollaborators);
+            assinados = filterMetricRowsByUnit(assinados, unidadeId, activeCollaborators);
+            protocolados = filterMetricRowsByUnit(protocolados, unidadeId, activeCollaborators);
+            ganhos = filterMetricRowsByUnit(ganhos, unidadeId, activeCollaborators);
+            perdidos = filterMetricRowsByUnit(perdidos, unidadeId, activeCollaborators);
+          }
 
           const mapToNum = (arr: any[], key: string) => {
             const m = new Map<string, number>();
@@ -912,7 +948,10 @@ export const useAppStore = create<AppStore>()(
           set({ rawMetrics });
 
           // --- Série diária de leads (granularity='daily') ---
-          const leadsData = await fetchLeadsRecebidos({ ...apiParams, granularity: 'daily' });
+          let leadsData = await fetchLeadsRecebidos({ ...apiParams, granularity: 'daily' });
+          if (unidadeId != null) {
+            leadsData = filterMetricRowsByUnit(leadsData, unidadeId, get().collaborators);
+          }
           const leadsByDate = new Map<string, number>();
           (leadsData || []).forEach((l: any) => {
             const dateKey = String(l?.periodo || l?.data || '').slice(0, 10);
@@ -941,16 +980,24 @@ export const useAppStore = create<AppStore>()(
           const end = get().currentEndDate;
           if (!start || !end) return;
 
-          const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
+          const { equipeNome, colaboradorNome, colaboradorId, produto, unidadeId } = params;
           const apiParams = { start, end, equipe: equipeNome, colaborador: colaboradorNome, colaboradorId, produto };
 
-          const [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
+          let [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
             fetchEmitidos(apiParams),
             fetchAssinados(apiParams),
             fetchProtocolados(apiParams),
             fetchGanhos(apiParams),
             fetchPerdidos(apiParams),
           ]);
+          if (unidadeId != null) {
+            const activeCollaborators = get().collaborators;
+            emitidos = filterMetricRowsByUnit(emitidos, unidadeId, activeCollaborators);
+            assinados = filterMetricRowsByUnit(assinados, unidadeId, activeCollaborators);
+            protocolados = filterMetricRowsByUnit(protocolados, unidadeId, activeCollaborators);
+            ganhos = filterMetricRowsByUnit(ganhos, unidadeId, activeCollaborators);
+            perdidos = filterMetricRowsByUnit(perdidos, unidadeId, activeCollaborators);
+          }
 
           const sumTotal = (data: any[]) => (data || []).reduce((acc, item) => acc + (Number(item.total) || 0), 0);
           const rawMetrics = {

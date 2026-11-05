@@ -228,7 +228,13 @@ export async function fetchPerdidos(params: MetricParams): Promise<MetricRow[]> 
   return data.data || [];
 }
 
-export async function fetchLeadsRecebidos(params: MetricParams): Promise<{ data: string; total: number; colaborador: string }[]> {
+export async function fetchLeadsRecebidos(params: MetricParams): Promise<{
+  data?: string;
+  periodo?: string;
+  total: number;
+  colaborador: string;
+  equipe?: string;
+}[]> {
   const url = buildMetricUrl(`${API_BASE}/metrics/leads-recebidos`, params);
   const res = await fetch(url, { credentials: 'include', signal: params.signal });
   const data = await handleResponse(res, 'Erro ao carregar leads recebidos');

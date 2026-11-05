@@ -1,16 +1,5 @@
 // backend/services/access-control.js
 // Sistema de Controle de Acesso unificado (backend).
-// Fonte única de verdade: CARGO_LEVELS.
-//
-// [CHANGELOG 2026-XX] Nível novo: ASSESSOR_PLUS.
-//   • Inserido entre SUPERVISAO e COORDENADOR → renumerado.
-//   • Herda as MESMAS permissões de Suporte do COORDENADOR
-//     (busca cliente + movimentar + reportar; SalesOps bloqueado).
-//   • Sem acesso a Dashboard / Comissões / Ranking / Config / Reports / Equipe.
-//   • Promoção por whitelist de e-mail (ASSESSOR_PLUS_EMAILS) — só afeta
-//     usuários cujo cargo resolva para ASSESSOR.
-//   • Renumeração: NONE=0, JURIDICO=1, ASSESSOR=2, SUPERVISAO=3,
-//                  ASSESSOR_PLUS=4, COORDENADOR=5, ADMINISTRATIVO=6, SUPER_ADMIN=7.
 
 import { pool } from './db.js';
 
@@ -21,7 +10,7 @@ class AccessControl {
       JURIDICO: 1,
       ASSESSOR: 2,
       SUPERVISAO: 3,
-      ASSESSOR_PLUS: 4,     // [NOVO]
+      ASSESSOR_PLUS: 4,
       COORDENADOR: 5,
       ADMINISTRATIVO: 6,
       SUPER_ADMIN: 7,
@@ -89,10 +78,6 @@ class AccessControl {
       this.COMISSOES_BLOCKED_EMAILS.map((e) => this.normalize(e))
     );
 
-    // [NOVO] Assessores promovidos para ASSESSOR_PLUS.
-    // Mesma mecânica do COMISSOES_BLOCKED_EMAILS — whitelist por e-mail.
-    // Só tem efeito se o cargo do usuário resolver para LEVELS.ASSESSOR.
-    // Herda as MESMAS permissões de Suporte do COORDENADOR.
     this.ASSESSOR_PLUS_EMAILS = [
       'larissa.tayna@madmbrasil.com.br',
       'alessandra.grob@madmbrasil.com.br',
@@ -256,13 +241,6 @@ class AccessControl {
     return this.COMISSOES_BLOCKED_EMAILS_SET.has(this.normalize(user.email));
   }
 
-  /**
-   * [NOVO] Retorna `true` para usuários cujo cargo resolve para ASSESSOR
-   * e cujo e-mail está em ASSESSOR_PLUS_EMAILS.
-   *
-   * Efeito: nível efetivo promovido para LEVELS.ASSESSOR_PLUS
-   * (Suporte com permissões de coordenador; todo o resto bloqueado).
-   */
   isAssessorPlusUser(user) {
     if (!user?.email) return false;
     if (!this.ASSESSOR_PLUS_EMAILS_SET.has(this.normalize(user.email))) return false;
@@ -270,10 +248,6 @@ class AccessControl {
     return this.getAccessLevel(user.cargo, user.status) === this.LEVELS.ASSESSOR;
   }
 
-  /**
-   * [NOVO] Nível efetivo do usuário (considera a whitelist de ASSESSOR_PLUS).
-   * Use SEMPRE que precisar do "comportamento real" — não apenas cargo.
-   */
   getEffectiveAccessLevel(user) {
     const baseLevel = this.getAccessLevel(user?.cargo, user?.status);
     if (baseLevel !== this.LEVELS.ASSESSOR) return baseLevel;
@@ -368,10 +342,6 @@ class AccessControl {
     return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;
   }
 
-  /**
-   * [NOVO] Variante que enxerga ASSESSOR_PLUS (precisa do user completo,
-   * não só cargo/status). Use em rotas que já carregaram o user da view.
-   */
   canAccessSupportByUser(user) {
     const level = this.getEffectiveAccessLevel(user);
     return level >= this.LEVELS.SUPERVISAO || level === this.LEVELS.JURIDICO;

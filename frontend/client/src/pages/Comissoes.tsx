@@ -1215,6 +1215,7 @@ export default function Comissoes() {
     colaborador: string;
     colaboradorId?: string | number;
     produto: string;
+    unidadeId?: number;
   }>({ equipe: "todas", colaborador: "todos", produto: "Todos" });
 
   const [loading, setLoading] = useState(true);
@@ -1331,16 +1332,27 @@ export default function Comissoes() {
             console.error("Erro ao carregar ligações:", err);
             return [] as CallMetrics[];
           }),
-          loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi),
+          loadCollaboratorsAndMetrics(equipeApi, colaboradorApi, colaboradorIdApi, produtoApi, filters.unidadeId),
           loadRawMetrics({
             equipeNome: equipeApi,
             colaboradorNome: colaboradorApi,
             colaboradorId: colaboradorIdApi,
             produto: produtoApi,
+            unidadeId: filters.unidadeId,
           }),
           loadWeeklyPerformanceData(),
         ]);
-        setCallMetrics(calls);
+        const unitCalls = filters.unidadeId == null
+          ? calls
+          : calls.filter((call) =>
+              storeColabs.some(
+                (collaborator) =>
+                  Number(collaborator.unidadeId) === filters.unidadeId &&
+                  normalizeName(collaborator.name) === normalizeName(call.colaborador) &&
+                  normalizeName(collaborator.equipeNome) === normalizeName(call.equipe),
+              ),
+            );
+        setCallMetrics(unitCalls);
 
         const colaboradoresAtualizados = useAppStore.getState().collaborators;
         let targetColab: any;
@@ -1588,6 +1600,7 @@ export default function Comissoes() {
     const source = isCoordenadorUser ? scopedColabs : storeColabs;
 
     let filtered = source.filter((c) => {
+      if (filters.unidadeId != null && Number(c.unidadeId) !== filters.unidadeId) return false;
       if (EXCLUDED_TEAMS_SET.has(normalizeName(c.equipeNome))) return false;
       if (EXCLUDED_CARGOS.some((cargo) => normalizeName(c.cargo) === normalizeName(cargo)))
         return false;

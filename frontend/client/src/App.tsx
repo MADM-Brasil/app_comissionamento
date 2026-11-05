@@ -18,6 +18,7 @@ import Suporte from "./pages/Suporte";
 import Login from "./pages/Login";
 import Visao_geral from "./pages/Visao_geral";
 import Equipe from "./pages/Equipe";
+import Inte_comerce from "./pages/Inte_comerce";
 import Verify2FA from "./pages/ResetPassword/Verify2FA";
 import ProtectedRoute from "./components/ProtectedRoute";
 import ForgotPassword from "./pages/ResetPassword/ForgotPassword";
@@ -98,9 +99,11 @@ function LandingRedirect() {
  */
 function ProtectedRouteWithPermission({
   permission,
+  minimumLevel,
   children,
 }: {
-  permission: keyof Permissions;
+  permission?: keyof Permissions;
+  minimumLevel?: number;
   children: React.ReactNode;
 }) {
   const currentUser = useAppStore((s) => s.currentUser);
@@ -128,7 +131,12 @@ function ProtectedRouteWithPermission({
 
   const perms = getUserPermissions(accessUser ?? undefined);
 
-  if (!perms[permission]) {
+  const hasAccess =
+    minimumLevel !== undefined
+      ? perms.level >= minimumLevel
+      : permission !== undefined && perms[permission];
+
+  if (!hasAccess) {
     // [CHANGELOG] JURIDICO e ASSESSOR_PLUS: qualquer rota protegida
     // leva para "/suporte".
     if (
@@ -224,7 +232,11 @@ function Router() {
         </PeriodProvider>
       </Route>
       <Route path="/inte_comerce">
-        <Redirect to="/tabulacoes" />
+        <PeriodProvider>
+          <ProtectedRouteWithPermission minimumLevel={LEVELS.COORDENADOR}>
+            <Inte_comerce />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
       </Route>
       <Route path="/tabulacoes">
         <PeriodProvider>

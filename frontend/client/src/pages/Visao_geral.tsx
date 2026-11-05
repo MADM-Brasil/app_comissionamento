@@ -315,6 +315,7 @@ export default function VisaoGeral() {
     colaborador: string;
     colaboradorId?: string | number;
     produto: string;
+    unidadeId?: number;
   }>({
     equipe: "todas",
     colaborador: "todos",
@@ -336,6 +337,10 @@ export default function VisaoGeral() {
   // ============================================================
   const uniqueCollaborators = useMemo(() => {
     let list = dedupeCollaborators(rawCollaborators);
+
+    if (filters.unidadeId != null) {
+      list = list.filter((c) => Number(c.unidadeId) === filters.unidadeId);
+    }
 
     if (isCoordenador) {
       if (!coordenadorEscopo) return [];
@@ -366,6 +371,7 @@ export default function VisaoGeral() {
     userUnidade,
     userTeam,
     currentUser?.email,
+    filters.unidadeId,
   ]);
 
   // ============================================================
@@ -390,7 +396,7 @@ export default function VisaoGeral() {
     }
 
     const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
-    return { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi };
+    return { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi, unidadeId: filters.unidadeId };
   }, [filters, isSupervisorSelected, selectedCollaborator]);
 
   useEffect(() => {
@@ -405,20 +411,30 @@ export default function VisaoGeral() {
     if (lastFetchLeads.current > 0 && (now - lastFetchLeads.current) < LEADS_CACHE_TTL) return;
 
     try {
-      const { equipeApi, colaboradorApi, produtoApi } = getEffectiveFilterParams();
+      const { equipeApi, colaboradorApi, produtoApi, unidadeId } = getEffectiveFilterParams();
       const params = {
         start: currentStartDate,
         end: currentEndDate,
         equipe: equipeApi,
         colaborador: colaboradorApi,
         produto: produtoApi,
+        unidadeId,
       };
       const [leadsData, ligacoesProdutivas] = await Promise.all([
         fetchLeadsRecebidos(params),
         fetchLigacoesProdutivas(params),
       ]);
+      const unitLeads = unidadeId == null
+        ? leadsData
+        : leadsData.filter((row) =>
+            uniqueCollaborators.some(
+              (collaborator) =>
+                normalize(collaborator.name) === normalize(row.colaborador) &&
+                (row.equipe == null || normalize(collaborator.equipeNome) === normalize(row.equipe)),
+            ),
+          );
       // Extração defensiva: aceita `total` (atual) ou `leads_recebidos` (novo).
-      const total = (leadsData || []).reduce(
+      const total = (unitLeads || []).reduce(
         (sum: number, item: any) => sum + extractLeadsTotal(item),
         0
       );
@@ -428,13 +444,13 @@ export default function VisaoGeral() {
     } catch (err) {
       console.error("Erro ao buscar leads:", err);
     }
-  }, [currentStartDate, currentEndDate, getEffectiveFilterParams]);
+  }, [currentStartDate, currentEndDate, getEffectiveFilterParams, uniqueCollaborators]);
 
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (!currentStartDate || !currentEndDate) return;
     if (showRefreshing) setRefreshing(true);
     try {
-      const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi } = getEffectiveFilterParams();
+      const { equipeApi, colaboradorApi, colaboradorIdApi, produtoApi, unidadeId } = getEffectiveFilterParams();
 
       if (rawCollaborators.length === 0) await loadCollaborators();
       await loadMetricsForPeriod({
@@ -442,12 +458,14 @@ export default function VisaoGeral() {
         colaboradorNome: colaboradorApi,
         colaboradorId: colaboradorIdApi,
         produto: produtoApi,
+        unidadeId,
       });
       await loadRawMetrics({
         equipeNome: equipeApi,
         colaboradorNome: colaboradorApi,
         colaboradorId: colaboradorIdApi,
         produto: produtoApi,
+        unidadeId,
       });
 
       await fetchLeadsData();

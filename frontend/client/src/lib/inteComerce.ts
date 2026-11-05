@@ -7,6 +7,7 @@ export interface InteComerceParams {
   equipe?: string;
   colaboradorId?: string | number;
   produto?: string;
+  unidadeId?: number;
 }
 
 export interface InteComerceOverview {
@@ -92,6 +93,7 @@ function buildUrl(path: string, params: InteComerceParams): string {
     url.searchParams.append('colaboradorId', String(params.colaboradorId));
   }
   if (params.produto && params.produto !== 'Todos') url.searchParams.append('produto', params.produto);
+  if (params.unidadeId != null) url.searchParams.append('unidadeId', String(params.unidadeId));
   return url.toString();
 }
 
