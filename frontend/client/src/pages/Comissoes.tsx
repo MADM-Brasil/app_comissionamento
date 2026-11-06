@@ -2701,13 +2701,15 @@ export default function Comissoes() {
       };
     }
     return {
-      label: "Gols",
-      value: totalGols,
+      label: activeCampaignsForUser.length ? "Gols" : "Assinados",
+      value: activeCampaignsForUser.length
+        ? totalGols
+        : (commissionData[0]?.assinados ?? 0),
       icon: Award,
       color: "#16A34A",
       isInteger: true as const,
     };
-  }, [campGanhos2026, currentRole, totalGols]);
+  }, [activeCampaignsForUser, campGanhos2026, commissionData, currentRole, totalGols]);
 
   const firstCommissionItem = commissionData[0] || null;
   const specialGanhosForCards = firstCommissionItem?.ganhos || 0;
@@ -3041,6 +3043,7 @@ export default function Comissoes() {
     <DashboardLayout
       title="Painel de Comissões"
       subtitle="Suas comissões, calculadas com base nos ganhos e nas campanhas ativas"
+      allowCoordinatorValueToggleForOtherCollaborator
     >
       {canUseFilterBar && (
         <FilterBar

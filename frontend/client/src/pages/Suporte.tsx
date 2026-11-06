@@ -492,6 +492,7 @@ function MovimentacaoTab() {
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [loadingHistory, setLoadingHistory] = useState(true);
   const isSubmitting = useRef(false);
+  const historyRequestInFlight = useRef(false);
 
   const [escopo, setEscopo] = useState<EscopoSuporte | null>(null);
   const [loadingEscopo, setLoadingEscopo] = useState(true);
@@ -638,8 +639,11 @@ function MovimentacaoTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [equipe, produtoConfig.allowChange, produtoConfig.default, produtoConfig.options.join('|')]);
 
-  const loadUserHistory = async () => {
+  const loadUserHistory = async (silent = false) => {
     if (!currentUser?.nome) return;
+    if (historyRequestInFlight.current) return;
+    historyRequestInFlight.current = true;
+    if (!silent) setLoadingHistory(true);
     try {
       const params = new URLSearchParams({ colaborador_origem_nome: currentUser.nome });
       const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao?${params}`, { credentials: 'include' });
@@ -690,20 +694,27 @@ function MovimentacaoTab() {
     } catch (err: any) {
       console.error('Erro ao carregar histórico:', err);
     } finally {
-      setLoadingHistory(false);
+      historyRequestInFlight.current = false;
+      if (!silent) setLoadingHistory(false);
     }
   };
 
-  useEffect(() => { loadUserHistory(); }, [currentUser?.nome]);
-
   useEffect(() => {
-    const hasPending = movements.some(
-      (m) => m.status === "pendente" || m.status === "processando"
-    );
-    if (!hasPending) return;
-    const intervalId = setInterval(() => { loadUserHistory(); }, 10000);
-    return () => clearInterval(intervalId);
-  }, [movements]);
+    if (!currentUser?.nome) return;
+
+    void loadUserHistory();
+    const intervalId = setInterval(() => {
+      if (!document.hidden) void loadUserHistory(true);
+    }, 10000);
+    const handleVisibilityChange = () => {
+      if (!document.hidden) void loadUserHistory(true);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [currentUser?.nome]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1181,11 +1192,14 @@ function MovimentacaoTab() {
 
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
+          <div>
+            <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
+            <p className="text-xs text-[#64748b]">Atualização automática a cada 10 segundos</p>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={loadUserHistory}
+              onClick={() => loadUserHistory()}
               disabled={loadingHistory}
               className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0] disabled:opacity-50"
               title="Recarregar o histórico"
@@ -1571,15 +1585,20 @@ function ReportarTab() {
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [loadingReports, setLoadingReports] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const reportsRequestInFlight = useRef(false);
 
-  const loadUserReports = async () => {
+  const loadUserReports = async (silent = false) => {
     if (!currentUser?.email) {
       setLoadingReports(false);
       return;
     }
+    if (reportsRequestInFlight.current) return;
+    reportsRequestInFlight.current = true;
     try {
-      setLoadingReports(true);
-      setLoadError(null);
+      if (!silent) {
+        setLoadingReports(true);
+        setLoadError(null);
+      }
       const res = await fetch(
         `${API_BASE}/suporte/ticket-suporte?solicitante_email=${encodeURIComponent(currentUser.email)}`,
         { credentials: 'include' }
@@ -1587,6 +1606,7 @@ function ReportarTab() {
       if (!res.ok) throw new Error(`Erro ${res.status}: ${res.statusText}`);
       const data = await res.json();
       if (data.success && Array.isArray(data.data)) {
+        setLoadError(null);
         const mapped: ReportItem[] = data.data.map((ticket: any) => ({
           id: `REP_${ticket.id_ticket_suporte}`,
           data: ticket.criado_em,
@@ -1612,16 +1632,29 @@ function ReportarTab() {
       console.error('Erro ao carregar reportes:', err);
       setLoadError(err.message || 'Erro desconhecido ao carregar reportes.');
     } finally {
-      setLoadingReports(false);
+      reportsRequestInFlight.current = false;
+      if (!silent) setLoadingReports(false);
     }
   };
 
   useEffect(() => {
-    if (currentUser?.email) {
-      loadUserReports();
-    } else {
+    if (!currentUser?.email) {
       setLoadingReports(false);
+      return;
     }
+
+    void loadUserReports();
+    const intervalId = setInterval(() => {
+      if (!document.hidden) void loadUserReports(true);
+    }, 10000);
+    const handleVisibilityChange = () => {
+      if (!document.hidden) void loadUserReports(true);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [currentUser?.email]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1873,11 +1906,14 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
 
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
+          <div>
+            <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
+            <p className="text-xs text-[#64748b]">Atualização automática a cada 10 segundos</p>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={loadUserReports}
+              onClick={() => loadUserReports()}
               disabled={loadingReports}
               className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0] disabled:opacity-50"
               title="Recarregar os reportes"
