@@ -46,9 +46,15 @@ interface DashboardLayoutProps {
   children: React.ReactNode;
   title: string;
   subtitle?: string;
+  allowCoordinatorValueToggleForOtherCollaborator?: boolean;
 }
 
-export default function DashboardLayout({ children, title, subtitle }: DashboardLayoutProps) {
+export default function DashboardLayout({
+  children,
+  title,
+  subtitle,
+  allowCoordinatorValueToggleForOtherCollaborator = false,
+}: DashboardLayoutProps) {
   const [location] = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
@@ -128,13 +134,18 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
     !!selectedCollaboratorEmail &&
     !!currentUser?.email &&
     selectedCollaboratorEmail !== currentUser.email;
+  const canToggleValuesForOtherCollaborator =
+    allowCoordinatorValueToggleForOtherCollaborator &&
+    userLevel === LEVELS.COORDENADOR;
+  const shouldForceHideValues =
+    isViewingOtherCollaborator && !canToggleValuesForOtherCollaborator;
 
   // Força hideValues = true enquanto estiver visualizando outro colaborador
   useEffect(() => {
-    if (isViewingOtherCollaborator && !hideValues) {
+    if (shouldForceHideValues && !hideValues) {
       toggleHideValues();
     }
-  }, [isViewingOtherCollaborator, hideValues, toggleHideValues]);
+  }, [shouldForceHideValues, hideValues, toggleHideValues]);
 
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
@@ -636,14 +647,14 @@ export default function DashboardLayout({ children, title, subtitle }: Dashboard
 
             <button
               onClick={toggleHideValues}
-              disabled={isViewingOtherCollaborator}
+              disabled={shouldForceHideValues}
               className={cn(
                 "hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e2e8f0] bg-white text-[#475569] transition-colors",
-                isViewingOtherCollaborator
+                shouldForceHideValues
                   ? "opacity-50 cursor-not-allowed"
                   : "hover:bg-[#f1f5f9]",
               )}
-              title={isViewingOtherCollaborator
+              title={shouldForceHideValues
                 ? "Você não pode alterar a visibilidade ao visualizar outro colaborador"
                 : (hideValues ? "Mostrar valores" : "Ocultar valores")}
             >
