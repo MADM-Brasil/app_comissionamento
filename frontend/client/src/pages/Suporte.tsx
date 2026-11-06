@@ -236,6 +236,33 @@ const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string
   return true;
 };
 
+async function fetchAllSupportPages<T>(endpoint: string): Promise<T[]> {
+  const items: T[] = [];
+  let page = 1;
+  let hasMore = true;
+
+  while (hasMore) {
+    const separator = endpoint.includes('?') ? '&' : '?';
+    const res = await fetch(`${endpoint}${separator}page=${page}&limit=200`, {
+      credentials: 'include',
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Erro HTTP ${res.status}`);
+    if (!data.success || !Array.isArray(data.data) || typeof data.pagination?.hasMore !== 'boolean') {
+      throw new Error('Resposta inválida ao carregar os casos de suporte.');
+    }
+
+    items.push(...data.data);
+    hasMore = data.pagination.hasMore;
+    if (hasMore && data.data.length === 0) {
+      throw new Error('A paginação dos casos de suporte não avançou.');
+    }
+    page += 1;
+  }
+
+  return items;
+}
+
 const getTodayString = (): string => {
   const now = new Date();
   const year = now.getFullYear();
@@ -956,7 +983,7 @@ function MovimentacaoTab() {
             >
               <UserPlus className={cn("w-5 h-5 mt-0.5 flex-shrink-0", modoEscolhido === "criar" ? "text-[#2F6FED]" : "text-[#64748b]")} />
               <div>
-                <div className="text-sm font-semibold text-[#0f172a]">Criar Lead</div>
+                <div className="text-sm font-semibold text-[#0f172a]">Movimentar Lead</div>
                 <div className="text-xs text-[#64748b] mt-0.5">Informe os dados do cliente para cadastrar e movimentar um novo lead.</div>
               </div>
             </button>
@@ -2218,6 +2245,7 @@ function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
@@ -2255,12 +2283,15 @@ function MovimentacoesSuporteTab() {
 
   const carregarTickets = async () => {
     try {
-      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao?todos=1`, { credentials: 'include' });
-      const data = await res.json();
-      if (data.success) setTickets(data.data);
-      else setMessage({ text: "Erro ao carregar tickets", type: "error" });
+      const data = await fetchAllSupportPages<TicketMovimentacao>(
+        `${API_BASE}/suporte/tickets-movimentacao?todos=1`,
+      );
+      setTickets(data);
     } catch (err) {
-      setMessage({ text: "Erro ao carregar tickets", type: "error" });
+      setMessage({
+        text: err instanceof Error ? err.message : "Erro ao carregar tickets",
+        type: "error",
+      });
     } finally {
       setLoading(false);
     }
@@ -2512,7 +2543,17 @@ function MovimentacoesSuporteTab() {
   };
 
   const filteredTickets = tickets.filter(t => {
-    return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
+    const query = normalizeKey(searchTerm);
+    const nameMatches = !query || [
+      t.nome_cliente_informado,
+      t.sobrenome_cliente_informado,
+      t.colaborador_origem_nome,
+      t.colaborador_destino_nome,
+      t.equipe_destino_nome,
+      t.motivo_solicitacao,
+      t.observacao_sales_ops,
+    ].some(value => normalizeKey(String(value || '')).includes(query));
+    return nameMatches && isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
   });
 
   const ticketsPorColuna = useMemo(() => {
@@ -2549,6 +2590,17 @@ function MovimentacoesSuporteTab() {
               <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} /> Atualizar
             </button>
 
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]" />
+              <input
+                type="search"
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                placeholder="Buscar por nome do caso..."
+                aria-label="Buscar movimentações por nome do caso"
+                className="pl-8 pr-3 py-1.5 border border-[#e2e8f0] rounded text-sm"
+              />
+            </div>
             <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
             <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
@@ -2809,6 +2861,7 @@ function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterAssunto, setFilterAssunto] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
@@ -2820,12 +2873,15 @@ function ReportesSuporteTab() {
 
   const carregarReportes = async () => {
     try {
-      const res = await fetch(`${API_BASE}/suporte/ticket-suporte?todos=1`, { credentials: 'include' });
-      const data = await res.json();
-      if (data.success) setTickets(data.data);
-      else setMessage({ text: "Erro ao carregar reportes", type: "error" });
+      const data = await fetchAllSupportPages<TicketSuporte>(
+        `${API_BASE}/suporte/ticket-suporte?todos=1`,
+      );
+      setTickets(data);
     } catch (err) {
-      setMessage({ text: "Erro ao carregar reportes", type: "error" });
+      setMessage({
+        text: err instanceof Error ? err.message : "Erro ao carregar reportes",
+        type: "error",
+      });
     } finally {
       setLoading(false);
     }
@@ -2888,7 +2944,14 @@ function ReportesSuporteTab() {
   const filteredTickets = tickets.filter(t => {
     const statusMatch = filterStatus === "todos" || t.status === filterStatus;
     const assuntoMatch = filterAssunto === "todos" || t.assunto === filterAssunto;
-    if (!statusMatch || !assuntoMatch) return false;
+    const query = normalizeKey(searchTerm);
+    const nameMatches = !query || [
+      t.titulo,
+      t.assunto,
+      t.solicitante_nome,
+      t.equipe_nome,
+    ].some(value => normalizeKey(String(value || '')).includes(query));
+    if (!statusMatch || !assuntoMatch || !nameMatches) return false;
     return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
   });
 
@@ -2911,6 +2974,17 @@ function ReportesSuporteTab() {
               <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} /> Atualizar
             </button>
 
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]" />
+              <input
+                type="search"
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                placeholder="Buscar por nome do caso..."
+                aria-label="Buscar reportes por nome do caso"
+                className="pl-8 pr-3 py-1.5 border border-[#e2e8f0] rounded text-sm"
+              />
+            </div>
             <select
               value={filterAssunto}
               onChange={e => setFilterAssunto(e.target.value)}
