@@ -461,17 +461,14 @@ export default function Inte_comerce() {
   const [today] = useState(() => new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Sao_Paulo",
   }).format(new Date()));
-  const [viewMode, setViewMode] = useState<"safra" | "producao" | "producao-3-meses">("safra");
+  const [viewMode, setViewMode] = useState<"safra" | "producao">("safra");
   const [selectedMonth, setSelectedMonth] = useState(today.slice(0, 7));
   // ⬇️ opcionais; sem preenchimento não há comparativo
   const [selectedDay, setSelectedDay] = useState<string | null>(null);
   const [comparisonMonth, setComparisonMonth] = useState<string | null>(null);
 
   const reportPeriod = useMemo(() => {
-    const limits = getInteComerceDateLimits(
-      new Date(`${today}T12:00:00`),
-      viewMode === "producao-3-meses" ? 21 : 24,
-    );
+    const limits = getInteComerceDateLimits(new Date(`${today}T12:00:00`), 24);
     const [year, month] = selectedMonth.split("-").map(Number);
     const start = `${selectedMonth}-01`;
     const nextMonth = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
@@ -484,7 +481,7 @@ export default function Inte_comerce() {
         end <= start,
       limits,
     };
-  }, [selectedMonth, today, viewMode]);
+  }, [selectedMonth, today]);
 
   const comparisonPeriod = useMemo(
     () => (comparisonMonth ? getMonthPeriod(comparisonMonth, today) : null),
@@ -564,12 +561,12 @@ export default function Inte_comerce() {
     };
 
     const comparisonParams =
-      (viewMode === "safra" || viewMode === "producao") && comparisonPeriod
+      comparisonPeriod
         ? {
             ...params,
             start: comparisonPeriod.start,
             end: comparisonPeriod.end,
-            mode: (viewMode === "safra" ? "safra" : "producao") as "safra" | "producao",
+            mode: viewMode,
             selectedDay: undefined,
           }
         : null;
@@ -780,7 +777,6 @@ export default function Inte_comerce() {
 
   // Tabela comparativa (adaptativa)
   const comparisonTableRows = useMemo(() => {
-    if (viewMode !== "safra" && viewMode !== "producao") return [];
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasDay = !!selectedDay;
     const hasComp = hasComparison;
@@ -891,21 +887,15 @@ export default function Inte_comerce() {
       : daysInMonth;
   })();
 
-  const modeLabel = viewMode === "safra"
-    ? "Safra"
-    : viewMode === "producao"
-      ? "Produção"
-      : "Produção de 3 meses";
+  const modeLabel = viewMode === "safra" ? "Safra" : "Produção";
 
   const modeDescription = viewMode === "safra"
     ? (selectedDay
         ? `Negócios criados em ${selectedMonth}; resultados realizados em ${dateBr(selectedDay)}.`
         : `Negócios criados em ${selectedMonth}; resultados realizados no mês selecionado.`)
-    : viewMode === "producao"
-      ? (selectedDay
-          ? `Produção realizada em ${dateBr(selectedDay)} comparada ao total do mês ${selectedMonth}, sem restringir a data de criação dos negócios.`
-          : `Produção realizada no mês ${selectedMonth}, sem restringir a data de criação dos negócios.`)
-      : `Negócios criados nos três meses anteriores a ${selectedMonth}; resultados realizados em ${selectedMonth}.`;
+    : (selectedDay
+        ? `Produção realizada em ${dateBr(selectedDay)} comparada ao total do mês ${selectedMonth}, sem restringir a data de criação dos negócios.`
+        : `Produção realizada no mês ${selectedMonth}, sem restringir a data de criação dos negócios.`);
 
   const comparisonSectionTitle = viewMode === "safra"
     ? "Comparativo da safra"
@@ -937,19 +927,12 @@ export default function Inte_comerce() {
         {([
           ["safra", "Safra"],
           ["producao", "Produção"],
-          ["producao-3-meses", "Produção de 3 meses"],
         ] as const).map(([mode, label]) => (
           <button
             key={mode}
             type="button"
             aria-pressed={viewMode === mode}
-            onClick={() => {
-              setViewMode(mode);
-              if (mode === "producao-3-meses") {
-                setSelectedDay(null);
-                setComparisonMonth(null);
-              }
-            }}
+            onClick={() => setViewMode(mode)}
             className={cn(
               "rounded-lg border px-3 py-2 text-xs font-semibold transition-colors",
               viewMode === mode
@@ -974,61 +957,52 @@ export default function Inte_comerce() {
             className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
           />
         </label>
-        {(viewMode === "safra" || viewMode === "producao") && (
-          <>
-            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
-              Dia para comparar
-              <select
-                value={selectedDay ? selectedDay.slice(-2) : ""}
-                onChange={(event) => {
-                  const v = event.target.value;
-                  setSelectedDay(v ? `${selectedMonth}-${v}` : null);
-                }}
-                className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+        <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+          Dia para comparar
+          <select
+            value={selectedDay ? selectedDay.slice(-2) : ""}
+            onChange={(event) => {
+              const v = event.target.value;
+              setSelectedDay(v ? `${selectedMonth}-${v}` : null);
+            }}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+          >
+            <option value="">Selecione um dia</option>
+            {Array.from({ length: selectedMonthDays }, (_, index) => {
+              const day = String(index + 1).padStart(2, "0");
+              return <option key={day} value={day}>{day}</option>;
+            })}
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+          Comparar mês com
+          <div className="flex items-center gap-1">
+            <input
+              type="month"
+              min={reportPeriod.limits?.minimum.slice(0, 7)}
+              max={today.slice(0, 7)}
+              value={comparisonMonth ?? ""}
+              onChange={(event) => setComparisonMonth(event.target.value || null)}
+              placeholder="Selecione"
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+            />
+            {comparisonMonth && (
+              <button
+                type="button"
+                onClick={() => setComparisonMonth(null)}
+                className="rounded-md px-2 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-100"
+                title="Limpar comparação"
               >
-                <option value="">Selecione um dia</option>
-                {Array.from({ length: selectedMonthDays }, (_, index) => {
-                  const day = String(index + 1).padStart(2, "0");
-                  return <option key={day} value={day}>{day}</option>;
-                })}
-              </select>
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
-              Comparar mês com
-              <div className="flex items-center gap-1">
-                <input
-                  type="month"
-                  min={reportPeriod.limits?.minimum.slice(0, 7)}
-                  max={today.slice(0, 7)}
-                  value={comparisonMonth ?? ""}
-                  onChange={(event) => setComparisonMonth(event.target.value || null)}
-                  placeholder="Selecione"
-                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
-                />
-                {comparisonMonth && (
-                  <button
-                    type="button"
-                    onClick={() => setComparisonMonth(null)}
-                    className="rounded-md px-2 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-100"
-                    title="Limpar comparação"
-                  >
-                    Limpar
-                  </button>
-                )}
-              </div>
-            </label>
-          </>
-        )}
-        {viewMode === "producao-3-meses" && (
-          <p className="pb-2 text-xs text-slate-600">
-            Coorte criada nos três meses até o mês selecionado; resultados medidos no mês selecionado.
-          </p>
-        )}
+                Limpar
+              </button>
+            )}
+          </div>
+        </label>
       </div>
       <p className="mb-4 text-xs text-slate-500">{modeDescription}</p>
 
       {/* ── Comparativo: só aparece com mês de comparação; recolhido por padrão ── */}
-      {(viewMode === "safra" || viewMode === "producao") && hasComparison && (
+      {hasComparison && (
         <details className="card mb-4 group">
           <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 [&::-webkit-details-marker]:hidden">
             <div className="flex-1 min-w-0">
@@ -1240,7 +1214,7 @@ export default function Inte_comerce() {
               <span className="badge info">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
-              {strategic.pct_recebidos_ate_assinados
+              {strategic.pct_recebidos_ate_assinados != null
                 ? `${strategic.pct_recebidos_ate_assinados.toFixed(1).replace(".", ",")}%`
                 : "—"}
             </div>
@@ -1251,7 +1225,7 @@ export default function Inte_comerce() {
               <p className="text-[11px] text-slate-500 mt-1">
                 Comparação ({comparisonMonth}):{" "}
                 <b>
-                  {comparisonStrategic?.pct_recebidos_ate_assinados
+                  {comparisonStrategic?.pct_recebidos_ate_assinados != null
                     ? `${comparisonStrategic.pct_recebidos_ate_assinados.toFixed(1).replace(".", ",")}%`
                     : "—"}
                 </b>
@@ -1259,7 +1233,7 @@ export default function Inte_comerce() {
             )}
             <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
               {viewMode === "producao"
-                ? "A conversão por coorte não se aplica: os eventos podem pertencer a negócios criados em outros períodos."
+                ? "Assinados no período ÷ recebidos no período. Não é conversão por coorte: os eventos podem pertencer a negócios criados em outros períodos."
                 : "Recebidos → assinados na mesma safra (K02A)."}
             </div>
           </div>
@@ -1272,7 +1246,7 @@ export default function Inte_comerce() {
               <span className="badge success">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
-              {strategic.pct_assinados_ate_ganhos
+              {strategic.pct_assinados_ate_ganhos != null
                 ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
                 : "—"}
             </div>
@@ -1283,7 +1257,7 @@ export default function Inte_comerce() {
               <p className="text-[11px] text-slate-500 mt-1">
                 Comparação ({comparisonMonth}):{" "}
                 <b>
-                  {comparisonStrategic?.pct_assinados_ate_ganhos
+                  {comparisonStrategic?.pct_assinados_ate_ganhos != null
                     ? `${comparisonStrategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
                     : "—"}
                 </b>
@@ -1291,7 +1265,7 @@ export default function Inte_comerce() {
             )}
             <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
               {viewMode === "producao"
-                ? "Considera negócios com assinatura e ganho ocorridos nesta produção."
+                ? "Dos negócios assinados no período, quantos já possuem data de ganho registrada."
                 : "Ganho registrado após a assinatura da mesma safra (K02A)."}
             </div>
           </div>
