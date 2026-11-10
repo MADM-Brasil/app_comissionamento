@@ -1544,6 +1544,185 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
   });
 }));
 
+// ============================================================
+// VISÃO COORDENADOR
+// ------------------------------------------------------------
+// GET  /coordenador/casos
+// POST /coordenador/casos/:id/decisao
+//
+// Regras:
+//   - Apenas COORDENADOR ou acima (validado com isSupportCoordinatorOrAbove).
+//   - JURIDICO é bloqueado por requireNonJuridico.
+//   - Lista apenas casos com status_mapeamento = 'bloqueado'
+//     (o que o ticketQueue marca quando o worker precisa de validação).
+//   - "autorizar" devolve o caso para 'pendente' e grava
+//     validacaoCoordenador.bypassTemporalRestriction = true, que o
+//     ticketQueue consome para pular a checagem de horas desde a
+//     última modificação.
+//   - "bloquear" mantém o status em 'bloqueado' e registra a decisão.
+// ============================================================
+
+router.get('/coordenador/casos', requireNonJuridico, asyncRoute(async (req, res) => {
+  if (!isSupportCoordinatorOrAbove(req.supportActor.cargo)) {
+    throw fail(403, 'Apenas coordenadores ou superiores podem validar casos.');
+  }
+
+  const { page, limit, offset } = pageParams(req.query);
+
+  const rows = await pool.query(
+    `SELECT
+       to_jsonb(tml) || jsonb_build_object(
+         'colaborador_origem_nome',  COALESCE(ts.metadados->>'origem_colaborador',''),
+         'equipe_origem_nome',       COALESCE(ts.metadados->>'origem_equipe',''),
+         'colaborador_destino_nome', COALESCE(ts.metadados->>'destino_colaborador', tml.colaborador_destino_nome),
+         'equipe_destino_nome',      COALESCE(ts.metadados->>'destino_equipe', tml.colaborador_destino_nome),
+         'solicitante_email',        COALESCE(ts.metadados->>'solicitante_email',''),
+         'solicitante_nome',         COALESCE(ts.metadados->>'solicitante_nome',''),
+         'criado_em',                ts.encaminhado_em,
+         'ticket_titulo',            ts.titulo,
+         'ticket_descricao',         ts.descricao,
+         'produto',                  tml.observacao_sales_ops::jsonb->>'produto',
+         'observacao',               tml.observacao_sales_ops::jsonb->>'observacao',
+         'observacao_data',          tml.observacao_sales_ops::jsonb,
+         'validacaoCoordenador',     tml.observacao_sales_ops::jsonb->'validacaoCoordenador',
+         'hubspot',                  tml.observacao_sales_ops::jsonb->'hubspot'
+       ) AS payload
+     FROM app_comissionamento.tickets_movimentacao_lead tml
+     JOIN app_comissionamento.tickets_suporte ts ON ts.id_ticket = tml.ticket_id
+     WHERE tml.status_mapeamento = 'bloqueado'
+     ORDER BY tml.atualizado_em DESC NULLS LAST, tml.id_ticket_movimentacao DESC
+     LIMIT $1 OFFSET $2`,
+    [limit + 1, offset]
+  );
+
+  res.json({
+    success: true,
+    data: rows.rows.slice(0, limit).map(r => r.payload),
+    pagination: {
+      page,
+      limit,
+      hasMore: rows.rows.length > limit,
+    },
+  });
+}));
+
+router.post('/coordenador/casos/:id/decisao', requireNonJuridico, asyncRoute(async (req, res) => {
+  if (!isSupportCoordinatorOrAbove(req.supportActor.cargo)) {
+    throw fail(403, 'Apenas coordenadores ou superiores podem validar casos.');
+  }
+
+  const id = recordId(req.params.id);
+  const acao = text(req.body?.acao, 'Ação', { required: true, max: 20 });
+  if (!['autorizar', 'bloquear'].includes(acao)) {
+    throw fail(400, 'Ação inválida. Use "autorizar" ou "bloquear".');
+  }
+
+  const actor = req.supportActor;
+
+  const result = await transaction(async client => {
+    const cur = await client.query(
+      `SELECT id_ticket_movimentacao, ticket_id, status_mapeamento,
+              crm_origem, observacao_sales_ops
+         FROM app_comissionamento.tickets_movimentacao_lead
+        WHERE id_ticket_movimentacao = $1
+        FOR UPDATE`,
+      [id]
+    );
+    if (!cur.rowCount) throw fail(404, 'Caso não encontrado.');
+
+    const movement = cur.rows[0];
+
+    if (String(movement.status_mapeamento || '').toLowerCase() !== 'bloqueado') {
+      throw fail(
+        409,
+        `Este caso não está em "bloqueado" (status atual: ${movement.status_mapeamento}).`
+      );
+    }
+
+    const metadata = parseJsonObject(movement.observacao_sales_ops);
+
+    const validacaoCoordenador = {
+      acao,
+      usuario: actor.email,
+      nome: actor.nome || actor.email,
+      em: new Date().toISOString(),
+      ...(acao === 'autorizar'
+        ? { bypassTemporalRestriction: true }
+        : { bypassTemporalRestriction: false }),
+    };
+
+    const novoStatus = acao === 'autorizar' ? 'pendente' : 'bloqueado';
+
+    // Ao autorizar, limpamos o "processado" e qualquer marcador de worker
+    // para garantir que o ticketQueue/linkHubBatchQueue voltem a pegar
+    // o ticket — senão o SELECT da fila ignora o registro.
+    const novoMetadata = {
+      ...metadata,
+      processado: false,
+      validacaoCoordenador,
+      ...(acao === 'autorizar' && movement.crm_origem === HUBSPOT_LINK_MOVEMENT
+        ? {
+            _worker: {
+              processando_desde: null,
+              tentativas: 0,
+              erro_lease: null,
+              ultima_falha_em: null,
+            },
+          }
+        : {}),
+    };
+
+    await client.query(
+      `UPDATE app_comissionamento.tickets_movimentacao_lead
+          SET status_mapeamento = $1,
+              observacao_sales_ops = $2,
+              analisado_em = CASE WHEN $1 = 'bloqueado' THEN NOW() ELSE NULL END,
+              atualizado_em = NOW()
+        WHERE id_ticket_movimentacao = $3`,
+      [novoStatus, JSON.stringify(novoMetadata), id]
+    );
+
+    const supportStatus = acao === 'autorizar' ? 'Aberto' : 'Bloqueado';
+    await client.query(
+      `UPDATE app_comissionamento.tickets_suporte
+          SET status = $1,
+              concluido_em = NULL,
+              atualizado_em = NOW()
+        WHERE id_ticket = $2`,
+      [supportStatus, movement.ticket_id]
+    );
+
+    return {
+      acao,
+      novoStatus,
+      ticketId: movement.ticket_id,
+      movementId: movement.id_ticket_movimentacao,
+      solicitanteEmail: metadata.solicitante_email || null,
+    };
+  });
+
+  // Notifica o solicitante (SSE) — igual ao restante do arquivo.
+  notify({
+    tipo: 'info',
+    titulo: 'Atualização da movimentação',
+    destinatario: result.solicitanteEmail,
+    mensagem:
+      result.acao === 'autorizar'
+        ? 'Seu caso foi autorizado pelo coordenador e voltou para processamento.'
+        : 'Seu caso foi bloqueado pelo coordenador.',
+    data: new Date().toISOString(),
+  });
+
+  res.json({
+    success: true,
+    message:
+      result.acao === 'autorizar'
+        ? 'Caso autorizado. Ele voltou para a fila e será reprocessado.'
+        : 'Caso bloqueado pelo coordenador.',
+    status: result.novoStatus,
+  });
+}));
+
 router.use((error, req, res, next) => {
   Promise.resolve().then(async () => {
     if (!req.supportUploadsPersisted) await cleanupUploads(req);
