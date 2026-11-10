@@ -49,6 +49,24 @@ class TeamsNotificadorSuporte {
         });
     }
 
+    /**
+     * [NOVO] Render defensivo de templates literais não avaliados.
+     *
+     * Se o caller passar uma string contendo `${variavel}` (aspas simples,
+     * template salvo em config, ou string vinda do banco), os `$` chegam
+     * literais até a notificação. Este helper substitui cada `${chave}`
+     * pelo valor correspondente em `vars`. Se a string não contém `\${...}`,
+     * é devolvida intacta (no-op quando o caller já está correto).
+     */
+    renderTemplate(str, vars) {
+        if (typeof str !== 'string' || !str) return str;
+        if (!/\$\{\w+\}/.test(str)) return str;
+        return str.replace(/\$\{(\w+)\}/g, (_, key) => {
+            const v = vars[key];
+            return v === undefined || v === null || v === '' ? '—' : String(v);
+        });
+    }
+
     criarCartaoValidacaoCoordenador(dados, assunto, unidadeId) {
         const baseUrl = process.env.APP_PUBLIC_URL ||
             process.env.SUPPORT_PUBLIC_BASE_URL ||
@@ -229,39 +247,78 @@ class TeamsNotificadorSuporte {
                 );
             }
 
+            // ─── [NOVO] Variáveis para o render defensivo ─────────────────
+            // Cobre tanto os nomes usados nos templates de bloqueio
+            // (equipeOrigem, unidade, pipeline, stage…) quanto os nomes
+            // originais recebidos em `dados` (equipe, unidadeId, …).
+            const templateVars = {
+                cliente: dados.cliente,
+                telefone: dados.telefone,
+                equipeDestino: dados.equipeDestino,
+                assessorDestino: dados.assessorDestino,
+                produto: dados.produto,
+                pipeline: dados.pipelineNome || dados.pipeline,
+                stage: dados.stageNome || dados.stage,
+                pipelineNome: dados.pipelineNome || dados.pipeline,
+                stageNome: dados.stageNome || dados.stage,
+                solicitante: dados.solicitante,
+                equipeOrigem: dados.equipe,
+                equipe: dados.equipe,
+                unidade: dados.unidadeId ?? (casoCoordenador ? unidadeId : null),
+                unidadeId: dados.unidadeId ?? (casoCoordenador ? unidadeId : null),
+                mensagem: dados.mensagem,
+                status: dados.status,
+                link: dados.link,
+                dealId: dados.dealId,
+                notesLastUpdated: dados.notesLastUpdated,
+                titulo: dados.titulo,
+                assunto,
+            };
+
+            const descricaoRenderizada = this.renderTemplate(dados.descricao, templateVars);
+            const mensagemRenderizada  = this.renderTemplate(dados.mensagem,  templateVars);
+
+            // Objeto já com os textos renderizados — usado pelos builders
+            // de cartão, para que as facts também exibam o resultado certo.
+            const dadosRenderizados = {
+                ...dados,
+                descricao: descricaoRenderizada,
+                mensagem: mensagemRenderizada,
+            };
+
             // Monta o JSON raiz exatamente como o Power Automate espera
             const payload = {
-    titulo: casoCoordenador ? assunto : (dados.titulo || assunto),
-    assunto,
-    descricao: dados.descricao,
-    solicitante: dados.solicitante || 'Não informado',
-    equipe: dados.equipe || 'Não informada',
-    dataHora: this.formatarDataHora(),
-    anexosMarkdown: dados.anexosMarkdown || 'Nenhum anexo',
-    // Campos extras para movimentação
-    cliente: dados.cliente || null,
-    telefone: dados.telefone || null,
-    equipeDestino: dados.equipeDestino || null,
-    assessorDestino: dados.assessorDestino || null,
-    status: dados.status || null,
-    solicitanteEmail: dados.solicitanteEmail || null,
-    mensagem: dados.mensagem || null,
-    pipeline: dados.pipeline || null, 
-    stage: dados.stage || null,
-    pipelineNome: dados.pipelineNome || null,
-    stageNome: dados.stageNome || null,
-    unidadeId: casoCoordenador ? unidadeId : (dados.unidadeId || null),
-    dealId: dados.dealId || null,
-    link: dados.link || null,
-    produto: dados.produto || null,
-    regra: dados.regra || null,
-    notesLastUpdated: dados.notesLastUpdated || null,
-    ...(casoCoordenador
-        ? { adaptiveCard: this.criarCartaoValidacaoCoordenador(dados, assunto, unidadeId) }
-        : assunto.toLowerCase().startsWith('movimentacao')
-            ? { adaptiveCard: this.criarCartaoMovimentacao({ ...dados, unidadeId }, assunto) }
-            : {}),
-};
+                titulo: casoCoordenador ? assunto : (dados.titulo || assunto),
+                assunto,
+                descricao: descricaoRenderizada,
+                solicitante: dados.solicitante || 'Não informado',
+                equipe: dados.equipe || 'Não informada',
+                dataHora: this.formatarDataHora(),
+                anexosMarkdown: dados.anexosMarkdown || 'Nenhum anexo',
+                // Campos extras para movimentação
+                cliente: dados.cliente || null,
+                telefone: dados.telefone || null,
+                equipeDestino: dados.equipeDestino || null,
+                assessorDestino: dados.assessorDestino || null,
+                status: dados.status || null,
+                solicitanteEmail: dados.solicitanteEmail || null,
+                mensagem: mensagemRenderizada || null,
+                pipeline: dados.pipeline || null,
+                stage: dados.stage || null,
+                pipelineNome: dados.pipelineNome || null,
+                stageNome: dados.stageNome || null,
+                unidadeId: casoCoordenador ? unidadeId : (dados.unidadeId || null),
+                dealId: dados.dealId || null,
+                link: dados.link || null,
+                produto: dados.produto || null,
+                regra: dados.regra || null,
+                notesLastUpdated: dados.notesLastUpdated || null,
+                ...(casoCoordenador
+                    ? { adaptiveCard: this.criarCartaoValidacaoCoordenador(dadosRenderizados, assunto, unidadeId) }
+                    : assunto.toLowerCase().startsWith('movimentacao')
+                        ? { adaptiveCard: this.criarCartaoMovimentacao({ ...dadosRenderizados, unidadeId }, assunto) }
+                        : {}),
+            };
 
             const response = await fetch(webhookUrl, {
                 method: 'POST',
