@@ -3436,7 +3436,7 @@ function CoordinatorValidationTab({ initialCaseId }: { initialCaseId: string | n
 
   const handleDecision = async (ticket: TicketMovimentacao, action: 'bloquear' | 'autorizar') => {
     const prompt = action === 'bloquear'
-      ? 'Bloquear este caso? A observação será registrada como "Bloqueado pelo supervisor".'
+      ? 'Bloquear este caso? A observação será registrada como "Bloqueado pelo Coordenador".'
       : 'Autorizar o reprocessamento? O limite de tempo será ignorado, mas as regras de pipeline e etapa continuarão ativas.';
     if (!window.confirm(prompt)) return;
 
@@ -3597,7 +3597,7 @@ function CoordinatorValidationTab({ initialCaseId }: { initialCaseId: string | n
               </div>
               {alreadyBlockedByCoordinator && (
                 <p className="text-sm font-medium text-red-700">
-                  Bloqueado pelo supervisor
+                  Bloqueado pelo Coordenador
                   {ticket.validacaoCoordenador?.em
                     ? ` em ${new Date(ticket.validacaoCoordenador.em).toLocaleString('pt-BR')}`
                     : ''}
