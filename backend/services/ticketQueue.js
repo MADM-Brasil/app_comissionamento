@@ -34,6 +34,7 @@ import {
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_PIPELINE_QUINQUENIO_ID,
   HUBSPOT_PIPELINE_ISENCAO_IR_ID,               // [ISENÇÃO IR]
+  HUBSPOT_PORTAL_ID_CONFIGURED,
   HUBSPOT_STAGE_EM_CONTATO_ID,
   HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID,
   HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID,       // [ISENÇÃO IR]
@@ -138,6 +139,28 @@ function describeBlockedReason(hubspotData) {
     parts.push(`Pipeline: ${hubspotData.pipelineNome || '—'} / Etapa: ${hubspotData.stageNome || '—'}.`);
   }
   return parts.filter(Boolean).join(' ');
+}
+
+async function requesterUnitId(client, metadata) {
+  const storedUnit = Number(metadata?.unidade_id ?? metadata?.unidadeId);
+  if (Number.isInteger(storedUnit) && storedUnit >= 1 && storedUnit <= 5) return storedUnit;
+  const requesterEmail = String(metadata?.solicitante_email || '').trim();
+  if (!requesterEmail) return null;
+
+  try {
+    const result = await client.query(
+      `SELECT unidade_id
+         FROM core.view_app_colaboradores
+        WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
+        LIMIT 1`,
+      [requesterEmail]
+    );
+    const unit = Number(result.rows[0]?.unidade_id);
+    return Number.isInteger(unit) && unit >= 1 && unit <= 5 ? unit : null;
+  } catch (error) {
+    console.error('[ticketQueue] Falha ao consultar unidade do solicitante:', error.message);
+    return null;
+  }
 }
 
 async function processTicketQueue() {
@@ -253,6 +276,9 @@ async function handleTicket(ticket, client) {
     observacaoAtual.produto ||
     ticket.metadados?.produto ||
     null;
+  const bypassTemporalRestriction =
+    observacaoAtual.validacaoCoordenador?.acao === 'autorizar' &&
+    observacaoAtual.validacaoCoordenador?.bypassTemporalRestriction === true;
 
   // Destino esperado pelo produto:
   //   Auxílio (e comuns)          → Closer / Em Contato.
@@ -345,7 +371,8 @@ async function handleTicket(ticket, client) {
             nomeCompleto,
             ownerId,
             ticket.colaborador_destino_nome,
-            produto
+            produto,
+            { bypassTemporalRestriction }
           );
           if (resultado && !resultado.blocked && resultado.dealId) {
             dealId = resultado.dealId;
@@ -371,7 +398,7 @@ async function handleTicket(ticket, client) {
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
-      hubspotData.status = 'suporte';
+      hubspotData.status = 'aviso';
       hubspotData.ruleApplied = 'contact_data_mismatch';
       hubspotData.mensagem = busca.motivo || RULE_LABELS.contact_data_mismatch;
       resultado = { blocked: false, message: hubspotData.mensagem, ruleApplied: 'contact_data_mismatch' };
@@ -385,7 +412,8 @@ async function handleTicket(ticket, client) {
         nomeCompleto,
         ownerId,
         ticket.colaborador_destino_nome,
-        produto
+        produto,
+        { bypassTemporalRestriction }
       );
       if (resultado && !resultado.blocked && resultado.dealId) {
         dealId = resultado.dealId;
@@ -529,23 +557,39 @@ async function handleTicket(ticket, client) {
     }
 
     const observacaoTexto =
-      hubspotData.status === 'bloqueado'
+      resultado?.blocked
         ? describeBlockedReason(hubspotData)
         : (hubspotData.mensagem || RULE_LABELS[hubspotData.ruleApplied] || '');
+    const validacaoCoordenador = observacaoAtual.validacaoCoordenador;
+    const notaValidacaoCoordenador = validacaoCoordenador?.acao === 'autorizar'
+      ? `Validado pelo coordenador (${validacaoCoordenador.nome || validacaoCoordenador.usuario || 'nome não informado'})`
+      : '';
+    const observacaoFinal = [observacaoTexto, notaValidacaoCoordenador]
+      .filter(Boolean)
+      .join('\n');
 
     const novoObservacao = {
       ...observacaoAtual,
       processado: true,
-      dealId: dealId || observacaoAtual.dealId || null,
+      dealId: dealId || resultado?.dealId || observacaoAtual.dealId || null,
       hubspot: hubspotData,
       motivoOriginal: ticket.motivo_solicitacao || '',
-      observacao: observacaoTexto,
+      observacao: observacaoFinal,
       regra: hubspotData.ruleApplied || null,
       colaboradorDestinoNome: ticket.colaborador_destino_nome,
       colaboradorDestinoEmail: colaboradorEmail,
       validacaoFinal: true,
       produto: observacaoAtual.produto || produto || null,
       destinoEsperado: destination.name,
+      ...(bypassTemporalRestriction
+        ? {
+            validacaoCoordenador: {
+              ...observacaoAtual.validacaoCoordenador,
+              bypassTemporalRestriction: false,
+              concluidoEm: new Date().toISOString(),
+            },
+          }
+        : {}),
     };
 
     await client.query(
@@ -583,7 +627,10 @@ async function handleTicket(ticket, client) {
 
     if (statusFinal !== 'concluido') {
       try {
-        await teamsNotificador.enviar({
+        const unidadeId = statusFinal === 'bloqueado'
+          ? await requesterUnitId(client, ticket.metadados)
+          : (ticket.metadados?.unidade_id ?? ticket.metadados?.unidadeId ?? null);
+        const notification = await teamsNotificador.enviar({
           titulo: 'Movimentação de Lead',
           assunto: 'Movimentacao',
           descricao:
@@ -594,14 +641,22 @@ async function handleTicket(ticket, client) {
             `Destino esperado: ${destination.name} | ` +
             `Status: ${statusFinal}`,
           solicitante: ticket.colaborador_origem_nome || 'N/A',
+          solicitanteEmail: ticket.metadados?.solicitante_email || null,
           equipe: ticket.equipe_origem_nome || 'N/A',
           anexosMarkdown: 'Nenhum anexo',
           cliente: nomeCompleto,
           telefone: ticket.telefone_cliente_informado || 'N/A',
           equipeDestino: ticket.equipe_destino_nome || 'N/A',
           assessorDestino: ticket.colaborador_destino_nome || 'N/A',
-          status: statusFinal,
-          mensagem: observacaoTexto || 'N/A',
+          status: statusFinal === 'bloqueado' ? 'coordenador' : statusFinal,
+          unidadeId,
+          idTicketMovimentacao: ticket.id_ticket_movimentacao,
+          idTicket: ticket.ticket_id,
+          link: dealId && /^\d+$/.test(String(HUBSPOT_PORTAL_ID_CONFIGURED || ''))
+            ? `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID_CONFIGURED}/record/0-3/${dealId}`
+            : null,
+          dealId: dealId || null,
+          mensagem: observacaoFinal || 'N/A',
           regra: hubspotData.ruleApplied || null,
           pipeline: hubspotData.pipelineNome || hubspotData.pipeline || null,
           stage: hubspotData.stageNome || hubspotData.stage || null,
@@ -610,6 +665,9 @@ async function handleTicket(ticket, client) {
           hoursSinceNote: hubspotData.hoursSinceNote,
           notesLastUpdated: hubspotData.notesLastUpdated,
         });
+        if (!notification.success) {
+          console.error('Falha ao enviar notificação Teams:', notification.error);
+        }
       } catch (notifErr) {
         console.error('Erro ao enviar notificação Teams:', notifErr);
       }
@@ -620,7 +678,12 @@ async function handleTicket(ticket, client) {
       ...observacaoAtual,
       hubspot: { ...hubspotData, erro: true, status: 'erro', mensagem: error.message },
       motivoOriginal: ticket.motivo_solicitacao || '',
-      observacao: `Erro: ${error.message}`, 
+      observacao: [
+        `Erro: ${error.message}`,
+        observacaoAtual.validacaoCoordenador?.acao === 'autorizar'
+          ? `Validado pelo coordenador (${observacaoAtual.validacaoCoordenador.nome || observacaoAtual.validacaoCoordenador.usuario || 'nome não informado'})`
+          : '',
+      ].filter(Boolean).join('\n'),
       processado: true,
       produto: observacaoAtual.produto || produto || null,
     });

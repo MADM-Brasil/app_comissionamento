@@ -6,35 +6,47 @@ import {
   getActiveSupportUser,
   isSupportAdmin,
 } from '../services/access-control.js';
+import { createHash } from 'node:crypto';
+import { cached } from '../services/inteComerceCache.js';
+import {
+  getInteComerceRawAnalytics,
+} from '../services/inteComerceRawAnalytics.js';
 
 const router = express.Router();
-const ANALYTICS_STATEMENT_TIMEOUT_MS = 55_000;
-const ANALYTICS_QUERY_TIMEOUT_MS = ANALYTICS_STATEMENT_TIMEOUT_MS + 3_000;
 
-async function analyticsQuery(text, values) {
-  const client = await db.pool.connect();
-  let releaseError;
-  try {
-    await client.query('BEGIN');
-    await client.query(`SET LOCAL statement_timeout = '${ANALYTICS_STATEMENT_TIMEOUT_MS}ms'`);
-    const result = await client.query({
-      text,
-      values,
-      query_timeout: ANALYTICS_QUERY_TIMEOUT_MS,
-    });
-    await client.query('COMMIT');
-    return result;
-  } catch (error) {
-    try {
-      await client.query('ROLLBACK');
-    } catch (rollbackError) {
-      releaseError = rollbackError;
-      console.error('Falha ao reverter consulta analítica:', rollbackError);
-    }
-    throw error;
-  } finally {
-    client.release(releaseError);
-  }
+function analyticsCacheKey(params) {
+  const normalizeIds = (ids) => ids == null
+    ? ids
+    : [...new Set(ids.map(String))].sort();
+  const scope = JSON.stringify({
+    mode: params.mode,
+    selected_day: params.selected_day,
+    cohort_inicio: params.cohort_inicio,
+    cohort_fim: params.cohort_fim,
+    result_inicio: params.result_inicio,
+    result_fim: params.result_fim,
+    production_month_inicio: params.production_month_inicio,
+    production_month_fim: params.production_month_fim,
+    inicio: params.inicio,
+    fim_exclusivo: params.fim_exclusivo,
+    equipe: params.equipe,
+    produto: params.produto,
+    include_unassigned: params.include_unassigned,
+    colaborador_id: params.colaborador_id,
+    colaborador_ids_escopo: normalizeIds(params.colaborador_ids_escopo),
+    colaborador_ids_ativos: normalizeIds(params.colaborador_ids_ativos),
+    // refresh NÃO entra na chave: queremos reusar a mesma entrada
+    // e apenas forçar o refetch.
+  });
+  return createHash('sha256').update(scope).digest('hex');
+}
+
+function getAnalytics(params) {
+  return cached(
+    analyticsCacheKey(params),
+    () => getInteComerceRawAnalytics(params),
+    { forceRefresh: params.refresh === true },
+  );
 }
 
 async function requireAuth(req, res, next) {
@@ -82,9 +94,9 @@ async function requireAuth(req, res, next) {
       ? unidadeUsuario
       : unidadeSelecionada;
     const result = await db.pool.query(
-      `SELECT DISTINCT id_assessor, unidade_id
+      `SELECT DISTINCT colaborador_id AS id_assessor, unidade_id
        FROM core.view_app_colaboradores
-       WHERE id_assessor IS NOT NULL
+       WHERE colaborador_id IS NOT NULL
          AND LOWER(TRIM(COALESCE(status, ''))) != 'desativado'
          AND LOWER(TRIM(COALESCE(cargo, ''))) != 'desativado'`,
     );
@@ -92,6 +104,7 @@ async function requireAuth(req, res, next) {
     req.inteComerceColaboradorIds = result.rows
       .filter((row) => unidadeFiltro == null || Number(row.unidade_id) === unidadeFiltro)
       .map((row) => String(row.id_assessor));
+    req.inteComerceIncludeUnassigned = isAdmin && unidadeFiltro == null;
 
     next();
   } catch (error) {
@@ -100,8 +113,12 @@ async function requireAuth(req, res, next) {
 }
 
 function readParams(req) {
-  const { start, end, equipe, colaboradorId } = req.query;
+  const { start, end, equipe, colaboradorId, mode, selectedDay, produto, refresh } = req.query;
   if (!start || !end) return null;
+  const supportedModes = ['safra', 'producao', 'producao-3-meses'];
+  if (mode != null && !supportedModes.includes(mode)) {
+    return { error: `mode deve ser um destes valores: ${supportedModes.join(', ')}.` };
+  }
   if (typeof start !== 'string' || typeof end !== 'string') {
     return { error: 'start e end devem estar no formato YYYY-MM-DD.' };
   }
@@ -109,15 +126,6 @@ function readParams(req) {
     colaboradorId != null && String(colaboradorId).trim() !== ''
       ? Number(colaboradorId)
       : null;
-
-  const params = {
-    inicio: start,
-    fim_exclusivo: end,
-    equipe: equipe && equipe !== 'todas' ? equipe : null,
-    colaborador_id: Number.isFinite(colabNum) ? colabNum : null,
-    colaborador_ids_escopo: req.inteComerceColaboradorIds,
-    colaborador_ids_ativos: req.inteComerceActiveCollaboratorIds,
-  };
 
   const validDate = (value) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -127,6 +135,21 @@ function readParams(req) {
   if (!validDate(start) || !validDate(end) || end <= start) {
     return { error: 'Período inválido. Use datas válidas no formato YYYY-MM-DD e end posterior a start.' };
   }
+  if (produto != null && (typeof produto !== 'string' || produto.length > 100)) {
+    return { error: 'produto deve ser um texto válido.' };
+  }
+
+  const params = {
+    mode: mode || 'safra',
+    equipe: equipe && equipe !== 'todas' ? equipe : null,
+    colaborador_id: Number.isFinite(colabNum) ? colabNum : null,
+    produto: produto && produto !== 'Todos' ? produto : null,
+    include_unassigned: req.inteComerceIncludeUnassigned === true,
+    colaborador_ids_escopo: req.inteComerceColaboradorIds,
+    colaborador_ids_ativos: req.inteComerceActiveCollaboratorIds,
+    // 🔄 bypass de cache quando o usuário clica "Atualizar dados"
+    refresh: refresh === '1' || refresh === 'true',
+  };
 
   const dateParts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Sao_Paulo',
@@ -138,375 +161,184 @@ function readParams(req) {
   const year = Number(todayParts.year);
   const month = Number(todayParts.month);
   const day = Number(todayParts.day);
-  const targetMonth = month - 2;
+  const isProductionComparison = params.mode === 'producao-3-meses';
+  const targetMonth = month - 24;
   const minDateYear = year + Math.floor((targetMonth - 1) / 12);
   const minDateMonth = ((targetMonth - 1) % 12 + 12) % 12 + 1;
-  const daysInMinDateMonth = new Date(Date.UTC(minDateYear, minDateMonth, 0)).getUTCDate();
-  const minDate = `${minDateYear}-${String(minDateMonth).padStart(2, '0')}-${String(Math.min(day, daysInMinDateMonth)).padStart(2, '0')}`;
+  const minDate = `${minDateYear}-${String(minDateMonth).padStart(2, '0')}-01`;
   const tomorrow = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
-  if (start < minDate || end > tomorrow) {
+  const maxDate = tomorrow;
+  const cohortStart = isProductionComparison
+    ? new Date(Date.UTC(
+        Number(start.slice(0, 4)),
+        Number(start.slice(5, 7)) - 3,
+        1,
+      )).toISOString().slice(0, 10)
+    : start;
+  const cohortEnd = isProductionComparison ? start : end;
+  if (cohortStart < minDate || start < minDate || end > maxDate) {
     return {
-      error: `Este relatório permite consultar somente os últimos dois meses (${minDate} até hoje).`,
+      error: `O período selecionado está fora do limite permitido (${minDate} até hoje).`,
     };
   }
 
+  params.cohort_inicio = cohortStart;
+  params.cohort_fim = cohortEnd;
+  params.result_inicio = start;
+  params.result_fim = end;
+  if (params.mode === 'producao') {
+    params.production_month_inicio = start;
+    params.production_month_fim = end;
+  }
+
+  if (params.mode === 'safra' || params.mode === 'producao') {
+    const hasSelectedDay = selectedDay != null && selectedDay !== '';
+    if (hasSelectedDay) {
+      if (
+        typeof selectedDay !== 'string' ||
+        !validDate(selectedDay) ||
+        selectedDay < start ||
+        selectedDay >= end ||
+        selectedDay > todayParts.year + '-' + todayParts.month + '-' + todayParts.day
+      ) {
+        return { error: 'selectedDay deve ser uma data válida dentro do mês e não pode ser futura.' };
+      }
+      const selectedEnd = new Date(
+        Date.parse(`${selectedDay}T00:00:00.000Z`) + 86_400_000,
+      ).toISOString().slice(0, 10);
+      params.selected_day = selectedDay;
+      params.selected_day_end = selectedEnd;
+    } else {
+      params.selected_day = null;
+      params.selected_day_end = null;
+    }
+    params.result_inicio = start;
+    params.result_fim = end;
+  }
+
+  params.inicio = cohortStart < params.result_inicio ? cohortStart : params.result_inicio;
+  params.fim_exclusivo = end > params.result_fim ? end : params.result_fim;
   return params;
 }
 
-// CTE base — usa CURRENT_TIMESTAMP como as_of (produção).
-// Para homologação contra base staging, troque por LEAST(TIMESTAMPTZ '...', CURRENT_TIMESTAMP).
-const CTE_BASE = `
-WITH p AS (
-  SELECT $1::date AS inicio, $2::date AS fim_exclusivo,
-         CURRENT_TIMESTAMP AS as_of,
-         $3::text AS equipe, $4::bigint AS colaborador_id,
-         $5::bigint[] AS colaborador_ids_escopo,
-         $6::bigint[] AS colaborador_ids_ativos
-), limites AS (
-  SELECT p.*, (p.inicio::timestamp AT TIME ZONE 'America/Sao_Paulo') AS t0,
-         (p.fim_exclusivo::timestamp AT TIME ZONE 'America/Sao_Paulo') AS t1
-  FROM p
-)`;
-
-const CTE_EVENTOS = `,
-eventos AS (
-  SELECT e.deal_id, e.ocorrido_em, e.colaborador_id, e.equipe_atual, e.tipo
-  FROM ops.v_bi_v6_eventos e CROSS JOIN limites p
-  WHERE e.ocorrido_em >= p.t0
-    AND e.ocorrido_em <= p.as_of
-    AND (
-      e.colaborador_id IS NULL
-      OR e.colaborador_id = ANY($6::bigint[])
-    )
-    AND e.tipo IN (
-      'RECEBIDO_CORPORATIVO', 'RECEBIDO_ASSESSOR', 'TRABALHADO_PROXY',
-      'EM_CONTATO', 'COLETA', 'CONTRATO', 'EMITIDO_ORIGINAL',
-      'ASSINADO_ORIGINAL', 'GANHO', 'PROTOCOLADO', 'DESQUALIFICADO'
-    )
-)`;
-
-function cteCoorte(params) {
-  const filters = [];
-  if (params.equipe) {
-    filters.push('AND pa.equipe_atual = $3::text');
+function validateParams(req, res) {
+  const params = readParams(req);
+  if (!params) {
+    res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+    return null;
   }
-  if (params.colaborador_id != null) {
-    filters.push('AND pa.colaborador_id = $4::bigint');
+  if (params.error) {
+    res.status(400).json({ success: false, error: params.error });
+    return null;
   }
-  if (params.colaborador_ids_escopo !== null) {
-    filters.push('AND pa.colaborador_id = ANY($5::bigint[])');
-  }
-
-  return CTE_BASE + CTE_EVENTOS + `,
-recebimentos_corporativos AS (
-  SELECT e.deal_id, MIN(e.ocorrido_em) AS recebido_em
-  FROM eventos e CROSS JOIN limites p
-  WHERE e.tipo = 'RECEBIDO_CORPORATIVO'
-    AND e.ocorrido_em < p.t1
-  GROUP BY e.deal_id
-),
-primeiro_assessor AS (
-  SELECT DISTINCT ON (e.deal_id)
-         e.deal_id, e.colaborador_id, e.equipe_atual, e.ocorrido_em
-  FROM eventos e
-  JOIN recebimentos_corporativos r
-    ON r.deal_id = e.deal_id AND e.ocorrido_em >= r.recebido_em
-  WHERE e.tipo = 'RECEBIDO_ASSESSOR'
-    AND e.colaborador_id = ANY($5::bigint[])
-  ORDER BY e.deal_id, e.ocorrido_em, e.colaborador_id NULLS LAST, e.equipe_atual
-),
-coorte_filtrada AS (
-  SELECT r.deal_id, r.recebido_em
-  FROM recebimentos_corporativos r
-  LEFT JOIN primeiro_assessor pa ON pa.deal_id = r.deal_id
-  WHERE true ${filters.join(' ')}
-),
-coorte AS (
-  SELECT c.deal_id,
-         c.recebido_em AS data_recebimento_corporativo,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'TRABALHADO_PROXY' AND e.ocorrido_em >= c.recebido_em
-         ) AS primeiro_trabalho_em,
-         BOOL_OR(e.tipo = 'EM_CONTATO') AS chegou_em_contato,
-         BOOL_OR(e.tipo = 'EM_CONTATO' AND e.ocorrido_em <= c.recebido_em) AS ja_em_contato_ao_receber,
-         MIN(e.ocorrido_em) FILTER (WHERE e.tipo = 'EM_CONTATO') AS primeiro_em_contato_em,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'COLETA' AND e.ocorrido_em >= c.recebido_em
-         ) AS primeira_coleta_em,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'CONTRATO' AND e.ocorrido_em >= c.recebido_em
-         ) AS primeiro_contrato_em,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'DESQUALIFICADO' AND e.ocorrido_em >= c.recebido_em
-         ) AS primeira_desqualificacao_em,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'EMITIDO_ORIGINAL' AND e.ocorrido_em >= c.recebido_em
-         ) AS primeira_emissao_original_em,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'ASSINADO_ORIGINAL' AND e.ocorrido_em >= c.recebido_em
-         ) AS primeira_assinatura_original_em,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'GANHO' AND e.ocorrido_em >= c.recebido_em
-         ) AS data_ganho,
-         MIN(e.ocorrido_em) FILTER (
-           WHERE e.tipo = 'PROTOCOLADO' AND e.ocorrido_em >= c.recebido_em
-         ) AS data_protocolo
-  FROM coorte_filtrada c
-  LEFT JOIN eventos e
-    ON e.deal_id = c.deal_id
-  GROUP BY c.deal_id, c.recebido_em
-)`;
+  return params;
 }
 
-function cteRecebimentosAssessores(params) {
-  const filters = [];
-  if (params.equipe) filters.push('AND e.equipe_atual = $3::text');
-  if (params.colaborador_id != null) filters.push('AND e.colaborador_id = $4::bigint');
-  if (params.colaborador_ids_escopo !== null) {
-    filters.push('AND e.colaborador_id = ANY($5::bigint[])');
-  }
-
-  return CTE_BASE + CTE_EVENTOS + `,
-recebimentos AS (
-  SELECT DISTINCT ON (
-           e.deal_id, e.colaborador_id,
-           (e.ocorrido_em AT TIME ZONE 'America/Sao_Paulo')::date
-         )
-         e.deal_id, e.colaborador_id, e.equipe_atual, e.ocorrido_em AS recebido_em
-  FROM eventos e CROSS JOIN limites p
-  WHERE e.tipo = 'RECEBIDO_ASSESSOR'
-    AND e.ocorrido_em < p.t1
-    ${filters.join('\n    ')}
-  ORDER BY e.deal_id, e.colaborador_id,
-           (e.ocorrido_em AT TIME ZONE 'America/Sao_Paulo')::date,
-           e.ocorrido_em
-),
-marcos AS (
-  SELECT r.deal_id, r.colaborador_id, r.equipe_atual, r.recebido_em,
-         BOOL_OR(e.tipo = 'TRABALHADO_PROXY') AS trabalhou_na_posse,
-         BOOL_OR(e.tipo = 'EM_CONTATO') AS contatou_etapa,
-         BOOL_OR(e.tipo = 'ASSINADO_ORIGINAL') AS assinou_apos_receber,
-         BOOL_OR(e.tipo = 'GANHO') AS ganhou_apos_receber,
-         BOOL_OR(e.tipo = 'COLETA') AS coletou_apos_receber,
-         BOOL_OR(e.tipo = 'PROTOCOLADO') AS protocolou_apos_receber
-  FROM recebimentos r
-  LEFT JOIN eventos e
-    ON e.deal_id = r.deal_id AND e.ocorrido_em >= r.recebido_em
-  GROUP BY r.deal_id, r.colaborador_id, r.equipe_atual, r.recebido_em
-)`;
-}
-
-/* ============================================================
- * K01A | SAFRA | sete cards
- * ============================================================ */
 router.get('/overview', requireAuth, async (req, res) => {
-  const params = readParams(req);
-  if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
-  if (params.error) return res.status(400).json({ success: false, error: params.error });
+  const params = validateParams(req, res);
+  if (!params) return;
   try {
-    const r = await analyticsQuery(cteCoorte(params) + `
-      SELECT
-        COUNT(*)::int AS recebidos,
-        COUNT(*) FILTER (WHERE primeiro_trabalho_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS trabalhados_proxy,
-        COUNT(*) FILTER (WHERE chegou_em_contato AND (ja_em_contato_ao_receber OR primeiro_em_contato_em <= (SELECT as_of FROM p)))::int AS em_contato_crm,
-        COUNT(*) FILTER (WHERE primeira_assinatura_original_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS assinados,
-        COUNT(*) FILTER (WHERE data_ganho BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS ganhos,
-        COUNT(*) FILTER (WHERE data_protocolo BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS protocolados,
-        COUNT(*) FILTER (WHERE primeira_desqualificacao_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS desqualificados
-      FROM coorte
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
-    res.json({ success: true, data: r.rows[0] || {} });
-  } catch (err) {
-    console.error('Erro /inte-comerce/overview:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const result = await getAnalytics(params);
+    res.json({ success: true, data: result.overview });
+  } catch (error) {
+    console.error('Erro /inte-comerce/overview:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/* ============================================================
- * K02A | SAFRA | três estratégicos
- * ============================================================ */
+router.get('/all', requireAuth, async (req, res) => {
+  const params = validateParams(req, res);
+  if (!params) return;
+  try {
+    const result = await getAnalytics(params);
+    res.json({
+      success: true,
+      data: {
+        overview: result.overview,
+        strategic: result.strategic,
+        funnel: result.funnel,
+        daily: result.daily,
+        reasons: result.reasons,
+        dataAsOf: result.asOf,
+        safraComparison: result.safraComparison,
+        productionComparison: result.productionComparison,
+      },
+    });
+  } catch (error) {
+    console.error('Erro /inte-comerce/all:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 router.get('/strategic', requireAuth, async (req, res) => {
-  const params = readParams(req);
-  if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
-  if (params.error) return res.status(400).json({ success: false, error: params.error });
+  const params = validateParams(req, res);
+  if (!params) return;
   try {
-    const r = await analyticsQuery(cteCoorte(params) + `,
-      cnt AS (
-        SELECT
-          COUNT(*)::int AS recebidos,
-          COUNT(*) FILTER (WHERE chegou_em_contato AND (ja_em_contato_ao_receber OR primeiro_em_contato_em <= (SELECT as_of FROM p)))::int AS em_contato,
-          COUNT(*) FILTER (WHERE primeira_assinatura_original_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS assinados,
-          COUNT(*) FILTER (WHERE primeira_assinatura_original_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p)
-                         AND data_ganho >= primeira_assinatura_original_em AND data_ganho <= (SELECT as_of FROM p))::int AS assinados_que_ganharam
-        FROM coorte
-      )
-      SELECT recebidos, em_contato, assinados, assinados_que_ganharam,
-        ROUND(100.0 * assinados / NULLIF(recebidos, 0), 2)::numeric AS pct_recebidos_ate_assinados,
-        ROUND(100.0 * em_contato / NULLIF(recebidos, 0), 2)::numeric AS pct_recebidos_ate_em_contato,
-        ROUND(100.0 * assinados_que_ganharam / NULLIF(assinados, 0), 2)::numeric AS pct_assinados_ate_ganhos,
-        NULL::numeric AS variacao_safra_sem_maturidade_equivalente
-      FROM cnt
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
-    res.json({ success: true, data: r.rows[0] || {} });
-  } catch (err) {
-    console.error('Erro /inte-comerce/strategic:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const result = await getAnalytics(params);
+    res.json({ success: true, data: result.strategic });
+  } catch (error) {
+    console.error('Erro /inte-comerce/strategic:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/* ============================================================
- * K03A | SAFRA | progressão do funil
- * ============================================================ */
 router.get('/funnel', requireAuth, async (req, res) => {
-  const params = readParams(req);
-  if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
-  if (params.error) return res.status(400).json({ success: false, error: params.error });
+  const params = validateParams(req, res);
+  if (!params) return;
   try {
-    const r = await analyticsQuery(cteCoorte(params) + `
-      SELECT
-        COUNT(*)::int AS recebidos,
-        COUNT(*) FILTER (WHERE primeiro_trabalho_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS trabalhados,
-        COUNT(*) FILTER (WHERE chegou_em_contato AND (ja_em_contato_ao_receber OR primeiro_em_contato_em <= (SELECT as_of FROM p)))::int AS em_contato,
-        COUNT(*) FILTER (WHERE primeira_coleta_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS coleta,
-        COUNT(*) FILTER (WHERE primeiro_contrato_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS contrato,
-        COUNT(*) FILTER (WHERE primeira_emissao_original_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS emitidos,
-        COUNT(*) FILTER (WHERE primeira_assinatura_original_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS assinados,
-        COUNT(*) FILTER (WHERE data_ganho BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS ganhos,
-        COUNT(*) FILTER (WHERE data_protocolo BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS protocolados,
-        COUNT(*) FILTER (WHERE primeira_desqualificacao_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p))::int AS desqualificados_saida,
-        COUNT(*) FILTER (WHERE primeira_coleta_em IS NOT NULL AND NOT chegou_em_contato)::int AS coleta_sem_contato_observado
-      FROM coorte
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
-    res.json({ success: true, data: r.rows[0] || {} });
-  } catch (err) {
-    console.error('Erro /inte-comerce/funnel:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const result = await getAnalytics(params);
+    res.json({ success: true, data: result.funnel });
+  } catch (error) {
+    console.error('Erro /inte-comerce/funnel:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/* ============================================================
- * K04A | SAFRA | motivos de desqualificação
- * ============================================================ */
 router.get('/disqualify-reasons', requireAuth, async (req, res) => {
-  const params = readParams(req);
-  if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
-  if (params.error) return res.status(400).json({ success: false, error: params.error });
+  const params = validateParams(req, res);
+  if (!params) return;
   try {
-    const r = await analyticsQuery(cteCoorte(params) + `,
-      casos AS (
-        SELECT c.deal_id, d.motivo_perda AS motivo
-        FROM coorte c
-        JOIN core.deals d ON d.deal_id = c.deal_id
-        CROSS JOIN limites p
-        WHERE c.primeira_desqualificacao_em BETWEEN c.data_recebimento_corporativo AND p.as_of
-      )
-      SELECT COALESCE(NULLIF(BTRIM(c.motivo), ''), '(SEM MOTIVO)') AS motivo,
-             COUNT(DISTINCT c.deal_id)::int AS deals_desqualificados
-      FROM casos c GROUP BY 1
-      ORDER BY deals_desqualificados DESC, motivo
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
-    res.json({ success: true, data: r.rows });
-  } catch (err) {
-    console.error('Erro /inte-comerce/disqualify-reasons:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const result = await getAnalytics(params);
+    res.json({ success: true, data: result.reasons });
+  } catch (error) {
+    console.error('Erro /inte-comerce/disqualify-reasons:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/* ============================================================
- * K07A | SAFRA | gráfico diário duas barras
- * ============================================================ */
 router.get('/daily', requireAuth, async (req, res) => {
-  const params = readParams(req);
-  if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
-  if (params.error) return res.status(400).json({ success: false, error: params.error });
+  const params = validateParams(req, res);
+  if (!params) return;
   try {
-    const r = await analyticsQuery(cteCoorte(params) + `,
-      dias AS (
-        SELECT g::date AS dia FROM limites p
-        CROSS JOIN LATERAL generate_series(p.inicio, p.fim_exclusivo - 1, INTERVAL '1 day') g
-      ),
-      agg AS (
-        SELECT (data_recebimento_corporativo AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
-               COUNT(DISTINCT deal_id)::int AS recebidos,
-               COUNT(DISTINCT deal_id) FILTER (
-                 WHERE primeira_assinatura_original_em BETWEEN data_recebimento_corporativo AND (SELECT as_of FROM p)
-               )::int AS assinados_ate_corte
-        FROM coorte GROUP BY 1
-      )
-      SELECT TO_CHAR(d.dia, 'YYYY-MM-DD') AS dia,
-             COALESCE(a.recebidos, 0)::int AS recebidos,
-             COALESCE(a.assinados_ate_corte, 0)::int AS assinados_ate_corte,
-             ROUND(100.0 * a.assinados_ate_corte / NULLIF(a.recebidos, 0), 2)::numeric AS taxa_safra_pct
-      FROM dias d LEFT JOIN agg a USING (dia)
-      ORDER BY d.dia
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
-    res.json({ success: true, data: r.rows });
-  } catch (err) {
-    console.error('Erro /inte-comerce/daily:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const result = await getAnalytics(params);
+    res.json({ success: true, data: result.daily });
+  } catch (error) {
+    console.error('Erro /inte-comerce/daily:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/* ============================================================
- * K05A | SAFRA | tabela por colaborador
- * Indicadores posteriores calculados pelos eventos do Deal após o recebimento.
- * ============================================================ */
 router.get('/collaborators', requireAuth, async (req, res) => {
-  const params = readParams(req);
-  if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
-  if (params.error) return res.status(400).json({ success: false, error: params.error });
+  const params = validateParams(req, res);
+  if (!params) return;
   try {
-    const r = await analyticsQuery(cteRecebimentosAssessores(params) + `
-      SELECT m.colaborador_id::text AS colaborador_id,
-             COALESCE(c.nome, '(SEM ATRIBUICAO)') AS colaborador,
-             COALESCE(m.equipe_atual, '(SEM EQUIPE)') AS equipe_atual,
-             COUNT(*)::int AS recebimentos_deal_dia,
-             COUNT(*) FILTER (WHERE m.trabalhou_na_posse)::int AS trabalhados,
-             COUNT(*) FILTER (WHERE m.contatou_etapa)::int AS em_contato,
-             COUNT(DISTINCT m.deal_id) FILTER (WHERE m.coletou_apos_receber)::int AS coleta,
-             COUNT(*) FILTER (WHERE m.assinou_apos_receber)::int AS assinados,
-             COUNT(*) FILTER (WHERE m.ganhou_apos_receber)::int AS ganhos,
-             COUNT(DISTINCT m.deal_id) FILTER (WHERE m.protocolou_apos_receber)::int AS protocolados,
-             NULL::numeric AS pct_olos_pendente,
-             NULL::numeric AS pct_hubspot_pendente
-      FROM marcos m
-      LEFT JOIN core.colaboradores c ON c.colaborador_id = m.colaborador_id
-      GROUP BY 1, 2, 3
-      ORDER BY assinados DESC, recebimentos_deal_dia DESC
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
-    res.json({ success: true, data: r.rows });
-  } catch (err) {
-    console.error('Erro /inte-comerce/collaborators:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const result = await getAnalytics(params);
+    res.json({ success: true, data: result.collaborators });
+  } catch (error) {
+    console.error('Erro /inte-comerce/collaborators:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-/* ============================================================
- * K06A | SAFRA | tabela por equipe
- * ============================================================ */
 router.get('/teams', requireAuth, async (req, res) => {
-  const params = readParams(req);
-  if (!params) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
-  if (params.error) return res.status(400).json({ success: false, error: params.error });
+  const params = validateParams(req, res);
+  if (!params) return;
   try {
-    const r = await analyticsQuery(cteRecebimentosAssessores(params) + `
-      SELECT COALESCE(equipe_atual, '(SEM EQUIPE)') AS equipe,
-             COUNT(*)::int AS recebimentos_assessor_deal_dia,
-             COUNT(DISTINCT deal_id)::int AS deals_unicos_da_equipe,
-             COUNT(DISTINCT deal_id) FILTER (WHERE trabalhou_na_posse)::int AS trabalhados,
-             COUNT(DISTINCT deal_id) FILTER (WHERE contatou_etapa)::int AS em_contato,
-             COUNT(DISTINCT deal_id) FILTER (WHERE coletou_apos_receber)::int AS coleta,
-             COUNT(DISTINCT deal_id) FILTER (WHERE assinou_apos_receber)::int AS assinados,
-             COUNT(DISTINCT deal_id) FILTER (WHERE ganhou_apos_receber)::int AS ganhos,
-             COUNT(DISTINCT deal_id) FILTER (WHERE protocolou_apos_receber)::int AS protocolados
-      FROM marcos
-      GROUP BY 1
-      ORDER BY assinados DESC
-    `, [params.inicio, params.fim_exclusivo, params.equipe, params.colaborador_id, params.colaborador_ids_escopo, params.colaborador_ids_ativos]);
-    res.json({ success: true, data: r.rows });
-  } catch (err) {
-    console.error('Erro /inte-comerce/teams:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const result = await getAnalytics(params);
+    res.json({ success: true, data: result.teams });
+  } catch (error) {
+    console.error('Erro /inte-comerce/teams:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

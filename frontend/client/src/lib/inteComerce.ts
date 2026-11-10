@@ -4,6 +4,8 @@ import { API_BASE } from '@/lib/api';
 export interface InteComerceParams {
   start: string;
   end: string;
+  mode?: 'safra' | 'producao' | 'producao-3-meses';
+  selectedDay?: string;
   equipe?: string;
   colaboradorId?: string | number;
   produto?: string;
@@ -84,10 +86,29 @@ export interface InteComerceDaily {
   taxa_safra_pct: number | null;
 }
 
+export interface InteComerceAll {
+  overview: InteComerceOverview;
+  strategic: InteComerceStrategic;
+  funnel: InteComerceFunnel;
+  daily: InteComerceDaily[];
+  reasons: InteComerceReason[];
+  dataAsOf: string;
+  safraComparison?: {
+    day: Pick<InteComerceOverview, 'recebidos' | 'assinados' | 'ganhos' | 'protocolados'>;
+    month: Pick<InteComerceOverview, 'recebidos' | 'assinados' | 'ganhos' | 'protocolados'>;
+  };
+  productionComparison?: {
+    day: Pick<InteComerceOverview, 'recebidos' | 'assinados' | 'ganhos' | 'protocolados'>;
+    month: Pick<InteComerceOverview, 'recebidos' | 'assinados' | 'ganhos' | 'protocolados'>;
+  };
+}
+
 function buildUrl(path: string, params: InteComerceParams): string {
   const url = new URL(`${API_BASE}/metrics/inte-comerce${path}`, window.location.origin);
   url.searchParams.append('start', params.start);
   url.searchParams.append('end', params.end);
+  if (params.mode) url.searchParams.append('mode', params.mode);
+  if (params.selectedDay) url.searchParams.append('selectedDay', params.selectedDay);
   if (params.equipe && params.equipe !== 'todas') url.searchParams.append('equipe', params.equipe);
   if (params.colaboradorId != null && String(params.colaboradorId).trim() !== '') {
     url.searchParams.append('colaboradorId', String(params.colaboradorId));
@@ -111,3 +132,4 @@ export const fetchInteComerceDisqualify      = (p: InteComerceParams) => call<In
 export const fetchInteComerceDaily           = (p: InteComerceParams) => call<InteComerceDaily[]>('/daily', p);
 export const fetchInteComerceCollaborators   = (p: InteComerceParams) => call<InteComerceCollaborator[]>('/collaborators', p);
 export const fetchInteComerceTeams           = (p: InteComerceParams) => call<InteComerceTeam[]>('/teams', p);
+export const fetchInteComerceAll             = (p: InteComerceParams) => call<InteComerceAll>('/all', p);

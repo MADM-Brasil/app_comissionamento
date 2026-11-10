@@ -61,6 +61,28 @@ function safeParse(value) {
   } catch { return {}; }
 }
 
+async function requesterUnitId(client, metadata) {
+  const storedUnit = Number(metadata?.unidade_id ?? metadata?.unidadeId);
+  if (Number.isInteger(storedUnit) && storedUnit >= 1 && storedUnit <= 5) return storedUnit;
+  const requesterEmail = String(metadata?.solicitante_email || '').trim();
+  if (!requesterEmail) return null;
+
+  try {
+    const result = await client.query(
+      `SELECT unidade_id
+         FROM core.view_app_colaboradores
+        WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
+        LIMIT 1`,
+      [requesterEmail]
+    );
+    const unit = Number(result.rows[0]?.unidade_id);
+    return Number.isInteger(unit) && unit >= 1 && unit <= 5 ? unit : null;
+  } catch (error) {
+    console.error('[linkHubBatchQueue] Falha ao consultar unidade do solicitante:', error.message);
+    return null;
+  }
+}
+
 function describeFailure(error, attempts) {
   const parts = [];
   parts.push(error.message || 'Falha na movimentação Link Hub.');
@@ -174,6 +196,10 @@ async function markSuccess(client, ticket, resultData) {
   const { regra, mensagem } = resolveRuleLabel(resultData);
   const movedFromBase = Boolean(resultData.movedFromBaseLeads);
   const agora = new Date().toISOString();
+  const validation = observacao.validacaoCoordenador;
+  const coordinatorNote = validation?.acao === 'autorizar'
+    ? `Validado pelo coordenador (${validation.nome || validation.usuario || 'nome não informado'})`
+    : '';
 
   const nova = {
     ...observacao,
@@ -199,7 +225,7 @@ async function markSuccess(client, ticket, resultData) {
       produto: resultData.produto || observacao.produto || null,
     },
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
-    observacao: mensagem,
+    observacao: [mensagem, coordinatorNote].filter(Boolean).join('\n'),
     colaboradorDestinoNome: ticket.colaborador_destino_nome,
     validacaoFinal: true,
     _worker: {
@@ -234,6 +260,10 @@ async function markFailure(client, ticket, error) {
   const agora = new Date().toISOString();
 
   const observacaoTexto = describeFailure(error, tentativas);
+  const validation = observacao.validacaoCoordenador;
+  const coordinatorNote = validation?.acao === 'autorizar'
+    ? `Validado pelo coordenador (${validation.nome || validation.usuario || 'nome não informado'})`
+    : '';
 
   const nova = {
     ...observacao,
@@ -247,7 +277,7 @@ async function markFailure(client, ticket, error) {
       ...(error.partialResult ? { resultadoParcial: error.partialResult } : {}),
     },
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
-    observacao: observacaoTexto,
+    observacao: [observacaoTexto, coordinatorNote].filter(Boolean).join('\n'),
     _worker: {
       ...(observacao._worker || {}),
       tentativas,
@@ -283,7 +313,10 @@ async function markFailure(client, ticket, error) {
     try {
       const meta = ticket.metadados || {};
       const partial = error.partialResult || {};
-      await teamsNotificador.enviar({
+      const unidadeId = statusFinal === 'bloqueado'
+        ? await requesterUnitId(client, meta)
+        : (meta.unidade_id ?? meta.unidadeId ?? null);
+      const notification = await teamsNotificador.enviar({
         titulo: 'Movimentação Link Hub — Falha',
         assunto: 'MovimentacaoLinkHub',
         descricao:
@@ -291,12 +324,16 @@ async function markFailure(client, ticket, error) {
           `Status: ${statusFinal} | ` +
           `Tentativas: ${tentativas}/${MAX_ATTEMPTS}`,
         solicitante: meta.solicitante_nome || meta.solicitante_email || 'N/A',
+        solicitanteEmail: meta.solicitante_email || null,
         equipe: meta.origem_equipe || 'N/A',
         anexosMarkdown: 'Nenhum anexo',
         cliente: `Deal ${ticket.crm_lead_id || 'N/A'}`,
         equipeDestino: meta.destino_equipe || 'N/A',
         assessorDestino: ticket.colaborador_destino_nome || 'N/A',
-        status: statusFinal,
+        status: statusFinal === 'bloqueado' ? 'coordenador' : statusFinal,
+        unidadeId,
+        idTicketMovimentacao: ticket.id_ticket_movimentacao,
+        idTicket: ticket.ticket_id,
         mensagem: observacaoTexto,
         pipeline: partial.previousPipeline || null,
         stage: partial.previousStage || null,
@@ -304,6 +341,9 @@ async function markFailure(client, ticket, error) {
         link: meta.link_hub || null,
         produto: observacao.produto || meta.produto || null,
       });
+      if (!notification.success) {
+        console.error('Falha ao enviar notificação Teams (Link Hub):', notification.error);
+      }
     } catch (notifErr) {
       console.error('Erro ao enviar notificação Teams (Link Hub):', notifErr);
     }
