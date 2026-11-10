@@ -19,22 +19,6 @@
 //     produto fora do resolveTeamProduct.
 //
 // Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
-//
-// ─── [CHANGELOG ASSESSOR_PLUS] ──────────────────────────────────────
-// O nível ASSESSOR_PLUS (promoção por e-mail, whitelist ASSESSOR_PLUS_EMAILS)
-// foi criado como "Suporte com permissões de coordenador". Para reconhecê-lo
-// sem perder a whitelist, o middleware principal passou a usar
-// `accessControl.getEffectiveAccessLevel(actor)` em vez de
-// `getAccessLevel(actor.cargo, actor.status)`.
-//
-// Impacto nas rotas:
-//   • Escopo, Busca Cliente, Movimentar, Reportar → liberados (ASSESSOR_PLUS ≥ SUPERVISAO).
-//   • SalesOps (`requireAdmin`) → continuam bloqueados (ASSESSOR_PLUS < ADMINISTRATIVO).
-//   • `validateHubSpotMovementAccess` → já cobre ASSESSOR_PLUS internamente;
-//     `enforceDestinationSameTeam: true` continua só afetando supervisores,
-//     então ASSESSOR_PLUS herda a liberdade de destino do coordenador.
-//   • `supervisorDeveTravarEquipe` / `deveOcultarEquipesReservadas` → retornam
-//     `false` para ASSESSOR_PLUS (cargo = assessor, não supervisor).
 
 import express from 'express';
 import { createHash, randomUUID } from 'crypto';
@@ -46,7 +30,7 @@ import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
 import { HUBSPOT_PORTAL_ID_CONFIGURED, buscarClienteResumo } from '../services/hubspot.js';
 import {
-  accessControl,                    // singleton — expõe getEffectiveAccessLevel, LEVELS, etc.
+  accessControl,                    // necessário para LEVELS.JURIDICO e getAccessLevel
   getActiveSupportUser,
   isSupportAdmin,
   isSupportCoordinatorOrAbove,
@@ -221,24 +205,14 @@ const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, r
 // ============================================================
 // Middleware principal de autenticação.
 //
-// Aceita JURIDICO, SUPERVISAO+ e ASSESSOR_PLUS.
+// Aceita JURIDICO além de SUPERVISAO+. O nível JURIDICO
+// (Analista Jurídico / Coordenador Jurídico / Supervisor Jurídico /
+// Analista) é liberado APENAS para consultar a Busca Cliente — todas
+// as demais rotas são bloqueadas logo abaixo pelo middleware
+// `requireNonJuridico`.
 //
-// [CHANGELOG] Antes usava `getAccessLevel(actor.cargo, actor.status)`,
-// que ignora a whitelist ASSESSOR_PLUS_EMAILS e fazia um assessor
-// promovido cair em `LEVELS.ASSESSOR` (2), recebendo 403 logo aqui
-// ("Perfil sem acesso à página de Suporte.").
-//
-// Agora usa `getEffectiveAccessLevel(actor)`, que aplica a promoção:
-//   • cargo "assessor" + e-mail na whitelist → nível 4 (ASSESSOR_PLUS)
-//   • cargo "assessor" (fora)                → nível 2 (bloqueado abaixo)
-//   • juridico                               → nível 1 (marcado `req.supportIsJuridico`)
-//   • supervisor/coordenador/admin           → nível >= 3 (liberado)
-//
-// Marca também `req.supportIsAssessorPlus` para handlers/workers
-// consultarem quando precisarem de regras específicas (por ora, nenhum
-// usa — todas as decisões passam por `isSupportSupervisor`/
-// `isSupportAdmin`/`validateHubSpotMovementAccess`, que já distinguem
-// corretamente ASSESSOR_PLUS de supervisor e de admin).
+// Marca `req.supportIsJuridico` para os handlers consultarem quando
+// precisarem aplicar regras específicas (ex.: buscar-cliente).
 // ============================================================
 router.use(asyncRoute(async (req, res, next) => {
   const requesterEmail = email(req.session?.userId, 'Identidade da sessão');
@@ -247,10 +221,8 @@ router.use(asyncRoute(async (req, res, next) => {
   const actor = await getActiveSupportUser(requesterEmail);
   if (!actor) throw fail(403, 'Perfil sem acesso à página de Suporte.');
 
-  // [CHANGELOG] Nível efetivo — reconhece ASSESSOR_PLUS por e-mail.
-  const level = accessControl.getEffectiveAccessLevel(actor);
+  const level = accessControl.getAccessLevel(actor.cargo, actor.status);
   const isJuridico = level === accessControl.LEVELS.JURIDICO;
-  const isAssessorPlus = level === accessControl.LEVELS.ASSESSOR_PLUS;
   const isSupervisorOrAbove = level >= accessControl.LEVELS.SUPERVISAO;
 
   if (!isSupervisorOrAbove && !isJuridico) {
@@ -259,7 +231,6 @@ router.use(asyncRoute(async (req, res, next) => {
 
   req.supportActor = { ...actor, email: email(actor.email, 'E-mail do usuário', true) };
   req.supportIsJuridico = isJuridico;
-  req.supportIsAssessorPlus = isAssessorPlus;
   next();
 }));
 
@@ -272,9 +243,6 @@ function requireNonJuridico(req, res, next) {
   next();
 }
 
-// [NOTA] `requireAdmin` continua usando `isSupportAdmin(cargo)` de propósito:
-// ASSESSOR_PLUS NÃO é admin (nível 4 < 6), então rotas SalesOps permanecem
-// bloqueadas. Não troque por `getEffectiveAccessLevel` sem revisar a regra.
 function requireAdmin(req) {
   if (!isSupportAdmin(req.supportActor.cargo)) throw fail(403, 'Sem permissão para esta operação.');
 }
@@ -302,10 +270,6 @@ async function destinationFor(req, enforceEmail = false, { enforceDestinationSam
 // Supervisor em unidade travada (2,3,4,5) OU pertencente a uma equipe
 // reservada (Equipe Tatiane) → destino travado na própria equipe.
 // Coordenador/Admin não são afetados.
-//
-// [NOTA] Para ASSESSOR_PLUS `isSupportSupervisor` retorna `false` (cargo =
-// "assessor"), então a função retorna `false` — comportamento de
-// coordenador, conforme especificado.
 function supervisorDeveTravarEquipe(actor) {
   if (!isSupportSupervisor(actor?.cargo)) return false;
 
@@ -318,9 +282,6 @@ function supervisorDeveTravarEquipe(actor) {
 
 // Supervisor de unidade 1 que NÃO pertence a uma equipe reservada → não deve
 // ver equipes reservadas (ex.: Equipe Tatiane) na lista de destino.
-//
-// [NOTA] Para ASSESSOR_PLUS, mesma lógica de `supervisorDeveTravarEquipe`:
-// `isSupportSupervisor` é `false` → retorna `false` (nenhuma equipe oculta).
 function deveOcultarEquipesReservadas(actor) {
   if (!isSupportSupervisor(actor?.cargo)) return false;
 
@@ -456,8 +417,6 @@ router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
     success: true,
     debug: {
       supportActorCompleto: actor,
-      supportLevel: accessControl.getEffectiveAccessLevel(actor),
-      supportIsAssessorPlus: !!req.supportIsAssessorPlus,
       calculo: {
         isAdmin,
         ehHO,
@@ -490,14 +449,12 @@ router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
 // Regra de unidade:
 //   - Admin → sem filtro.
 //   - HO (unidade_id = 4) → sem filtro (HO vê todas as unidades).
-//   - Coordenador / Supervisor / ASSESSOR_PLUS com unidade_id (1, 2, 3)
-//     → apenas da própria unidade.
+//   - Coordenador / Supervisor com unidade_id (1, 2, 3) → apenas da própria unidade.
 //   - Sem unidade_id → fallback sem filtro (com aviso no log).
 //
 // Regra de equipes reservadas (Equipe Tatiane):
 //   - Supervisor fora da equipe reservada na unidade 1 → não vê a equipe
-//     reservada na lista. ASSESSOR_PLUS NÃO é afetado por esta regra
-//     (isSupportSupervisor retorna false), igual ao coordenador.
+//     reservada na lista.
 //
 // Fonte: view_app_metricas_assessores (mês corrente) JOIN view_app_colaboradores.
 //  - m.data_metrica do mês corrente garante apenas colaboradores do mês.
@@ -588,12 +545,8 @@ router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
     });
   }
 
-  // [CHANGELOG] Log inclui `level` e `isAssessorPlus` para facilitar
-  // diagnosticar em produção (basta ler uma linha).
-  const effectiveLevel = accessControl.getEffectiveAccessLevel(actor);
   console.log(
     `[suporte/escopo] user=${actor.email} cargo=${actor.cargo} ` +
-    `level=${effectiveLevel} isAssessorPlus=${!!req.supportIsAssessorPlus} ` +
     `unidade_id=${unidadeId} ehHO=${ehHO} isAdmin=${isAdmin} aplicarFiltro=${aplicarFiltroUnidade} ` +
     `travaEquipe=${supervisorDeveTravarEquipe(actor)} ocultaReservadas=${ocultarEquipesReservadas} ` +
     `mes=${dataMetrica} equipes=${equipesSet.size} assessores=${assessores.length}`
@@ -633,9 +586,14 @@ router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
 //     `restrito: true` e `motivo` (dados completos + aviso) para o
 //     frontend exibir o banner informativo "Acesso jurídico: ...".
 //
-// Regra antiga (mantida para supervisor):
-//   - Supervisor só enxerga detalhes/link de clientes da própria equipe.
-//   - Coordenador/Admin/ASSESSOR_PLUS não são afetados.
+// [ALTERADO] Supervisor:
+//   - Recebe o payload completo mesmo quando o cliente está em outra equipe.
+//   - `link` é forçado para `null` (card da HubSpot bloqueado) e o backend
+//     retorna `restrito: true` + `motivo` para o frontend exibir o aviso.
+//   - Quando o cliente está na própria equipe, comportamento antigo
+//     (dados completos + link liberado, sem marca).
+//
+// Coordenador/Admin não são afetados em nenhum dos casos.
 // ---------------------- Busca de cliente na HubSpot ----------------------
 router.get('/buscar-cliente', asyncRoute(async (req, res) => {
   const telefone = text(req.query.telefone, 'Telefone');
@@ -674,9 +632,14 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
   }
 
   // JURIDICO: retorna dados completos.
-  // Quando o cliente está em outra equipe, anexa `restrito: true` +
-  // `motivo` (para o banner informativo do frontend), mas mantém o
-  // payload (contato, negocio, responsavel, link) intacto.
+  // Supervisor de outra equipe: retorna dados completos, mas bloqueia o link.
+  //
+  // [ALTERADO] Antes, quando o cliente estava em outra equipe e o solicitante
+  // era supervisor, a resposta vinha SÓ com `{ found, restrito, equipeCliente,
+  // motivo }` — sem contato/negocio/responsavel. Agora o payload completo é
+  // retornado normalmente; o que fica bloqueado é o campo `link` (card da
+  // HubSpot), que é zerado. O frontend usa `restrito` + `motivo` para exibir
+  // o aviso e usa `link === null` para esconder/avisar o botão de acesso.
   const equipeCliente = resultado.responsavel?.equipe || null;
   const equipeSolicitante = normalizeAccessValue(actor.nome_equipe);
   const clienteEmOutraEquipe = Boolean(
@@ -685,7 +648,7 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
 
   if (resultado.found && !resultado.duplicado && clienteEmOutraEquipe) {
     if (req.supportIsJuridico) {
-      // JURIDICO: dados completos + aviso informativo.
+      // JURIDICO: dados completos + aviso informativo (link liberado).
       return res.json({
         success: true,
         data: {
@@ -696,23 +659,23 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
         },
       });
     }
-    // [NOTA] `isSupportSupervisor` retorna `false` para ASSESSOR_PLUS
-    // (cargo = "assessor"), então ASSESSOR_PLUS cai no caminho normal
-    // (payload completo), igual ao coordenador.
     if (isSupportSupervisor(actor.cargo)) {
-      // Supervisor: bloqueia (comportamento original).
+      // [NOVO] Supervisor: dados completos + aviso, mas SEM link do card.
       return res.json({
         success: true,
         data: {
-          found: true,
+          ...resultado,
+          link: null, // bloqueia o botão "Abrir card na HubSpot"
           restrito: true,
           equipeCliente,
-          motivo: `Cliente se encontra na equipe ${equipeCliente}. Fale com seu coordenador para obter mais informações do card.`,
+          motivo:
+            `Cliente se encontra na equipe ${equipeCliente}. ` +
+            `O acesso ao card na HubSpot está bloqueado — fale com seu coordenador ` +
+            `para obter mais informações.`,
         },
       });
     }
-    // Coordenador/Admin/ASSESSOR_PLUS: cai no caminho normal
-    // (payload completo sem marca).
+    // Coordenador/Admin: cai no caminho normal (payload completo sem marca).
   }
 
   res.json({ success: true, data: resultado });
@@ -724,7 +687,6 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
 //
 // JURIDICO: permitido (é o único caso em que JURIDICO pode criar
 // um ticket — para escalar duplicados ao time de Suporte).
-// ASSESSOR_PLUS: permitido (herda o acesso do coordenador).
 // ---------------------- Encaminhar caso ao Suporte ----------------------
 router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
   const telefone = text(req.body?.telefone, 'Telefone');
@@ -775,7 +737,7 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Movimentação normal (CRM) ----------------------
-// Bloqueado para JURIDICO. Liberado para ASSESSOR_PLUS (regras de coordenador).
+// Bloqueado para JURIDICO.
 router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const body = req.body;
 
@@ -832,8 +794,7 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
 
   // Supervisor em unidade travada (2,3,4,5) OU pertencente à Equipe Tatiane
   // → destino obrigatoriamente na própria equipe. Coordenador/Admin e demais
-  // supervisores seguem o fluxo antigo. ASSESSOR_PLUS não é supervisor
-  // (isSupportSupervisor retorna false), então cai no fluxo livre.
+  // supervisores seguem o fluxo antigo.
   const destination = await destinationFor(req, false, {
     enforceDestinationSameTeam: supervisorDeveTravarEquipe(req.supportActor),
   });
@@ -931,12 +892,7 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
 }));
 
 // ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
-// Bloqueado para JURIDICO. Liberado para ASSESSOR_PLUS (regras de coordenador).
-//
-// [NOTA] `enforceDestinationSameTeam: true` afeta APENAS supervisores
-// (dentro de `validateHubSpotMovementAccess`). Para ASSESSOR_PLUS (não
-// supervisor) a flag é ignorada — comportamento de coordenador: livre
-// para qualquer equipe.
+// Bloqueado para JURIDICO.
 router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async (req, res) => {
   const { links } = req.body;
   if (!Array.isArray(links) || links.length < 1 || links.length > 50) {
@@ -956,7 +912,7 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
 
   // Regra do fluxo Link Hub:
   //   - Supervisor só pode direcionar para a própria equipe (qualquer unidade).
-  //   - Coordenador/Admin/ASSESSOR_PLUS não são afetados por esta restrição.
+  //   - Coordenador/Admin não são afetados por esta restrição.
   const destination = await destinationFor(req, true, { enforceDestinationSameTeam: true });
   const actor = req.supportActor;
 
@@ -1091,11 +1047,6 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
 
 // ---------------------- Histórico unificado ----------------------
 // Bloqueado para JURIDICO.
-//
-// [NOTA] `historyScope` continua retornando apenas os tickets do próprio
-// solicitante para quem não é admin. ASSESSOR_PLUS cai nessa regra —
-// comportamento idêntico ao coordenador (só vê os próprios tickets,
-// a menos que seja admin).
 router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
   const status = text(req.query.status_mapeamento, 'Status', { max: 40 }) || null;
@@ -1164,7 +1115,7 @@ router.get('/ticket-suporte', requireNonJuridico, asyncRoute(async (req, res) =>
 //   - Resposta inclui `anexos_com_link` e `anexos_sem_link`
 //     para o frontend detectar o fallback se quiser avisar.
 //
-// Bloqueado para JURIDICO. Liberado para ASSESSOR_PLUS.
+// Bloqueado para JURIDICO.
 // ============================================================
 router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), asyncRoute(async (req, res) => {
   const title = text(req.body.titulo, 'Título', { required: true, max: 500 });
@@ -1264,7 +1215,6 @@ router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), 
 
 // ---------------------- Edição manual (SalesOps) ----------------------
 // JURIDICO: bloqueado por `requireAdmin` (JURIDICO < ADMINISTRATIVO).
-// ASSESSOR_PLUS: bloqueado por `requireAdmin` (ASSESSOR_PLUS < ADMINISTRATIVO).
 //
 // [NOVO] Agora aceita também edição dos campos do cliente:
 //   - nome_cliente_informado, sobrenome_cliente_informado, email_cliente_informado,
@@ -1437,7 +1387,6 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
 }));
 
 // JURIDICO: bloqueado por `requireAdmin`.
-// ASSESSOR_PLUS: bloqueado por `requireAdmin`.
 router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
@@ -1483,8 +1432,6 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
 //     suportada por esta rota.
 //
 // JURIDICO: bloqueado por `requireAdmin`.
-// ASSESSOR_PLUS: bloqueado por `requireAdmin` (regra de coordenador,
-// não de admin — só quem vê SalesOps reprocessa).
 router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);

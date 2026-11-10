@@ -41,6 +41,7 @@ import { getEffectiveAccessLevel, LEVELS } from "@/lib/accessControl";
 // ---------------------- Tipos ----------------------
 interface MovementItem {
   id: string;
+  ticket?: TicketMovimentacao;
   timestamp: string;
   cliente: string;
   email: string;
@@ -49,7 +50,7 @@ interface MovementItem {
   origem: string;
   equipe: string;
   assessor: string;
-  status: "pendente" | "processando" | "concluido" | "suporte" | "aviso" | "erro";
+  status: string;
   resultado: string;
   usuario: string;
   atualizadoEm: string;
@@ -63,6 +64,7 @@ interface MovementItem {
     status?: string;
     erro?: boolean;
     mensagem?: string;
+    link?: string;
   };
 }
 
@@ -82,6 +84,7 @@ interface ReportItem {
 
 interface TicketMovimentacao {
   id_ticket_movimentacao: number;
+  id_ticket?: number;
   crm_origem: string;
   tipo_solicitacao: string;
   nome_cliente_informado: string;
@@ -99,6 +102,25 @@ interface TicketMovimentacao {
   motivo_solicitacao?: string;
   criado_em: string;
   produto?: string | null;
+  ticket_titulo?: string;
+  ticket_descricao?: string;
+  solicitante_nome?: string;
+  solicitante_email?: string;
+  unidade_id?: number | null;
+  link_card?: string | null;
+  observacao?: string;
+  observacao_data?: Record<string, unknown>;
+  validacaoCoordenador?: {
+    acao?: string;
+    usuario?: string;
+    nome?: string;
+    em?: string;
+  };
+  hubspot?: {
+    mensagem?: string;
+    pipelineNome?: string | null;
+    stageNome?: string | null;
+  };
 }
 
 interface TicketSuporte {
@@ -282,6 +304,7 @@ const getStatusInfo = (status: string) => {
     no_pipeline: { label: "No Pipeline", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
     fora_pipeline: { label: "Fora do Pipeline", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
     bloqueado: { label: "Bloqueado", icon: <Ban className="w-3 h-3" />, className: "bg-red-100 text-red-800" },
+    coordenador: { label: "Coordenador", icon: <Users className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
     ENVIADO: { label: "Enviado", icon: <Send className="w-3 h-3" />, className: "bg-blue-50 text-blue-700" },
     SUSPEITO: { label: "Suspeito", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
     CONCLUÍDO: { label: "Concluído", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
@@ -297,14 +320,14 @@ const getStatusInfo = (status: string) => {
 // Todos os status possíveis de uma movimentação (não removido do sistema,
 // só não aparecem todos como coluna no quadro — ver MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS).
 const MOVIMENTACOES_STATUS_COLUMNS = [
-  'pendente', 'processando', 'suporte', 'aviso', 'bloqueado', 'erro', 'fora_pipeline', 'no_pipeline', 'concluido',
+  'pendente', 'processando', 'suporte', 'aviso', 'coordenador', 'bloqueado', 'erro', 'fora_pipeline', 'no_pipeline', 'concluido',
 ];
 
 // Colunas exibidas no quadro de funis de Movimentações (Visão SalesOps).
 // Pendente/Processando/Fora do Pipeline/No Pipeline ficam ocultos, mas um
 // ticket que esteja num desses status continua existindo normalmente.
 const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
-  'suporte', 'aviso', 'bloqueado', 'erro', 'concluido',
+  'suporte', 'aviso', 'coordenador', 'bloqueado', 'erro', 'concluido',
 ];
 
 const EXCLUDED_TEAMS = [
@@ -313,6 +336,7 @@ const EXCLUDED_TEAMS = [
   'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
   'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
   'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice','Equipe Debora',
+  'Equipe Gabriela Toledo',
 ];
 
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
@@ -421,8 +445,14 @@ export default function Suporte() {
   // [CHANGELOG] ASSESSOR_PLUS também inicia em "reportar" — mesma UX
   // do coordenador (que é o nível com quem ele compartilha permissões).
   // Nada a mudar aqui: `isJuridico` já é `false` para ASSESSOR_PLUS.
-  const [activeTab, setActiveTab] = useState<"movimentacao" | "busca" | "reportar" | "salesops">(
-    isJuridico ? "busca" : "reportar"
+  const coordinatorRequested =
+    new URLSearchParams(window.location.search).get("aba") === "coordenador";
+  const initialCoordinatorCaseId = new URLSearchParams(window.location.search).get("id");
+  const isCoordinator = accessLevel >= LEVELS.COORDENADOR;
+  const [activeTab, setActiveTab] = useState<
+    "movimentacao" | "busca" | "reportar" | "salesops" | "coordenador"
+  >(
+    isJuridico ? "busca" : coordinatorRequested && isCoordinator ? "coordenador" : "reportar"
   );
 
   // Liberação da página para JURIDICO e ASSESSOR_PLUS (ambos têm
@@ -441,6 +471,12 @@ export default function Suporte() {
     }
   }, [isJuridico, activeTab]);
 
+  useEffect(() => {
+    if (!isCoordinator && activeTab === "coordenador") {
+      setActiveTab(isJuridico ? "busca" : "reportar");
+    }
+  }, [activeTab, isCoordinator, isJuridico]);
+
   if (!canAccessPage) return <Redirect to="/" />;
 
   // Tabs visíveis — JURIDICO só vê "Busca Cliente".
@@ -450,6 +486,7 @@ export default function Suporte() {
     { id: "reportar", label: "Reportar", icon: Search },
     { id: "movimentacao", label: "Movimentar", icon: ClipboardList },
     { id: "busca", label: "Busca Cliente", icon: Users },
+    ...(isCoordinator ? [{ id: "coordenador", label: "Visão Coordenador", icon: CheckCircle }] : []),
     ...(isAdmin ? [{ id: "salesops", label: "Visão SalesOps", icon: ChartNoAxesCombined }] : []),
   ] as const;
 
@@ -484,6 +521,9 @@ export default function Suporte() {
       {activeTab === "busca" && <BuscaClienteTab />}
       {activeTab === "reportar" && !isJuridico && <ReportarTab />}
       {activeTab === "salesops" && isAdmin && !isJuridico && <SalesOpsTab />}
+      {activeTab === "coordenador" && isCoordinator && !isJuridico && (
+        <CoordinatorValidationTab initialCaseId={initialCoordinatorCaseId} />
+      )}
     </DashboardLayout>
   );
 }
@@ -514,6 +554,18 @@ function MovimentacaoTab() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [movements, setMovements] = useState<MovementItem[]>([]);
+  const [historyEditTicket, setHistoryEditTicket] = useState<TicketMovimentacao | null>(null);
+  const [historyEditForm, setHistoryEditForm] = useState({
+    nome_cliente_informado: '',
+    sobrenome_cliente_informado: '',
+    email_cliente_informado: '',
+    telefone_cliente_informado: '',
+    cpf_cliente_informado: '',
+    origem_cliente_informada: '',
+  });
+  const [savingHistoryEdit, setSavingHistoryEdit] = useState(false);
+  const [historyReprocessTicket, setHistoryReprocessTicket] = useState<TicketMovimentacao | null>(null);
+  const [historyReprocessing, setHistoryReprocessing] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
@@ -697,6 +749,7 @@ function MovimentacaoTab() {
 
           return {
             id: `db_${ticket.id_ticket_movimentacao}`,
+            ticket: ticket as TicketMovimentacao,
             timestamp: ticket.criado_em,
             cliente: ticket.crm_origem === 'HUBSPOT_LINK'
               ? hubspotData?.dealName || `Deal ${ticket.crm_lead_id || ''}`.trim()
@@ -885,7 +938,7 @@ function MovimentacaoTab() {
     if (!statusMatch) return false;
     return isWithinDateRange(m.timestamp, filterDataInicio, filterDataFim);
   });
-  const statusOptions = ["todos", "pendente", "processando", "concluido", "suporte", "aviso", "erro"];
+  const statusOptions = ["todos", "pendente", "processando", "concluido", "suporte", "aviso", "coordenador", "erro"];
 
   const exportHistory = () => {
     if (movements.length === 0) return;
@@ -923,6 +976,97 @@ function MovimentacaoTab() {
   const clearHistory = () => {
     if (confirm("Limpar todo o histórico local?")) {
       setMovements([]); setMessage({ text: "Histórico local limpo.", type: "success" });
+    }
+  };
+
+  const historyReprocessableStatuses = new Set([
+    'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
+  ]);
+  const openHistoryEdit = (ticket: TicketMovimentacao) => {
+    setHistoryEditTicket(ticket);
+    setHistoryEditForm({
+      nome_cliente_informado: ticket.nome_cliente_informado || '',
+      sobrenome_cliente_informado: ticket.sobrenome_cliente_informado || '',
+      email_cliente_informado: ticket.email_cliente_informado || '',
+      telefone_cliente_informado: ticket.telefone_cliente_informado || '',
+      cpf_cliente_informado: ticket.cpf_cliente_informado || '',
+      origem_cliente_informada: ticket.origem_cliente_informada || '',
+    });
+  };
+  const saveHistoryCorrections = async () => {
+    if (!historyEditTicket) return;
+    setSavingHistoryEdit(true);
+    try {
+      const response = await fetch(
+        `${API_BASE}/suporte/tickets-movimentacao/${historyEditTicket.id_ticket_movimentacao}`,
+        {
+          method: 'PATCH',
+          headers: getCsrfHeaders(),
+          credentials: 'include',
+          body: JSON.stringify(historyEditForm),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Erro ao corrigir os dados do caso.');
+      }
+      setMovements(previous => previous.map(movement =>
+        movement.ticket?.id_ticket_movimentacao === historyEditTicket.id_ticket_movimentacao
+          ? {
+              ...movement,
+              cliente: `${historyEditForm.nome_cliente_informado} ${historyEditForm.sobrenome_cliente_informado}`.trim(),
+              email: historyEditForm.email_cliente_informado,
+              telefone: historyEditForm.telefone_cliente_informado,
+              cpf: historyEditForm.cpf_cliente_informado,
+              origem: historyEditForm.origem_cliente_informada,
+              ticket: movement.ticket ? { ...movement.ticket, ...historyEditForm } : undefined,
+            }
+          : movement
+      ));
+      setHistoryEditTicket(null);
+      setMessage({ text: 'Dados corrigidos. Agora você pode reprocessar o caso.', type: 'success' });
+      await loadUserHistory();
+    } catch (error) {
+      setMessage({
+        text: error instanceof Error ? error.message : 'Erro ao corrigir os dados do caso.',
+        type: 'error',
+      });
+    } finally {
+      setSavingHistoryEdit(false);
+    }
+  };
+  const reprocessHistoryTicket = async ({ force, observacao }: { force: boolean; observacao: string }) => {
+    if (!historyReprocessTicket) return;
+    setHistoryReprocessing(true);
+    try {
+      const response = await fetch(
+        `${API_BASE}/suporte/tickets-movimentacao/${historyReprocessTicket.id_ticket_movimentacao}/reprocessar`,
+        {
+          method: 'POST',
+          headers: getCsrfHeaders(),
+          credentials: 'include',
+          body: JSON.stringify({ force, observacao }),
+        },
+      );
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Erro ao reprocessar o caso.');
+      }
+      setMovements(previous => previous.map(movement =>
+        movement.ticket?.id_ticket_movimentacao === historyReprocessTicket.id_ticket_movimentacao
+          ? { ...movement, status: 'pendente' }
+          : movement
+      ));
+      setHistoryReprocessTicket(null);
+      setMessage({ text: data.message || 'Caso reenfileirado para reprocessamento.', type: 'success' });
+      window.setTimeout(() => { void loadUserHistory(); }, 5000);
+    } catch (error) {
+      setMessage({
+        text: error instanceof Error ? error.message : 'Erro ao reprocessar o caso.',
+        type: 'error',
+      });
+    } finally {
+      setHistoryReprocessing(false);
     }
   };
 
@@ -1268,11 +1412,13 @@ function MovimentacaoTab() {
                   <th>Status</th>
                   <th>Obs. Comercial</th>
                   <th>Resultado</th>
+                  {isSupervisor && <th>Ações</th>}
                 </tr>
               </thead>
               <tbody>
                 {filteredMovements.map(m => {
                   const info = getStatusInfo(m.status);
+                  const ticket = m.ticket;
                   return (
                     <tr key={m.id}>
                       <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
@@ -1296,8 +1442,46 @@ function MovimentacaoTab() {
                       </td>
                       <td className="max-w-[200px] whitespace-pre-wrap break-words" title={m.observacao_sales_ops || ''}>
                         {m.observacao_sales_ops || '—'}
+                        {m.hubspot?.link && (
+                          <a
+                            href={m.hubspot.link}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="mt-1 inline-flex items-center gap-1 text-[#2F6FED] hover:underline"
+                          >
+                            Abrir card <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
                       </td>
                       <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
+                      {isSupervisor && (
+                        <td>
+                          {ticket && historyReprocessableStatuses.has(m.status.toLowerCase()) && (
+                            <div className="flex items-center gap-1">
+                              {ticket.crm_origem !== 'HUBSPOT_LINK' && (
+                                <button
+                                  type="button"
+                                  onClick={() => openHistoryEdit(ticket)}
+                                  className="rounded p-2 text-[#64748b] hover:bg-[#f1f5f9] hover:text-[#2F6FED]"
+                                  title="Corrigir os dados do caso"
+                                  aria-label="Corrigir os dados do caso"
+                                >
+                                  <Edit2 className="h-4 w-4" />
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setHistoryReprocessTicket(ticket)}
+                                className="rounded p-2 text-amber-700 hover:bg-amber-50"
+                                title="Reprocessar caso"
+                                aria-label="Reprocessar caso"
+                              >
+                                <RotateCcw className="h-4 w-4" />
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -1306,6 +1490,81 @@ function MovimentacaoTab() {
           </div>
         )}
       </div>
+      <EditModal
+        isOpen={historyEditTicket !== null}
+        onClose={() => setHistoryEditTicket(null)}
+        title={`Corrigir caso #${historyEditTicket?.id_ticket_movimentacao || ''}`}
+        onSave={saveHistoryCorrections}
+        saving={savingHistoryEdit}
+      >
+        <p className="text-sm text-[#64748b]">
+          Corrija os dados do cliente e salve. Depois, use “Reprocessar” no histórico para reenviar o caso.
+        </p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label className="text-sm font-medium text-[#334155]">
+            Nome
+            <input
+              value={historyEditForm.nome_cliente_informado}
+              onChange={event => setHistoryEditForm(form => ({ ...form, nome_cliente_informado: event.target.value }))}
+              maxLength={500}
+              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
+            />
+          </label>
+          <label className="text-sm font-medium text-[#334155]">
+            Sobrenome
+            <input
+              value={historyEditForm.sobrenome_cliente_informado}
+              onChange={event => setHistoryEditForm(form => ({ ...form, sobrenome_cliente_informado: event.target.value }))}
+              maxLength={500}
+              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
+            />
+          </label>
+          <label className="text-sm font-medium text-[#334155]">
+            E-mail
+            <input
+              type="email"
+              value={historyEditForm.email_cliente_informado}
+              onChange={event => setHistoryEditForm(form => ({ ...form, email_cliente_informado: event.target.value }))}
+              maxLength={254}
+              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
+            />
+          </label>
+          <label className="text-sm font-medium text-[#334155]">
+            Telefone
+            <input
+              value={historyEditForm.telefone_cliente_informado}
+              onChange={event => setHistoryEditForm(form => ({ ...form, telefone_cliente_informado: event.target.value }))}
+              maxLength={50}
+              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
+            />
+          </label>
+          <label className="text-sm font-medium text-[#334155]">
+            CPF
+            <input
+              value={historyEditForm.cpf_cliente_informado}
+              onChange={event => setHistoryEditForm(form => ({ ...form, cpf_cliente_informado: event.target.value }))}
+              maxLength={30}
+              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
+            />
+          </label>
+          <label className="text-sm font-medium text-[#334155]">
+            Origem
+            <input
+              value={historyEditForm.origem_cliente_informada}
+              onChange={event => setHistoryEditForm(form => ({ ...form, origem_cliente_informada: event.target.value }))}
+              maxLength={500}
+              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
+            />
+          </label>
+        </div>
+      </EditModal>
+      <ReprocessModal
+        isOpen={historyReprocessTicket !== null}
+        onClose={() => setHistoryReprocessTicket(null)}
+        ticket={historyReprocessTicket}
+        onConfirm={reprocessHistoryTicket}
+        saving={historyReprocessing}
+      />
     </div>
   );
 }
@@ -1801,7 +2060,7 @@ function ReportarTab() {
     if (!statusMatch) return false;
     return isWithinDateRange(r.data, filterDataInicio, filterDataFim);
   });
-  const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "ANALISE", "REVISÃO", "CANCELADO"];
+  const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "Coordenador", "ANALISE", "REVISÃO", "CANCELADO"];
 
   const viewDetails = (report: ReportItem) => {
     const statusLabel = getStatusInfo(report.status).label;
@@ -2811,12 +3070,18 @@ function MovimentacoesSuporteTab() {
         <div>
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
           {editingTicket?.crm_origem === 'HUBSPOT_LINK' ? (
-            <div className="px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm bg-[#f8fafc] text-[#475569]">
-              <strong className="capitalize">{editForm.status_mapeamento}</strong>
-              <span className="text-xs text-[#94a3b8] ml-2">
-                — use o botão <strong>Concluir</strong> para finalizar manualmente
-              </span>
-            </div>
+            <select
+              value={editForm.status_mapeamento}
+              onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
+              className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
+            >
+              {!['coordenador', 'concluido'].includes(editForm.status_mapeamento) && (
+                <option value={editForm.status_mapeamento} disabled>
+                  {getStatusInfo(editForm.status_mapeamento).label}
+                </option>
+              )}
+              <option value="concluido">Concluído</option>
+            </select>
           ) : (
             <select
               value={editForm.status_mapeamento}
@@ -3110,6 +3375,274 @@ function ReportesSuporteTab() {
           />
         </div>
       </EditModal>
+    </div>
+  );
+}
+
+function CoordinatorValidationTab({ initialCaseId }: { initialCaseId: string | null }) {
+  const [cases, setCases] = useState<TicketMovimentacao[]>([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterDate, setFilterDate] = useState(() => {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  });
+  const [loading, setLoading] = useState(true);
+  const [processingId, setProcessingId] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const loadCases = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchAllSupportPages<TicketMovimentacao>(
+        `${API_BASE}/suporte/coordenador/casos`,
+      );
+      setCases(data);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : 'Erro ao carregar casos para validação.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadCases();
+  }, []);
+
+  const query = normalizeKey(searchTerm);
+  const queryDigits = query.replace(/\D/g, '');
+  const filteredCases = cases.filter(ticket => {
+    const matchesSearch = !query || [
+      `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`,
+      ticket.cpf_cliente_informado || '',
+      ticket.email_cliente_informado || '',
+      String(ticket.id_ticket_movimentacao),
+      String(ticket.id_ticket || ''),
+    ].some(value => normalizeKey(String(value)).includes(query)) ||
+      (/^\d+$/.test(query) &&
+        String(ticket.cpf_cliente_informado || '').replace(/\D/g, '').includes(queryDigits));
+
+    if (!matchesSearch) return false;
+    // A busca deve localizar casos antigos mesmo com o filtro padrão em hoje.
+    if (query || !filterDate) return true;
+
+    if (!ticket.criado_em) return false;
+    const createdAt = new Date(ticket.criado_em);
+    if (Number.isNaN(createdAt.getTime())) return false;
+    const createdDate = `${createdAt.getFullYear()}-${String(createdAt.getMonth() + 1).padStart(2, '0')}-${String(createdAt.getDate()).padStart(2, '0')}`;
+    return createdDate === filterDate;
+  });
+
+  const handleDecision = async (ticket: TicketMovimentacao, action: 'bloquear' | 'autorizar') => {
+    const prompt = action === 'bloquear'
+      ? 'Bloquear este caso? A observação será registrada como "Bloqueado pelo supervisor".'
+      : 'Autorizar o reprocessamento? O limite de tempo será ignorado, mas as regras de pipeline e etapa continuarão ativas.';
+    if (!window.confirm(prompt)) return;
+
+    setProcessingId(ticket.id_ticket_movimentacao);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await fetch(
+        `${API_BASE}/suporte/coordenador/casos/${ticket.id_ticket_movimentacao}/decisao`,
+        {
+          method: 'POST',
+          headers: getCsrfHeaders(),
+          credentials: 'include',
+          body: JSON.stringify({ acao: action }),
+        },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || `Erro HTTP ${response.status}`);
+      }
+      setMessage(data.message || 'Decisão registrada.');
+      await loadCases();
+    } catch (decisionError) {
+      setError(decisionError instanceof Error ? decisionError.message : 'Erro ao registrar a decisão.');
+    } finally {
+      setProcessingId(null);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="card flex flex-wrap items-center justify-between gap-3 p-5">
+        <div>
+          <h2 className="text-lg font-bold text-[#0f172a]">Visão Coordenador</h2>
+          <p className="mt-1 text-sm text-[#64748b]">
+            Casos bloqueados aguardando análise. Ao reprocessar, apenas a restrição de tempo é ignorada;
+            pipelines, etapas e demais validações continuam valendo.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#94a3b8]" />
+            <input
+              type="search"
+              value={searchTerm}
+              onChange={event => setSearchTerm(event.target.value)}
+              placeholder="Nome, número, CPF ou e-mail"
+              aria-label="Buscar casos por nome do cliente, número, CPF ou e-mail"
+              className="w-full rounded-lg border border-[#e2e8f0] py-2 pl-9 pr-3 text-sm text-[#334155] sm:w-64"
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm text-[#64748b]">
+            Data:
+            <input
+              type="date"
+              value={filterDate}
+              onChange={event => setFilterDate(event.target.value)}
+              className="rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm text-[#334155]"
+              aria-label="Filtrar casos pela data"
+            />
+          </label>
+          {filterDate && (
+            <button
+              type="button"
+              onClick={() => setFilterDate('')}
+              className="rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm font-medium text-[#334155] hover:bg-[#f8fafc]"
+            >
+              Todas as datas
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void loadCases()}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm font-medium text-[#334155] hover:bg-[#f8fafc] disabled:opacity-50"
+          >
+            <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+            Atualizar
+          </button>
+        </div>
+      </div>
+
+      {message && (
+        <div className="rounded-lg bg-green-50 p-3 text-sm text-green-700" role="status">{message}</div>
+      )}
+      {error && (
+        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700" role="alert">{error}</div>
+      )}
+      {loading ? (
+        <div className="flex items-center justify-center gap-2 py-10 text-sm text-[#64748b]">
+          <Loader2 className="h-4 w-4 animate-spin" /> Carregando casos...
+        </div>
+      ) : cases.length === 0 ? (
+        <div className="card p-8 text-center text-sm text-[#64748b]">
+          Nenhum caso bloqueado aguardando validação.
+        </div>
+      ) : filteredCases.length === 0 ? (
+        <div className="card p-8 text-center text-sm text-[#64748b]">
+          {query
+            ? 'Nenhum caso encontrado para essa busca.'
+            : `Nenhum caso encontrado para ${filterDate ? new Date(`${filterDate}T00:00:00`).toLocaleDateString('pt-BR') : 'as datas selecionadas'}.`}
+        </div>
+      ) : (
+        filteredCases.map(ticket => {
+          const requesterUnit = ticket.unidade_id != null ? `Unidade ${ticket.unidade_id}` : 'Unidade não informada';
+          const observation = ticket.observacao || ticket.hubspot?.mensagem || 'Sem observação registrada.';
+          const alreadyBlockedByCoordinator = ticket.validacaoCoordenador?.acao === 'bloquear';
+          return (
+            <article
+              key={ticket.id_ticket_movimentacao}
+              id={`caso-coordenador-${ticket.id_ticket_movimentacao}`}
+              className={cn(
+                "card space-y-4 p-5",
+                initialCaseId === String(ticket.id_ticket_movimentacao) && "ring-2 ring-[#2F6FED]",
+              )}
+            >
+              <header className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold text-[#0f172a]">
+                    {ticket.ticket_titulo || `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`.trim() || `Caso #${ticket.id_ticket_movimentacao}`}
+                  </h3>
+                  <p className="mt-1 text-xs text-[#64748b]">
+                    Caso #{ticket.id_ticket_movimentacao}
+                    {ticket.id_ticket ? ` · Ticket #${ticket.id_ticket}` : ''}
+                    {ticket.criado_em ? ` · ${new Date(ticket.criado_em).toLocaleString('pt-BR')}` : ''}
+                  </p>
+                </div>
+                <span className={cn("badge", getStatusInfo(ticket.status_mapeamento).className)}>
+                  {getStatusInfo(ticket.status_mapeamento).icon} {getStatusInfo(ticket.status_mapeamento).label}
+                </span>
+              </header>
+
+              {ticket.ticket_descricao && (
+                <p className="whitespace-pre-wrap break-words text-sm text-[#475569]">{ticket.ticket_descricao}</p>
+              )}
+
+              <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+                <div><dt className="text-xs text-[#94a3b8]">Cliente</dt><dd className="break-words font-medium">{`${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim() || 'Não informado'}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">Telefone</dt><dd>{ticket.telefone_cliente_informado || 'Não informado'}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">E-mail do cliente</dt><dd className="break-words">{ticket.email_cliente_informado || 'Não informado'}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">CPF</dt><dd>{ticket.cpf_cliente_informado || 'Não informado'}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">Origem / produto</dt><dd>{ticket.crm_origem || '—'}{ticket.produto ? ` · ${maskProduct(ticket.produto)}` : ''}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">Solicitante</dt><dd className="break-words">{ticket.solicitante_nome || ticket.colaborador_origem_nome || 'Não informado'}{ticket.solicitante_email ? ` · ${ticket.solicitante_email}` : ''}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">Unidade / equipe de origem</dt><dd>{requesterUnit}{ticket.equipe_origem_nome ? ` · ${ticket.equipe_origem_nome}` : ''}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">Equipe / assessor destino</dt><dd>{ticket.equipe_destino_nome || '—'}{ticket.colaborador_destino_nome ? ` · ${ticket.colaborador_destino_nome}` : ''}</dd></div>
+                <div><dt className="text-xs text-[#94a3b8]">Pipeline / etapa</dt><dd>{ticket.hubspot?.pipelineNome || '—'} / {ticket.hubspot?.stageNome || '—'}</dd></div>
+              </dl>
+
+              {ticket.motivo_solicitacao && (
+                <div>
+                  <div className="text-xs text-[#94a3b8]">Motivo da solicitação</div>
+                  <p className="whitespace-pre-wrap break-words text-sm text-[#475569]">{ticket.motivo_solicitacao}</p>
+                </div>
+              )}
+              <div>
+                <div className="text-xs text-[#94a3b8]">Observação / validação HubSpot</div>
+                <p className="whitespace-pre-wrap break-words text-sm text-[#475569]">{observation}</p>
+              </div>
+              {alreadyBlockedByCoordinator && (
+                <p className="text-sm font-medium text-red-700">
+                  Bloqueado pelo supervisor
+                  {ticket.validacaoCoordenador?.em
+                    ? ` em ${new Date(ticket.validacaoCoordenador.em).toLocaleString('pt-BR')}`
+                    : ''}
+                </p>
+              )}
+
+              <footer className="flex flex-wrap items-center gap-2 border-t border-[#e2e8f0] pt-3">
+                {ticket.link_card && (
+                  <a
+                    href={ticket.link_card}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm text-[#2F6FED] hover:bg-blue-50"
+                  >
+                    Ver card HubSpot <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                )}
+                <div className="flex-1" />
+                {!alreadyBlockedByCoordinator && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void handleDecision(ticket, 'bloquear')}
+                      disabled={processingId !== null}
+                      className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      {processingId === ticket.id_ticket_movimentacao && <Loader2 className="h-4 w-4 animate-spin" />}
+                      Bloquear
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDecision(ticket, 'autorizar')}
+                      disabled={processingId !== null}
+                      className="inline-flex items-center gap-2 rounded-lg bg-[#2F6FED] px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {processingId === ticket.id_ticket_movimentacao && <Loader2 className="h-4 w-4 animate-spin" />}
+                      Reprocessar
+                    </button>
+                  </>
+                )}
+              </footer>
+            </article>
+          );
+        })
+      )}
     </div>
   );
 }

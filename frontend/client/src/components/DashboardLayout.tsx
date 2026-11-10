@@ -46,6 +46,7 @@ interface DashboardLayoutProps {
   children: React.ReactNode;
   title: string;
   subtitle?: string;
+  showPeriodFilter?: boolean;
   allowCoordinatorValueToggleForOtherCollaborator?: boolean;
 }
 
@@ -53,6 +54,7 @@ export default function DashboardLayout({
   children,
   title,
   subtitle,
+  showPeriodFilter = true,
   allowCoordinatorValueToggleForOtherCollaborator = false,
 }: DashboardLayoutProps) {
   const [location] = useLocation();
@@ -414,7 +416,7 @@ export default function DashboardLayout({
   const displayRole = currentUser?.cargo || "Colaborador";
   const displayAvatar = currentUser?.avatar || displayName.charAt(0).toUpperCase();
 
-  const shouldShowPeriodFilter = !HIDE_PERIOD_FILTER_PATHS.includes(location);
+  const shouldShowPeriodFilter = showPeriodFilter && !HIDE_PERIOD_FILTER_PATHS.includes(location);
   const isCustomPeriod = period === "Custom";
 
   return (

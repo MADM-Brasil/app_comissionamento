@@ -715,7 +715,7 @@ function hoursSince(value) {
   return !Number.isFinite(timestamp) || timestamp > Date.now() ? null : (Date.now() - timestamp) / 3600000;
 }
 
-function temporalCheck(deal) {
+function temporalCheck(deal, { bypassTimeLimit = false } = {}) {
   const required = {
     [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
     [STAGE_ENTRADA_ID]: 24,
@@ -737,9 +737,11 @@ function temporalCheck(deal) {
   }
 
   const hours = hoursSince(deal.lastModifiedDate);
-  const allowed = hours !== null && requiredHours !== undefined && hours > requiredHours;
+  const allowed = hours !== null && requiredHours !== undefined &&
+    (bypassTimeLimit || hours > requiredHours);
   const reason = hours === null ? 'Data da última modificação ausente, inválida ou futura'
     : requiredHours === undefined ? 'Etapa não elegível para movimentação por tempo'
+    : bypassTimeLimit ? 'Prazo de modificação autorizado pelo coordenador'
     : allowed ? `Última modificação há mais de ${requiredHours}h`
     : `Prazo de mais de ${requiredHours}h desde a última modificação ainda não atingido`;
   return { allowed, reason, requiredHours: requiredHours ?? null, hoursSinceNote: hours, lastUpdated: deal.lastModifiedDate || null };
@@ -756,7 +758,14 @@ async function assignmentResult(deal, extras = {}) {
     lastUpdatedAt: deal?.lastModifiedDate || null, ...extras };
 }
 
-export async function garantirLeadNoCloser(contactId, dealName, ownerId = null, collaboratorName = '', produto = null) {
+export async function garantirLeadNoCloser(
+  contactId,
+  dealName,
+  ownerId = null,
+  collaboratorName = '',
+  produto = null,
+  { bypassTemporalRestriction = false } = {},
+) {
   if (!ownerId) return assignmentResult(null, { blocked: true, ruleApplied: 'owner_missing', message: RULE_MESSAGES.owner_missing });
   await accountReady(); await activeOwner(ownerId);
   return withLocks([`contact:${id(contactId)}`], async () => {
@@ -823,7 +832,7 @@ const deals = allDeals.filter(d =>
         error.requiresReconciliation = true; error.retryable = false; throw error;
       }
     } else {
-      const check = temporalCheck(deal);
+      const check = temporalCheck(deal, { bypassTimeLimit: bypassTemporalRestriction });
       if (!check.allowed) return assignmentResult(deal, {
         blocked: true,
         ruleApplied: 'owned_by_another_recent_activity',
@@ -832,7 +841,9 @@ const deals = allDeals.filter(d =>
         hoursSinceNote: check.hoursSinceNote,
         notesLastUpdated: check.lastUpdated,
       });
-      rule = 'reassigned_by_last_modified_date';
+      rule = bypassTemporalRestriction
+        ? 'reassigned_by_coordinator_validation'
+        : 'reassigned_by_last_modified_date';
     }
 
     const previousContact = await getContact(contactId, ['hubspot_owner_id']);

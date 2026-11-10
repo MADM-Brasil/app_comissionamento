@@ -8,6 +8,7 @@ import { getAccessLevel, LEVELS } from "@/lib/accessControl";
 import {
   Download, AlertTriangle, Loader2,
   Send, Clock, Trash2, Megaphone, Info, AlertCircle,
+  ChevronDown,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -25,11 +26,7 @@ import {
   type RecommendationPriority,
 } from "@/lib/recommendations";
 import {
-  fetchInteComerceOverview,
-  fetchInteComerceStrategic,
-  fetchInteComerceFunnel,
-  fetchInteComerceDisqualify,
-  fetchInteComerceDaily,
+  fetchInteComerceAll,
   fetchInteComerceCollaborators,
   fetchInteComerceTeams,
   type InteComerceOverview,
@@ -52,6 +49,34 @@ const dateBr = (iso: string) => {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}/${y}`;
 };
+const dateTimeBr = (iso: string) => new Intl.DateTimeFormat("pt-BR", {
+  dateStyle: "short",
+  timeStyle: "short",
+}).format(new Date(iso));
+function getInteComerceDateLimits(now = new Date(), lookbackMonths = 24) {
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+  }).format(now);
+  const [year, month, day] = today.split("-").map(Number);
+  const minimumMonth = new Date(Date.UTC(year, month - 1 - lookbackMonths, 1));
+  const daysInMinimumMonth = new Date(
+    Date.UTC(minimumMonth.getUTCFullYear(), minimumMonth.getUTCMonth() + 1, 0),
+  ).getUTCDate();
+  const minimumDay = lookbackMonths >= 22 ? 1 : Math.min(day, daysInMinimumMonth);
+  const minimum = new Date(Date.UTC(
+    minimumMonth.getUTCFullYear(),
+    minimumMonth.getUTCMonth(),
+    minimumDay,
+  )).toISOString().slice(0, 10);
+  const maximumExclusive = new Date(Date.UTC(
+    year,
+    month - 1,
+    day + 1,
+  ))
+    .toISOString()
+    .slice(0, 10);
+  return { minimum, maximumExclusive, today };
+}
 function countWeekdays(start: string, end: string): number {
   if (!start || !end) return 0;
   const s = new Date(start + "T12:00:00Z");
@@ -65,6 +90,16 @@ function countWeekdays(start: string, end: string): number {
 }
 const normalizeKey = (s: string | undefined | null) =>
   String(s || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+function getMonthPeriod(month: string, today: string) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const start = `${month}-01`;
+  const nextMonth = new Date(Date.UTC(year, monthNumber, 1)).toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  return { start, end: nextMonth < tomorrow ? nextMonth : tomorrow };
+}
 
 // ───────────────────────────────────────────────────────────
 type StatKey =
@@ -85,10 +120,10 @@ const STAT_CARDS: {
   sub: string;
   highlight?: "signed" | "disq";
 }[] = [
-  { key: "received",     label: "Leads recebidos", sub: "Atribuições novas no período" },
+  { key: "received",     label: "Negócios criados", sub: "Dentro do período de criação da coorte" },
   { key: "worked",       label: "Trabalhados",     sub: "Movimentação no CRM" },
   { key: "contact",      label: "Em contato",      sub: "Etapa Em contato" },
-  { key: "signed",       label: "Assinados",       sub: "ORIGINAL · safra do período", highlight: "signed" },
+  { key: "signed",       label: "Assinados",       sub: "ORIGINAL · dentro do período medido", highlight: "signed" },
   { key: "gained",       label: "Ganhos",          sub: "Ganho registrado no Deal" },
   { key: "protocolados", label: "Protocolados",    sub: "Protocolo registrado" },
   { key: "disq",         label: "Desqualificados", sub: "Saída do Closer", highlight: "disq" },
@@ -120,7 +155,6 @@ const EMPTY_FUNNEL: InteComerceFunnel = {
   emitidos: 0, assinados: 0, ganhos: 0, protocolados: 0,
   desqualificados_saida: 0, coleta_sem_contato_observado: 0,
 };
-
 type Row = {
   key: string;
   name: string;
@@ -134,8 +168,15 @@ type Row = {
   protocolados: number;
 };
 
+type ComparisonSlice = Pick<
+  InteComerceOverview,
+  "recebidos" | "assinados" | "ganhos" | "protocolados"
+>;
+type ComparisonBlock = { day: ComparisonSlice | null; month: ComparisonSlice };
+type AllResult = Awaited<ReturnType<typeof fetchInteComerceAll>>;
+
 // ───────────────────────────────────────────────────────────
-//  ESTILOS DE PRIORIDADE (mesma nomenclatura de Equipe.tsx)
+//  ESTILOS DE PRIORIDADE
 // ───────────────────────────────────────────────────────────
 const REC_PRIORITY_STYLES: Record<
   RecommendationPriority,
@@ -147,8 +188,7 @@ const REC_PRIORITY_STYLES: Record<
 };
 
 // ───────────────────────────────────────────────────────────
-//  CARD DE RECOMENDAÇÕES TEMPORÁRIAS (24h)
-//  Adaptado de Equipe.tsx; o "alvo" é determinado pelos filtros.
+//  CARD DE RECOMENDAÇÕES TEMPORÁRIAS (24h) — compacto
 // ───────────────────────────────────────────────────────────
 function RecomendacoesCard({
   filters,
@@ -162,7 +202,6 @@ function RecomendacoesCard({
   const canAuthorRecommendations = userLevel >= LEVELS.SUPERVISAO;
   const canDeleteAny = userLevel >= LEVELS.COORDENADOR;
 
-  // Alvo = lista de colaboradores deduzida do filtro
   const targetColaboradores = useMemo<Collaborator[]>(() => {
     const isIndividual =
       filters.colaboradorId != null ||
@@ -225,32 +264,18 @@ function RecomendacoesCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIdsKey]);
 
-  // Agrupa por (texto + autor + expiração) para que uma publicação em
-  // equipe inteira apareça como UMA linha, não N.
   const grouped = useMemo(() => {
     const map = new Map<
       string,
-      {
-        key: string;
-        rec: TemporaryRecommendation;
-        ids: string[];
-        targetNames: string[];
-      }
+      { key: string; rec: TemporaryRecommendation; ids: string[]; targetNames: string[] }
     >();
-    const nameById = new Map(
-      targetColaboradores.map((c) => [String(c.id), c.name]),
-    );
+    const nameById = new Map(targetColaboradores.map((c) => [String(c.id), c.name]));
     for (const r of tempRecs) {
       const key = `${r.text}|${r.authorId}|${r.expiresAt}`;
-      if (!map.has(key)) {
-        map.set(key, { key, rec: r, ids: [], targetNames: [] });
-      }
+      if (!map.has(key)) map.set(key, { key, rec: r, ids: [], targetNames: [] });
       const entry = map.get(key)!;
       entry.ids.push(r.id);
-      const name =
-        nameById.get(String((r as any).targetId)) ||
-        (r as any).targetName ||
-        "—";
+      const name = nameById.get(String((r as any).targetId)) || (r as any).targetName || "—";
       if (!entry.targetNames.includes(name)) entry.targetNames.push(name);
     }
     return Array.from(map.values());
@@ -290,167 +315,181 @@ function RecomendacoesCard({
   const hasTarget = targetColaboradores.length > 0;
 
   return (
-    <div className="card p-5 mb-6">
-      <div className="flex items-center gap-2 mb-3 flex-wrap">
-        <Megaphone size={17} className="text-amber-600" />
-        <h3 className="text-sm font-semibold text-slate-700">
-          Recomendações temporárias
-        </h3>
+    <details className="card mb-4 group">
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-[13px] font-semibold text-slate-700 [&::-webkit-details-marker]:hidden">
+        <Megaphone size={15} className="text-amber-600" />
+        <span>Recomendações temporárias</span>
         <span className="text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-medium">
           Ativas por 24h
         </span>
-        <span className="text-[11px] text-slate-500 ml-auto">
+        <span className="text-[11px] font-normal text-slate-500 ml-auto">
           Alvo atual: <b>{targetLabel}</b>
         </span>
-      </div>
-
-      {!hasTarget ? (
-        <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
-          <p className="text-[12px] text-slate-500">
-            Selecione uma <b>equipe</b> ou um <b>colaborador</b> no filtro acima
-            para publicar ou visualizar recomendações temporárias.
-          </p>
+        <ChevronDown size={15} className="shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="border-t border-slate-100 p-3">
+        <div className="flex items-center gap-2 mb-2 flex-wrap">
+          <span className="text-[11px] text-slate-500">
+            Orientações direcionadas ao filtro selecionado.
+          </span>
         </div>
-      ) : (
-        <>
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 mb-4">
-            <p className="text-[11px] font-semibold text-slate-700 mb-2">
-              Nova recomendação para{" "}
-              {targetColaboradores.length === 1
-                ? targetColaboradores[0].name
-                : `${targetColaboradores.length} colaboradores da equipe ${filters.equipe}`}
-            </p>
-            <textarea
-              value={newRecText}
-              onChange={(e) => setNewRecText(e.target.value)}
-              placeholder="Escreva uma orientação temporária (válida por 24h)..."
-              rows={3}
-              maxLength={500}
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[13px] text-slate-800 outline-none focus:ring-2 focus:ring-blue-500/20 resize-none"
-            />
-            <div className="flex flex-wrap items-center gap-2 mt-2 justify-between">
-              <div className="flex items-center gap-1.5">
-                {(
-                  ["info", "warning", "danger"] as RecommendationPriority[]
-                ).map((p) => {
-                  const style = REC_PRIORITY_STYLES[p];
-                  const PIcon = style.Icon;
-                  const active = newRecPriority === p;
-                  return (
-                    <button
-                      key={p}
-                      type="button"
-                      onClick={() => setNewRecPriority(p)}
-                      className={cn(
-                        "inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border transition-colors",
-                        active
-                          ? `${style.bg} ${style.text} ${style.border}`
-                          : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50",
-                      )}
-                    >
-                      <PIcon size={11} />
-                      {style.label}
-                    </button>
-                  );
-                })}
-                <span className="text-[10px] text-slate-400 ml-1">
-                  {newRecText.length}/500
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={handleAddRec}
-                disabled={!newRecText.trim() || sendingRec}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {sendingRec ? (
-                  <Loader2 size={13} className="animate-spin" />
-                ) : (
-                  <Send size={13} />
-                )}
-                Publicar (24h)
-              </button>
-            </div>
-          </div>
 
-          {grouped.length > 0 ? (
-            <div className="space-y-2">
-              <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
-                Orientações ativas
-              </p>
-              <ul className="space-y-2">
-                {grouped.map((entry) => {
-                  const style = REC_PRIORITY_STYLES[entry.rec.priority];
-                  const canDelete =
-                    canDeleteAny || entry.rec.authorId === currentUser?.id;
-                  const targetsLabel =
-                    entry.targetNames.length === 1
-                      ? entry.targetNames[0]
-                      : `${entry.targetNames.length} colaboradores`;
-                  return (
-                    <li
-                      key={entry.key}
-                      className={cn(
-                        "flex gap-3 items-start p-3 rounded-lg border",
-                        style.border,
-                        style.bg,
-                      )}
-                    >
-                      <style.Icon
-                        size={15}
-                        className={cn("mt-0.5 shrink-0", style.text)}
-                      />
-                      <div className="flex-1 min-w-0">
-                        <p
-                          className={cn(
-                            "text-[13px] whitespace-pre-wrap break-words",
-                            style.text,
-                          )}
-                        >
-                          {entry.rec.text}
-                        </p>
-                        <p className="text-[10px] text-slate-500 mt-1 flex flex-wrap items-center gap-2">
-                          <span>
-                            {entry.rec.authorName} · {entry.rec.authorCargo}
-                          </span>
-                          <span className="inline-flex items-center gap-1">
-                            <Clock size={10} /> expira em{" "}
-                            {getRemainingTimeLabel(entry.rec.expiresAt)}
-                          </span>
-                          <span className="text-slate-400">
-                            · para {targetsLabel}
-                          </span>
-                        </p>
-                      </div>
-                      {canDelete && (
-                        <button
-                          type="button"
-                          onClick={() => handleRemoveRec(entry.ids)}
-                          className="shrink-0 p-1 rounded text-slate-400 hover:text-red-600 hover:bg-white"
-                          title="Remover recomendação"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      )}
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ) : (
-            <p className="text-[12px] text-slate-400 italic">
-              Nenhuma orientação temporária ativa para {targetLabel}.
+        {!hasTarget ? (
+          <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
+            <p className="text-[12px] text-slate-500">
+              Selecione uma <b>equipe</b> ou um <b>colaborador</b> no filtro acima
+              para publicar ou visualizar recomendações temporárias.
             </p>
-          )}
-        </>
-      )}
-    </div>
+          </div>
+        ) : (
+          <>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5 mb-3">
+              <p className="text-[11px] font-semibold text-slate-700 mb-1.5">
+                Nova recomendação para{" "}
+                {targetColaboradores.length === 1
+                  ? targetColaboradores[0].name
+                  : `${targetColaboradores.length} colaboradores da equipe ${filters.equipe}`}
+              </p>
+              <textarea
+                value={newRecText}
+                onChange={(e) => setNewRecText(e.target.value)}
+                placeholder="Escreva uma orientação temporária (válida por 24h)..."
+                rows={2}
+                maxLength={500}
+                className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[12px] text-slate-800 outline-none focus:ring-2 focus:ring-blue-500/20 resize-none"
+              />
+              <div className="flex flex-wrap items-center gap-2 mt-1.5 justify-between">
+                <div className="flex items-center gap-1.5">
+                  {(["info", "warning", "danger"] as RecommendationPriority[]).map((p) => {
+                    const style = REC_PRIORITY_STYLES[p];
+                    const PIcon = style.Icon;
+                    const active = newRecPriority === p;
+                    return (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() => setNewRecPriority(p)}
+                        className={cn(
+                          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium border transition-colors",
+                          active
+                            ? `${style.bg} ${style.text} ${style.border}`
+                            : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50",
+                        )}
+                      >
+                        <PIcon size={10} />
+                        {style.label}
+                      </button>
+                    );
+                  })}
+                  <span className="text-[10px] text-slate-400 ml-1">
+                    {newRecText.length}/500
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddRec}
+                  disabled={!newRecText.trim() || sendingRec}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {sendingRec ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+                  Publicar (24h)
+                </button>
+              </div>
+            </div>
+
+            {grouped.length > 0 ? (
+              <div className="space-y-2">
+                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
+                  Orientações ativas
+                </p>
+                <ul className="space-y-2">
+                  {grouped.map((entry) => {
+                    const style = REC_PRIORITY_STYLES[entry.rec.priority];
+                    const canDelete = canDeleteAny || entry.rec.authorId === currentUser?.id;
+                    const targetsLabel =
+                      entry.targetNames.length === 1
+                        ? entry.targetNames[0]
+                        : `${entry.targetNames.length} colaboradores`;
+                    return (
+                      <li
+                        key={entry.key}
+                        className={cn("flex gap-2 items-start p-2 rounded-lg border", style.border, style.bg)}
+                      >
+                        <style.Icon size={13} className={cn("mt-0.5 shrink-0", style.text)} />
+                        <div className="flex-1 min-w-0">
+                          <p className={cn("text-[12px] whitespace-pre-wrap break-words", style.text)}>
+                            {entry.rec.text}
+                          </p>
+                          <p className="text-[10px] text-slate-500 mt-0.5 flex flex-wrap items-center gap-2">
+                            <span>{entry.rec.authorName} · {entry.rec.authorCargo}</span>
+                            <span className="inline-flex items-center gap-1">
+                              <Clock size={9} /> expira em {getRemainingTimeLabel(entry.rec.expiresAt)}
+                            </span>
+                            <span className="text-slate-400">· para {targetsLabel}</span>
+                          </p>
+                        </div>
+                        {canDelete && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveRec(entry.ids)}
+                            className="shrink-0 p-1 rounded text-slate-400 hover:text-red-600 hover:bg-white"
+                            title="Remover recomendação"
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : (
+              <p className="text-[12px] text-slate-400 italic">
+                Nenhuma orientação temporária ativa para {targetLabel}.
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </details>
   );
 }
 
 // ───────────────────────────────────────────────────────────
 export default function Inte_comerce() {
-  const { collaborators, currentStartDate, currentEndDate } = useAppStore();
+  const { collaborators } = useAppStore();
+  const [today] = useState(() => new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+  }).format(new Date()));
+  const [viewMode, setViewMode] = useState<"safra" | "producao" | "producao-3-meses">("safra");
+  const [selectedMonth, setSelectedMonth] = useState(today.slice(0, 7));
+  // ⬇️ opcionais; sem preenchimento não há comparativo
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [comparisonMonth, setComparisonMonth] = useState<string | null>(null);
+
+  const reportPeriod = useMemo(() => {
+    const limits = getInteComerceDateLimits(
+      new Date(`${today}T12:00:00`),
+      viewMode === "producao-3-meses" ? 21 : 24,
+    );
+    const [year, month] = selectedMonth.split("-").map(Number);
+    const start = `${selectedMonth}-01`;
+    const nextMonth = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+    const end = nextMonth < limits.maximumExclusive ? nextMonth : limits.maximumExclusive;
+    return {
+      start, end, clipped: false,
+      unavailable:
+        selectedMonth > today.slice(0, 7) ||
+        start < limits.minimum ||
+        end <= start,
+      limits,
+    };
+  }, [selectedMonth, today, viewMode]);
+
+  const comparisonPeriod = useMemo(
+    () => (comparisonMonth ? getMonthPeriod(comparisonMonth, today) : null),
+    [comparisonMonth, today],
+  );
 
   const [filters, setFilters] = useState<FiltersState>({
     equipe: "todas",
@@ -467,6 +506,13 @@ export default function Inte_comerce() {
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tableError, setTableError] = useState<string | null>(null);
+  const [showAllReasons, setShowAllReasons] = useState(false);
+  const [dataAsOf, setDataAsOf] = useState<string | null>(null);
+  const [safraComparison, setSafraComparison] = useState<ComparisonBlock | null>(null);
+  const [productionComparison, setProductionComparison] = useState<ComparisonBlock | null>(null);
+  const [comparisonResult, setComparisonResult] = useState<AllResult | null>(null);
+  const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [overview, setOverview] = useState<InteComerceOverview>(EMPTY_OVERVIEW);
   const [strategic, setStrategic] = useState<InteComerceStrategic>(EMPTY_STRATEGIC);
   const [funnel, setFunnel] = useState<InteComerceFunnel>(EMPTY_FUNNEL);
@@ -475,51 +521,128 @@ export default function Inte_comerce() {
   const [collabTable, setCollabTable] = useState<InteComerceCollaborator[]>([]);
   const [teamTable, setTeamTable] = useState<InteComerceTeam[]>([]);
 
-  // ── Carregamento dos indicadores e da tabela selecionada
+  // ── Carregamento
   const reloadData = useCallback(async () => {
-    if (!currentStartDate || !currentEndDate) return;
+    if (!reportPeriod.start || !reportPeriod.end) return;
+    if (reportPeriod.unavailable) {
+      setLoading(false);
+      setOverview(EMPTY_OVERVIEW);
+      setStrategic(EMPTY_STRATEGIC);
+      setFunnel(EMPTY_FUNNEL);
+      setReasons([]);
+      setDaily([]);
+      setDataAsOf(null);
+      setCollabTable([]);
+      setTeamTable([]);
+      setTableError(null);
+      setSafraComparison(null);
+      setProductionComparison(null);
+      setComparisonResult(null);
+      setError(
+        `O período selecionado não contém datas disponíveis. Esta visão permite consultar de ${dateBr(reportPeriod.limits?.minimum || "")} até hoje.`,
+      );
+      return;
+    }
     setLoading(true);
     setError(null);
+    setTableError(null);
+
+    const dayParam =
+      (viewMode === "safra" || viewMode === "producao") && selectedDay
+        ? selectedDay
+        : undefined;
+
     const params = {
-      start: currentStartDate,
-      end: currentEndDate,
+      start: reportPeriod.start,
+      end: reportPeriod.end,
       equipe: equipe !== "todas" ? equipe : undefined,
       colaboradorId,
       produto,
       unidadeId: filters.unidadeId,
+      mode: viewMode,
+      selectedDay: dayParam,
     };
+
+    const comparisonParams =
+      (viewMode === "safra" || viewMode === "producao") && comparisonPeriod
+        ? {
+            ...params,
+            start: comparisonPeriod.start,
+            end: comparisonPeriod.end,
+            mode: (viewMode === "safra" ? "safra" : "producao") as "safra" | "producao",
+            selectedDay: undefined,
+          }
+        : null;
+
     try {
-      const o = await fetchInteComerceOverview(params);
-      setOverview(o || EMPTY_OVERVIEW);
+      const [allResult, tableResult, monthCompareResult] = await Promise.allSettled([
+        fetchInteComerceAll(params),
+        grouping === "team"
+          ? fetchInteComerceTeams(params).then((data) => ({ kind: "team" as const, data }))
+          : fetchInteComerceCollaborators(params).then((data) => ({ kind: "person" as const, data })),
+        comparisonParams ? fetchInteComerceAll(comparisonParams) : Promise.resolve(null),
+      ]);
 
-      const s = await fetchInteComerceStrategic(params);
-      setStrategic(s || EMPTY_STRATEGIC);
-
-      const f = await fetchInteComerceFunnel(params);
-      setFunnel(f || EMPTY_FUNNEL);
-
-      const r = await fetchInteComerceDisqualify(params);
-      setReasons(r || []);
-
-      const d = await fetchInteComerceDaily(params);
-      setDaily(d || []);
-
-      if (grouping === "team") {
-        setTeamTable((await fetchInteComerceTeams(params)) || []);
+      if (allResult.status === "fulfilled") {
+        setDataAsOf(allResult.value.dataAsOf || null);
+        setOverview(allResult.value.overview || EMPTY_OVERVIEW);
+        setStrategic(allResult.value.strategic || EMPTY_STRATEGIC);
+        setFunnel(allResult.value.funnel || EMPTY_FUNNEL);
+        setReasons(allResult.value.reasons || []);
+        setDaily(allResult.value.daily || []);
+        setSafraComparison((allResult.value.safraComparison as any) || null);
+        setProductionComparison((allResult.value.productionComparison as any) || null);
       } else {
-        setCollabTable((await fetchInteComerceCollaborators(params)) || []);
+        console.error("Erro ao carregar indicadores de Inte_comerce:", allResult.reason);
+        setError(
+          allResult.reason instanceof Error
+            ? allResult.reason.message
+            : "Falha ao carregar os indicadores.",
+        );
       }
-    } catch (err: any) {
-      console.error("Erro ao carregar Inte_comerce:", err);
-      setError(err.message || "Falha ao carregar dados.");
+
+      if (comparisonParams) {
+        if (monthCompareResult.status === "fulfilled" && monthCompareResult.value) {
+          setComparisonResult(monthCompareResult.value as AllResult);
+          setComparisonError(null);
+        } else {
+          setComparisonResult(null);
+          setComparisonError(
+            monthCompareResult.status === "rejected"
+              ? (monthCompareResult.reason instanceof Error
+                  ? monthCompareResult.reason.message
+                  : "Falha ao carregar o mês de comparação.")
+              : null,
+          );
+        }
+      } else {
+        setComparisonResult(null);
+        setComparisonError(null);
+      }
+
+      if (tableResult.status === "fulfilled") {
+        setTableError(null);
+        if (tableResult.value.kind === "team") setTeamTable(tableResult.value.data || []);
+        else setCollabTable(tableResult.value.data || []);
+      } else {
+        console.warn("Tabela de Inte_comerce indisponível:", tableResult.reason);
+        setTableError(
+          tableResult.reason instanceof Error
+            ? tableResult.reason.message
+            : "Falha ao carregar a tabela.",
+        );
+        if (grouping === "team") setTeamTable([]);
+        else setCollabTable([]);
+      }
     } finally {
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, equipe, colaboradorId, produto, filters.unidadeId, grouping]);
+  }, [
+    reportPeriod, equipe, colaboradorId, produto, filters.unidadeId,
+    grouping, viewMode, selectedDay, comparisonPeriod,
+  ]);
 
-  useEffect(() => {
-    void reloadData();
-  }, [reloadData]);
+  useEffect(() => { void reloadData(); }, [reloadData]);
 
   const handleFilterChange = useCallback((rawFilters: FiltersState) => {
     setFilters((prev) => {
@@ -529,15 +652,12 @@ export default function Inte_comerce() {
         String(prev.colaboradorId ?? "") === String(rawFilters.colaboradorId ?? "") &&
         prev.produto === rawFilters.produto &&
         prev.unidadeId === rawFilters.unidadeId
-      )
-        return prev;
+      ) return prev;
       return rawFilters;
     });
   }, []);
 
-  const handleRefresh = useCallback(async () => {
-    await reloadData();
-  }, [reloadData]);
+  const handleRefresh = useCallback(async () => { await reloadData(); }, [reloadData]);
 
   // ── Derivados
   const aggregates = useMemo(
@@ -553,53 +673,57 @@ export default function Inte_comerce() {
     [overview],
   );
 
-  const seriesData = useMemo(
-    () =>
-      daily.map((d) => ({
+  const comparisonOverview = comparisonResult?.overview ?? null;
+  const comparisonFunnel = comparisonResult?.funnel ?? null;
+  const comparisonStrategic = comparisonResult?.strategic ?? null;
+  const comparisonReasons = comparisonResult?.reasons ?? [];
+  const comparisonDaily = comparisonResult?.daily ?? [];
+  const hasComparison = !!comparisonResult;
+
+  // Evolução diária com sobreposição (por dia do mês)
+  const seriesData = useMemo(() => {
+    const compByDom = new Map<string, InteComerceDaily>();
+    for (const d of comparisonDaily) compByDom.set(d.dia.slice(-2), d);
+    return daily.map((d) => {
+      const dom = d.dia.slice(-2);
+      const comp = compByDom.get(dom);
+      return {
+        dayOfMonth: dom,
         date: d.dia,
         received: d.recebidos,
         signed: d.assinados_ate_corte,
-      })),
-    [daily],
-  );
+        receivedComp: comp?.recebidos ?? null,
+        signedComp: comp?.assinados_ate_corte ?? null,
+      };
+    });
+  }, [daily, comparisonDaily]);
 
   const tableRows = useMemo<Row[]>(() => {
     if (grouping === "team") {
       return teamTable.map((t) => ({
-        key: t.equipe,
-        name: t.equipe,
-        team: t.equipe,
+        key: t.equipe, name: t.equipe, team: t.equipe,
         received: t.recebimentos_assessor_deal_dia,
-        worked: t.trabalhados,
-        contact: t.em_contato,
-        collection: t.coleta,
-        signed: t.assinados,
-        gained: t.ganhos,
-        protocolados: t.protocolados,
+        worked: t.trabalhados, contact: t.em_contato,
+        collection: t.coleta, signed: t.assinados,
+        gained: t.ganhos, protocolados: t.protocolados,
       }));
     }
     return collabTable.map((c) => ({
       key: c.colaborador_id || c.colaborador,
-      name: c.colaborador,
-      team: c.equipe_atual || "—",
+      name: c.colaborador, team: c.equipe_atual || "—",
       received: c.recebimentos_deal_dia,
-      worked: c.trabalhados,
-      contact: c.em_contato,
-      collection: c.coleta,
-      signed: c.assinados,
-      gained: c.ganhos,
-      protocolados: c.protocolados,
+      worked: c.trabalhados, contact: c.em_contato,
+      collection: c.coleta, signed: c.assinados,
+      gained: c.ganhos, protocolados: c.protocolados,
     }));
   }, [grouping, collabTable, teamTable]);
 
   const filteredTable = useMemo(() => {
     const q = search.trim().toLocaleLowerCase("pt-BR");
     let arr = tableRows;
-    if (q) {
-      arr = arr.filter((r) =>
-        `${r.name} ${r.team}`.toLocaleLowerCase("pt-BR").includes(q),
-      );
-    }
+    if (q) arr = arr.filter((r) =>
+      `${r.name} ${r.team}`.toLocaleLowerCase("pt-BR").includes(q),
+    );
     return [...arr].sort((a, b) => {
       const va: any = (a as any)[sortKey];
       const vb: any = (b as any)[sortKey];
@@ -617,63 +741,380 @@ export default function Inte_comerce() {
     return formatPct(funnel[curr] as number, funnel[prev] as number);
   };
 
-  const weekdays = countWeekdays(currentStartDate || "", currentEndDate || "");
+  const weekdays = countWeekdays(reportPeriod.start, reportPeriod.end);
   const avgSignedPerDay = weekdays ? aggregates.signed / weekdays : 0;
+  const comparisonWeekdays = comparisonPeriod
+    ? countWeekdays(comparisonPeriod.start, comparisonPeriod.end)
+    : 0;
+  const comparisonAvgSignedPerDay =
+    comparisonWeekdays && comparisonStrategic
+      ? comparisonStrategic.assinados / comparisonWeekdays
+      : 0;
+
   const hasActiveFilters =
     equipe !== "todas" || colaborador !== "todos" || produto !== "Todos";
 
   const maxDisqReasons = reasons.reduce(
-    (m, r) => Math.max(m, r.deals_desqualificados),
-    0,
+    (m, r) => Math.max(m, r.deals_desqualificados), 0,
   );
+
+  // Motivos com sobreposição do mês comparativo
+  const mergedReasons = useMemo(() => {
+    const map = new Map<string, { motivo: string; current: number; comp: number }>();
+    for (const r of reasons) {
+      map.set(r.motivo, { motivo: r.motivo, current: r.deals_desqualificados, comp: 0 });
+    }
+    for (const r of comparisonReasons) {
+      const e = map.get(r.motivo) || { motivo: r.motivo, current: 0, comp: 0 };
+      e.comp = r.deals_desqualificados;
+      map.set(r.motivo, e);
+    }
+    return Array.from(map.values())
+      .sort((a, b) => Math.max(b.current, b.comp) - Math.max(a.current, a.comp))
+      .slice(0, showAllReasons ? undefined : 10);
+  }, [reasons, comparisonReasons, showAllReasons]);
+
+  const maxMergedReason = mergedReasons.reduce(
+    (m, r) => Math.max(m, r.current, r.comp), 0,
+  );
+
+  // Tabela comparativa (adaptativa)
+  const comparisonTableRows = useMemo(() => {
+    if (viewMode !== "safra" && viewMode !== "producao") return [];
+    const data = viewMode === "safra" ? safraComparison : productionComparison;
+    const hasDay = !!selectedDay;
+    const hasComp = hasComparison;
+    const metrics = [
+      ["recebidos", viewMode === "producao" ? "Leads recebidos" : "Negócios criados"],
+      ["assinados", "Assinados"],
+      ["ganhos", "Ganhos"],
+      ["protocolados", "Protocolados"],
+    ] as const;
+    return metrics.map(([key, label]) => {
+      const dayValue = hasDay
+        ? ((data as any)?.day?.[key] as number | null | undefined)
+        : undefined;
+      const monthValue = (data as any)?.month?.[key] as number | undefined;
+      const comparedValue = hasComp
+        ? ((comparisonOverview as any)?.[key] as number | undefined)
+        : undefined;
+      const variation =
+        hasComp && comparedValue
+          ? (((monthValue || 0) - comparedValue) / comparedValue) * 100
+          : null;
+      return { key, label, dayValue, monthValue, comparedValue, variation };
+    });
+  }, [
+    viewMode, safraComparison, productionComparison,
+    selectedDay, hasComparison, comparisonOverview,
+  ]);
 
   const handleExportCsv = () => {
     if (filteredTable.length === 0) return;
     const header = [
       grouping === "person" ? "Colaborador" : "Equipe",
-      "Equipe",
-      "Recebidos",
-      "Trabalhados",
-      "Em contato",
-      "Coleta",
-      "Assinados",
-      "Ganhos",
-      "Protocolados",
+      "Equipe", "Recebidos", "Trabalhados", "Em contato",
+      "Coleta", "Assinados", "Ganhos", "Protocolados",
     ];
     const rows = filteredTable.map((r) => [
       r.name, r.team, r.received, r.worked, r.contact,
       r.collection, r.signed, r.gained, r.protocolados,
     ]);
-    const csv =
-      "\uFEFF" +
-      [header, ...rows]
-        .map((row) =>
-          row
-            .map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`)
-            .join(";"),
-        )
-        .join("\r\n");
+    const csv = "\uFEFF" + [header, ...rows]
+      .map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(";"))
+      .join("\r\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `producao_comercial_${currentStartDate ?? "inicio"}_${currentEndDate ?? "fim"}.csv`;
+    a.download = `producao_comercial_${reportPeriod.start || "inicio"}_${reportPeriod.end || "fim"}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const handleExportComparison = () => {
+    if (comparisonTableRows.length === 0) return;
+    const hasDay = !!selectedDay;
+    const hasComp = hasComparison;
+    const header = ["Indicador"];
+    if (hasDay) header.push("Dia");
+    header.push("Total mês");
+    if (hasDay) header.push("Dia / mês");
+    if (hasComp) header.push("Total comparação", "Variação");
+    const rows = comparisonTableRows.map((r) => {
+      const row: (string | number)[] = [r.label];
+      if (hasDay) row.push(r.dayValue == null ? "" : r.dayValue);
+      row.push(r.monthValue == null ? "" : r.monthValue);
+      if (hasDay) row.push(formatPct(r.dayValue || 0, r.monthValue || 0));
+      if (hasComp) {
+        row.push(r.comparedValue == null ? "" : r.comparedValue);
+        row.push(
+          r.variation == null
+            ? ""
+            : `${r.variation > 0 ? "+" : ""}${r.variation.toFixed(1).replace(".", ",")}%`,
+        );
+      }
+      return row;
+    });
+    const csv = "\uFEFF" + [header, ...rows]
+      .map((row) => row.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(";"))
+      .join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `comparativo_${viewMode}_${selectedMonth}${selectedDay ? `_${selectedDay}` : ""}${comparisonMonth ? `_vs_${comparisonMonth}` : ""}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleMonthChange = (value: string) => {
+    if (!/^\d{4}-\d{2}$/.test(value)) return;
+    setSelectedMonth(value);
+    if (selectedDay) {
+      const [year, month] = value.split("-").map(Number);
+      const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      const preferredDay = Number(selectedDay.slice(-2)) || 1;
+      const todayDay = Number(today.slice(-2));
+      const maxDay = value === today.slice(0, 7) ? todayDay : daysInMonth;
+      const day = Math.min(preferredDay, daysInMonth, maxDay);
+      setSelectedDay(`${value}-${String(day).padStart(2, "0")}`);
+    }
+    if (comparisonMonth === value) setComparisonMonth(null);
+  };
+
+  const selectedMonthDays = (() => {
+    const [year, month] = selectedMonth.split("-").map(Number);
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    return selectedMonth === today.slice(0, 7)
+      ? Math.min(daysInMonth, Number(today.slice(-2)))
+      : daysInMonth;
+  })();
+
+  const modeLabel = viewMode === "safra"
+    ? "Safra"
+    : viewMode === "producao"
+      ? "Produção"
+      : "Produção de 3 meses";
+
+  const modeDescription = viewMode === "safra"
+    ? (selectedDay
+        ? `Negócios criados em ${selectedMonth}; resultados realizados em ${dateBr(selectedDay)}.`
+        : `Negócios criados em ${selectedMonth}; resultados realizados no mês selecionado.`)
+    : viewMode === "producao"
+      ? (selectedDay
+          ? `Produção realizada em ${dateBr(selectedDay)} comparada ao total do mês ${selectedMonth}, sem restringir a data de criação dos negócios.`
+          : `Produção realizada no mês ${selectedMonth}, sem restringir a data de criação dos negócios.`)
+      : `Negócios criados nos três meses anteriores a ${selectedMonth}; resultados realizados em ${selectedMonth}.`;
+
+  const comparisonSectionTitle = viewMode === "safra"
+    ? "Comparativo da safra"
+    : "Comparativo da produção";
+  const comparisonSectionDescription = viewMode === "safra"
+    ? (selectedDay
+        ? `Dia ${dateBr(selectedDay)} × total de ${selectedMonth} × mês ${comparisonMonth}.`
+        : `Total de ${selectedMonth} × mês ${comparisonMonth}.`)
+    : (selectedDay
+        ? `Produção do dia ${dateBr(selectedDay)}, do mês ${selectedMonth} e do mês ${comparisonMonth}.`
+        : `Total de ${selectedMonth} × mês ${comparisonMonth}.`);
 
   // ═══════════════════════════════════════════════════════════
   return (
     <DashboardLayout
       title="Inteligência Comercial"
       subtitle="Visão consolidada da operação, da distribuição à assinatura e ao resultado jurídico, em uma única página."
+      showPeriodFilter={false}
     >
       <FilterBar
         onFilterChange={handleFilterChange}
         showColaboradorFilter={true}
-        className="mb-6"
+        className="mb-3"
         onRefresh={handleRefresh}
       />
+      <RecomendacoesCard filters={filters} colaboradores={collaborators} />
+
+      <div className="mb-5 flex flex-wrap items-center gap-2" role="group" aria-label="Modo do relatório">
+        {([
+          ["safra", "Safra"],
+          ["producao", "Produção"],
+          ["producao-3-meses", "Produção de 3 meses"],
+        ] as const).map(([mode, label]) => (
+          <button
+            key={mode}
+            type="button"
+            aria-pressed={viewMode === mode}
+            onClick={() => {
+              setViewMode(mode);
+              if (mode === "producao-3-meses") {
+                setSelectedDay(null);
+                setComparisonMonth(null);
+              }
+            }}
+            className={cn(
+              "rounded-lg border px-3 py-2 text-xs font-semibold transition-colors",
+              viewMode === mode
+                ? "border-blue-600 bg-blue-600 text-white"
+                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="mb-5 flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4">
+        <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+          Mês
+          <input
+            type="month"
+            min={reportPeriod.limits?.minimum.slice(0, 7)}
+            max={today.slice(0, 7)}
+            value={selectedMonth}
+            onChange={(event) => handleMonthChange(event.target.value)}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+          />
+        </label>
+        {(viewMode === "safra" || viewMode === "producao") && (
+          <>
+            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+              Dia para comparar
+              <select
+                value={selectedDay ? selectedDay.slice(-2) : ""}
+                onChange={(event) => {
+                  const v = event.target.value;
+                  setSelectedDay(v ? `${selectedMonth}-${v}` : null);
+                }}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+              >
+                <option value="">Selecione um dia</option>
+                {Array.from({ length: selectedMonthDays }, (_, index) => {
+                  const day = String(index + 1).padStart(2, "0");
+                  return <option key={day} value={day}>{day}</option>;
+                })}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+              Comparar mês com
+              <div className="flex items-center gap-1">
+                <input
+                  type="month"
+                  min={reportPeriod.limits?.minimum.slice(0, 7)}
+                  max={today.slice(0, 7)}
+                  value={comparisonMonth ?? ""}
+                  onChange={(event) => setComparisonMonth(event.target.value || null)}
+                  placeholder="Selecione"
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+                />
+                {comparisonMonth && (
+                  <button
+                    type="button"
+                    onClick={() => setComparisonMonth(null)}
+                    className="rounded-md px-2 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-100"
+                    title="Limpar comparação"
+                  >
+                    Limpar
+                  </button>
+                )}
+              </div>
+            </label>
+          </>
+        )}
+        {viewMode === "producao-3-meses" && (
+          <p className="pb-2 text-xs text-slate-600">
+            Coorte criada nos três meses até o mês selecionado; resultados medidos no mês selecionado.
+          </p>
+        )}
+      </div>
+      <p className="mb-4 text-xs text-slate-500">{modeDescription}</p>
+
+      {/* ── Comparativo: só aparece com mês de comparação; recolhido por padrão ── */}
+      {(viewMode === "safra" || viewMode === "producao") && hasComparison && (
+        <details className="card mb-4 group">
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 [&::-webkit-details-marker]:hidden">
+            <div className="flex-1 min-w-0">
+              <h2 className="text-base font-bold text-slate-800">
+                {comparisonSectionTitle}
+              </h2>
+              <p className="mt-0.5 text-[11px] text-slate-500 truncate">
+                {comparisonSectionDescription}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                handleExportComparison();
+              }}
+              disabled={comparisonTableRows.length === 0}
+              className="inline-flex items-center gap-1 px-2 py-1 border border-[#e2e8f0] rounded-md text-[11px] font-semibold text-[#475569] bg-white hover:bg-[#f1f5f9] disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Exportar comparativo em CSV"
+            >
+              <Download className="w-3 h-3" />
+              CSV
+            </button>
+            <ChevronDown
+              size={15}
+              className="shrink-0 text-slate-400 transition-transform group-open:rotate-180"
+            />
+          </summary>
+          <div className="overflow-x-auto border-t border-slate-100 [&_th]:py-1.5 [&_th]:text-[11px] [&_td]:py-1.5 [&_td]:text-[11px]">
+            <table className="simple-table w-full">
+              <thead>
+                <tr>
+                  <th>Indicador</th>
+                  {selectedDay && <th className="text-right">{dateBr(selectedDay)}</th>}
+                  <th className="text-right">
+                    Total {selectedMonth}{selectedMonth === today.slice(0, 7) ? " · até hoje" : ""}
+                  </th>
+                  {selectedDay && <th className="text-right">Dia / mês</th>}
+                  <th className="text-right">Total {comparisonMonth}</th>
+                  <th className="text-right">Variação entre períodos</th>
+                </tr>
+              </thead>
+              <tbody>
+                {comparisonTableRows.map((r) => (
+                  <tr key={r.key}>
+                    <td className="font-semibold">{r.label}</td>
+                    {selectedDay && (
+                      <td className="text-right tabular-nums">
+                        {r.dayValue == null ? "—" : formatInt(r.dayValue)}
+                      </td>
+                    )}
+                    <td className="text-right tabular-nums">
+                      {r.monthValue == null ? "—" : formatInt(r.monthValue)}
+                    </td>
+                    {selectedDay && (
+                      <td className="text-right tabular-nums">
+                        {formatPct(r.dayValue || 0, r.monthValue || 0)}
+                      </td>
+                    )}
+                    <td className="text-right tabular-nums">
+                      {r.comparedValue == null ? "—" : formatInt(r.comparedValue)}
+                    </td>
+                    <td className="text-right tabular-nums">
+                      {r.variation == null
+                        ? "—"
+                        : `${r.variation > 0 ? "+" : ""}${r.variation.toFixed(1).replace(".", ",")}%`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {comparisonError && (
+            <p className="border-t border-red-100 bg-red-50 px-4 py-1.5 text-[11px] text-red-700">
+              Não foi possível carregar o mês de comparação: {comparisonError}
+            </p>
+          )}
+        </details>
+      )}
+
+      {dataAsOf && (
+        <div className="mb-4 text-xs text-slate-500" role="status">
+          Dados consultados até {dateTimeBr(dataAsOf)}.
+        </div>
+      )}
 
       {hasActiveFilters && (
         <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
@@ -686,12 +1127,6 @@ export default function Inte_comerce() {
           </span>
         </div>
       )}
-
-      {/* ═══════════════════════════════════════════════════════
-          RECOMENDAÇÕES TEMPORÁRIAS (24h) — supervisor+
-          Alvo definido pelo filtro acima (colaborador OU equipe).
-          ═══════════════════════════════════════════════════════ */}
-      <RecomendacoesCard filters={filters} colaboradores={collaborators} />
 
       {loading && (
         <div className="mb-4 flex items-center gap-2 text-xs text-[#64748b]">
@@ -716,23 +1151,25 @@ export default function Inte_comerce() {
         </div>
       )}
 
-      {/* ═══════════════════════════════════════════════════════
-          1) VISÃO GERAL DO FUNIL  (K01A)
-          ═══════════════════════════════════════════════════════ */}
+      {/* 1) VISÃO GERAL — sempre mês de referência */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">Visão geral do funil</h2>
             <p className="text-xs text-[#64748b]">
-              Sete indicadores principais do período selecionado.
+              Indicadores do mês de referência ({modeLabel}).
             </p>
           </div>
-          <span className="badge info">SAFRA · K01A</span>
+          <span className="badge info">{modeLabel} · K01A</span>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
           {STAT_CARDS.map((card) => (
             <div key={card.key} className="card p-4">
-              <div className="text-[11px] text-[#64748b] font-medium">{card.label}</div>
+              <div className="text-[11px] text-[#64748b] font-medium">
+                {viewMode === "producao" && card.key === "received"
+                  ? "Leads recebidos"
+                  : card.label}
+              </div>
               <div
                 className={cn(
                   "text-2xl font-extrabold mt-2 tabular-nums",
@@ -744,7 +1181,9 @@ export default function Inte_comerce() {
                 {formatInt(aggregates[card.key])}
               </div>
               <div className="text-[10px] text-[#94a3b8] mt-1 leading-snug min-h-[32px]">
-                {card.sub}
+                {viewMode === "producao" && card.key === "received"
+                  ? "Recebidos no período, sem restrição de criação"
+                  : card.sub}
               </div>
               <div
                 className={cn(
@@ -757,28 +1196,25 @@ export default function Inte_comerce() {
         </div>
       </div>
 
-      {/* ═══════════════════════════════════════════════════════
-          2) PERFORMANCE COMERCIAL  (K02A)
-          ═══════════════════════════════════════════════════════ */}
+      {/* 2) PERFORMANCE COMERCIAL — mostra ambos os meses */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">Performance Comercial</h2>
             <p className="text-xs text-[#64748b]">
-              Métricas estratégicas em um bloco unificado.
+              Métricas estratégicas do mês de referência{hasComparison ? " e do mês de comparação" : ""}.
             </p>
           </div>
-          <span className="badge info">SAFRA · K02A</span>
+          <span className="badge info">{modeLabel} · K02A</span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+          {/* Card 1 — Média de assinados / dia */}
           <div className="card p-5 relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1 bg-[#407de5]" />
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-[#50627a]">
-                Média de assinados / dia
-              </h3>
-              <span className="badge success">SAFRA</span>
+              <h3 className="text-sm font-bold text-[#50627a]">Média de assinados / dia</h3>
+              <span className="badge success">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
               {avgSignedPerDay.toFixed(1).replace(".", ",")}
@@ -786,18 +1222,22 @@ export default function Inte_comerce() {
             <p className="text-[11px] text-[#8c9bae] mt-3 min-h-[36px]">
               {formatInt(aggregates.signed)} assinados · {formatInt(weekdays)} dias de semana
             </p>
+            {hasComparison && (
+              <p className="text-[11px] text-slate-500 mt-1">
+                Comparação ({comparisonMonth}): <b>{comparisonAvgSignedPerDay.toFixed(1).replace(".", ",")}</b>
+              </p>
+            )}
             <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
-              Assinados ORIGINAL da safra ÷ dias úteis do período.
+              Assinados ORIGINAL no período medido ÷ dias úteis do período.
             </div>
           </div>
 
+          {/* Card 2 — Conversão geral */}
           <div className="card p-5 relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1 bg-[#1a9ac5]" />
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-[#50627a]">
-                Conversão geral operacional
-              </h3>
-              <span className="badge info">SAFRA</span>
+              <h3 className="text-sm font-bold text-[#50627a]">Conversão geral operacional</h3>
+              <span className="badge info">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
               {strategic.pct_recebidos_ate_assinados
@@ -807,18 +1247,29 @@ export default function Inte_comerce() {
             <p className="text-[11px] text-[#8c9bae] mt-3 min-h-[36px]">
               {formatInt(strategic.assinados)} assinados ÷ {formatInt(strategic.recebidos)} recebidos
             </p>
+            {hasComparison && (
+              <p className="text-[11px] text-slate-500 mt-1">
+                Comparação ({comparisonMonth}):{" "}
+                <b>
+                  {comparisonStrategic?.pct_recebidos_ate_assinados
+                    ? `${comparisonStrategic.pct_recebidos_ate_assinados.toFixed(1).replace(".", ",")}%`
+                    : "—"}
+                </b>
+              </p>
+            )}
             <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
-              Recebidos → assinados na mesma safra (K02A).
+              {viewMode === "producao"
+                ? "A conversão por coorte não se aplica: os eventos podem pertencer a negócios criados em outros períodos."
+                : "Recebidos → assinados na mesma safra (K02A)."}
             </div>
           </div>
 
+          {/* Card 3 — Conversão assinados → ganhos */}
           <div className="card p-5 relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-[#50627a]">
-                Conversão assinados → ganhos
-              </h3>
-              <span className="badge success">SAFRA</span>
+              <h3 className="text-sm font-bold text-[#50627a]">Conversão assinados → ganhos</h3>
+              <span className="badge success">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
               {strategic.pct_assinados_ate_ganhos
@@ -828,16 +1279,26 @@ export default function Inte_comerce() {
             <p className="text-[11px] text-[#8c9bae] mt-3 min-h-[36px]">
               {formatInt(strategic.assinados_que_ganharam)} ganhos de {formatInt(strategic.assinados)} assinados
             </p>
+            {hasComparison && (
+              <p className="text-[11px] text-slate-500 mt-1">
+                Comparação ({comparisonMonth}):{" "}
+                <b>
+                  {comparisonStrategic?.pct_assinados_ate_ganhos
+                    ? `${comparisonStrategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
+                    : "—"}
+                </b>
+              </p>
+            )}
             <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
-              Ganho registrado após a assinatura da mesma safra (K02A).
+              {viewMode === "producao"
+                ? "Considera negócios com assinatura e ganho ocorridos nesta produção."
+                : "Ganho registrado após a assinatura da mesma safra (K02A)."}
             </div>
           </div>
         </div>
       </div>
 
-      {/* ═══════════════════════════════════════════════════════
-          3) PROGRESSÃO DO FUNIL E DESQUALIFICAÇÃO (K03A / K04A)
-          ═══════════════════════════════════════════════════════ */}
+      {/* 3) FUNIL + DESQUALIFICAÇÃO — sobreposição comparativa */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
@@ -848,38 +1309,65 @@ export default function Inte_comerce() {
               Marcos da jornada por Deal e motivos de saída do Closer.
             </p>
           </div>
-          <span className="badge info">SAFRA · K03A / K04A</span>
+          <span className="badge info">{modeLabel} · K03A / K04A</span>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="card p-5 lg:col-span-2">
-            <h3 className="text-sm font-bold text-[#0f172a] mb-4">
-              Progressão do funil comercial
-            </h3>
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+              <h3 className="text-sm font-bold text-[#0f172a]">Progressão do funil comercial</h3>
+              {comparisonFunnel && (
+                <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-1.5 rounded-full bg-slate-400/50" /> Comparação
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-2.5 rounded-full bg-gradient-to-r from-[#3972e0] to-[#83adfa]" /> Referência
+                  </span>
+                </div>
+              )}
+            </div>
             <div className="space-y-2.5">
               {FUNNEL_STAGES.map((stage, i) => {
                 const value = (funnel[stage.key] as number) || 0;
                 const base = funnel.recebidos;
                 const width = base ? Math.max(2, (value / base) * 100) : 2;
+                const compValue = comparisonFunnel
+                  ? ((comparisonFunnel[stage.key] as number) || 0)
+                  : null;
+                const compBase = comparisonFunnel?.recebidos;
+                const compWidth = comparisonFunnel && compBase
+                  ? Math.max(2, (compValue! / compBase) * 100)
+                  : 0;
+                const grid = comparisonFunnel
+                  ? "grid-cols-[110px_1fr_56px_56px_56px]"
+                  : "grid-cols-[110px_1fr_70px_70px]";
                 return (
-                  <div
-                    key={stage.key}
-                    className="w-full grid grid-cols-[110px_1fr_70px_70px] items-center gap-3 text-xs py-1 px-1"
-                  >
-                    <span className="font-medium text-[#0f172a] text-left">
-                      {stage.label}
-                    </span>
-                    <div className="h-2.5 rounded-full bg-[#edf2f8] overflow-hidden">
-                      <div
-                        className={cn(
-                          "h-full rounded-full bg-gradient-to-r",
-                          stage.gradient,
-                        )}
-                        style={{ width: `${width}%` }}
-                      />
+                  <div key={stage.key} className={cn("w-full grid items-center gap-3 text-xs py-1 px-1", grid)}>
+                    <span className="font-medium text-[#0f172a] text-left">{stage.label}</span>
+                    <div className="flex flex-col gap-0.5">
+                      {comparisonFunnel && (
+                        <div className="h-1.5 rounded-full bg-[#edf2f8] overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-slate-400/50"
+                            style={{ width: `${compWidth}%` }}
+                          />
+                        </div>
+                      )}
+                      <div className="h-2.5 rounded-full bg-[#edf2f8] overflow-hidden">
+                        <div
+                          className={cn("h-full rounded-full bg-gradient-to-r", stage.gradient)}
+                          style={{ width: `${width}%` }}
+                        />
+                      </div>
                     </div>
                     <span className="font-bold text-right text-[#0f172a] tabular-nums">
                       {formatInt(value)}
                     </span>
+                    {comparisonFunnel && (
+                      <span className="text-right text-slate-400 tabular-nums">
+                        {formatInt(compValue || 0)}
+                      </span>
+                    )}
                     <span className="text-right text-[#94a3b8] tabular-nums">
                       {pctOfPrevious(i)}
                     </span>
@@ -887,41 +1375,61 @@ export default function Inte_comerce() {
                 );
               })}
 
-              <div className="w-full grid grid-cols-[110px_1fr_70px_70px] items-center gap-3 text-xs border-t border-dashed border-[#e2e8f0] pt-3 mt-2 py-1 px-1">
-                <span className="font-medium text-[#DC2626] text-left">
-                  ↳ Desqualificados
-                </span>
-                <div className="h-2.5 rounded-full bg-[#fef2f2] overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-[#df8d93]"
-                    style={{
-                      width: `${
-                        funnel.recebidos
-                          ? Math.max(
-                              2,
-                              (funnel.desqualificados_saida / funnel.recebidos) *
-                                100,
-                            )
-                          : 2
-                      }%`,
-                    }}
-                  />
+              <div
+                className={cn(
+                  "w-full grid items-center gap-3 text-xs border-t border-dashed border-[#e2e8f0] pt-3 mt-2 py-1 px-1",
+                  comparisonFunnel
+                    ? "grid-cols-[110px_1fr_56px_56px_56px]"
+                    : "grid-cols-[110px_1fr_70px_70px]",
+                )}
+              >
+                <span className="font-medium text-[#DC2626] text-left">↳ Desqualificados</span>
+                <div className="flex flex-col gap-0.5">
+                  {comparisonFunnel && (
+                    <div className="h-1.5 rounded-full bg-[#fef2f2] overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-[#df8d93]/60"
+                        style={{
+                          width: `${
+                            comparisonFunnel.recebidos
+                              ? Math.max(2, (comparisonFunnel.desqualificados_saida / comparisonFunnel.recebidos) * 100)
+                              : 2
+                          }%`,
+                        }}
+                      />
+                    </div>
+                  )}
+                  <div className="h-2.5 rounded-full bg-[#fef2f2] overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-[#df8d93]"
+                      style={{
+                        width: `${
+                          funnel.recebidos
+                            ? Math.max(2, (funnel.desqualificados_saida / funnel.recebidos) * 100)
+                            : 2
+                        }%`,
+                      }}
+                    />
+                  </div>
                 </div>
                 <span className="font-bold text-right text-[#0f172a] tabular-nums">
                   {formatInt(funnel.desqualificados_saida)}
                 </span>
+                {comparisonFunnel && (
+                  <span className="text-right text-slate-400 tabular-nums">
+                    {formatInt(comparisonFunnel.desqualificados_saida)}
+                  </span>
+                )}
                 <span className="text-right text-[#94a3b8] tabular-nums">
                   {formatPct(funnel.desqualificados_saida, funnel.recebidos)}
                 </span>
               </div>
             </div>
             <div className="mt-4 rounded-lg bg-[#f4f8ff] border-l-2 border-[#82a9e7] px-3 py-2 text-[11px] text-[#627a98]">
-              <strong className="text-[#2357a3]">Desqualificados</strong> é saída
-              paralela, não uma etapa posterior a Protocolados. Fonte:{" "}
+              <strong className="text-[#2357a3]">Desqualificados</strong> é saída paralela, não uma etapa posterior a Protocolados. Fonte:{" "}
               <code className="text-[10px]">
                 ops.v_bi_v6_coortes.primeira_desqualificacao_em
-              </code>
-              .
+              </code>.
             </div>
           </div>
 
@@ -933,24 +1441,22 @@ export default function Inte_comerce() {
               <span className="badge">Closer · motivo_perda</span>
             </div>
             <div className="space-y-3">
-              {reasons.length === 0 && (
+              {mergedReasons.length === 0 && (
                 <p className="text-xs text-[#94a3b8]">
-                  {loading
-                    ? "Carregando motivos…"
-                    : "Nenhum motivo registrado no período."}
+                  {loading ? "Carregando motivos…" : "Nenhum motivo registrado no período."}
                 </p>
               )}
-              {reasons.map((reason) => {
-                const width = maxDisqReasons
-                  ? Math.max(
-                      2,
-                      (reason.deals_desqualificados / maxDisqReasons) * 100,
-                    )
+              {mergedReasons.map((reason) => {
+                const width = maxMergedReason
+                  ? Math.max(2, (reason.current / maxMergedReason) * 100)
                   : 2;
+                const compWidth = maxMergedReason && hasComparison
+                  ? Math.max(2, (reason.comp / maxMergedReason) * 100)
+                  : 0;
                 return (
                   <div
                     key={reason.motivo}
-                    className="grid grid-cols-[1fr_1.6fr_50px] items-center gap-3 text-xs"
+                    className="grid grid-cols-[1fr_1.6fr_56px] items-center gap-3 text-xs"
                   >
                     <span
                       className="text-[#0f172a] font-medium truncate"
@@ -958,30 +1464,56 @@ export default function Inte_comerce() {
                     >
                       {reason.motivo}
                     </span>
-                    <div className="h-2 rounded-full bg-[#edf1f7] overflow-hidden">
-                      <div
-                        className="h-full rounded-full bg-[#d99362]"
-                        style={{ width: `${width}%` }}
-                      />
+                    <div className="flex flex-col gap-0.5">
+                      {hasComparison && (
+                        <div className="h-1.5 rounded-full bg-[#edf1f7] overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-slate-400/50"
+                            style={{ width: `${compWidth}%` }}
+                          />
+                        </div>
+                      )}
+                      <div className="h-2 rounded-full bg-[#edf1f7] overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-[#d99362]"
+                          style={{ width: `${width}%` }}
+                        />
+                      </div>
                     </div>
-                    <strong className="text-right text-[#0f172a] tabular-nums">
-                      {formatInt(reason.deals_desqualificados)}
-                    </strong>
+                    <div className="text-right">
+                      <strong className="text-[#0f172a] tabular-nums">
+                        {formatInt(reason.current)}
+                      </strong>
+                      {hasComparison && (
+                        <div className="text-[10px] text-slate-400 tabular-nums">
+                          {formatInt(reason.comp)}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 );
               })}
             </div>
+            {reasons.length > 10 && (
+              <button
+                type="button"
+                aria-expanded={showAllReasons}
+                aria-label={showAllReasons ? "Mostrar menos motivos" : "Mostrar todos os motivos"}
+                title={showAllReasons ? "Mostrar menos" : "Mostrar todos os motivos"}
+                onClick={() => setShowAllReasons((expanded) => !expanded)}
+                className="mt-5 rounded px-2 py-1 text-sm font-bold text-[#2F6FED] hover:bg-[#eff6ff] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6FED]"
+              >
+                {showAllReasons ? "Mostrar menos" : "..."}
+              </button>
+            )}
             <div className="mt-4 text-[11px] text-[#94a3b8]">
-              Fonte: <strong>K04A</strong> — motivo atual do Deal no momento da
-              desqualificação.
+              Fonte: <strong>K04A</strong> — motivo atual do Deal no momento da desqualificação.
             </div>
           </div>
         </div>
       </div>
 
-      {/* ═══════════════════════════════════════════════════════
-          4) TABELA DE PRODUÇÃO (K05A / K06A)
-          ═══════════════════════════════════════════════════════ */}
+      {/* 4) TABELA DE PRODUÇÃO */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
@@ -998,6 +1530,16 @@ export default function Inte_comerce() {
           </span>
         </div>
 
+        {tableError && (
+          <div className="mb-3 bg-amber-50 text-amber-800 p-3 rounded-lg text-xs flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="font-semibold">Não foi possível carregar a tabela.</p>
+              <p className="mt-0.5">{tableError}</p>
+            </div>
+          </div>
+        )}
+
         <div className="card">
           <div className="p-5 border-b border-[#e2e8f0]">
             <div className="flex items-center justify-between flex-wrap gap-3">
@@ -1006,7 +1548,7 @@ export default function Inte_comerce() {
                   Produção comercial
                 </h3>
                 <p className="text-xs text-[#64748b] mt-0.5">
-                  {grouping === "person" ? "Colaboradores" : "Equipes"} · SAFRA por
+                  {grouping === "person" ? "Colaboradores" : "Equipes"} · {modeLabel} por
                   recebimento
                 </p>
               </div>
@@ -1163,9 +1705,7 @@ export default function Inte_comerce() {
         </div>
       </div>
 
-      {/* ═══════════════════════════════════════════════════════
-          5) EVOLUÇÃO DIÁRIA (K07A)
-          ═══════════════════════════════════════════════════════ */}
+      {/* 5) EVOLUÇÃO DIÁRIA — sobreposição comparativa */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
@@ -1173,18 +1713,35 @@ export default function Inte_comerce() {
               Evolução de recebimentos e assinaturas
             </h2>
             <p className="text-xs text-[#64748b]">
-              Duas barras lado a lado por dia, sem filtro próprio. Segue o
-              período, equipe e colaborador do topo.
+              Barras por dia; medida de comparação em tom translúcido e mês de referência em cor viva.
             </p>
           </div>
-          <span className="badge">SAFRA · K07A</span>
+          <span className="badge">{modeLabel} · K07A</span>
         </div>
 
         <div className="card p-5">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
             <h3 className="text-sm font-bold text-[#0f172a]">
-              Recebidos × Assinados (safra)
+              {viewMode === "producao"
+                ? "Leads recebidos × Assinados"
+                : "Recebidos × Assinados (safra)"}
             </h3>
+            {comparisonResult && (
+              <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]/50" /> Recebidos (comp.)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]" /> Recebidos (ref.)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]/50" /> Assinados (comp.)
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]" /> Assinados (ref.)
+                </span>
+              </div>
+            )}
           </div>
           {seriesData.length === 0 ? (
             <div className="flex items-center justify-center h-[260px] text-[#94a3b8] text-sm">
@@ -1199,15 +1756,17 @@ export default function Inte_comerce() {
             </div>
           ) : (
             <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={seriesData} barGap={2}>
+              <BarChart data={seriesData} barGap={comparisonResult ? 1 : 2}>
                 <CartesianGrid
                   strokeDasharray="3 3"
                   stroke="#e2e8f0"
                   vertical={false}
                 />
                 <XAxis
-                  dataKey="date"
-                  tickFormatter={(v) => dateBr(v).slice(0, 5)}
+                  dataKey={comparisonResult ? "dayOfMonth" : "date"}
+                  tickFormatter={(v) =>
+                    comparisonResult ? String(v) : dateBr(String(v)).slice(0, 5)
+                  }
                   tick={{ fontSize: 10, fill: "#64748b" }}
                   axisLine={false}
                   tickLine={false}
@@ -1219,19 +1778,53 @@ export default function Inte_comerce() {
                   width={30}
                 />
                 <Tooltip
-                  labelFormatter={(v) => dateBr(String(v))}
-                  formatter={(value: any, name: any) => [
-                    formatInt(Number(value)),
-                    name === "received" ? "Recebidos" : "Assinados (safra)",
-                  ]}
+                  labelFormatter={(v) =>
+                    comparisonResult ? `Dia ${v}` : dateBr(String(v))
+                  }
+                  formatter={(value: any, name: any) => {
+                    const labels: Record<string, string> = {
+                      received: viewMode === "producao" ? "Leads recebidos" : "Recebidos",
+                      signed: "Assinados",
+                      receivedComp:
+                        viewMode === "producao"
+                          ? "Leads recebidos (comparação)"
+                          : "Recebidos (comparação)",
+                      signedComp: "Assinados (comparação)",
+                    };
+                    return [formatInt(Number(value)), labels[name] || name];
+                  }}
                   contentStyle={{ fontSize: 12, borderRadius: 8 }}
                 />
                 <Legend
                   wrapperStyle={{ fontSize: 11 }}
-                  formatter={(value) =>
-                    value === "received" ? "Recebidos" : "Assinados"
-                  }
+                  formatter={(value) => {
+                    const labels: Record<string, string> = {
+                      received: viewMode === "producao" ? "Leads recebidos" : "Recebidos",
+                      signed: "Assinados",
+                      receivedComp: "Recebidos (comparação)",
+                      signedComp: "Assinados (comparação)",
+                    };
+                    return labels[value] || value;
+                  }}
                 />
+                {comparisonResult && (
+                  <Bar
+                    dataKey="receivedComp"
+                    name="receivedComp"
+                    fill="#9bc1fb"
+                    fillOpacity={0.35}
+                    radius={[4, 4, 0, 0]}
+                  />
+                )}
+                {comparisonResult && (
+                  <Bar
+                    dataKey="signedComp"
+                    name="signedComp"
+                    fill="#2866dd"
+                    fillOpacity={0.35}
+                    radius={[4, 4, 0, 0]}
+                  />
+                )}
                 <Bar
                   dataKey="received"
                   name="received"
