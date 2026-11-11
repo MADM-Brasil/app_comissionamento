@@ -37,10 +37,8 @@ import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
 import { HUBSPOT_PORTAL_ID_CONFIGURED, buscarClienteResumo } from '../services/hubspot.js';
 import {
-  accessControl,                    // necessário para LEVELS.JURIDICO e getAccessLevel
+  accessControl,
   getActiveSupportUser,
-  isSupportAdmin,
-  isSupportCoordinatorOrAbove,
   isSupportSupervisor,
   normalizeAccessValue,
   validateHubSpotMovementAccess,
@@ -215,14 +213,9 @@ const asyncRoute = handler => (req, res, next) => Promise.resolve(handler(req, r
 // ============================================================
 // Middleware principal de autenticação.
 //
-// Aceita JURIDICO além de SUPERVISAO+. O nível JURIDICO
-// (Analista Jurídico / Coordenador Jurídico / Supervisor Jurídico /
-// Analista) é liberado APENAS para consultar a Busca Cliente — todas
-// as demais rotas são bloqueadas logo abaixo pelo middleware
-// `requireNonJuridico`.
-//
-// Marca `req.supportIsJuridico` para os handlers consultarem quando
-// precisarem aplicar regras específicas (ex.: buscar-cliente).
+// Aceita JURIDICO, ASSESSOR_PLUS e SUPERVISAO+.
+// Utiliza getEffectiveAccessLevel para reconhecer corretamente
+// promoções por e-mail (ex.: ASSESSOR_PLUS).
 // ============================================================
 router.use(asyncRoute(async (req, res, next) => {
   const requesterEmail = email(req.session?.userId, 'Identidade da sessão');
@@ -231,16 +224,20 @@ router.use(asyncRoute(async (req, res, next) => {
   const actor = await getActiveSupportUser(requesterEmail);
   if (!actor) throw fail(403, 'Perfil sem acesso à página de Suporte.');
 
-  const level = accessControl.getAccessLevel(actor.cargo, actor.status);
+  // CORREÇÃO: Usar getEffectiveAccessLevel para reconhecer promoções (ASSESSOR_PLUS)
+  const level = accessControl.getEffectiveAccessLevel(actor);
+  
   const isJuridico = level === accessControl.LEVELS.JURIDICO;
   const isSupervisorOrAbove = level >= accessControl.LEVELS.SUPERVISAO;
+  const isAssessorPlus = level === accessControl.LEVELS.ASSESSOR_PLUS;
 
-  if (!isSupervisorOrAbove && !isJuridico) {
+  if (!isSupervisorOrAbove && !isJuridico && !isAssessorPlus) {
     throw fail(403, 'Perfil sem acesso à página de Suporte.');
   }
 
   req.supportActor = { ...actor, email: email(actor.email, 'E-mail do usuário', true) };
   req.supportIsJuridico = isJuridico;
+  req.supportLevel = level; // Armazena para uso nos handlers
   next();
 }));
 
@@ -253,8 +250,12 @@ function requireNonJuridico(req, res, next) {
   next();
 }
 
+// Verifica se o usuário tem acesso administrativo
 function requireAdmin(req) {
-  if (!isSupportAdmin(req.supportActor.cargo)) throw fail(403, 'Sem permissão para esta operação.');
+  const level = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
+  if (level < accessControl.LEVELS.ADMINISTRATIVO) {
+    throw fail(403, 'Sem permissão para esta operação.');
+  }
 }
 
 async function destinationFor(req, enforceEmail = false, { enforceDestinationSameTeam = false } = {}) {
@@ -306,11 +307,10 @@ function deveOcultarEquipesReservadas(actor) {
 // Escopo de histórico.
 //
 // Regras:
-//   1) `todos=1` exige ADMIN (mantido como antes).
-//   2) Coordenador+ consultando status administrativos
-//      (`coordenador` / `bloqueado`) → vê TODOS os casos, para que a
-//      "Visão Coordenador" funcione. Filtros explícitos de
-//      solicitante (e-mail/nome) ainda podem ser aplicados.
+//   1) `todos=1` exige ADMIN.
+//   2) Coordenador+ (incluindo ASSESSOR_PLUS) consultando status
+//      administrativos (`coordenador` / `bloqueado`) → vê TODOS os
+//      casos, para que a "Visão Coordenador" funcione.
 //   3) Demais casos: escopo restrito ao próprio solicitante.
 // ────────────────────────────────────────────────────────────────
 function historyScope(req) {
@@ -323,11 +323,15 @@ function historyScope(req) {
   const requestedEmail = email(req.query.solicitante_email, 'E-mail do solicitante');
   const requestedName = text(req.query.colaborador_origem_nome, 'Nome do solicitante');
 
-  if (!isSupportAdmin(req.supportActor.cargo)) {
-    // [NOVO] Coordenador+ consultando casos administrativos → visão global.
+  const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
+  const isAdmin = actorLevel >= accessControl.LEVELS.ADMINISTRATIVO;
+  const isCoordOrPlus = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
+
+  if (!isAdmin) {
     const statusQueryRaw = String(req.query.status_mapeamento || '').toLowerCase();
     const wantsAdministrative = /\b(coordenador|bloqueado)\b/.test(statusQueryRaw);
-    if (wantsAdministrative && isSupportCoordinatorOrAbove(req.supportActor.cargo)) {
+    
+    if (wantsAdministrative && isCoordOrPlus) {
       return {
         email: requestedEmail || null,
         name: requestedName || null,
@@ -376,12 +380,10 @@ function notify(payload) {
 // ============================================================
 // GET /escopo/debug
 // Diagnóstico temporário. Mostra exatamente o que o servidor vê.
-// Pode ser removido após a validação do filtro por unidade.
-// Bloqueado para JURIDICO.
 // ============================================================
 router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
   const actor = req.supportActor;
-  const isAdmin = isSupportAdmin(actor.cargo);
+  const isAdmin = req.supportLevel >= accessControl.LEVELS.ADMINISTRATIVO;
   const unidadeId = actor.unidade_id != null ? Number(actor.unidade_id) : null;
   const ehHO = unidadeId === HO_UNIDADE_ID;
   const aplicarFiltroUnidade = !isAdmin && !ehHO && unidadeId != null;
@@ -458,6 +460,7 @@ router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
     debug: {
       supportActorCompleto: actor,
       calculo: {
+        level: req.supportLevel,
         isAdmin,
         ehHO,
         HO_UNIDADE_ID,
@@ -485,27 +488,10 @@ router.get('/escopo/debug', requireNonJuridico, asyncRoute(async (req, res) => {
 // ============================================================
 // GET /escopo
 // Retorna equipes e assessores disponíveis para o usuário logado.
-//
-// Regra de unidade:
-//   - Admin → sem filtro.
-//   - HO (unidade_id = 4) → sem filtro (HO vê todas as unidades).
-//   - Coordenador / Supervisor com unidade_id (1, 2, 3) → apenas da própria unidade.
-//   - Sem unidade_id → fallback sem filtro (com aviso no log).
-//
-// Regra de equipes reservadas (Equipe Tatiane):
-//   - Supervisor fora da equipe reservada na unidade 1 → não vê a equipe
-//     reservada na lista.
-//
-// Fonte: view_app_metricas_assessores (mês corrente) JOIN view_app_colaboradores.
-//  - m.data_metrica do mês corrente garante apenas colaboradores do mês.
-//  - m.classificacao_operacional preenchida filtra os desativados/duplicados.
-//  - c.unidade_id aplica o filtro de unidade.
-//
-// Bloqueado para JURIDICO.
 // ============================================================
 router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
   const actor = req.supportActor;
-  const isAdmin = isSupportAdmin(actor.cargo);
+  const isAdmin = req.supportLevel >= accessControl.LEVELS.ADMINISTRATIVO;
   const unidadeId = actor.unidade_id != null ? Number(actor.unidade_id) : null;
 
   const ehHO = unidadeId === HO_UNIDADE_ID;
@@ -586,7 +572,7 @@ router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
   }
 
   console.log(
-    `[suporte/escopo] user=${actor.email} cargo=${actor.cargo} ` +
+    `[suporte/escopo] user=${actor.email} cargo=${actor.cargo} level=${req.supportLevel} ` +
     `unidade_id=${unidadeId} ehHO=${ehHO} isAdmin=${isAdmin} aplicarFiltro=${aplicarFiltroUnidade} ` +
     `travaEquipe=${supervisorDeveTravarEquipe(actor)} ocultaReservadas=${ocultarEquipesReservadas} ` +
     `mes=${dataMetrica} equipes=${equipesSet.size} assessores=${assessores.length}`
@@ -616,25 +602,6 @@ router.get('/escopo', requireNonJuridico, asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Busca de cliente na HubSpot ----------------------
-// Consulta somente leitura: telefone, e-mail ou CPF -> nome, etapa/pipeline
-// do negócio mais recente e responsável atual. Não altera nada no HubSpot.
-//
-// JURIDICO:
-//   - Recebe SEMPRE o payload completo, mesmo quando o cliente está em
-//     outra equipe.
-//   - Quando o cliente está em outra equipe, o backend retorna também
-//     `restrito: true` e `motivo` (dados completos + aviso) para o
-//     frontend exibir o banner informativo "Acesso jurídico: ...".
-//
-// Supervisor:
-//   - Recebe o payload completo mesmo quando o cliente está em outra equipe.
-//   - `link` é forçado para `null` (card da HubSpot bloqueado) e o backend
-//     retorna `restrito: true` + `motivo` para o frontend exibir o aviso.
-//   - Quando o cliente está na própria equipe, comportamento antigo
-//     (dados completos + link liberado, sem marca).
-//
-// Coordenador/Admin não são afetados em nenhum dos casos.
-// ---------------------- Busca de cliente na HubSpot ----------------------
 router.get('/buscar-cliente', asyncRoute(async (req, res) => {
   const telefone = text(req.query.telefone, 'Telefone');
   const cpf = text(req.query.cpf, 'CPF');
@@ -660,8 +627,6 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
     }
   }
 
-  // Monta o link direto do card na HubSpot (negócio mais recente, ou o
-  // contato quando não houver negócio associado).
   const portalId = String(HUBSPOT_PORTAL_ID_CONFIGURED || '').trim();
   if (resultado.found && !resultado.duplicado && /^\d+$/.test(portalId)) {
     if (resultado.negocio?.id) {
@@ -671,8 +636,6 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
     }
   }
 
-  // JURIDICO: retorna dados completos.
-  // Supervisor de outra equipe: retorna dados completos, mas bloqueia o link.
   const equipeCliente = resultado.responsavel?.equipe || null;
   const equipeSolicitante = normalizeAccessValue(actor.nome_equipe);
   const clienteEmOutraEquipe = Boolean(
@@ -681,7 +644,6 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
 
   if (resultado.found && !resultado.duplicado && clienteEmOutraEquipe) {
     if (req.supportIsJuridico) {
-      // JURIDICO: dados completos + aviso informativo (link liberado).
       return res.json({
         success: true,
         data: {
@@ -693,12 +655,11 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
       });
     }
     if (isSupportSupervisor(actor.cargo)) {
-      // Supervisor: dados completos + aviso, mas SEM link do card.
       return res.json({
         success: true,
         data: {
           ...resultado,
-          link: null, // bloqueia o botão "Abrir card na HubSpot"
+          link: null,
           restrito: true,
           equipeCliente,
           motivo:
@@ -708,18 +669,11 @@ router.get('/buscar-cliente', asyncRoute(async (req, res) => {
         },
       });
     }
-    // Coordenador/Admin: cai no caminho normal (payload completo sem marca).
   }
 
   res.json({ success: true, data: resultado });
 }));
 
-// Encaminha um caso problemático da Busca Cliente (ex.: duplicado na HubSpot)
-// direto para a esteira Suporte do quadro de Movimentações, sem passar pela
-// fila de processamento automático (o worker ignora status != pendente).
-//
-// JURIDICO: permitido (é o único caso em que JURIDICO pode criar
-// um ticket — para escalar duplicados ao time de Suporte).
 // ---------------------- Encaminhar caso ao Suporte ----------------------
 router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
   const telefone = text(req.body?.telefone, 'Telefone');
@@ -770,7 +724,6 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Movimentação normal (CRM) ----------------------
-// Bloqueado para JURIDICO.
 router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const body = req.body;
 
@@ -825,18 +778,11 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
   const reason = text(body.motivo_solicitacao, 'Motivo', { max: 10000 });
   const observation = text(body.observacao_sales_ops, 'Observação', { max: 10000 });
 
-  // Supervisor em unidade travada (2,3,4,5) OU pertencente à Equipe Tatiane
-  // → destino obrigatoriamente na própria equipe. Coordenador/Admin e demais
-  // supervisores seguem o fluxo antigo.
   const destination = await destinationFor(req, false, {
     enforceDestinationSameTeam: supervisorDeveTravarEquipe(req.supportActor),
   });
   const actor = req.supportActor;
 
-  // Resolve produto com base na equipe VALIDADA pelo servidor.
-  // - Equipes com allowChange=false: ignora o que veio, usa o default.
-  // - Equipes com allowChange=true:  valida contra as opções permitidas.
-  // - Lança erro 400 se o valor enviado não for permitido.
   const produto = resolveTeamProduct(destination.team, body.produto);
 
   const requestHash = hashRequest({ firstName, lastName, phone, customerEmail, cpf, origin,
@@ -920,8 +866,7 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
   });
 }));
 
-// ---------------------- Movimentação por Link Hub (mesma tabela) ----------------------
-// Bloqueado para JURIDICO.
+// ---------------------- Movimentação por Link Hub ----------------------
 router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async (req, res) => {
   const { links } = req.body;
   if (!Array.isArray(links) || links.length < 1 || links.length > 50) {
@@ -939,9 +884,6 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
   }
   const items = [...byDeal.values()];
 
-  // Regra do fluxo Link Hub:
-  //   - Supervisor só pode direcionar para a própria equipe (qualquer unidade).
-  //   - Coordenador/Admin não são afetados por esta restrição.
   const destination = await destinationFor(req, true, { enforceDestinationSameTeam: true });
   const actor = req.supportActor;
 
@@ -1068,11 +1010,6 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
 }));
 
 // ---------------------- Histórico unificado ----------------------
-// Bloqueado para JURIDICO.
-//
-// Suporta status_mapeamento em CSV (ex.: `coordenador,bloqueado`).
-// O payload devolve `link` do card na HubSpot (deal → contato → null)
-// e `unidade_id` (para o filtro de unidade da Visão Coordenador).
 router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
 
@@ -1086,6 +1023,7 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
     }
   }
 
+  const isAdmin = req.supportLevel >= accessControl.LEVELS.ADMINISTRATIVO;
   const { page, limit, offset } = pageParams(req.query);
   const rows = await pool.query(`
     SELECT
@@ -1135,13 +1073,12 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
       AND ($3::text[] IS NULL OR tml.status_mapeamento::text = ANY($3::text[]))
     ORDER BY tml.atualizado_em DESC NULLS LAST, tml.id_ticket_movimentacao DESC
     LIMIT $5 OFFSET $6`,
-  [scope.email, scope.name, statusList, isSupportAdmin(req.supportActor.cargo), limit + 1, offset]);
+  [scope.email, scope.name, statusList, isAdmin, limit + 1, offset]);
   const data = rows.rows.slice(0, limit).map(row => row.payload);
   res.json({ success: true, data, pagination: { page, limit, hasMore: rows.rows.length > limit } });
 }));
 
 // ---------------------- Reportes ----------------------
-// Bloqueado para JURIDICO (leitura e escrita).
 router.get('/ticket-suporte', requireNonJuridico, asyncRoute(async (req, res) => {
   const scope = historyScope(req);
   const { page, limit, offset } = pageParams(req.query);
@@ -1164,19 +1101,6 @@ router.get('/ticket-suporte', requireNonJuridico, asyncRoute(async (req, res) =>
 
 // ============================================================
 // POST /ticket-suporte — Reportar problema
-//
-//   - Se SUPPORT_PUBLIC_BASE_URL / APP_PUBLIC_URL estiver
-//     configurada → gera as URLs absolutas dos anexos e envia
-//     ao Teams.
-//   - Se NÃO estiver configurada → loga um aviso, SALVA o ticket
-//     normalmente, mas a notificação do Teams vai sem os links
-//     dos anexos. NÃO bloqueia mais o reporte.
-//   - Em dev (NODE_ENV !== 'production'), aceita http:// além
-//     de https://.
-//   - Resposta inclui `anexos_com_link` e `anexos_sem_link`
-//     para o frontend detectar o fallback se quiser avisar.
-//
-// Bloqueado para JURIDICO.
 // ============================================================
 router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), asyncRoute(async (req, res) => {
   const title = text(req.body.titulo, 'Título', { required: true, max: 500 });
@@ -1193,8 +1117,7 @@ router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), 
     if (!configuredUrl) {
       console.warn(
         '[suporte/ticket-suporte] SUPPORT_PUBLIC_BASE_URL/APP_PUBLIC_URL não configurada. ' +
-        'O ticket será salvo, mas os anexos NÃO aparecerão como links na notificação do Teams. ' +
-        'Configure uma dessas variáveis para exibir os anexos corretamente.'
+        'O ticket será salvo, mas os anexos NÃO aparecerão como links na notificação do Teams.'
       );
     } else {
       let base;
@@ -1273,22 +1196,12 @@ router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), 
 }));
 
 // ---------------------- Edição manual ----------------------
-// JURIDICO: bloqueado (JURIDICO < ADMINISTRATIVO/COORDENADOR).
-//
-// Aceita ADMIN e COORDENADOR+. Coordenadores têm restrição de status:
-// só podem alterar para "bloqueado" ou "concluido". Admins têm acesso
-// total.
-//
-// Aceita também edição dos campos do cliente:
-//   - nome_cliente_informado, sobrenome_cliente_informado, email_cliente_informado,
-//     telefone_cliente_informado, cpf_cliente_informado, origem_cliente_informada
-//
-// Para tickets HUBSPOT_LINK, o único status permitido manualmente é
-// `concluido` (força conclusão independentemente do processamento).
-// Qualquer outro status continua bloqueado (é responsabilidade do worker).
+// Aceita ADMIN e COORDENADOR+ (incluindo ASSESSOR_PLUS).
 router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
-  const isAdmin = isSupportAdmin(req.supportActor.cargo);
-  const isCoordinatorOrAbove = isSupportCoordinatorOrAbove(req.supportActor.cargo);
+  const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
+  const isAdmin = actorLevel >= accessControl.LEVELS.ADMINISTRATIVO;
+  const isCoordinatorOrAbove = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
+  
   if (!isAdmin && !isCoordinatorOrAbove) {
     throw fail(403, 'Sem permissão para esta operação.');
   }
@@ -1298,7 +1211,6 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
   const hasStatus = req.body.status_mapeamento !== undefined;
   const hasObservation = req.body.observacao_sales_ops !== undefined;
 
-  // ─── Campos editáveis do cliente ────────────────────────────────────
   const clientFieldNames = [
     'nome_cliente_informado',
     'sobrenome_cliente_informado',
@@ -1338,10 +1250,6 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
     throw fail(400, 'Status de movimentação inválido.');
   }
 
-  // Coordenadores têm restrição de status — não podem mover para
-  // "pendente" / "processando" diretamente (isso reenfileira sem passar
-  // pelas regras). Para reenfileirar, devem usar o endpoint dedicado
-  // /reprocessar-coordenador.
   if (!isAdmin && hasStatus && !['bloqueado', 'concluido'].includes(status)) {
     throw fail(
       403,
@@ -1365,7 +1273,6 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
     if (!current.rowCount) throw fail(404, 'Ticket de movimentação não encontrado.');
     const movement = current.rows[0];
 
-    // HUBSPOT_LINK: só permite 'concluido' como override manual.
     if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT && hasStatus && status !== 'concluido') {
       throw fail(
         409,
@@ -1386,8 +1293,6 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
         status,
         em: new Date().toISOString(),
       };
-      // Conclusão manual via Link Hub — deixa rastro para auditoria
-      // e evita que o worker reprocesse o ticket.
       if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT && status === 'concluido') {
         metadata.conclusao_manual = {
           usuario: req.supportActor.email,
@@ -1494,18 +1399,6 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
 }));
 
 // ---------------------- Reprocessamento (SalesOps) ----------------------
-// Reenfileira um ticket para o worker. NÃO reativa sem controle:
-//   - Só aceita status elegíveis (STATUS_REPROCESSAVEIS).
-//   - Se o JSON de observação indicar escrita parcial no HubSpot
-//     (resultadoParcial/requiresReconciliation), exige `force: true`
-//     e registra a ação no histórico, sinalizando o risco.
-//   - Preserva produto/idempotency_key; apenas marca processado=false.
-//   - Limpa o estado interno do worker (_worker) para o Link Hub.
-//
-// Casos em "coordenador" NÃO passam por aqui — devem ser tratados pelo
-// endpoint /reprocessar-coordenador (que injeta bypass temporal).
-//
-// JURIDICO: bloqueado por `requireAdmin`.
 router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
   requireAdmin(req);
   const id = recordId(req.params.id);
@@ -1566,7 +1459,6 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
       ],
     };
 
-    // Apenas para HUBSPOT_LINK: remove marcadores do worker (lease/tentativas).
     if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT) {
       novoMetadata._worker = {
         processando_desde: null,
@@ -1621,31 +1513,20 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
 // ============================================================
 // POST /tickets-movimentacao/:id/reprocessar-coordenador
 //
-// Reprocessamento autorizado pelo COORDENADOR (ou ADMIN).
-//
-// Diferenças em relação ao /reprocessar (SalesOps):
-//   - Permite COORDENADOR+ (não exige admin).
-//   - Aceita status `coordenador` E `bloqueado`.
-//   - Grava `validacaoCoordenador` com
-//     `bypassTemporalRestriction: true` → o worker pula a regra de
-//     prazo mínimo desde a última modificação. TODAS as demais regras
-//     continuam sendo aplicadas (jurídico, ambíguo, confirmação,
-//     contexto mudou, etc.).
-//   - Aplica edições de cadastro do cliente feitas no modal, para que
-//     o worker trabalhe com dados corrigidos.
-//   - Se o ticket for HUBSPOT_LINK, o bypass é inócuo (não há regra
-//     temporal no Link Hub), mas o `_worker` é resetado.
+// Permite COORDENADOR+ (incluindo ASSESSOR_PLUS) reprocessar.
 // ============================================================
 router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(async (req, res) => {
-  const actor = req.supportActor;
-  if (!isSupportCoordinatorOrAbove(actor.cargo)) {
+  const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
+  const isCoordinatorOrAbove = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
+  
+  if (!isCoordinatorOrAbove) {
     throw fail(403, 'Sem permissão para reprocessar.');
   }
 
+  const actor = req.supportActor;
   const id = recordId(req.params.id);
   const observacaoOperador = text(req.body?.observacao, 'Observação', { max: 10000 });
 
-  // Campos editáveis do cliente (mesma assinatura do PATCH).
   const clientUpdates = [];
   const clientFields = [
     ['nome_cliente_informado',      v => text(v, 'Nome', { max: 500 }) || null],
@@ -1686,8 +1567,6 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
     const novoMetadata = {
       ...metadata,
       processado: false,
-      // 👇 lido pelo ticketQueue para pular a temporalCheck em
-      // garantirLeadNoCloser. Todas as demais regras seguem ativas.
       validacaoCoordenador: {
         acao: 'autorizar',
         bypassTemporalRestriction: true,
@@ -1707,7 +1586,6 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
       };
     }
 
-    // 1) Aplica edições de cadastro do cliente (o que o coordenador tiver editado).
     if (clientUpdates.length) {
       const params = [];
       const sets = [];
@@ -1724,7 +1602,6 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
       );
     }
 
-    // 2) Reabre como pendente com a autorização do coordenador.
     await client.query(
       `UPDATE app_comissionamento.tickets_movimentacao_lead
           SET observacao_sales_ops = $1,
