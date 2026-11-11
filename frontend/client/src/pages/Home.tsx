@@ -1303,7 +1303,7 @@ export default function Home() {
             <div className="card lg:col-span-2 animate-fade-in-up" style={{ animationDelay: "480ms" }}>
               <div className="flex items-center justify-between mb-5">
                 <div><h3 className="text-sm font-bold text-[#0f172a]">Produção Diária</h3><p className="text-xs text-[#64748b] mt-0.5">Leads recebidos vs Assinados</p></div>
-                {canAccessReports && <Link href="/analytics"><button className="text-xs text-[#2F6FED] font-semibold flex items-center gap-1 hover:gap-2 transition-all">Ver mais <ArrowRight className="w-3 h-3" /></button></Link>}
+                {canAccessReports && <Link href="/inte_comerce"><button className="text-xs text-[#2F6FED] font-semibold flex items-center gap-1 hover:gap-2 transition-all">Ver mais <ArrowRight className="w-3 h-3" /></button></Link>}
               </div>
               {dailyChartData.length === 0 ? <div className="flex items-center justify-center h-[200px] text-[#94a3b8] text-sm">Nenhum dado disponível para o período</div> : (
                 <ResponsiveContainer width="100%" height={200}>

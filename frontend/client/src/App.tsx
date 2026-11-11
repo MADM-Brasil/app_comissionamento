@@ -11,13 +11,10 @@ import Home from "./pages/Home";
 import Comissoes from "./pages/Comissoes";
 import Funil from "./pages/Funil";
 import Tabulacoes from "./pages/Tabulacoes";
-import Analytics from "./pages/Analytics";
 import Ranking from "./pages/Ranking";
 import Configuration from "./pages/Configuration";
 import Suporte from "./pages/Suporte";
 import Login from "./pages/Login";
-import Visao_geral from "./pages/Visao_geral";
-import Equipe from "./pages/Equipe";
 import Inte_comerce from "./pages/Inte_comerce";
 import Verify2FA from "./pages/ResetPassword/Verify2FA";
 import ProtectedRoute from "./components/ProtectedRoute";
@@ -223,14 +220,7 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Dashboard / Analytics */}
-      <Route path="/funil">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canAccessReports">
-            <Funil />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
+      {/* Comercial */}
       <Route path="/inte_comerce">
         <PeriodProvider>
           <ProtectedRouteWithPermission minimumLevel={LEVELS.COORDENADOR}>
@@ -245,65 +235,9 @@ function Router() {
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
-      <Route path="/analytics">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canAccessReports">
-            <Analytics />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
-      <Route path="/Visao_geral">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canAccessReports">
-            <Visao_geral />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
 
-      {/* Equipe */}
-      <Route path="/Equipe">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canViewTeam">
-            <Equipe />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
-      <Route path="/Equipe/:supervisor">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canViewTeam">
-            <Equipe />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
-      <Route path="/equipe">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canViewTeam">
-            <Equipe />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
-      <Route path="/equipe/:supervisor">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canViewTeam">
-            <Equipe />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
-      <Route path="/colaboradores/:id">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canViewTeam">
-            <Equipe />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
-      <Route path="/colaborador/:id">
-        <PeriodProvider>
-          <ProtectedRouteWithPermission permission="canViewTeam">
-            <Equipe />
-          </ProtectedRouteWithPermission>
-        </PeriodProvider>
-      </Route>
 
+      
       {/* Configuração */}
       <Route path="/configuration">
         <PeriodProvider>
@@ -313,13 +247,6 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-      {/* Suporte
-          Mantém <ProtectedRoute> (apenas autenticação). A própria página
-          <Suporte /> decide abas/features via `useAccessControl()` e
-          `getEffectiveAccessLevel`. Trocar para
-          `<ProtectedRouteWithPermission permission="canAccessSuporte">`
-          é seguro (JURIDICO, ASSESSOR_PLUS e SUPERVISAO+ têm a flag),
-          mas preserva-se o comportamento atual para minimizar mudanças. */}
       <Route path="/suporte">
         <PeriodProvider>
           <ProtectedRoute>
@@ -388,8 +315,7 @@ export default function App() {
   // ⚠️ NÃO chamar `loadCollaboratorsAndMetrics()` ou `loadRawMetrics()`
   // aqui. Essas funções aceitam `equipe`/`colaborador` como parâmetros,
   // mas, ao serem chamadas sem filtro, populam `collaborators` e
-  // `rawMetrics` com dados GLOBAIS. Como cada página (Home, Analytics,
-  // Funil, Visão Geral, Comissões) dispara seu próprio fetch escopado
+  // `rawMetrics` com dados GLOBAIS. Como cada página (Home, Funil, Comissões) dispara seu próprio fetch escopado
   // em paralelo, a chamada global do App podia terminar DEPOIS e
   // sobrescrever os dados escopados.
   const dataLoaded = useRef(false);

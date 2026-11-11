@@ -247,9 +247,6 @@ export default function DashboardLayout({
       dashboardChildren.push({ path: "/inte_comerce", label: "Comercial", icon: BarChart3,});
     }
     if (permissions.canViewTeam && permissions.canAccessReports) {
-      dashboardChildren.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
-      dashboardChildren.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
-      dashboardChildren.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
       dashboardChildren.push({ path: "/funil", label: "Funil de Vendas", icon: GitBranch });
     }
     if (dashboardChildren.length > 0) {
@@ -300,14 +297,10 @@ export default function DashboardLayout({
     if (permissions.canAccessComissoes)
       flat.push({ path: "/comissoes", label: "Comissões", icon: DollarSign });
 
-    if (permissions.canViewTeam)
-      flat.push({ path: "/Equipe", label: "Equipe", icon: BarChart3 });
-
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
       flat.push({ path: "/tabulacoes", label: "Não Tabuladas", icon: Phone });
-      flat.push({ path: "/Visao_geral", label: "Visão Geral", icon: BarChart3 });
-      flat.push({ path: "/analytics", label: "Analytics", icon: BarChart3 });
+
     }
 
     if (userLevel >= LEVELS.COORDENADOR) {

@@ -69,6 +69,16 @@ const STATUS_REPROCESSAVEIS = new Set([
   'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
 ]);
 
+// ── [NOVO] Regras de bloqueio de edição de DADOS por perfil ─────────
+// Supervisor só edita dados quando o caso NÃO está em status finais.
+// Assessor_Plus (reportes) só edita dados em reportes ainda "abertos".
+const STATUS_MOVIMENTACAO_BLOQUEIA_EDICAO_SUPERVISOR = new Set([
+  'concluido', 'bloqueado', 'suporte', 'coordenador',
+]);
+const STATUS_REPORTE_BLOQUEIA_EDICAO_DADOS = new Set([
+  'concluido', 'bloqueado', 'cancelado',
+]);
+
 // Mapeamento de unidade_id para nome legível.
 // 4 (HO) é tratado como "vê todas as unidades".
 const UNIDADES_MAP = Object.freeze({
@@ -226,7 +236,7 @@ router.use(asyncRoute(async (req, res, next) => {
 
   // CORREÇÃO: Usar getEffectiveAccessLevel para reconhecer promoções (ASSESSOR_PLUS)
   const level = accessControl.getEffectiveAccessLevel(actor);
-  
+
   const isJuridico = level === accessControl.LEVELS.JURIDICO;
   const isSupervisorOrAbove = level >= accessControl.LEVELS.SUPERVISAO;
   const isAssessorPlus = level === accessControl.LEVELS.ASSESSOR_PLUS;
@@ -308,9 +318,10 @@ function deveOcultarEquipesReservadas(actor) {
 //
 // Regras:
 //   1) `todos=1` exige ADMIN.
-//   2) Coordenador+ (incluindo ASSESSOR_PLUS) consultando status
-//      administrativos (`coordenador` / `bloqueado`) → vê TODOS os
-//      casos, para que a "Visão Coordenador" funcione.
+//   2) Admin OU Coordenador+ (incluindo ASSESSOR_PLUS) consultando
+//      status administrativos (`coordenador` / `bloqueado`) → vê TODOS
+//      os casos, sem filtro por e-mail, para que a "Visão Coordenador"
+//      funcione corretamente.
 //   3) Demais casos: escopo restrito ao próprio solicitante.
 // ────────────────────────────────────────────────────────────────
 function historyScope(req) {
@@ -327,29 +338,35 @@ function historyScope(req) {
   const isAdmin = actorLevel >= accessControl.LEVELS.ADMINISTRATIVO;
   const isCoordOrPlus = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
 
-  if (!isAdmin) {
-    const statusQueryRaw = String(req.query.status_mapeamento || '').toLowerCase();
-    const wantsAdministrative = /\b(coordenador|bloqueado)\b/.test(statusQueryRaw);
-    
-    if (wantsAdministrative && isCoordOrPlus) {
-      return {
-        email: requestedEmail || null,
-        name: requestedName || null,
-      };
-    }
+  const statusQueryRaw = String(req.query.status_mapeamento || '').toLowerCase();
+  const wantsAdministrative = /\b(coordenador|bloqueado)\b/.test(statusQueryRaw);
 
-    if (requestedEmail && requestedEmail !== req.supportActor.email) {
-      throw fail(403, 'Sem permissão para consultar outro solicitante.');
+  // ── ADMIN ────────────────────────────────────────────────────────
+  // CORREÇÃO: admin consultando status administrativos precisa ver todos
+  // os casos, sem filtro por e-mail (a "Visão Coordenador" fica inútil
+  // se o admin só enxergar os próprios tickets).
+  if (isAdmin) {
+    if (wantsAdministrative) {
+      return { email: requestedEmail || null, name: requestedName || null };
     }
-    if (requestedName && normalizeAccessValue(requestedName) !== normalizeAccessValue(req.supportActor.nome)) {
-      throw fail(403, 'Sem permissão para consultar outro solicitante.');
-    }
-    return { email: req.supportActor.email, name: null };
+    return {
+      email: requestedEmail || (requestedName || all ? null : req.supportActor.email),
+      name: requestedName || null,
+    };
   }
-  return {
-    email: requestedEmail || (requestedName || all ? null : req.supportActor.email),
-    name: requestedName || null,
-  };
+
+  // ── COORDENADOR / ASSESSOR_PLUS ──────────────────────────────────
+  if (wantsAdministrative && isCoordOrPlus) {
+    return { email: requestedEmail || null, name: requestedName || null };
+  }
+
+  if (requestedEmail && requestedEmail !== req.supportActor.email) {
+    throw fail(403, 'Sem permissão para consultar outro solicitante.');
+  }
+  if (requestedName && normalizeAccessValue(requestedName) !== normalizeAccessValue(req.supportActor.nome)) {
+    throw fail(403, 'Sem permissão para consultar outro solicitante.');
+  }
+  return { email: req.supportActor.email, name: null };
 }
 
 // Upload: autenticação já executada pelo router.use acima.
@@ -1016,7 +1033,13 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
   const statusParam = text(req.query.status_mapeamento, 'Status', { max: 200 }) || null;
   let statusList = null;
   if (statusParam) {
-    statusList = statusParam.split(',').map(s => s.trim()).filter(Boolean);
+    // Normalização defensiva: aceita variações de caixa/espaço vindas do
+    // frontend ou de integrações e valida contra as chaves canônicas do
+    // STATUS_MAP (sempre em minúsculas).
+    statusList = statusParam
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean);
     if (statusList.length === 0) statusList = null;
     for (const s of statusList) {
       if (!Object.hasOwn(STATUS_MAP, s)) throw fail(400, 'Status de movimentação inválido.');
@@ -1070,7 +1093,7 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
     LEFT JOIN app_comissionamento.tickets_suporte ts ON ts.id_ticket = tml.ticket_id
     WHERE ($1::text   IS NULL OR LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_email',''))) = $1)
       AND ($2::text   IS NULL OR LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_nome','')))  = LOWER(TRIM($2)))
-      AND ($3::text[] IS NULL OR tml.status_mapeamento::text = ANY($3::text[]))
+      AND ($3::text[] IS NULL OR LOWER(TRIM(tml.status_mapeamento::text)) = ANY($3::text[]))
     ORDER BY tml.atualizado_em DESC NULLS LAST, tml.id_ticket_movimentacao DESC
     LIMIT $5 OFFSET $6`,
   [scope.email, scope.name, statusList, isAdmin, limit + 1, offset]);
@@ -1195,14 +1218,26 @@ router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), 
   });
 }));
 
-// ---------------------- Edição manual ----------------------
-// Aceita ADMIN e COORDENADOR+ (incluindo ASSESSOR_PLUS).
+// ============================================================
+// PATCH /tickets-movimentacao/:id — Edição manual
+//
+// Permissões:
+//   • ADMIN          → dados + status + observação
+//   • COORDENADOR+ / ASSESSOR_PLUS → dados + status (restrito a
+//     bloqueado/concluido) + observação
+//   • SUPERVISOR     → SOMENTE dados do cliente, e apenas quando o
+//                      status atual NÃO estiver em
+//                      {concluido, bloqueado, suporte, coordenador}.
+//                      Tentativas de enviar status_mapeamento ou
+//                      observacao_sales_ops → 403.
+// ============================================================
 router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
   const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
   const isAdmin = actorLevel >= accessControl.LEVELS.ADMINISTRATIVO;
-  const isCoordinatorOrAbove = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
-  
-  if (!isAdmin && !isCoordinatorOrAbove) {
+  const isCoordOrPlus = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
+  const isSupervisor = actorLevel === accessControl.LEVELS.SUPERVISAO;
+
+  if (!isAdmin && !isCoordOrPlus && !isSupervisor) {
     throw fail(403, 'Sem permissão para esta operação.');
   }
 
@@ -1243,14 +1278,23 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
     throw fail(400, 'Nenhum campo para atualizar.');
   }
 
+  // Supervisor: apenas dados do cliente.
+  if (isSupervisor && (hasStatus || hasObservation)) {
+    throw fail(
+      403,
+      'Supervisores só podem editar os dados do cliente. ' +
+      'Alteração de status e observação é restrita a Coordenador/Admin.'
+    );
+  }
+
   const status = hasStatus
-    ? text(req.body.status_mapeamento, 'Status', { required: true, max: 40 })
+    ? text(req.body.status_mapeamento, 'Status', { required: true, max: 40 }).toLowerCase()
     : null;
   if (hasStatus && !Object.hasOwn(STATUS_MAP, status)) {
     throw fail(400, 'Status de movimentação inválido.');
   }
 
-  if (!isAdmin && hasStatus && !['bloqueado', 'concluido'].includes(status)) {
+  if (!isAdmin && !isSupervisor && hasStatus && !['bloqueado', 'concluido'].includes(status)) {
     throw fail(
       403,
       'Coordenadores só podem alterar status para "bloqueado" ou "concluido". ' +
@@ -1272,6 +1316,17 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
     );
     if (!current.rowCount) throw fail(404, 'Ticket de movimentação não encontrado.');
     const movement = current.rows[0];
+
+    // Supervisor: bloqueia edição em status finais / administrativos.
+    const statusAtual = String(movement.status_mapeamento || '').trim().toLowerCase();
+    if (isSupervisor && STATUS_MOVIMENTACAO_BLOQUEIA_EDICAO_SUPERVISOR.has(statusAtual)) {
+      throw fail(
+        403,
+        'Este caso não pode ser editado por supervisores no status atual ' +
+        `("${movement.status_mapeamento}"). ` +
+        'Edição permitida apenas em: pendente, processando, erro, aviso, fora_pipeline, no_pipeline.'
+      );
+    }
 
     if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT && hasStatus && status !== 'concluido') {
       throw fail(
@@ -1369,32 +1424,150 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
   });
 }));
 
-// JURIDICO: bloqueado por `requireAdmin`.
+// ============================================================
+// PATCH /tickets-suporte/:id
+//
+// Permissões:
+//   • ADMIN / COORDENADOR → status + observação + dados
+//     (titulo, assunto, descricao)
+//   • ASSESSOR_PLUS       → dados (titulo/assunto/descricao) APENAS.
+//                            Não altera status nem observação.
+//   • SUPERVISOR          → dados (titulo/assunto/descricao) APENAS.
+//                            Não altera status nem observação.
+//
+// Bloqueio para Supervisor/Assessor_Plus:
+//   Casos com status CONCLUÍDO, BLOQUEADO ou CANCELADO não podem ser editados.
+// ============================================================
 router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
-  requireAdmin(req);
+  const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
+  const isAdmin = actorLevel >= accessControl.LEVELS.ADMINISTRATIVO;
+  const isCoordOrAdmin = actorLevel >= accessControl.LEVELS.COORDENADOR;
+  const isAssessorPlus = actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
+  const isSupervisor = actorLevel === accessControl.LEVELS.SUPERVISAO;
+
+  if (!isAdmin && !isCoordOrAdmin && !isAssessorPlus && !isSupervisor) {
+    throw fail(403, 'Sem permissão para esta operação.');
+  }
+
   const id = recordId(req.params.id);
+
   const hasStatus = req.body.status !== undefined;
   const hasObservation = req.body.observacao_sales_ops !== undefined;
-  if (!hasStatus && !hasObservation) throw fail(400, 'Nenhum campo para atualizar.');
+  const hasTitulo = req.body.titulo !== undefined;
+  const hasAssunto = req.body.assunto !== undefined;
+  const hasDescricao = req.body.descricao !== undefined;
+
+  if (!hasStatus && !hasObservation && !hasTitulo && !hasAssunto && !hasDescricao) {
+    throw fail(400, 'Nenhum campo para atualizar.');
+  }
+
+  // Supervisor / Assessor_Plus: apenas dados do reporte (título, assunto, descrição).
+  const apenasDados = isSupervisor || isAssessorPlus;
+  if (apenasDados && (hasStatus || hasObservation)) {
+    throw fail(
+      403,
+      'Este perfil só pode editar os dados do reporte (título, assunto, descrição). ' +
+      'Status e observação são restritos a Coordenador/Admin.'
+    );
+  }
+
   const rawStatus = hasStatus ? text(req.body.status, 'Status', { required: true, max: 40 }) : null;
-  const status = hasStatus ? [...SUPPORT_STATUSES].find(value => normalizeAccessValue(value) === normalizeAccessValue(rawStatus)) : null;
+  const status = hasStatus
+    ? [...SUPPORT_STATUSES].find(value => normalizeAccessValue(value) === normalizeAccessValue(rawStatus))
+    : null;
   if (hasStatus && !status) throw fail(400, 'Status de suporte inválido.');
-  const observation = hasObservation ? text(req.body.observacao_sales_ops, 'Observação', { max: 10000 }) : null;
-  const result = await pool.query(`
-    UPDATE app_comissionamento.tickets_suporte
-    SET status = CASE WHEN $2::boolean THEN $3 ELSE status END,
-        concluido_em = CASE WHEN $2::boolean THEN CASE WHEN $3 = 'Concluído' THEN NOW() ELSE NULL END ELSE concluido_em END,
-        metadados = CASE WHEN $4::boolean THEN
-          jsonb_set(COALESCE(metadados, '{}'::jsonb), '{observacao_sales_ops}', to_jsonb($5::text), true)
-          ELSE metadados END,
-        atualizado_em = NOW()
-    WHERE id_ticket = $1 AND tipo_ticket = 'Reporte'
-    RETURNING titulo, metadados->>'solicitante_email' AS solicitante_email`,
-  [id, hasStatus, status, hasObservation, observation]);
-  if (!result.rowCount) throw fail(404, 'Ticket de suporte não encontrado.');
-  notify({ tipo: 'info', titulo: 'Atualização da solicitação', destinatario: result.rows[0].solicitante_email,
-    mensagem: `Sua solicitação "${result.rows[0].titulo}" foi atualizada.\nStatus: ${hasStatus ? status : 'inalterado'}.\nObservação: ${hasObservation ? observation : 'inalterada'}`,
-    data: new Date().toISOString() });
+
+  const observation = hasObservation
+    ? text(req.body.observacao_sales_ops, 'Observação', { max: 10000 })
+    : null;
+
+  const titulo = hasTitulo ? text(req.body.titulo, 'Título', { required: true, max: 500 }) : null;
+  const assunto = hasAssunto ? text(req.body.assunto, 'Assunto', { required: true, max: 500 }) : null;
+  const descricao = hasDescricao
+    ? text(req.body.descricao, 'Descrição', { required: true, max: 50000 })
+    : null;
+
+  const result = await transaction(async client => {
+    const current = await client.query(
+      `SELECT id_ticket, status, metadados
+         FROM app_comissionamento.tickets_suporte
+        WHERE id_ticket = $1 AND tipo_ticket = 'Reporte'
+        FOR UPDATE`,
+      [id]
+    );
+    if (!current.rowCount) throw fail(404, 'Ticket de suporte não encontrado.');
+
+    const ticketAtual = current.rows[0];
+
+    // Bloqueio para Supervisor/Assessor_Plus: status CONCLUÍDO, BLOQUEADO, CANCELADO.
+    if (apenasDados) {
+      const statusNorm = normalizeAccessValue(ticketAtual.status);
+      if (STATUS_REPORTE_BLOQUEIA_EDICAO_DADOS.has(statusNorm)) {
+        throw fail(
+          403,
+          `Reporte em status "${ticketAtual.status}" não pode ter dados editados por este perfil.`
+        );
+      }
+    }
+
+    // Atualiza colunas simples (titulo/descricao).
+    const sets = [];
+    const params = [];
+
+    if (hasTitulo) {
+      params.push(titulo);
+      sets.push(`titulo = $${params.length}`);
+    }
+    if (hasDescricao) {
+      params.push(descricao);
+      sets.push(`descricao = $${params.length}`);
+    }
+    if (hasStatus) {
+      params.push(status);
+      sets.push(`status = $${params.length}`);
+      sets.push(`concluido_em = CASE WHEN $${params.length} = 'Concluído' THEN NOW() ELSE NULL END`);
+    }
+
+    // Metadados: assunto e observacao_sales_ops, preservando demais chaves.
+    const metadadosAtual = parseJsonObject(ticketAtual.metadados);
+    const metadadosNovos = { ...metadadosAtual };
+    if (hasAssunto) metadadosNovos.assunto = assunto;
+    if (hasObservation) metadadosNovos.observacao_sales_ops = observation;
+
+    if (hasAssunto || hasObservation) {
+      params.push(JSON.stringify(metadadosNovos));
+      sets.push(`metadados = $${params.length}::jsonb`);
+    }
+
+    sets.push('atualizado_em = NOW()');
+    params.push(id);
+
+    const updated = await client.query(
+      `UPDATE app_comissionamento.tickets_suporte
+          SET ${sets.join(', ')}
+        WHERE id_ticket = $${params.length} AND tipo_ticket = 'Reporte'
+        RETURNING titulo, metadados->>'solicitante_email' AS solicitante_email`,
+      params
+    );
+    if (!updated.rowCount) throw fail(409, 'Ticket base ausente; atualização cancelada.');
+
+    return {
+      titulo: updated.rows[0].titulo,
+      solicitante_email: updated.rows[0].solicitante_email,
+    };
+  });
+
+  notify({
+    tipo: 'info',
+    titulo: 'Atualização da solicitação',
+    destinatario: result.solicitante_email,
+    mensagem:
+      `Sua solicitação "${result.titulo}" foi atualizada.\n` +
+      `Status: ${hasStatus ? status : 'inalterado'}.\n` +
+      `Observação: ${hasObservation ? observation : 'inalterada'}`,
+    data: new Date().toISOString(),
+  });
+
   res.json({ success: true, message: 'Ticket de suporte atualizado com sucesso.' });
 }));
 
@@ -1518,7 +1691,7 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
 router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(async (req, res) => {
   const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
   const isCoordinatorOrAbove = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
-  
+
   if (!isCoordinatorOrAbove) {
     throw fail(403, 'Sem permissão para reprocessar.');
   }
