@@ -8,7 +8,7 @@ import { getAccessLevel, LEVELS } from "@/lib/accessControl";
 import {
   Download, AlertTriangle, Loader2,
   Send, Clock, Trash2, Megaphone, Info, AlertCircle,
-  ChevronDown,
+  ChevronDown, RefreshCw,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -98,6 +98,22 @@ function countWeekdays(start: string, end: string): number {
 const normalizeKey = (s: string | undefined | null) =>
   String(s || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
+/**
+ * Normaliza o nome do motivo de desqualificação para exibição:
+ *  - Substitui "_" por espaço;
+ *  - Colapsa espaços múltiplos;
+ *  - Capitaliza a 1ª letra após início, espaço ou "/" quando for minúscula,
+ *    preservando maiúsculas existentes (ex.: "BPC/LOAS" permanece).
+ */
+function formatMotivo(raw: string | undefined | null): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "(SEM MOTIVO)";
+  const cleaned = s.replace(/_+/g, " ").replace(/\s+/g, " ").trim();
+  return cleaned.replace(/(^|[\s/])(\p{Ll})/gu, (_, sep, ch) =>
+    sep + ch.toLocaleUpperCase("pt-BR"),
+  );
+}
+
 function getMonthPeriod(month: string, today: string) {
   const [year, monthNumber] = month.split("-").map(Number);
   const start = `${month}-01`;
@@ -109,11 +125,9 @@ function getMonthPeriod(month: string, today: string) {
 }
 
 // ───────────────────────────────────────────────────────────
-//  TIPO: ponto da série diária (mesma forma que a Analytics usa)
-// ───────────────────────────────────────────────────────────
 type DailyPoint = {
-  date: string;      // dd/mm
-  fullDate: string;  // yyyy-mm-dd
+  date: string;
+  fullDate: string;
   leads: number;
   assinados: number;
   ganhos: number;
@@ -123,11 +137,6 @@ type DailyPoint = {
 
 type RawSeriesItem = { data?: string; periodo?: string; total?: number; leads_recebidos?: number };
 
-/**
- * Mescla as 5 séries retornadas por @/lib/api (as mesmas que a Analytics usa)
- * em um único array diário, preenchendo todos os dias do período — exatamente
- * como o Analytics.tsx faz em `fetchChartData`.
- */
 function buildDailySeries(
   start: string,
   end: string,
@@ -170,7 +179,6 @@ function buildDailySeries(
   process(series.protocolados, "protocolados");
   process(series.perdidos, "perdidos");
 
-  // Preenche todos os dias do período (mesmo os sem movimento) — igual à Analytics.
   const allDates: string[] = [];
   const [sy, sm, sd] = start.split("-").map(Number);
   const [ey, em, ed] = end.split("-").map(Number);
@@ -204,8 +212,7 @@ function buildDailySeries(
 
 // ───────────────────────────────────────────────────────────
 type StatKey =
-  | "received" | "worked" | "contact" | "signed"
-  | "gained" | "protocolados" | "disq";
+  | "received" | "worked" | "contact" | "signed" | "gained" | "protocolados" | "disq";
 
 type FiltersState = {
   equipe: string;
@@ -219,15 +226,15 @@ const STAT_CARDS: {
   key: StatKey;
   label: string;
   sub: string;
-  highlight?: "signed" | "disq";
+  highlight?: "signed" | "disq" | "gained";
 }[] = [
-  { key: "received",     label: "Negócios criados", sub: "Dentro do período de criação da coorte" },
-  { key: "worked",       label: "Trabalhados",     sub: "Movimentação no CRM" },
-  { key: "contact",      label: "Em contato",      sub: "Etapa Em contato" },
-  { key: "signed",       label: "Assinados",       sub: "ORIGINAL · dentro do período medido", highlight: "signed" },
-  { key: "gained",       label: "Ganhos",          sub: "Ganho registrado no Deal" },
-  { key: "protocolados", label: "Protocolados",    sub: "Protocolo registrado" },
-  { key: "disq",         label: "Desqualificados", sub: "Saída do Closer", highlight: "disq" },
+  { key: "received",     label: "Negócios criados",sub: "" },
+  { key: "worked",       label: "Trabalhados",     sub: "" },
+  { key: "contact",      label: "Em contato",      sub: "" },
+  { key: "signed",       label: "Assinados",       sub: "", highlight: "signed" },
+  { key: "gained",       label: "Ganhos",          sub: "", highlight: "gained" },
+  { key: "protocolados", label: "Protocolados",    sub: "", highlight: "gained" },
+  { key: "disq",         label: "Desqualificados", sub: "", highlight: "disq" },
 ];
 
 const FUNNEL_STAGES: { key: keyof InteComerceFunnel; label: string; gradient: string }[] = [
@@ -289,7 +296,7 @@ const REC_PRIORITY_STYLES: Record<
 };
 
 // ───────────────────────────────────────────────────────────
-//  CARD DE RECOMENDAÇÕES TEMPORÁRIAS (24h) — compacto
+//  CARD DE RECOMENDAÇÕES TEMPORÁRIAS (24h) — fontes maiores
 // ───────────────────────────────────────────────────────────
 function RecomendacoesCard({
   filters,
@@ -417,35 +424,35 @@ function RecomendacoesCard({
 
   return (
     <details className="card mb-4 group">
-      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-[13px] font-semibold text-slate-700 [&::-webkit-details-marker]:hidden">
-        <Megaphone size={15} className="text-amber-600" />
+      <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-3 text-sm font-semibold text-slate-700 [&::-webkit-details-marker]:hidden">
+        <Megaphone size={16} className="text-amber-600" />
         <span>Recomendações temporárias</span>
-        <span className="text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-medium">
+        <span className="text-[11px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-medium">
           Ativas por 24h
         </span>
-        <span className="text-[11px] font-normal text-slate-500 ml-auto">
-          Alvo atual: <b>{targetLabel}</b>
+        <span className="text-xs font-normal text-slate-500 ml-auto">
+          Recomendação para: <b>{targetLabel}</b>
         </span>
-        <ChevronDown size={15} className="shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+        <ChevronDown size={16} className="shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
       </summary>
-      <div className="border-t border-slate-100 p-3">
-        <div className="flex items-center gap-2 mb-2 flex-wrap">
-          <span className="text-[11px] text-slate-500">
+      <div className="border-t border-slate-100 p-4">
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
+          <span className="text-xs text-slate-500">
             Orientações direcionadas ao filtro selecionado.
           </span>
         </div>
 
         {!hasTarget ? (
-          <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
-            <p className="text-[12px] text-slate-500">
+          <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
+            <p className="text-sm text-slate-500">
               Selecione uma <b>equipe</b> ou um <b>colaborador</b> no filtro acima
               para publicar ou visualizar recomendações temporárias.
             </p>
           </div>
         ) : (
           <>
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-2.5 mb-3">
-              <p className="text-[11px] font-semibold text-slate-700 mb-1.5">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 mb-3">
+              <p className="text-xs font-semibold text-slate-700 mb-2">
                 Nova recomendação para{" "}
                 {targetColaboradores.length === 1
                   ? targetColaboradores[0].name
@@ -457,9 +464,9 @@ function RecomendacoesCard({
                 placeholder="Escreva uma orientação temporária (válida por 24h)..."
                 rows={2}
                 maxLength={500}
-                className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[12px] text-slate-800 outline-none focus:ring-2 focus:ring-blue-500/20 resize-none"
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-blue-500/20 resize-none"
               />
-              <div className="flex flex-wrap items-center gap-2 mt-1.5 justify-between">
+              <div className="flex flex-wrap items-center gap-2 mt-2 justify-between">
                 <div className="flex items-center gap-1.5">
                   {(["info", "warning", "danger"] as RecommendationPriority[]).map((p) => {
                     const style = REC_PRIORITY_STYLES[p];
@@ -471,18 +478,18 @@ function RecomendacoesCard({
                         type="button"
                         onClick={() => setNewRecPriority(p)}
                         className={cn(
-                          "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-medium border transition-colors",
+                          "inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border transition-colors",
                           active
                             ? `${style.bg} ${style.text} ${style.border}`
                             : "bg-white text-slate-500 border-slate-200 hover:bg-slate-50",
                         )}
                       >
-                        <PIcon size={10} />
+                        <PIcon size={11} />
                         {style.label}
                       </button>
                     );
                   })}
-                  <span className="text-[10px] text-slate-400 ml-1">
+                  <span className="text-[11px] text-slate-400 ml-1">
                     {newRecText.length}/500
                   </span>
                 </div>
@@ -490,9 +497,9 @@ function RecomendacoesCard({
                   type="button"
                   onClick={handleAddRec}
                   disabled={!newRecText.trim() || sendingRec}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  {sendingRec ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+                  {sendingRec ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
                   Publicar (24h)
                 </button>
               </div>
@@ -500,7 +507,7 @@ function RecomendacoesCard({
 
             {grouped.length > 0 ? (
               <div className="space-y-2">
-                <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">
+                <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
                   Orientações ativas
                 </p>
                 <ul className="space-y-2">
@@ -514,17 +521,17 @@ function RecomendacoesCard({
                     return (
                       <li
                         key={entry.key}
-                        className={cn("flex gap-2 items-start p-2 rounded-lg border", style.border, style.bg)}
+                        className={cn("flex gap-2 items-start p-3 rounded-lg border", style.border, style.bg)}
                       >
-                        <style.Icon size={13} className={cn("mt-0.5 shrink-0", style.text)} />
+                        <style.Icon size={15} className={cn("mt-0.5 shrink-0", style.text)} />
                         <div className="flex-1 min-w-0">
-                          <p className={cn("text-[12px] whitespace-pre-wrap break-words", style.text)}>
+                          <p className={cn("text-sm whitespace-pre-wrap break-words", style.text)}>
                             {entry.rec.text}
                           </p>
-                          <p className="text-[10px] text-slate-500 mt-0.5 flex flex-wrap items-center gap-2">
+                          <p className="text-[11px] text-slate-500 mt-1 flex flex-wrap items-center gap-2">
                             <span>{entry.rec.authorName} · {entry.rec.authorCargo}</span>
                             <span className="inline-flex items-center gap-1">
-                              <Clock size={9} /> expira em {getRemainingTimeLabel(entry.rec.expiresAt)}
+                              <Clock size={10} /> expira em {getRemainingTimeLabel(entry.rec.expiresAt)}
                             </span>
                             <span className="text-slate-400">· para {targetsLabel}</span>
                           </p>
@@ -536,7 +543,7 @@ function RecomendacoesCard({
                             className="shrink-0 p-1 rounded text-slate-400 hover:text-red-600 hover:bg-white"
                             title="Remover recomendação"
                           >
-                            <Trash2 size={13} />
+                            <Trash2 size={15} />
                           </button>
                         )}
                       </li>
@@ -545,7 +552,7 @@ function RecomendacoesCard({
                 </ul>
               </div>
             ) : (
-              <p className="text-[12px] text-slate-400 italic">
+              <p className="text-sm text-slate-400 italic">
                 Nenhuma orientação temporária ativa para {targetLabel}.
               </p>
             )}
@@ -635,7 +642,6 @@ export default function Inte_comerce() {
   const [funnel, setFunnel] = useState<InteComerceFunnel>(EMPTY_FUNNEL);
   const [reasons, setReasons] = useState<InteComerceReason[]>([]);
   const [daily, setDaily] = useState<InteComerceDaily[]>([]);
-  // ⬇️ NOVO: série diária vinda das mesmas funções que a Analytics usa.
   const [dailySeries, setDailySeries] = useState<DailyPoint[]>([]);
   const [dailySeriesError, setDailySeriesError] = useState<string | null>(null);
   const [collabTable, setCollabTable] = useState<InteComerceCollaborator[]>([]);
@@ -685,8 +691,6 @@ export default function Inte_comerce() {
       selectedDay: dayParam,
     };
 
-    // ⬇️ Parâmetros para a série diária — idênticos aos que a Analytics usa
-    //    (mesmo shape: start, end, equipe, colaborador, colaboradorId, produto, granularity).
     const dailySeriesParams = {
       start: reportPeriod.start,
       end: reportPeriod.end,
@@ -715,7 +719,6 @@ export default function Inte_comerce() {
           ? fetchInteComerceTeams(params).then((data) => ({ kind: "team" as const, data }))
           : fetchInteComerceCollaborators(params).then((data) => ({ kind: "person" as const, data })),
         comparisonParams ? fetchInteComerceAll(comparisonParams) : Promise.resolve(null),
-        // ⬇️ As 5 séries diárias — mesma fonte que a Analytics.
         Promise.all([
           fetchLeadsRecebidos(dailySeriesParams),
           fetchAssinados(dailySeriesParams),
@@ -743,7 +746,6 @@ export default function Inte_comerce() {
         );
       }
 
-      // ⬇️ Série diária (Analytics) — montada no frontend, exatamente como no Analytics.tsx.
       if (dailySeriesResult.status === "fulfilled") {
         const [leadsR, assinadosR, ganhosR, protocoladosR, perdidosR] = dailySeriesResult.value;
         setDailySeries(
@@ -845,7 +847,6 @@ export default function Inte_comerce() {
   const comparisonDaily = comparisonResult?.daily ?? [];
   const hasComparison = !!comparisonResult;
 
-  // Evolução diária com sobreposição (por dia do mês) — BarChart comparativo
   const seriesData = useMemo(() => {
     const compByDom = new Map<string, InteComerceDaily>();
     for (const d of comparisonDaily) compByDom.set(d.dia.slice(-2), d);
@@ -863,12 +864,6 @@ export default function Inte_comerce() {
     });
   }, [daily, comparisonDaily]);
 
-  // ─────────────────────────────────────────────────────────
-  // Evolução Diária (Analytics) — AreaChart de 5 séries.
-  // Fonte: as mesmas 6 funções de @/lib/api usadas pela Analytics.
-  // Não há mais fallback para `daily` do backend, então os campos
-  // `ganhos`, `protocolados` e `perdidos` chegam preenchidos.
-  // ─────────────────────────────────────────────────────────
   const dailyChartData = useMemo(() => {
     return dailySeries.map((d) => ({
       date: d.date,
@@ -941,7 +936,6 @@ export default function Inte_comerce() {
     (m, r) => Math.max(m, r.deals_desqualificados), 0,
   );
 
-  // Motivos com sobreposição do mês comparativo
   const mergedReasons = useMemo(() => {
     const map = new Map<string, { motivo: string; current: number; comp: number }>();
     for (const r of reasons) {
@@ -961,7 +955,6 @@ export default function Inte_comerce() {
     (m, r) => Math.max(m, r.current, r.comp), 0,
   );
 
-  // Tabela comparativa (adaptativa)
   const comparisonTableRows = useMemo(() => {
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasDay = !!selectedDay;
@@ -1076,23 +1069,10 @@ export default function Inte_comerce() {
   const modeLabel = viewMode === "safra" ? "Safra" : "Produção";
 
   const modeDescription = viewMode === "safra"
-    ? (selectedDay
-        ? `Negócios criados em ${selectedMonth}; resultados realizados em ${dateBr(selectedDay)}.`
-        : `Negócios criados em ${selectedMonth}; resultados realizados no mês selecionado.`)
-    : (selectedDay
-        ? `Produção realizada em ${dateBr(selectedDay)} comparada ao total do mês ${selectedMonth}, sem restringir a data de criação dos negócios.`
-        : `Produção realizada no mês ${selectedMonth}, sem restringir a data de criação dos negócios.`);
 
   const comparisonSectionTitle = viewMode === "safra"
-    ? "Comparativo da safra"
-    : "Comparativo da produção";
+
   const comparisonSectionDescription = viewMode === "safra"
-    ? (selectedDay
-        ? `Dia ${dateBr(selectedDay)} × total de ${selectedMonth} × mês ${comparisonMonth}.`
-        : `Total de ${selectedMonth} × mês ${comparisonMonth}.`)
-    : (selectedDay
-        ? `Produção do dia ${dateBr(selectedDay)}, do mês ${selectedMonth} e do mês ${comparisonMonth}.`
-        : `Total de ${selectedMonth} × mês ${comparisonMonth}.`);
 
   // ═══════════════════════════════════════════════════════════
   return (
@@ -1101,93 +1081,135 @@ export default function Inte_comerce() {
       subtitle="Visão consolidada da operação, da distribuição à assinatura e ao resultado jurídico, em uma única página."
       showPeriodFilter={false}
     >
-      <FilterBar
-        onFilterChange={handleFilterChange}
-        showColaboradorFilter={true}
-        className="mb-3"
-        onRefresh={handleRefresh}
-      />
-      <RecomendacoesCard filters={filters} colaboradores={collaborators} />
-
-      <div className="mb-5 flex flex-wrap items-center gap-2" role="group" aria-label="Modo do relatório">
-        {([
-          ["safra", "Safra"],
-          ["producao", "Produção"],
-        ] as const).map(([mode, label]) => (
-          <button
-            key={mode}
-            type="button"
-            aria-pressed={viewMode === mode}
-            onClick={() => setViewMode(mode)}
-            className={cn(
-              "rounded-lg border px-3 py-2 text-xs font-semibold transition-colors",
-              viewMode === mode
-                ? "border-blue-600 bg-blue-600 text-white"
-                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
-            )}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      <div className="mb-5 flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4">
-        <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
-          Mês
-          <input
-            type="month"
-            min={reportPeriod.limits?.minimum.slice(0, 7)}
-            max={today.slice(0, 7)}
-            value={selectedMonth}
-            onChange={(event) => handleMonthChange(event.target.value)}
-            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+      {/* FILTROS UNIFICADOS */}
+      <div className="mb-4 rounded-xl border border-slate-200 bg-white">
+        <div
+          className="
+            px-4 pt-3 pb-2
+            [&>*]:!mb-0 [&>*]:!mt-0
+            [&>*]:!border-0 [&>*]:!bg-transparent
+            [&>*]:!shadow-none [&>*]:!rounded-none
+            [&>*]:!p-0
+          "
+        >
+          <FilterBar
+            onFilterChange={handleFilterChange}
+            showColaboradorFilter={true}
           />
-        </label>
-        <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
-          Dia para comparar
-          <select
-            value={selectedDay ? selectedDay.slice(-2) : ""}
-            onChange={(event) => {
-              const v = event.target.value;
-              setSelectedDay(v ? `${selectedMonth}-${v}` : null);
-            }}
-            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
-          >
-            <option value="">Selecione um dia</option>
-            {Array.from({ length: selectedMonthDays }, (_, index) => {
-              const day = String(index + 1).padStart(2, "0");
-              return <option key={day} value={day}>{day}</option>;
-            })}
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
-          Comparar mês com
-          <div className="flex items-center gap-1">
+        </div>
+
+        <div className="mx-4 border-t border-slate-100" />
+
+        <div className="px-4 py-3 flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <span className="text-xs font-semibold text-slate-600">Modo</span>
+            <div
+              className="flex items-center gap-1"
+              role="group"
+              aria-label="Modo do relatório"
+            >
+              {([
+                ["safra", "Safra"],
+                ["producao", "Produção"],
+              ] as const).map(([mode, label]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={viewMode === mode}
+                  onClick={() => setViewMode(mode)}
+                  className={cn(
+                    "rounded-lg border px-3 py-2 text-xs font-semibold transition-colors",
+                    viewMode === mode
+                      ? "border-blue-600 bg-blue-600 text-white"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+            Mês
             <input
               type="month"
               min={reportPeriod.limits?.minimum.slice(0, 7)}
               max={today.slice(0, 7)}
-              value={comparisonMonth ?? ""}
-              onChange={(event) => setComparisonMonth(event.target.value || null)}
-              placeholder="Selecione"
+              value={selectedMonth}
+              onChange={(event) => handleMonthChange(event.target.value)}
               className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
             />
-            {comparisonMonth && (
-              <button
-                type="button"
-                onClick={() => setComparisonMonth(null)}
-                className="rounded-md px-2 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-100"
-                title="Limpar comparação"
-              >
-                Limpar
-              </button>
-            )}
-          </div>
-        </label>
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+            Dia para comparar
+            <select
+              value={selectedDay ? selectedDay.slice(-2) : ""}
+              onChange={(event) => {
+                const v = event.target.value;
+                setSelectedDay(v ? `${selectedMonth}-${v}` : null);
+              }}
+              className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+            >
+              <option value="">Selecione um dia</option>
+              {Array.from({ length: selectedMonthDays }, (_, index) => {
+                const day = String(index + 1).padStart(2, "0");
+                return <option key={day} value={day}>{day}</option>;
+              })}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs font-semibold text-slate-600">
+            Comparar mês com
+            <div className="flex items-center gap-1">
+              <input
+                type="month"
+                min={reportPeriod.limits?.minimum.slice(0, 7)}
+                max={today.slice(0, 7)}
+                value={comparisonMonth ?? ""}
+                onChange={(event) => setComparisonMonth(event.target.value || null)}
+                placeholder="Selecione"
+                className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-800"
+              />
+              {comparisonMonth && (
+                <button
+                  type="button"
+                  onClick={() => setComparisonMonth(null)}
+                  className="rounded-md px-2 py-1 text-[11px] font-semibold text-slate-500 hover:bg-slate-100"
+                  title="Limpar comparação"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+          </label>
+
+          <button
+            type="button"
+            onClick={() => void handleRefresh()}
+            disabled={loading}
+            className="
+              ml-auto inline-flex items-center gap-1.5
+              rounded-lg border border-slate-200 bg-white px-3 py-2
+              text-xs font-semibold text-slate-600
+              hover:bg-slate-50
+              disabled:opacity-50 disabled:cursor-not-allowed
+            "
+            title="Atualizar dados"
+            aria-label="Atualizar dados"
+          >
+            <RefreshCw
+              size={14}
+              className={cn(loading && "animate-spin")}
+            />
+            Atualizar dados
+          </button>
+        </div>
       </div>
       <p className="mb-4 text-xs text-slate-500">{modeDescription}</p>
 
-      {/* ── Comparativo: só aparece com mês de comparação; recolhido por padrão ── */}
+      {/* Comparativo */}
       {hasComparison && (
         <details className="card mb-4 group">
           <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 [&::-webkit-details-marker]:hidden">
@@ -1311,168 +1333,97 @@ export default function Inte_comerce() {
         </div>
       )}
 
-      {/* 1) VISÃO GERAL — sempre mês de referência */}
+      {/* 1) VISÃO GERAL */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">Visão geral do funil</h2>
-            <p className="text-xs text-[#64748b]">
-              Indicadores do mês de referência ({modeLabel}).
-            </p>
           </div>
-          <span className="badge info">{modeLabel} · K01A</span>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2">
           {STAT_CARDS.map((card) => (
-            <div key={card.key} className="card p-4">
-              <div className="text-[11px] text-[#64748b] font-medium">
+            <div key={card.key} className="card p-3">
+              <div className="text-xs text-[#64748b] font-medium leading-tight min-h-[28px]">
                 {viewMode === "producao" && card.key === "received"
                   ? "Leads recebidos"
                   : card.label}
               </div>
               <div
                 className={cn(
-                  "text-2xl font-extrabold mt-2 tabular-nums",
+                  "text-2xl font-extrabold mt-1.5 tabular-nums leading-none",
                   card.highlight === "signed" && "text-[#2F6FED]",
+                  card.highlight === "gained" && "text-[#16A34A]",
                   card.highlight === "disq" && "text-[#DC2626]",
                   !card.highlight && "text-[#0f172a]",
                 )}
               >
                 {formatInt(aggregates[card.key])}
               </div>
-              <div className="text-[10px] text-[#94a3b8] mt-1 leading-snug min-h-[32px]">
-                {viewMode === "producao" && card.key === "received"
-                  ? "Recebidos no período, sem restrição de criação"
-                  : card.sub}
-              </div>
-              <div
-                className={cn(
-                  "mt-3 h-1 w-6 rounded-full",
-                  card.highlight === "disq" ? "bg-[#DC2626]" : "bg-[#2F6FED]",
-                )}
-              />
             </div>
           ))}
         </div>
       </div>
 
-      {/* 2) PERFORMANCE COMERCIAL — mostra ambos os meses */}
+      {/* 2) PERFORMANCE COMERCIAL */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">Performance Comercial</h2>
-            <p className="text-xs text-[#64748b]">
-              Métricas estratégicas do mês de referência{hasComparison ? " e do mês de comparação" : ""}.
-            </p>
           </div>
-          <span className="badge info">{modeLabel} · K02A</span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-          {/* Card 1 — Média de assinados / dia */}
           <div className="card p-5 relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1 bg-[#407de5]" />
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-[#50627a]">Média de assinados / dia</h3>
-              <span className="badge success">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
               {avgSignedPerDay.toFixed(1).replace(".", ",")}
             </div>
-            <p className="text-[11px] text-[#8c9bae] mt-3 min-h-[36px]">
-              {formatInt(aggregates.signed)} assinados · {formatInt(weekdays)} dias de semana
-            </p>
-            {hasComparison && (
-              <p className="text-[11px] text-slate-500 mt-1">
-                Comparação ({comparisonMonth}): <b>{comparisonAvgSignedPerDay.toFixed(1).replace(".", ",")}</b>
-              </p>
-            )}
-            <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
-              Assinados ORIGINAL no período medido ÷ dias úteis do período.
-            </div>
           </div>
 
-          {/* Card 2 — Conversão geral */}
           <div className="card p-5 relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1 bg-[#1a9ac5]" />
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-[#50627a]">Conversão geral operacional</h3>
-              <span className="badge info">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
               {strategic.pct_recebidos_ate_assinados != null
                 ? `${strategic.pct_recebidos_ate_assinados.toFixed(1).replace(".", ",")}%`
                 : "—"}
             </div>
-            <p className="text-[11px] text-[#8c9bae] mt-3 min-h-[36px]">
-              {formatInt(strategic.assinados)} assinados ÷ {formatInt(strategic.recebidos)} recebidos
-            </p>
-            {hasComparison && (
-              <p className="text-[11px] text-slate-500 mt-1">
-                Comparação ({comparisonMonth}):{" "}
-                <b>
-                  {comparisonStrategic?.pct_recebidos_ate_assinados != null
-                    ? `${comparisonStrategic.pct_recebidos_ate_assinados.toFixed(1).replace(".", ",")}%`
-                    : "—"}
-                </b>
-              </p>
-            )}
-            <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
-              {viewMode === "producao"
-                ? "Assinados no período ÷ recebidos no período. Não é conversão por coorte: os eventos podem pertencer a negócios criados em outros períodos."
-                : "Recebidos → assinados na mesma safra (K02A)."}
-            </div>
           </div>
 
-          {/* Card 3 — Conversão assinados → ganhos */}
           <div className="card p-5 relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-bold text-[#50627a]">Conversão assinados → ganhos</h3>
-              <span className="badge success">{modeLabel}</span>
             </div>
             <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
               {strategic.pct_assinados_ate_ganhos != null
                 ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
                 : "—"}
             </div>
-            <p className="text-[11px] text-[#8c9bae] mt-3 min-h-[36px]">
-              {formatInt(strategic.assinados_que_ganharam)} ganhos de {formatInt(strategic.assinados)} assinados
-            </p>
-            {hasComparison && (
-              <p className="text-[11px] text-slate-500 mt-1">
-                Comparação ({comparisonMonth}):{" "}
-                <b>
-                  {comparisonStrategic?.pct_assinados_ate_ganhos != null
-                    ? `${comparisonStrategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
-                    : "—"}
-                </b>
-              </p>
-            )}
-            <div className="border-t border-[#eaf0f6] pt-3 mt-3 text-[11px] text-[#61768f]">
-              {viewMode === "producao"
-                ? "Dos negócios assinados no período, quantos já possuem data de ganho registrada."
-                : "Ganho registrado após a assinatura da mesma safra (K02A)."}
-            </div>
           </div>
         </div>
       </div>
 
-      {/* 3) FUNIL + DESQUALIFICAÇÃO — sobreposição comparativa */}
+      {/* RECOMENDAÇÕES TEMPORÁRIAS */}
+      <RecomendacoesCard filters={filters} colaboradores={collaborators} />
+
+      {/* 3) FUNIL + DESQUALIFICAÇÃO — cards sempre com a mesma altura */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">
               Progressão do funil comercial e desqualificação
             </h2>
-            <p className="text-xs text-[#64748b]">
-              Marcos da jornada por Deal e motivos de saída do Closer.
-            </p>
           </div>
-          <span className="badge info">{modeLabel} · K03A / K04A</span>
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="card p-5 lg:col-span-2">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+          {/* ── Progressão do funil ─────────────────────────── */}
+          <div className="card p-5 lg:col-span-2 h-full flex flex-col">
             <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
               <h3 className="text-sm font-bold text-[#0f172a]">Progressão do funil comercial</h3>
               {comparisonFunnel && (
@@ -1486,7 +1437,8 @@ export default function Inte_comerce() {
                 </div>
               )}
             </div>
-            <div className="space-y-2.5">
+
+            <div className="flex-1 flex flex-col justify-between gap-2">
               {FUNNEL_STAGES.map((stage, i) => {
                 const value = (funnel[stage.key] as number) || 0;
                 const base = funnel.recebidos;
@@ -1537,7 +1489,7 @@ export default function Inte_comerce() {
 
               <div
                 className={cn(
-                  "w-full grid items-center gap-3 text-xs border-t border-dashed border-[#e2e8f0] pt-3 mt-2 py-1 px-1",
+                  "w-full grid items-center gap-3 text-xs border-t border-dashed border-[#e2e8f0] pt-3 mt-1 py-1 px-1",
                   comparisonFunnel
                     ? "grid-cols-[110px_1fr_56px_56px_56px]"
                     : "grid-cols-[110px_1fr_70px_70px]",
@@ -1585,22 +1537,16 @@ export default function Inte_comerce() {
                 </span>
               </div>
             </div>
-            <div className="mt-4 rounded-lg bg-[#f4f8ff] border-l-2 border-[#82a9e7] px-3 py-2 text-[11px] text-[#627a98]">
-              <strong className="text-[#2357a3]">Desqualificados</strong> é saída paralela, não uma etapa posterior a Protocolados. Fonte:{" "}
-              <code className="text-[10px]">
-                ops.v_bi_v6_coortes.primeira_desqualificacao_em
-              </code>.
-            </div>
           </div>
 
-          <div className="card p-5">
+          {/* ── Principais motivos de desqualificação ────────── */}
+          <div className="card p-5 h-full flex flex-col">
             <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
               <h3 className="text-sm font-bold text-[#0f172a]">
                 Principais motivos de desqualificação
               </h3>
-              <span className="badge">Closer · motivo_perda</span>
             </div>
-            <div className="space-y-3">
+            <div className="space-y-3 flex-1">
               {mergedReasons.length === 0 && (
                 <p className="text-xs text-[#94a3b8]">
                   {loading ? "Carregando motivos…" : "Nenhum motivo registrado no período."}
@@ -1613,16 +1559,18 @@ export default function Inte_comerce() {
                 const compWidth = maxMergedReason && hasComparison
                   ? Math.max(2, (reason.comp / maxMergedReason) * 100)
                   : 0;
+                const displayMotivo = formatMotivo(reason.motivo);
+
                 return (
                   <div
                     key={reason.motivo}
                     className="grid grid-cols-[1fr_1.6fr_56px] items-center gap-3 text-xs"
                   >
                     <span
-                      className="text-[#0f172a] font-medium truncate"
-                      title={reason.motivo}
+                      className="text-[#0f172a] font-medium leading-tight break-words min-w-0"
+                      title={displayMotivo}
                     >
-                      {reason.motivo}
+                      {displayMotivo}
                     </span>
                     <div className="flex flex-col gap-0.5">
                       {hasComparison && (
@@ -1641,14 +1589,15 @@ export default function Inte_comerce() {
                       </div>
                     </div>
                     <div className="text-right">
+                      {hasComparison && (
+                        <strong className="text-[10px] text-slate-400 tabular-nums">
+                          {formatInt(reason.comp)}
+                        </strong>
+                      )}<br/>
                       <strong className="text-[#0f172a] tabular-nums">
                         {formatInt(reason.current)}
                       </strong>
-                      {hasComparison && (
-                        <div className="text-[10px] text-slate-400 tabular-nums">
-                          {formatInt(reason.comp)}
-                        </div>
-                      )}
+                      
                     </div>
                   </div>
                 );
@@ -1666,9 +1615,6 @@ export default function Inte_comerce() {
                 {showAllReasons ? "Mostrar menos" : "..."}
               </button>
             )}
-            <div className="mt-4 text-[11px] text-[#94a3b8]">
-              Fonte: <strong>K04A</strong> — motivo atual do Deal no momento da desqualificação.
-            </div>
           </div>
         </div>
       </div>
@@ -1680,9 +1626,6 @@ export default function Inte_comerce() {
             <h2 className="text-lg font-bold text-[#0f172a]">
               Tabela de Produção comercial
             </h2>
-            <p className="text-xs text-[#64748b]">
-              Visão por colaborador ou equipe; safra de recebimento no período.
-            </p>
           </div>
           <span className="badge info">
             {formatInt(filteredTable.length)}{" "}
@@ -1707,10 +1650,6 @@ export default function Inte_comerce() {
                 <h3 className="text-sm font-bold text-[#0f172a]">
                   Produção comercial
                 </h3>
-                <p className="text-xs text-[#64748b] mt-0.5">
-                  {grouping === "person" ? "Colaboradores" : "Equipes"} · {modeLabel} por
-                  recebimento
-                </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex rounded-lg border border-[#e2e8f0] overflow-hidden">
@@ -1786,7 +1725,10 @@ export default function Inte_comerce() {
                           setSortDir(-1);
                         }
                       }}
-                      className="cursor-pointer hover:text-[#2F6FED]"
+                      className={cn(
+                        "cursor-pointer hover:text-[#2F6FED]",
+                        col.key !== "name" && "text-right",
+                      )}
                     >
                       {col.label}
                       {sortKey === col.key && (sortDir === 1 ? " ↑" : " ↓")}
@@ -1853,39 +1795,21 @@ export default function Inte_comerce() {
               </tbody>
             </table>
           </div>
-
-          <div className="px-5 py-3 border-t border-[#e2e8f0] text-[11px] text-[#94a3b8]">
-            Fontes: <strong className="text-[#64748b]">K05A</strong> (por
-            colaborador) e <strong className="text-[#64748b]">K06A</strong> (por
-            equipe). Os percentuais de <strong className="text-[#64748b]">Discadora</strong>,{" "}
-            <strong className="text-[#64748b]">HubSpot</strong> e{" "}
-            <strong className="text-[#64748b]">desqualificados por colaborador</strong>{" "}
-            serão habilitados após a homologação da telefonia e origem (K11).
-          </div>
         </div>
       </div>
 
-      {/* 5) EVOLUÇÃO DIÁRIA (BarChart) — sobreposição comparativa */}
+      {/* 5) EVOLUÇÃO DIÁRIA (BarChart) */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">
               Recebidos × Assinados por dia
             </h2>
-            <p className="text-xs text-[#64748b]">
-              Barras por dia; medida de comparação em tom translúcido e mês de referência em cor viva.
-            </p>
           </div>
-          <span className="badge">{modeLabel} · K07A</span>
         </div>
 
         <div className="card p-5">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
-            <h3 className="text-sm font-bold text-[#0f172a]">
-              {viewMode === "producao"
-                ? "Leads recebidos × Assinados"
-                : "Recebidos × Assinados (safra)"}
-            </h3>
             {comparisonResult && (
               <div className="flex items-center gap-3 text-[10px] text-slate-500">
                 <span className="flex items-center gap-1">
@@ -1945,6 +1869,7 @@ export default function Inte_comerce() {
                     const labels: Record<string, string> = {
                       received: viewMode === "producao" ? "Leads recebidos" : "Recebidos",
                       signed: "Assinados",
+                      gained: "Ganhos",
                       receivedComp:
                         viewMode === "producao"
                           ? "Leads recebidos (comparação)"
@@ -1961,6 +1886,7 @@ export default function Inte_comerce() {
                     const labels: Record<string, string> = {
                       received: viewMode === "producao" ? "Leads recebidos" : "Recebidos",
                       signed: "Assinados",
+                      gained: "Ganhos",
                       receivedComp: "Recebidos (comparação)",
                       signedComp: "Assinados (comparação)",
                     };
@@ -2003,25 +1929,16 @@ export default function Inte_comerce() {
         </div>
       </div>
 
-      {/* 6) EVOLUÇÃO DIÁRIA (Analytics) — AreaChart 5 séries
-          Fonte: fetchLeadsRecebidos / fetchAssinados / fetchGanhos /
-          fetchProtocolados / fetchPerdidos (mesmo @/lib/api da Analytics). */}
+      {/* 6) EVOLUÇÃO DIÁRIA (AreaChart — Analytics) */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">Evolução Diária</h2>
-            <p className="text-xs text-[#64748b]">
-              Evolução diária referente a produção do período selecionado, histórico diário de leads, assinaturas, ganhos, protocolos e perdas.
-            </p>
           </div>
-          <span className="badge">{modeLabel} · Evolução</span>
         </div>
 
         <div className="card p-5">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
-            <p className="text-xs text-[#64748b]">
-              Período: {dateBr(reportPeriod.start)} a {dateBr(reportPeriod.end)}
-            </p>
           </div>
           {dailySeriesError && (
             <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700">
