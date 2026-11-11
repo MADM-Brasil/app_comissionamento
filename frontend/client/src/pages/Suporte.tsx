@@ -27,15 +27,16 @@ import {
   UserPlus,
   Users,
   ExternalLink,
+  Lock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { API_BASE } from "@/lib/api";
-import { 
-  getAccessLevel as resolveAccessLevel, 
+import {
+  getAccessLevel as resolveAccessLevel,
   getEffectiveAccessLevel,
-  LEVELS 
+  LEVELS,
 } from "@/lib/accessControl";
 
 // ---------------------- safeJson ----------------------
@@ -69,10 +70,23 @@ async function safeJson(res: Response): Promise<any> {
 }
 
 // ---------------------- Tipos ----------------------
+type ReportStatus =
+  | "ENVIADO"
+  | "SUSPEITO"
+  | "CONCLUÍDO"
+  | "ERRO"
+  | "BLOQUEADO"
+  | "REVISÃO"
+  | "ANALISE"
+  | "CANCELADO";
+
 interface MovementItem {
   id: string;
+  id_ticket_movimentacao: number;
   timestamp: string;
   cliente: string;
+  nome_cliente_informado: string;
+  sobrenome_cliente_informado: string;
   email: string;
   telefone: string;
   cpf: string;
@@ -106,6 +120,7 @@ interface MovementItem {
 
 interface ReportItem {
   id: string;
+  id_ticket_suporte: number;
   data: string;
   titulo: string;
   assunto: string;
@@ -113,15 +128,7 @@ interface ReportItem {
   descricaoResumida: string;
   solicitante: string;
   equipe: string;
-  status:
-    | "ENVIADO"
-    | "SUSPEITO"
-    | "CONCLUÍDO"
-    | "ERRO"
-    | "BLOQUEADO"
-    | "REVISÃO"
-    | "ANALISE"
-    | "CANCELADO";
+  status: ReportStatus;
   observacao_sales_ops: string;
   ultimaAtualizacao: string;
 }
@@ -232,18 +239,29 @@ const normalize = (str: string): string => (str || "").trim().toLowerCase();
 const normalizeKey = (str: string): string =>
   String(str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
 
-// ─────────────────────────────────────────────────────────────────────
-// Resolução de nível para a página de Suporte.
-// 
-// CORREÇÃO: Usa getEffectiveAccessLevel(user) para reconhecer promoções
-// como ASSESSOR_PLUS (baseadas em e-mail), evitando o loop infinito
-// de redirecionamento e permitindo o acesso correto.
-// ─────────────────────────────────────────────────────────────────────
+const normalizeStatus = (value: unknown): string =>
+  String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+
+const STATUS_BLOQUEIAM_EDICAO_DADOS = new Set([
+  "concluido",
+  "bloqueado",
+  "suporte",
+  "coordenador",
+]);
+
+const STATUS_REPORTE_BLOQUEIA_EDICAO = new Set([
+  "concluido",
+  "bloqueado",
+  "cancelado",
+]);
+
 function getSupportAccessLevel(user?: any): number {
   if (!user) return LEVELS.NONE;
   const level = getEffectiveAccessLevel(user);
-  
-  // Fallback de segurança para cargos iniciados com "supervisor"
   return level === LEVELS.NONE && normalize(user.cargo || "").startsWith("supervisor")
     ? LEVELS.SUPERVISAO
     : level;
@@ -311,6 +329,8 @@ const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
   "erro",
   "concluido",
 ];
+
+const COORDENADOR_STATUS_COLUMNS = ["coordenador", "bloqueado", "concluido"];
 
 const EXCLUDED_TEAMS = [
   "Coordenacao Closer",
@@ -437,7 +457,6 @@ function readUrlParams(): { aba: string | null; id: number | null } {
 // =====================================================================
 export default function Suporte() {
   const { currentUser: accessUser } = useAccessControl();
-  // CORREÇÃO: Passa o objeto accessUser completo para resolver o nível corretamente
   const accessLevel = getSupportAccessLevel(accessUser);
 
   const isJuridico = accessLevel === LEVELS.JURIDICO;
@@ -456,7 +475,6 @@ export default function Suporte() {
 
   const [focusTicketId, setFocusTicketId] = useState<number | null>(startsInCoordenador ? initialParams.id : null);
 
-  // O Nível 4 (ASSESSOR_PLUS) já está coberto pelo >= SUPERVISAO (3)
   const canAccessPage = accessLevel >= LEVELS.SUPERVISAO || isJuridico;
 
   useEffect(() => {
@@ -514,6 +532,11 @@ function MovimentacaoTab() {
   const { currentUser: accessUser } = useAccessControl();
   const accessLevel = getSupportAccessLevel(accessUser);
   const isSupervisor = accessLevel === LEVELS.SUPERVISAO;
+  const isAssessorPlus = accessLevel === LEVELS.ASSESSOR_PLUS;
+  const isCoordOrAdmin = accessLevel >= LEVELS.COORDENADOR;
+  const isAdmin = accessLevel >= LEVELS.ADMINISTRATIVO;
+
+  const podeEditarDadosHistorico = isSupervisor || isAssessorPlus || isCoordOrAdmin;
 
   const [firstName, setFirstName] = useState("");
   const [hubLink, setHubLink] = useState("");
@@ -540,7 +563,17 @@ function MovimentacaoTab() {
   const [loadingEscopo, setLoadingEscopo] = useState(true);
   const [escopoError, setEscopoError] = useState<string | null>(null);
 
-  // Efeito de sessão estabilizado para evitar loop infinito
+  const [editingHistory, setEditingHistory] = useState<MovementItem | null>(null);
+  const [savingHistory, setSavingHistory] = useState(false);
+  const [editHistoryForm, setEditHistoryForm] = useState({
+    nome_cliente_informado: "",
+    sobrenome_cliente_informado: "",
+    email_cliente_informado: "",
+    telefone_cliente_informado: "",
+    cpf_cliente_informado: "",
+    origem_cliente_informada: "",
+  });
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -559,7 +592,6 @@ function MovimentacaoTab() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -687,14 +719,21 @@ function MovimentacaoTab() {
             }
           }
 
+          const nome = ticket.nome_cliente_informado || "";
+          const sobrenome = ticket.sobrenome_cliente_informado || "";
+          const idNum = Number(ticket.id_ticket_movimentacao);
+
           return {
             id: `db_${ticket.id_ticket_movimentacao}`,
+            id_ticket_movimentacao: idNum,
             timestamp: ticket.criado_em,
             cliente:
               ticket.crm_origem === "HUBSPOT_LINK"
                 ? hubspotData?.dealName || `Deal ${ticket.crm_lead_id || ""}`.trim()
-                : `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`,
-            email: ticket.email_cliente_informado,
+                : `${nome} ${sobrenome}`.trim(),
+            nome_cliente_informado: nome,
+            sobrenome_cliente_informado: sobrenome,
+            email: ticket.email_cliente_informado || "",
             telefone: ticket.telefone_cliente_informado || "Não informado",
             cpf: ticket.cpf_cliente_informado || "Não informado",
             origem: ticket.origem_cliente_informada || "Não informada",
@@ -732,6 +771,97 @@ function MovimentacaoTab() {
     }, 10000);
     return () => clearInterval(intervalId);
   }, [movements, loadUserHistory]);
+
+  const statusPermiteEdicao = (item: MovementItem): boolean => {
+    return !STATUS_BLOQUEIAM_EDICAO_DADOS.has(normalizeStatus(item.status));
+  };
+
+  const podeEditarItemHistorico = (item: MovementItem): boolean =>
+    podeEditarDadosHistorico && statusPermiteEdicao(item);
+
+  const openEditHistory = (item: MovementItem) => {
+    setEditingHistory(item);
+    setEditHistoryForm({
+      nome_cliente_informado: item.nome_cliente_informado || "",
+      sobrenome_cliente_informado: item.sobrenome_cliente_informado || "",
+      email_cliente_informado: item.email || "",
+      telefone_cliente_informado: item.telefone || "",
+      cpf_cliente_informado: item.cpf !== "Não informado" ? item.cpf : "",
+      origem_cliente_informada: item.origem !== "Não informada" ? item.origem : "",
+    });
+  };
+
+  const closeEditHistory = () => {
+    setEditingHistory(null);
+    setEditHistoryForm({
+      nome_cliente_informado: "",
+      sobrenome_cliente_informado: "",
+      email_cliente_informado: "",
+      telefone_cliente_informado: "",
+      cpf_cliente_informado: "",
+      origem_cliente_informada: "",
+    });
+  };
+
+  const salvarEdicaoHistorico = async () => {
+    if (!editingHistory) return;
+
+    if (!editHistoryForm.nome_cliente_informado.trim()) {
+      setMessage({ text: "Nome do cliente é obrigatório.", type: "error" });
+      return;
+    }
+    if (!editHistoryForm.sobrenome_cliente_informado.trim()) {
+      setMessage({ text: "Sobrenome do cliente é obrigatório.", type: "error" });
+      return;
+    }
+    if (editHistoryForm.telefone_cliente_informado.trim() && !isValidBrazilianPhone(editHistoryForm.telefone_cliente_informado)) {
+      setMessage({ text: "Telefone inválido. Informe DDD + número.", type: "error" });
+      return;
+    }
+
+    setSavingHistory(true);
+    try {
+      const payload: Record<string, unknown> = {
+        nome_cliente_informado: editHistoryForm.nome_cliente_informado.trim(),
+        sobrenome_cliente_informado: editHistoryForm.sobrenome_cliente_informado.trim(),
+        email_cliente_informado: editHistoryForm.email_cliente_informado.trim(),
+        telefone_cliente_informado: editHistoryForm.telefone_cliente_informado.trim(),
+        cpf_cliente_informado: editHistoryForm.cpf_cliente_informado.trim(),
+        origem_cliente_informada: editHistoryForm.origem_cliente_informada.trim(),
+      };
+
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${editingHistory.id_ticket_movimentacao}`, {
+        method: "PATCH",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      const data = await safeJson(res);
+      if (!res.ok || !data.success) throw new Error(data.error || "Erro ao salvar dados do cliente.");
+
+      setMovements((prev) =>
+        prev.map((m) => {
+          if (m.id !== editingHistory.id) return m;
+          return {
+            ...m,
+            nome_cliente_informado: editHistoryForm.nome_cliente_informado.trim(),
+            sobrenome_cliente_informado: editHistoryForm.sobrenome_cliente_informado.trim(),
+            cliente: `${editHistoryForm.nome_cliente_informado.trim()} ${editHistoryForm.sobrenome_cliente_informado.trim()}`.trim(),
+            email: editHistoryForm.email_cliente_informado.trim(),
+            telefone: editHistoryForm.telefone_cliente_informado.trim() || "Não informado",
+            cpf: editHistoryForm.cpf_cliente_informado.trim() || "Não informado",
+            origem: editHistoryForm.origem_cliente_informada.trim() || "Não informada",
+          };
+        }),
+      );
+      setMessage({ text: "Dados do cliente atualizados.", type: "success" });
+      closeEditHistory();
+    } catch (err: any) {
+      setMessage({ text: err.message || "Erro ao salvar dados do cliente.", type: "error" });
+    } finally {
+      setSavingHistory(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1250,11 +1380,13 @@ function MovimentacaoTab() {
                   <th>Status</th>
                   <th>Obs. Comercial</th>
                   <th>Resultado</th>
+                  {podeEditarDadosHistorico && <th className="w-16 text-center">Ações</th>}
                 </tr>
               </thead>
               <tbody>
                 {filteredMovements.map((m) => {
                   const info = getStatusInfo(m.status);
+                  const habilitadoEdicao = podeEditarItemHistorico(m);
                   return (
                     <tr key={m.id}>
                       <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
@@ -1280,6 +1412,27 @@ function MovimentacaoTab() {
                         {m.observacao_sales_ops || "—"}
                       </td>
                       <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
+                      {podeEditarDadosHistorico && (
+                        <td className="text-center">
+                          {habilitadoEdicao ? (
+                            <button
+                              type="button"
+                              onClick={() => openEditHistory(m)}
+                              className="p-1.5 rounded hover:bg-[#f1f5f9] text-[#2F6FED] hover:text-[#1d4ed8]"
+                              title="Editar dados do cliente"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <span
+                              className="inline-flex items-center justify-center p-1.5 text-[#94a3b8]"
+                              title="Edição bloqueada para este status (concluído, bloqueado, suporte ou coordenador)"
+                            >
+                              <Lock className="w-4 h-4" />
+                            </span>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   );
                 })}
@@ -1288,6 +1441,98 @@ function MovimentacaoTab() {
           </div>
         )}
       </div>
+
+      <EditModal
+        isOpen={editingHistory !== null}
+        onClose={closeEditHistory}
+        title={`Editar dados do cliente — Ticket #${editingHistory?.id_ticket_movimentacao ?? ""}`}
+        onSave={salvarEdicaoHistorico}
+        saving={savingHistory}
+      >
+        <div className="space-y-3">
+          <div className="rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-xs text-blue-800" role="note">
+            <strong>Atenção:</strong> apenas os dados do cliente podem ser alterados. A
+            observação comercial e o status não podem ser modificados por esta ação. Casos
+            com status <em>concluído</em>, <em>bloqueado</em>, <em>suporte</em> ou{" "}
+            <em>coordenador</em> não são editáveis.
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-[#94a3b8] mb-0.5">Nome</label>
+              <input
+                type="text"
+                value={editHistoryForm.nome_cliente_informado}
+                onChange={(e) => setEditHistoryForm((prev) => ({ ...prev, nome_cliente_informado: e.target.value }))}
+                className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-[#94a3b8] mb-0.5">Sobrenome</label>
+              <input
+                type="text"
+                value={editHistoryForm.sobrenome_cliente_informado}
+                onChange={(e) => setEditHistoryForm((prev) => ({ ...prev, sobrenome_cliente_informado: e.target.value }))}
+                className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-[#94a3b8] mb-0.5">Telefone</label>
+              <input
+                type="text"
+                value={editHistoryForm.telefone_cliente_informado}
+                onChange={(e) => setEditHistoryForm((prev) => ({ ...prev, telefone_cliente_informado: e.target.value }))}
+                onBlur={() =>
+                  editHistoryForm.telefone_cliente_informado &&
+                  setEditHistoryForm((prev) => ({
+                    ...prev,
+                    telefone_cliente_informado: formatPhoneInput(prev.telefone_cliente_informado),
+                  }))
+                }
+                className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                placeholder="(00) 00000-0000"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-[#94a3b8] mb-0.5">E-mail</label>
+              <input
+                type="email"
+                value={editHistoryForm.email_cliente_informado}
+                onChange={(e) => setEditHistoryForm((prev) => ({ ...prev, email_cliente_informado: e.target.value }))}
+                className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                placeholder="cliente@email.com"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-[#94a3b8] mb-0.5">CPF</label>
+              <input
+                type="text"
+                value={editHistoryForm.cpf_cliente_informado}
+                onChange={(e) => setEditHistoryForm((prev) => ({ ...prev, cpf_cliente_informado: e.target.value }))}
+                onBlur={() =>
+                  editHistoryForm.cpf_cliente_informado &&
+                  setEditHistoryForm((prev) => ({
+                    ...prev,
+                    cpf_cliente_informado: formatCPF(prev.cpf_cliente_informado),
+                  }))
+                }
+                className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                placeholder="000.000.000-00"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-[#94a3b8] mb-0.5">Origem</label>
+              <input
+                type="text"
+                value={editHistoryForm.origem_cliente_informada}
+                onChange={(e) => setEditHistoryForm((prev) => ({ ...prev, origem_cliente_informada: e.target.value }))}
+                className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                placeholder="Discadora, CAT, Indicação..."
+              />
+            </div>
+          </div>
+        </div>
+      </EditModal>
     </div>
   );
 }
@@ -1587,6 +1832,13 @@ function BuscaClienteTab() {
 // =====================================================================
 function ReportarTab() {
   const { currentUser } = useAppStore();
+  const { currentUser: accessUser } = useAccessControl();
+  const accessLevel = getSupportAccessLevel(accessUser);
+  const isCoordOrAdmin = accessLevel >= LEVELS.COORDENADOR;
+  const isSupervisor = accessLevel === LEVELS.SUPERVISAO;
+  const isAssessorPlus = accessLevel === LEVELS.ASSESSOR_PLUS;
+
+  const podeEditarDadosReporte = isSupervisor || isAssessorPlus || isCoordOrAdmin;
 
   const [titulo, setTitulo] = useState("");
   const [assunto, setAssunto] = useState("");
@@ -1601,6 +1853,24 @@ function ReportarTab() {
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [loadingReports, setLoadingReports] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  const [editingReportData, setEditingReportData] = useState<ReportItem | null>(null);
+  const [savingReportData, setSavingReportData] = useState(false);
+  const [editReportForm, setEditReportForm] = useState({
+    titulo: "",
+    assunto: "",
+    descricao: "",
+  });
+
+  // ── CORREÇÃO DO ERRO DE TIPAGEM ────────────────────────────────────
+  // `status` precisa ser do tipo `ReportItem["status"]` para que
+  // `setReports(prev.map(...))` continue compatível com `ReportItem[]`.
+  const [editingTicket, setEditingTicket] = useState<ReportItem | null>(null);
+  const [editForm, setEditForm] = useState<{ status: ReportItem["status"]; observacao_sales_ops: string }>({
+    status: "ENVIADO",
+    observacao_sales_ops: "",
+  });
+  const [saving, setSaving] = useState(false);
 
   const loadUserReports = async () => {
     if (!currentUser?.email) {
@@ -1618,6 +1888,7 @@ function ReportarTab() {
       if (data.success && Array.isArray(data.data)) {
         const mapped: ReportItem[] = data.data.map((ticket: any) => ({
           id: `REP_${ticket.id_ticket_suporte}`,
+          id_ticket_suporte: Number(ticket.id_ticket_suporte),
           data: ticket.criado_em,
           titulo: ticket.titulo || ticket.assunto || "",
           assunto: ticket.assunto || ticket.titulo || "",
@@ -1625,7 +1896,7 @@ function ReportarTab() {
           descricaoResumida: ticket.descricao ? (ticket.descricao.length > 200 ? ticket.descricao.substring(0, 200) + "..." : ticket.descricao) : "",
           solicitante: ticket.solicitante_nome,
           equipe: ticket.equipe_nome,
-          status: ticket.status || "ENVIADO",
+          status: (ticket.status || "ENVIADO") as ReportStatus,
           observacao_sales_ops: ticket.observacao_sales_ops || "",
           ultimaAtualizacao: ticket.criado_em,
         }));
@@ -1646,6 +1917,121 @@ function ReportarTab() {
     else setLoadingReports(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.email]);
+
+  const statusReportePermiteEdicao = (r: ReportItem): boolean => {
+    return !STATUS_REPORTE_BLOQUEIA_EDICAO.has(normalizeStatus(r.status));
+  };
+
+  const podeEditarItemReporte = (r: ReportItem): boolean =>
+    podeEditarDadosReporte && statusReportePermiteEdicao(r);
+
+  const openEditReportData = (r: ReportItem) => {
+    setEditingReportData(r);
+    setEditReportForm({
+      titulo: r.titulo || "",
+      assunto: r.assunto || "",
+      descricao: r.descricao || "",
+    });
+  };
+
+  const closeEditReportData = () => {
+    setEditingReportData(null);
+    setEditReportForm({ titulo: "", assunto: "", descricao: "" });
+  };
+
+  const saveEditReportData = async () => {
+    if (!editingReportData) return;
+    if (!editReportForm.titulo.trim()) {
+      setMessage({ text: "Título é obrigatório.", type: "error" });
+      return;
+    }
+    if (!editReportForm.assunto.trim()) {
+      setMessage({ text: "Assunto é obrigatório.", type: "error" });
+      return;
+    }
+    if (!editReportForm.descricao.trim()) {
+      setMessage({ text: "Descrição é obrigatória.", type: "error" });
+      return;
+    }
+
+    setSavingReportData(true);
+    try {
+      const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${editingReportData.id_ticket_suporte}`, {
+        method: "PATCH",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({
+          titulo: editReportForm.titulo.trim(),
+          assunto: editReportForm.assunto.trim(),
+          descricao: editReportForm.descricao.trim(),
+        }),
+      });
+      const data = await safeJson(res);
+      if (!res.ok || !data.success) throw new Error(data.error || "Erro ao atualizar reporte.");
+
+      setReports((prev) =>
+        prev.map((r) =>
+          r.id === editingReportData.id
+            ? {
+                ...r,
+                titulo: editReportForm.titulo.trim(),
+                assunto: editReportForm.assunto.trim(),
+                descricao: editReportForm.descricao.trim(),
+                descricaoResumida:
+                  editReportForm.descricao.length > 200
+                    ? editReportForm.descricao.substring(0, 200) + "..."
+                    : editReportForm.descricao,
+              }
+            : r,
+        ),
+      );
+      setMessage({ text: "Reporte atualizado.", type: "success" });
+      closeEditReportData();
+    } catch (err: any) {
+      setMessage({ text: err.message || "Erro ao atualizar reporte.", type: "error" });
+    } finally {
+      setSavingReportData(false);
+    }
+  };
+
+  const openEditModal = (ticket: ReportItem) => {
+    setEditingTicket(ticket);
+    setEditForm({ status: ticket.status, observacao_sales_ops: ticket.observacao_sales_ops || "" });
+  };
+
+  const closeEditModal = () => {
+    setEditingTicket(null);
+    setEditForm({ status: "ENVIADO", observacao_sales_ops: "" });
+  };
+
+  const saveEdit = async () => {
+    if (!editingTicket) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${editingTicket.id_ticket_suporte}`, {
+        method: "PATCH",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify(editForm),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao atualizar");
+
+      setReports((prev) =>
+        prev.map((r) =>
+          r.id === editingTicket.id
+            ? { ...r, status: editForm.status, observacao_sales_ops: editForm.observacao_sales_ops }
+            : r,
+        ),
+      );
+      setMessage({ text: "Reporte atualizado com sucesso.", type: "success" });
+      closeEditModal();
+    } catch (err: any) {
+      setMessage({ text: err.message, type: "error" });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1963,6 +2349,7 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
                 {filteredReports.map((r) => {
                   const info = getStatusInfo(r.status);
                   const canCancel = r.status === "ENVIADO" || r.status === "REVISÃO";
+                  const habilitadoEdicaoDados = podeEditarItemReporte(r);
                   return (
                     <tr key={r.id}>
                       <td className="whitespace-nowrap">{new Date(r.data).toLocaleString("pt-BR")}</td>
@@ -1983,9 +2370,37 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
                           <button type="button" onClick={() => viewDetails(r)} className="text-[#2F6FED] hover:text-[#2F6FED]/80" title="Ver detalhes">
                             <Eye className="w-4 h-4" />
                           </button>
+                          {podeEditarDadosReporte &&
+                            (habilitadoEdicaoDados ? (
+                              <button
+                                type="button"
+                                onClick={() => openEditReportData(r)}
+                                className="text-[#2F6FED] hover:text-[#1d4ed8]"
+                                title="Editar dados do reporte (título, assunto, descrição)"
+                              >
+                                <Edit2 className="w-4 h-4" />
+                              </button>
+                            ) : (
+                              <span
+                                className="inline-flex items-center text-[#94a3b8]"
+                                title="Edição bloqueada para este status (concluído, bloqueado ou cancelado)"
+                              >
+                                <Lock className="w-4 h-4" />
+                              </span>
+                            ))}
                           {canCancel && (
                             <button type="button" onClick={() => cancelRequest(r.id)} className="text-red-500 hover:text-red-700" title="Cancelar solicitação">
                               <Ban className="w-4 h-4" />
+                            </button>
+                          )}
+                          {isCoordOrAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => openEditModal(r)}
+                              className="text-[#64748b] hover:text-[#0f172a]"
+                              title="Editar status e observação (SalesOps/Coordenador)"
+                            >
+                              <Save className="w-4 h-4" />
                             </button>
                           )}
                         </div>
@@ -1998,6 +2413,94 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
           </div>
         )}
       </div>
+
+      <EditModal
+        isOpen={editingReportData !== null}
+        onClose={closeEditReportData}
+        title={`Editar dados do reporte #${editingReportData?.id_ticket_suporte ?? ""}`}
+        onSave={saveEditReportData}
+        saving={savingReportData}
+      >
+        <div className="space-y-3">
+          <div className="rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-xs text-blue-800" role="note">
+            <strong>Atenção:</strong> apenas os dados do reporte podem ser alterados.
+            A observação comercial e o status não são modificáveis por esta ação.
+            Casos com status <em>concluído</em>, <em>bloqueado</em> ou <em>cancelado</em>{" "}
+            não são editáveis.
+          </div>
+
+          <div>
+            <label className="block text-xs text-[#94a3b8] mb-0.5">Título</label>
+            <input
+              type="text"
+              value={editReportForm.titulo}
+              onChange={(e) => setEditReportForm((prev) => ({ ...prev, titulo: e.target.value }))}
+              className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+              maxLength={150}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-[#94a3b8] mb-0.5">Assunto</label>
+            <input
+              type="text"
+              value={editReportForm.assunto}
+              onChange={(e) => setEditReportForm((prev) => ({ ...prev, assunto: e.target.value }))}
+              className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+              maxLength={150}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-[#94a3b8] mb-0.5">Descrição</label>
+            <textarea
+              value={editReportForm.descricao}
+              onChange={(e) => setEditReportForm((prev) => ({ ...prev, descricao: e.target.value }))}
+              rows={5}
+              className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm resize-y"
+              maxLength={50000}
+            />
+          </div>
+        </div>
+      </EditModal>
+
+      <EditModal
+        isOpen={editingTicket !== null}
+        onClose={closeEditModal}
+        title={`Editar Reporte #${editingTicket?.id_ticket_suporte || ""}`}
+        onSave={saveEdit}
+        saving={saving}
+      >
+        <div>
+          <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
+          <select
+            value={editForm.status}
+            onChange={(e) =>
+              setEditForm((prev) => ({ ...prev, status: e.target.value as ReportItem["status"] }))
+            }
+            className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
+          >
+            <option value="ENVIADO">Enviado</option>
+            <option value="SUSPEITO">Suspeito</option>
+            <option value="CONCLUÍDO">Concluído</option>
+            <option value="ERRO">Erro</option>
+            <option value="BLOQUEADO">Bloqueado</option>
+            <option value="ANALISE">Análise</option>
+            <option value="REVISÃO">Revisão</option>
+            <option value="CANCELADO">Cancelado</option>
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-[#0f172a] mb-2">Observação SalesOps</label>
+          <textarea
+            value={editForm.observacao_sales_ops}
+            onChange={(e) => setEditForm((prev) => ({ ...prev, observacao_sales_ops: e.target.value }))}
+            rows={5}
+            className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
+            placeholder="Digite a observação..."
+          />
+        </div>
+      </EditModal>
     </div>
   );
 }
@@ -3109,7 +3612,7 @@ function ReportesSuporteTab() {
 }
 
 // =====================================================================
-// CoordenadorTab
+// CoordenadorTab — Visão em Kanban (Coordenador · Bloqueado · Concluído)
 // =====================================================================
 function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }) {
   const { currentUser: accessUser } = useAccessControl();
@@ -3121,6 +3624,9 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [draggingTicketId, setDraggingTicketId] = useState<number | null>(null);
+  const [dragOverColuna, setDragOverColuna] = useState<string | null>(null);
 
   const [editForm, setEditForm] = useState<{
     observacao_sales_ops: string;
@@ -3146,14 +3652,23 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
   const focusConsumed = useRef(false);
 
   const carregar = async () => {
-    setLoading(true);
     setMessage(null);
     try {
-      const url = `${API_BASE}/suporte/tickets-movimentacao?status_mapeamento=coordenador,bloqueado`;
+      const baseQuery = "status_mapeamento=coordenador,bloqueado,concluido";
+      const query = isAdmin ? `todos=1&${baseQuery}` : baseQuery;
+      const url = `${API_BASE}/suporte/tickets-movimentacao?${query}`;
+
       const res = await fetch(url, { credentials: "include" });
       const data = await safeJson(res);
       if (!data.success) throw new Error(data.error || "Falha ao carregar");
-      let lista: TicketMovimentacao[] = data.data || [];
+
+      const raw: any[] = Array.isArray(data.data) ? data.data : [];
+      let lista: TicketMovimentacao[] = raw
+        .map((t: any) => ({
+          ...t,
+          status_mapeamento: normalizeStatus(t.status_mapeamento),
+        }))
+        .filter((t: TicketMovimentacao) => COORDENADOR_STATUS_COLUMNS.includes(t.status_mapeamento));
 
       if (!isAdmin && unidadeId != null) {
         lista = lista.filter((t) => {
@@ -3161,11 +3676,34 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
           return u == null || Number(u) === unidadeId;
         });
       }
+
+      if (raw.length === 0) {
+        console.warn(
+          "[CoordenadorTab] Backend retornou 0 tickets. " +
+            `isAdmin=${isAdmin} level=${accessLevel} url=${url}`,
+        );
+      } else if (lista.length === 0) {
+        console.warn(
+          "[CoordenadorTab] Backend retornou tickets, mas todos foram filtrados. " +
+            "Status distintos recebidos:",
+          [...new Set(raw.map((t: any) => String(t.status_mapeamento ?? "")))],
+        );
+      }
+
       setTickets(lista);
     } catch (err: any) {
       setMessage({ text: err.message, type: "error" });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await carregar();
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -3313,25 +3851,64 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
     }
   };
 
-  const jaBloqueado = editingTicket?.status_mapeamento === "bloqueado";
+  const moverTicketParaStatus = async (ticketId: number, novoStatus: string) => {
+    const ticketAtual = tickets.find((t) => t.id_ticket_movimentacao === ticketId);
+    if (!ticketAtual || ticketAtual.status_mapeamento === novoStatus) return;
+
+    const statusAnterior = ticketAtual.status_mapeamento;
+    setTickets((prev) =>
+      prev.map((t) => (t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: novoStatus } : t)),
+    );
+
+    try {
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${ticketId}`, {
+        method: "PATCH",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({ status_mapeamento: novoStatus }),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao mover ticket");
+    } catch (err: any) {
+      setTickets((prev) =>
+        prev.map((t) => (t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: statusAnterior } : t)),
+      );
+      setMessage({ text: err.message || "Erro ao mover ticket", type: "error" });
+    }
+  };
+
+  const ticketsPorColuna = useMemo(() => {
+    const grupos: Record<string, TicketMovimentacao[]> = {};
+    for (const coluna of COORDENADOR_STATUS_COLUMNS) grupos[coluna] = [];
+    for (const ticket of tickets) {
+      const status = normalizeStatus(ticket.status_mapeamento) || "coordenador";
+      if (!COORDENADOR_STATUS_COLUMNS.includes(status)) continue;
+      grupos[status].push(ticket);
+    }
+    return grupos;
+  }, [tickets]);
+
+  const isConcluido = normalizeStatus(editingTicket?.status_mapeamento) === "concluido";
+  const jaBloqueado = normalizeStatus(editingTicket?.status_mapeamento) === "bloqueado";
 
   return (
     <div className="space-y-4">
       <div className="card p-5">
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">Visão Coordenador</h2>
             <p className="text-xs text-[#64748b] mt-0.5">
-              Casos com status <strong>Coordenador</strong> (prazo mínimo) e <strong>Bloqueado</strong> que precisam da sua validação
+              Arraste os cards entre as colunas <strong>Coordenador</strong>, <strong>Bloqueado</strong> e{" "}
+              <strong>Concluído</strong>, ou clique em um card para validar
               {!isAdmin && unidadeId != null ? ` — unidade ${unidadeId}` : ""}.
             </p>
           </div>
           <button
-            onClick={carregar}
-            disabled={loading}
+            onClick={handleRefresh}
+            disabled={refreshing}
             className="px-3 py-1 text-sm rounded bg-[#f1f5f9] hover:bg-[#e2e8f0] flex items-center gap-1 disabled:opacity-50"
           >
-            <RefreshCw className={cn("w-3 h-3", loading && "animate-spin")} />
+            <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} />
             Atualizar
           </button>
         </div>
@@ -3354,59 +3931,95 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
         ) : tickets.length === 0 ? (
           <div className="text-center py-8 text-[#64748b]">Nenhum caso aguardando validação.</div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="simple-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Data</th>
-                  <th>Cliente</th>
-                  <th>Equipe destino</th>
-                  <th>Assessor destino</th>
-                  <th>Status</th>
-                  <th>Motivo</th>
-                  <th>Ações</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tickets.map((t) => {
-                  const info = getStatusInfo(t.status_mapeamento || "bloqueado");
-                  let motivo = "";
-                  try {
-                    motivo = JSON.parse(t.observacao_sales_ops || "{}").observacao || "";
-                  } catch {
-                    motivo = t.observacao_sales_ops || "";
-                  }
-                  return (
-                    <tr key={t.id_ticket_movimentacao}>
-                      <td className="text-xs text-[#94a3b8]">#{t.id_ticket_movimentacao}</td>
-                      <td className="text-xs whitespace-nowrap">{new Date(t.criado_em).toLocaleDateString("pt-BR")}</td>
-                      <td className="text-xs">
-                        {t.nome_cliente_informado} {t.sobrenome_cliente_informado}
-                      </td>
-                      <td className="text-xs">{t.equipe_destino_nome}</td>
-                      <td className="text-xs">{t.colaborador_destino_nome}</td>
-                      <td>
-                        <span className={cn("badge", info.className)}>
-                          {info.icon} {info.label}
-                        </span>
-                      </td>
-                      <td className="text-xs max-w-xs truncate" title={motivo}>
-                        {motivo || "—"}
-                      </td>
-                      <td>
-                        <button
-                          onClick={() => openEditModal(t)}
-                          className="text-[#2F6FED] hover:underline text-xs font-medium"
-                        >
-                          Validar
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="kanban-scroll flex gap-3 overflow-x-auto pb-3">
+            {COORDENADOR_STATUS_COLUMNS.map((coluna) => {
+              const statusInfo = getStatusInfo(coluna);
+              const ticketsColuna = ticketsPorColuna[coluna] || [];
+              const isDragOver = dragOverColuna === coluna;
+              return (
+                <div
+                  key={coluna}
+                  className={cn(
+                    "flex-1 min-w-[220px] h-[65vh] flex flex-col bg-[#f8fafc] rounded-lg border-2 transition-colors",
+                    isDragOver ? "border-[#2F6FED] bg-blue-50" : "border-[#e2e8f0]",
+                  )}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragOverColuna(coluna);
+                  }}
+                  onDragLeave={() => setDragOverColuna((prev) => (prev === coluna ? null : prev))}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    setDragOverColuna(null);
+                    const ticketId = Number(e.dataTransfer.getData("text/plain"));
+                    if (ticketId) moverTicketParaStatus(ticketId, coluna);
+                    setDraggingTicketId(null);
+                  }}
+                >
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-[#e2e8f0]">
+                    <span className={cn("badge", statusInfo.className)}>
+                      {statusInfo.icon} {statusInfo.label}
+                    </span>
+                    <span className="text-xs text-[#94a3b8] font-medium">{ticketsColuna.length}</span>
+                  </div>
+                  <div className="flex-1 p-2 space-y-2 overflow-y-auto">
+                    {ticketsColuna.length === 0 ? (
+                      <div className="text-center py-6 text-xs text-[#94a3b8]">Nenhum caso</div>
+                    ) : (
+                      ticketsColuna.map((ticket) => {
+                        let motivo = "";
+                        try {
+                          motivo = JSON.parse(ticket.observacao_sales_ops || "{}").observacao || "";
+                        } catch {
+                          motivo = ticket.observacao_sales_ops || "";
+                        }
+                        return (
+                          <div
+                            key={ticket.id_ticket_movimentacao}
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData("text/plain", String(ticket.id_ticket_movimentacao));
+                              e.dataTransfer.effectAllowed = "move";
+                              setDraggingTicketId(ticket.id_ticket_movimentacao);
+                            }}
+                            onDragEnd={() => {
+                              setDraggingTicketId(null);
+                              setDragOverColuna(null);
+                            }}
+                            onClick={() => openEditModal(ticket)}
+                            className={cn(
+                              "w-full text-left bg-white border border-[#e2e8f0] rounded-lg p-3 cursor-grab active:cursor-grabbing hover:border-[#2F6FED] hover:shadow-sm transition-colors",
+                              draggingTicketId === ticket.id_ticket_movimentacao && "opacity-40",
+                            )}
+                          >
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-xs text-[#94a3b8]">#{ticket.id_ticket_movimentacao}</span>
+                              <span className="text-xs text-[#94a3b8] whitespace-nowrap">
+                                {new Date(ticket.criado_em).toLocaleDateString("pt-BR")}
+                              </span>
+                            </div>
+                            <div className="text-sm font-medium text-[#0f172a]">
+                              {ticket.nome_cliente_informado} {ticket.sobrenome_cliente_informado}
+                            </div>
+                            <div className="text-xs text-[#64748b]">{ticket.equipe_destino_nome}</div>
+                            {ticket.colaborador_destino_nome && (
+                              <div className="text-xs text-[#94a3b8] mt-0.5 truncate">
+                                {ticket.colaborador_destino_nome}
+                              </div>
+                            )}
+                            {motivo && (
+                              <div className="text-xs text-[#475569] mt-1.5 truncate" title={motivo}>
+                                {motivo}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -3419,186 +4032,198 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
         saving={saving}
         onBloquear={bloquear}
         bloqueando={bloqueando}
-        bloquearDisabled={jaBloqueado}
-        bloquearTitle={jaBloqueado ? "Este caso já está bloqueado." : "Manter bloqueado com a observação atual"}
+        bloquearDisabled={jaBloqueado || isConcluido}
+        bloquearTitle={
+          isConcluido
+            ? "Este caso já está concluído e não pode ser bloqueado."
+            : jaBloqueado
+              ? "Este caso já está bloqueado."
+              : "Manter bloqueado com a observação atual"
+        }
         onReprocessar={reprocessar}
         reprocessando={reprocessando}
         reprocessarDisabled={
-          editingTicket
-            ? !["coordenador", "bloqueado"].includes(String(editingTicket.status_mapeamento || "").toLowerCase())
-            : false
+          isConcluido ||
+          (editingTicket
+            ? !["coordenador", "bloqueado"].includes(normalizeStatus(editingTicket.status_mapeamento))
+            : false)
         }
         reprocessarTitle={
-          editingTicket?.crm_origem === "HUBSPOT_LINK"
-            ? "Reprocessa o Link Hub mantendo as demais regras."
-            : "Reprocessa ignorando a regra de prazo mínimo de 24h. As demais regras continuam válidas."
+          isConcluido
+            ? "Este caso já está concluído e não pode ser reprocessado."
+            : editingTicket?.crm_origem === "HUBSPOT_LINK"
+              ? "Reprocessa o Link Hub mantendo as demais regras."
+              : "Reprocessa ignorando a regra de prazo mínimo de 24h. As demais regras continuam válidas."
         }
       >
-        {editingTicket && (() => {
-          const produtoInterno = (() => {
-            if (editingTicket.produto) return editingTicket.produto;
-            try {
-              const parsed = JSON.parse(editingTicket.observacao_sales_ops || "{}");
-              return parsed.produto || null;
-            } catch {
-              return null;
-            }
-          })();
+        {editingTicket &&
+          (() => {
+            const produtoInterno = (() => {
+              if (editingTicket.produto) return editingTicket.produto;
+              try {
+                const parsed = JSON.parse(editingTicket.observacao_sales_ops || "{}");
+                return parsed.produto || null;
+              } catch {
+                return null;
+              }
+            })();
 
-          const isJuridicoBlocked = Boolean(
-            editingTicket.isJuridicoBlocked || editingTicket.ruleApplied === "contact_has_juridico_deal",
-          );
+            const isJuridicoBlocked = Boolean(
+              editingTicket.isJuridicoBlocked || editingTicket.ruleApplied === "contact_has_juridico_deal",
+            );
 
-          const infoStatus = getStatusInfo(editingTicket.status_mapeamento || "bloqueado");
+            const infoStatus = getStatusInfo(normalizeStatus(editingTicket.status_mapeamento) || "bloqueado");
 
-          return (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <span className={cn("badge", infoStatus.className)}>
-                  {infoStatus.icon} {infoStatus.label}
-                </span>
-                <span className="text-xs text-[#94a3b8]">
-                  Solicitante: {editingTicket.colaborador_origem_nome || "—"} ·{" "}
-                  {editingTicket.equipe_origem_nome || "sem equipe"}
-                </span>
-              </div>
-
-              <div className="space-y-3 pb-4 border-b border-[#e2e8f0] text-sm">
-                <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
-                  Informações do Cliente
+            return (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <span className={cn("badge", infoStatus.className)}>
+                    {infoStatus.icon} {infoStatus.label}
+                  </span>
+                  <span className="text-xs text-[#94a3b8]">
+                    Solicitante: {editingTicket.colaborador_origem_nome || "—"} ·{" "}
+                    {editingTicket.equipe_origem_nome || "sem equipe"}
+                  </span>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-[#94a3b8] mb-0.5">Nome</label>
-                    <input
-                      type="text"
-                      value={editForm.nome_cliente_informado}
-                      onChange={(e) => setEditForm((prev) => ({ ...prev, nome_cliente_informado: e.target.value }))}
-                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                      placeholder="Nome do cliente"
-                    />
+                <div className="space-y-3 pb-4 border-b border-[#e2e8f0] text-sm">
+                  <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
+                    Informações do Cliente
                   </div>
-                  <div>
-                    <label className="block text-xs text-[#94a3b8] mb-0.5">Sobrenome</label>
-                    <input
-                      type="text"
-                      value={editForm.sobrenome_cliente_informado}
-                      onChange={(e) => setEditForm((prev) => ({ ...prev, sobrenome_cliente_informado: e.target.value }))}
-                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                      placeholder="Sobrenome do cliente"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-[#94a3b8] mb-0.5">Telefone</label>
-                    <input
-                      type="text"
-                      value={editForm.telefone_cliente_informado}
-                      onChange={(e) => setEditForm((prev) => ({ ...prev, telefone_cliente_informado: e.target.value }))}
-                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                      placeholder="+55-11-90000-0000"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-[#94a3b8] mb-0.5">E-mail</label>
-                    <input
-                      type="email"
-                      value={editForm.email_cliente_informado}
-                      onChange={(e) => setEditForm((prev) => ({ ...prev, email_cliente_informado: e.target.value }))}
-                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                      placeholder="cliente@email.com"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-[#94a3b8] mb-0.5">CPF</label>
-                    <input
-                      type="text"
-                      value={editForm.cpf_cliente_informado}
-                      onChange={(e) => setEditForm((prev) => ({ ...prev, cpf_cliente_informado: e.target.value }))}
-                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                      placeholder="000.000.000-00"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-[#94a3b8] mb-0.5">Origem</label>
-                    <input
-                      type="text"
-                      value={editForm.origem_cliente_informada}
-                      onChange={(e) => setEditForm((prev) => ({ ...prev, origem_cliente_informada: e.target.value }))}
-                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                      placeholder="Discadora, CAT, Indicação..."
-                    />
-                  </div>
-                </div>
-              </div>
 
-              <div className="space-y-2 text-sm pb-4 border-b border-[#e2e8f0]">
-                <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
-                  Dados da Movimentação
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <div className="text-xs text-[#94a3b8] mb-0.5">Equipe destino</div>
-                    <div className="text-[#0f172a] font-medium">{editingTicket.equipe_destino_nome || "—"}</div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-[#94a3b8] mb-0.5">Assessor destino</div>
-                    <div className="text-[#0f172a] font-medium">{editingTicket.colaborador_destino_nome || "—"}</div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-[#94a3b8] mb-0.5">Produto</div>
-                    <div className="text-[#0f172a]">{produtoInterno ? maskProduct(produtoInterno) : "—"}</div>
-                  </div>
-                  <div>
-                    <div className="text-xs text-[#94a3b8] mb-0.5">Tipo</div>
-                    <div className="text-[#0f172a]">{editingTicket.tipo_solicitacao || "—"}</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-[#94a3b8] mb-0.5">Nome</label>
+                      <input
+                        type="text"
+                        value={editForm.nome_cliente_informado}
+                        onChange={(e) => setEditForm((prev) => ({ ...prev, nome_cliente_informado: e.target.value }))}
+                        className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                        placeholder="Nome do cliente"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#94a3b8] mb-0.5">Sobrenome</label>
+                      <input
+                        type="text"
+                        value={editForm.sobrenome_cliente_informado}
+                        onChange={(e) => setEditForm((prev) => ({ ...prev, sobrenome_cliente_informado: e.target.value }))}
+                        className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                        placeholder="Sobrenome do cliente"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#94a3b8] mb-0.5">Telefone</label>
+                      <input
+                        type="text"
+                        value={editForm.telefone_cliente_informado}
+                        onChange={(e) => setEditForm((prev) => ({ ...prev, telefone_cliente_informado: e.target.value }))}
+                        className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                        placeholder="+55-11-90000-0000"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#94a3b8] mb-0.5">E-mail</label>
+                      <input
+                        type="email"
+                        value={editForm.email_cliente_informado}
+                        onChange={(e) => setEditForm((prev) => ({ ...prev, email_cliente_informado: e.target.value }))}
+                        className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                        placeholder="cliente@email.com"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#94a3b8] mb-0.5">CPF</label>
+                      <input
+                        type="text"
+                        value={editForm.cpf_cliente_informado}
+                        onChange={(e) => setEditForm((prev) => ({ ...prev, cpf_cliente_informado: e.target.value }))}
+                        className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                        placeholder="000.000.000-00"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#94a3b8] mb-0.5">Origem</label>
+                      <input
+                        type="text"
+                        value={editForm.origem_cliente_informada}
+                        onChange={(e) => setEditForm((prev) => ({ ...prev, origem_cliente_informada: e.target.value }))}
+                        className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                        placeholder="Discadora, CAT, Indicação..."
+                      />
+                    </div>
                   </div>
                 </div>
 
-                {editingTicket.motivo_solicitacao && (
-                  <div>
-                    <div className="text-xs text-[#94a3b8] mb-0.5">Motivo</div>
-                    <div className="text-[#0f172a] whitespace-pre-wrap break-words">{editingTicket.motivo_solicitacao}</div>
+                <div className="space-y-2 text-sm pb-4 border-b border-[#e2e8f0]">
+                  <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
+                    Dados da Movimentação
                   </div>
-                )}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <div className="text-xs text-[#94a3b8] mb-0.5">Equipe destino</div>
+                      <div className="text-[#0f172a] font-medium">{editingTicket.equipe_destino_nome || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-[#94a3b8] mb-0.5">Assessor destino</div>
+                      <div className="text-[#0f172a] font-medium">{editingTicket.colaborador_destino_nome || "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-[#94a3b8] mb-0.5">Produto</div>
+                      <div className="text-[#0f172a]">{produtoInterno ? maskProduct(produtoInterno) : "—"}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-[#94a3b8] mb-0.5">Tipo</div>
+                      <div className="text-[#0f172a]">{editingTicket.tipo_solicitacao || "—"}</div>
+                    </div>
+                  </div>
 
-                {editingTicket.link && (
-                  <div className="pt-1">
-                    <a
-                      href={editingTicket.link}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eff6ff] text-[#2F6FED] hover:bg-[#dbeafe] transition-colors"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                      Ver card na HubSpot
-                    </a>
-                  </div>
-                )}
+                  {editingTicket.motivo_solicitacao && (
+                    <div>
+                      <div className="text-xs text-[#94a3b8] mb-0.5">Motivo</div>
+                      <div className="text-[#0f172a] whitespace-pre-wrap break-words">
+                        {editingTicket.motivo_solicitacao}
+                      </div>
+                    </div>
+                  )}
 
-                {isJuridicoBlocked && (
-                  <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800" role="note">
-                    <strong>Bloqueio por regra Jurídica:</strong> o contato possui negócio no pipeline{" "}
-                    <em>Jurídico Auditoria de Ganho</em>. Encaminhe o caso ao time Jurídico.
-                  </div>
-                )}
+                  {editingTicket.link && (
+                    <div className="pt-1">
+                      <a
+                        href={editingTicket.link}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eff6ff] text-[#2F6FED] hover:bg-[#dbeafe] transition-colors"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                        Ver card na HubSpot
+                      </a>
+                    </div>
+                  )}
+
+                  {isJuridicoBlocked && (
+                    <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800" role="note">
+                      <strong>Bloqueio por regra Jurídica:</strong> o contato possui negócio no pipeline{" "}
+                      <em>Jurídico Auditoria de Ganho</em>. Encaminhe o caso ao time Jurídico.
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-2">
+                    Observação do coordenador
+                  </label>
+                  <textarea
+                    value={editForm.observacao_sales_ops}
+                    onChange={(e) => setEditForm((prev) => ({ ...prev, observacao_sales_ops: e.target.value }))}
+                    rows={4}
+                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
+                    placeholder="Motivo da validação, ajustes feitos, etc."
+                  />
+                </div>
               </div>
-
-              <div>
-                <label className="block text-sm font-medium text-[#0f172a] mb-2">
-                  Observação do coordenador
-                </label>
-                <textarea
-                  value={editForm.observacao_sales_ops}
-                  onChange={(e) => setEditForm((prev) => ({ ...prev, observacao_sales_ops: e.target.value }))}
-                  rows={4}
-                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
-                  placeholder="Motivo da validação, ajustes feitos, etc."
-                />
-              </div>
-            </div>
-          );
-        })()}
+            );
+          })()}
       </EditModal>
     </div>
   );

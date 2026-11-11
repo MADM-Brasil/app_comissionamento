@@ -1,38 +1,4 @@
 // backend/services/ticketQueue.js
-// Worker do fluxo de movimentação normal (CRM).
-//
-// IMPORTANTE: filtra por crm_origem = 'CRM' para não concorrer com o
-// linkHubBatchQueue.js, que processa apenas crm_origem = 'HUBSPOT_LINK'.
-//
-// Produto: lido de `observacao_sales_ops.produto` (fonte principal) ou, em
-// tickets legados, de `metadados.produto`. É propagado via garantirLeadNoCloser,
-// que decide o pipeline de destino:
-//   - Auxílio e demais produtos comuns → Closer / Em Contato.
-//   - Quinquênio/Quinqueino/Concomitante(s) → Quinquênio / Em contato.
-//   - Isenção de IR Aposentadoria (ISENCAO_IR) → Isenção de IR / Em Contato.
-//
-// A busca do card no contato também é orientada pelo produto (ver
-// garantirLeadNoCloser em hubspot.js).
-//
-// Não chamamos updateContactOwner direto aqui — deixamos que
-// garantirLeadNoCloser sincronize proprietário + produto apenas depois de
-// avaliar as regras do card (evita alterar contato em ticket bloqueado).
-//
-// Fila: o SELECT exclui explicitamente tickets com processado=true em
-// observacao_sales_ops. Isso evita loop infinito caso status_mapeamento e o
-// marcador `processado` divirjam (ex.: ticket devolvido a 'pendente' sem
-// revisão do resultado). Esses tickets só voltam a ser processados após
-// revisão manual e limpeza controlada do marcador.
-//
-// ─── Status "coordenador" ──────────────────────────────────────────────
-// O status `coordenador` é emitido quando o hubspot.js sinaliza bloqueio
-// temporário (regra de prazo mínimo desde a última modificação) via
-// `requiresCoordinator: true`. Esses casos NÃO são bloqueios definitivos:
-// o coordenador pode autorizar o reprocessamento com bypass da regra de
-// data (endpoint POST /tickets-movimentacao/:id/reprocessar-coordenador).
-// Os bloqueios definitivos (jurídico, ambíguo, sem owner, fallback)
-// continuam indo para `bloqueado`.
-
 import { pool } from './db.js';
 import {
   findContactAndValidate,
@@ -42,11 +8,11 @@ import {
   validateFinalAssignment,
   HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_PIPELINE_QUINQUENIO_ID,
-  HUBSPOT_PIPELINE_ISENCAO_IR_ID,               // [ISENÇÃO IR]
+  HUBSPOT_PIPELINE_ISENCAO_IR_ID,
   HUBSPOT_PORTAL_ID_CONFIGURED,
   HUBSPOT_STAGE_EM_CONTATO_ID,
   HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID,
-  HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID,       // [ISENÇÃO IR]
+  HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID,
 } from './hubspot.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 
@@ -88,12 +54,9 @@ const RULE_LABELS = Object.freeze({
   contact_data_mismatch: 'Dados divergentes do cadastro da HubSpot. Valide as informações registradas.',
   contact_has_juridico_deal:
     'Movimentação bloqueada: o contato possui um negócio no pipeline Jurídico Auditoria de Ganho.',
-  // Cobre Quinquênio E Isenção de IR (produto exige pipeline dedicado).
-  // [ISENÇÃO IR]
   product_pipeline_routing: 'Produto exige pipeline dedicado; movimentação executada.',
 });
 
-// Normaliza o produto para casar com a lógica do hubspot.js.
 function isQuinquenioOuConcomitante(produto) {
   const normalized = String(produto ?? '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -101,8 +64,6 @@ function isQuinquenioOuConcomitante(produto) {
   return /\b(?:quinquenio|quinqueino|concomitantes?)\b/.test(normalized);
 }
 
-// [ISENÇÃO IR] Detecta "Isenção de IR Aposentadoria" e variações
-// (com/sem acento, com/sem hífen, caixa livre). Mesma regra do hubspot.js.
 function isIsencaoIR(produto) {
   const normalized = String(produto ?? '')
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -110,9 +71,6 @@ function isIsencaoIR(produto) {
   return /\bisencao\b/.test(normalized) && /\bir\b/.test(normalized);
 }
 
-// Destino esperado, dado o produto. Fonte única para o worker CRM.
-// Ordem: Quinquênio → Isenção → Closer (fallback), mesma do hubspot.js.
-// [ISENÇÃO IR]
 function expectedDestination(produto) {
   if (isQuinquenioOuConcomitante(produto)) {
     return {
@@ -190,8 +148,6 @@ async function processTicketQueue() {
 
     isProcessing = true;
     while (true) {
-      // SELECT exclui tickets já marcados como processado=true no JSON.
-      // Isso evita loop quando o status estiver em 'pendente' por engano.
       const result = await client.query(
         `SELECT tml.*, ts.metadados
          FROM app_comissionamento.tickets_movimentacao_lead tml
@@ -214,8 +170,6 @@ async function processTicketQueue() {
       } catch (err) {
         console.error(`Erro no ticket ${ticket.id_ticket_movimentacao}:`, err);
 
-        // Preserva o JSON existente (produto, idempotency_key, etc.) em vez
-        // de sobrescrever com apenas { erro, timestamp }.
         let previous = {};
         try {
           const persisted = await client.query(
@@ -236,17 +190,19 @@ async function processTicketQueue() {
           ...(err.partialResult ? { resultadoParcial: err.partialResult } : {}),
         });
 
+        // ALTERADO: de 'erro' para 'suporte'
         await client.query(
           `UPDATE app_comissionamento.tickets_movimentacao_lead
-           SET status_mapeamento = 'erro',
+           SET status_mapeamento = 'suporte',
                observacao_sales_ops = $1,
                atualizado_em = NOW()
            WHERE id_ticket_movimentacao = $2`,
           [obs, ticket.id_ticket_movimentacao]
         );
+        // ALTERADO: de 'ERRO' para 'Aguardando Suporte'
         await client.query(
           `UPDATE app_comissionamento.tickets_suporte
-           SET status = 'ERRO', atualizado_em = NOW()
+           SET status = 'Aguardando Suporte', atualizado_em = NOW()
            WHERE id_ticket = $1`,
           [ticket.ticket_id]
         );
@@ -281,9 +237,6 @@ async function handleTicket(ticket, client) {
     return;
   }
 
-  // Produto: tenta primeiro em observacao_sales_ops.produto (fonte nova);
-  // em seguida em metadados.produto (fallback para tickets que não gravaram
-  // na observação). Nunca assume um default — o default vem da rota.
   const produto =
     observacaoAtual.produto ||
     ticket.metadados?.produto ||
@@ -293,13 +246,8 @@ async function handleTicket(ticket, client) {
     observacaoAtual.validacaoCoordenador?.acao === 'autorizar' &&
     observacaoAtual.validacaoCoordenador?.bypassTemporalRestriction === true;
 
-  // Portal ID — necessário para montar o link do card.
   const portalId = String(HUBSPOT_PORTAL_ID_CONFIGURED || '').trim();
 
-  // Destino esperado pelo produto:
-  //   Auxílio (e comuns)          → Closer / Em Contato.
-  //   Quinquênio/Concomitante     → Quinquênio / Em contato.
-  //   Isenção de IR Aposentadoria → Isenção de IR / Em Contato.  // [ISENÇÃO IR]
   const destination = expectedDestination(produto);
 
   const nomeCompleto = `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim();
@@ -409,8 +357,6 @@ async function handleTicket(ticket, client) {
         }
       }
     } else if (busca.divergente) {
-      // Contato divergente: apenas sinaliza suporte. NÃO altera o contato no
-      // HubSpot. Status final fica 'aviso' (não vai para coordenador).
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
@@ -436,12 +382,6 @@ async function handleTicket(ticket, client) {
       }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // Pipeline/etapa esperados após a movimentação.
-    // Preferimos o que o próprio hubspot.js confirmou (resultado.pipeline /
-    // resultado.stage). Se por algum motivo não vier, usamos o destino
-    // padrão calculado a partir do produto.
-    // ─────────────────────────────────────────────────────────────
     const expectedPipeline = String(resultado?.pipeline || destination.pipeline);
     const expectedStage = String(resultado?.stage || destination.stage);
 
@@ -449,11 +389,6 @@ async function handleTicket(ticket, client) {
       const validateOptions = {
         produto,
         expectedPipeline,
-        // Em modo estrito exigimos a etapa exata do destino. Fora dele,
-        // aceitamos qualquer etapa entre as aceitas do Closer quando o
-        // destino é o Closer — mesmo comportamento anterior para Auxílio.
-        // Para Quinquênio e Isenção (pipelines dedicados) a etapa é
-        // sempre exata.  // [ISENÇÃO IR]
         expectedStage: ENFORCE_EXACT_STAGE
           ? expectedStage
           : (String(expectedPipeline) === HUBSPOT_PIPELINE_CLOSER_ID ? null : expectedStage),
@@ -481,11 +416,6 @@ async function handleTicket(ticket, client) {
           && String(d.contactOwnerId) === String(ownerId);
         const pipelineOk = String(d.dealPipeline) === expectedPipeline;
 
-        // Aceitação de etapa:
-        //   - Modo estrito: precisa ser exatamente expectedStage.
-        //   - Não estrito + destino Closer: qualquer etapa entre as aceitas.
-        //   - Não estrito + destino Quinquênio OU Isenção: exige a etapa
-        //     do pipeline.  // [ISENÇÃO IR]
         const stageOk = ENFORCE_EXACT_STAGE
           ? String(d.dealStage) === expectedStage
           : (String(expectedPipeline) === HUBSPOT_PIPELINE_CLOSER_ID
@@ -507,13 +437,6 @@ async function handleTicket(ticket, client) {
 
     let statusFinal = 'pendente';
     if (resultado?.blocked) {
-      // ─────────────────────────────────────────────────────────
-      // requiresCoordinator === true → status `coordenador`
-      // (bloqueio temporário por prazo mínimo; pode ser autorizado
-      //  pelo coordenador com bypass da regra de data).
-      // requiresCoordinator ausente/false → status `bloqueado`
-      // (bloqueio definitivo: jurídico, ambíguo, sem owner, fallback).
-      // ─────────────────────────────────────────────────────────
       const isCoordinatorBlock = resultado.requiresCoordinator === true;
       statusFinal = isCoordinatorBlock ? 'coordenador' : 'bloqueado';
       hubspotData.status = statusFinal;
@@ -592,8 +515,6 @@ async function handleTicket(ticket, client) {
       .filter(Boolean)
       .join('\n');
 
-    // ─── Link do card para o coordenador / histórico ────────────────
-    // Preferimos o negócio; se só houver contato, usamos o contato.
     const cardLink = dealId && /^\d+$/.test(portalId)
       ? `https://app.hubspot.com/contacts/${portalId}/record/0-3/${dealId}`
       : (contactId && /^\d+$/.test(portalId)
@@ -661,8 +582,6 @@ async function handleTicket(ticket, client) {
 
     if (statusFinal !== 'concluido') {
       try {
-        // Unidade: obrigatória para coordenador/bloqueado (rota por webhook
-        // dedicado). Para os demais status mantém o fallback dos metadados.
         const unidadeId = (statusFinal === 'bloqueado' || statusFinal === 'coordenador')
           ? await requesterUnitId(client, ticket.metadados)
           : (ticket.metadados?.unidade_id ?? ticket.metadados?.unidadeId ?? null);
@@ -684,10 +603,6 @@ async function handleTicket(ticket, client) {
           telefone: ticket.telefone_cliente_informado || 'N/A',
           equipeDestino: ticket.equipe_destino_nome || 'N/A',
           assessorDestino: ticket.colaborador_destino_nome || 'N/A',
-          // O notificador usa `status === 'coordenador'` para montar o cartão
-          // de validação. Bloqueio definitivo e bloqueio por prazo mínimo
-          // compartilham o mesmo cartão do coordenador (o motivo fica no
-          // campo `mensagem`).
           status: (statusFinal === 'bloqueado' || statusFinal === 'coordenador')
             ? 'coordenador'
             : statusFinal,
@@ -715,8 +630,6 @@ async function handleTicket(ticket, client) {
   } catch (error) {
     console.error(`Erro na integração HubSpot (ticket ${ticket.id_ticket_movimentacao}):`, error);
 
-    // Fallback do link: se temos o contato, priorizamos o card do contato
-    // (o negócio pode não existir ainda quando o erro acontece).
     const linkErro = contactId && /^\d+$/.test(portalId)
       ? `https://app.hubspot.com/contacts/${portalId}/record/0-1/${contactId}`
       : (dealId && /^\d+$/.test(portalId)
@@ -726,7 +639,7 @@ async function handleTicket(ticket, client) {
     const obsErro = JSON.stringify({
       ...observacaoAtual,
       link: linkErro || observacaoAtual.link || null,
-      hubspot: { ...hubspotData, erro: true, status: 'erro', mensagem: error.message },
+      hubspot: { ...hubspotData, erro: true, status: 'suporte', mensagem: error.message },
       motivoOriginal: ticket.motivo_solicitacao || '',
       observacao: [
         `Erro: ${error.message}`,
@@ -737,14 +650,23 @@ async function handleTicket(ticket, client) {
       processado: true,
       produto: observacaoAtual.produto || produto || null,
     });
+    
+    // ALTERADO: de 'erro' para 'suporte'
     await client.query(
       `UPDATE app_comissionamento.tickets_movimentacao_lead
        SET observacao_sales_ops = $1,
-           status_mapeamento = 'erro',
+           status_mapeamento = 'suporte',
            analisado_em = NOW(),
            atualizado_em = NOW()
        WHERE id_ticket_movimentacao = $2`,
       [obsErro, ticket.id_ticket_movimentacao]
+    );
+    // ALTERADO: de 'ERRO' para 'Aguardando Suporte'
+    await client.query(
+      `UPDATE app_comissionamento.tickets_suporte
+       SET status = 'Aguardando Suporte', atualizado_em = NOW()
+       WHERE id_ticket = $1`,
+      [ticket.ticket_id]
     );
     throw error;
   }

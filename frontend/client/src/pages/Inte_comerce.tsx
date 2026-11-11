@@ -13,9 +13,16 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+  ResponsiveContainer, BarChart, Bar, AreaChart, Area, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend,
 } from "recharts";
+import {
+  fetchLeadsRecebidos,
+  fetchAssinados,
+  fetchGanhos,
+  fetchProtocolados,
+  fetchPerdidos,
+} from "@/lib/api";
 import {
   getActiveRecommendationsFor,
   subscribeRecommendations,
@@ -99,6 +106,100 @@ function getMonthPeriod(month: string, today: string) {
     .toISOString()
     .slice(0, 10);
   return { start, end: nextMonth < tomorrow ? nextMonth : tomorrow };
+}
+
+// ───────────────────────────────────────────────────────────
+//  TIPO: ponto da série diária (mesma forma que a Analytics usa)
+// ───────────────────────────────────────────────────────────
+type DailyPoint = {
+  date: string;      // dd/mm
+  fullDate: string;  // yyyy-mm-dd
+  leads: number;
+  assinados: number;
+  ganhos: number;
+  protocolados: number;
+  perdidos: number;
+};
+
+type RawSeriesItem = { data?: string; periodo?: string; total?: number; leads_recebidos?: number };
+
+/**
+ * Mescla as 5 séries retornadas por @/lib/api (as mesmas que a Analytics usa)
+ * em um único array diário, preenchendo todos os dias do período — exatamente
+ * como o Analytics.tsx faz em `fetchChartData`.
+ */
+function buildDailySeries(
+  start: string,
+  end: string,
+  series: {
+    leads: RawSeriesItem[];
+    assinados: RawSeriesItem[];
+    ganhos: RawSeriesItem[];
+    protocolados: RawSeriesItem[];
+    perdidos: RawSeriesItem[];
+  },
+): DailyPoint[] {
+  const dataMap = new Map<
+    string,
+    { leads: number; assinados: number; ganhos: number; protocolados: number; perdidos: number }
+  >();
+
+  const process = (
+    items: RawSeriesItem[] | undefined,
+    field: "leads" | "assinados" | "ganhos" | "protocolados" | "perdidos",
+    fallbackKey?: "leads_recebidos",
+  ) => {
+    for (const item of items ?? []) {
+      const rawDate = item?.data ?? item?.periodo;
+      if (!rawDate) continue;
+      const dateStr = String(rawDate).split("T")[0];
+      if (!dateStr) continue;
+      const existing = dataMap.get(dateStr) ?? {
+        leads: 0, assinados: 0, ganhos: 0, protocolados: 0, perdidos: 0,
+      };
+      const raw = (item.total ?? (fallbackKey ? (item as any)[fallbackKey] : 0) ?? 0);
+      const val = Number(raw) || 0;
+      existing[field] += val;
+      dataMap.set(dateStr, existing);
+    }
+  };
+
+  process(series.leads, "leads", "leads_recebidos");
+  process(series.assinados, "assinados");
+  process(series.ganhos, "ganhos");
+  process(series.protocolados, "protocolados");
+  process(series.perdidos, "perdidos");
+
+  // Preenche todos os dias do período (mesmo os sem movimento) — igual à Analytics.
+  const allDates: string[] = [];
+  const [sy, sm, sd] = start.split("-").map(Number);
+  const [ey, em, ed] = end.split("-").map(Number);
+  const startDate = new Date(Date.UTC(sy, sm - 1, sd));
+  const endDate = new Date(Date.UTC(ey, em - 1, ed));
+  const cursor = new Date(startDate);
+  while (cursor < endDate) {
+    allDates.push(cursor.toISOString().split("T")[0]);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  if (allDates.length === 0 && start) {
+    allDates.push(start);
+  }
+
+  return allDates.map((fullDate) => {
+    const values = dataMap.get(fullDate) ?? {
+      leads: 0, assinados: 0, ganhos: 0, protocolados: 0, perdidos: 0,
+    };
+    const [, m, d] = fullDate.split("-");
+    return {
+      date: `${d}/${m}`,
+      fullDate,
+      leads: values.leads,
+      assinados: values.assinados,
+      ganhos: values.ganhos,
+      protocolados: values.protocolados,
+      perdidos: values.perdidos,
+    };
+  });
 }
 
 // ───────────────────────────────────────────────────────────
@@ -456,6 +557,25 @@ function RecomendacoesCard({
 }
 
 // ───────────────────────────────────────────────────────────
+//  TOOLTIP PARA A EVOLUÇÃO DIÁRIA (padrão Analytics)
+// ───────────────────────────────────────────────────────────
+const EvolucaoTooltip = ({ active, payload, label }: any) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-white border border-[#e2e8f0] rounded-lg p-3 shadow-lg text-xs max-h-60 overflow-y-auto">
+        <p className="font-semibold text-[#0f172a] mb-1">{label}</p>
+        {payload.map((entry: any, i: number) => (
+          <p key={i} style={{ color: entry.color }} className="font-medium">
+            {entry.name}: {formatInt(entry.value)}
+          </p>
+        ))}
+      </div>
+    );
+  }
+  return null;
+};
+
+// ───────────────────────────────────────────────────────────
 export default function Inte_comerce() {
   const { collaborators } = useAppStore();
   const [today] = useState(() => new Intl.DateTimeFormat("en-CA", {
@@ -515,6 +635,9 @@ export default function Inte_comerce() {
   const [funnel, setFunnel] = useState<InteComerceFunnel>(EMPTY_FUNNEL);
   const [reasons, setReasons] = useState<InteComerceReason[]>([]);
   const [daily, setDaily] = useState<InteComerceDaily[]>([]);
+  // ⬇️ NOVO: série diária vinda das mesmas funções que a Analytics usa.
+  const [dailySeries, setDailySeries] = useState<DailyPoint[]>([]);
+  const [dailySeriesError, setDailySeriesError] = useState<string | null>(null);
   const [collabTable, setCollabTable] = useState<InteComerceCollaborator[]>([]);
   const [teamTable, setTeamTable] = useState<InteComerceTeam[]>([]);
 
@@ -528,6 +651,8 @@ export default function Inte_comerce() {
       setFunnel(EMPTY_FUNNEL);
       setReasons([]);
       setDaily([]);
+      setDailySeries([]);
+      setDailySeriesError(null);
       setDataAsOf(null);
       setCollabTable([]);
       setTeamTable([]);
@@ -560,6 +685,18 @@ export default function Inte_comerce() {
       selectedDay: dayParam,
     };
 
+    // ⬇️ Parâmetros para a série diária — idênticos aos que a Analytics usa
+    //    (mesmo shape: start, end, equipe, colaborador, colaboradorId, produto, granularity).
+    const dailySeriesParams = {
+      start: reportPeriod.start,
+      end: reportPeriod.end,
+      equipe: equipe !== "todas" ? equipe : undefined,
+      colaborador: colaborador !== "todos" ? colaborador : undefined,
+      colaboradorId,
+      produto: produto !== "Todos" ? produto : undefined,
+      granularity: "daily" as const,
+    };
+
     const comparisonParams =
       comparisonPeriod
         ? {
@@ -572,12 +709,20 @@ export default function Inte_comerce() {
         : null;
 
     try {
-      const [allResult, tableResult, monthCompareResult] = await Promise.allSettled([
+      const [allResult, tableResult, monthCompareResult, dailySeriesResult] = await Promise.allSettled([
         fetchInteComerceAll(params),
         grouping === "team"
           ? fetchInteComerceTeams(params).then((data) => ({ kind: "team" as const, data }))
           : fetchInteComerceCollaborators(params).then((data) => ({ kind: "person" as const, data })),
         comparisonParams ? fetchInteComerceAll(comparisonParams) : Promise.resolve(null),
+        // ⬇️ As 5 séries diárias — mesma fonte que a Analytics.
+        Promise.all([
+          fetchLeadsRecebidos(dailySeriesParams),
+          fetchAssinados(dailySeriesParams),
+          fetchGanhos(dailySeriesParams),
+          fetchProtocolados(dailySeriesParams),
+          fetchPerdidos(dailySeriesParams),
+        ]),
       ]);
 
       if (allResult.status === "fulfilled") {
@@ -595,6 +740,29 @@ export default function Inte_comerce() {
           allResult.reason instanceof Error
             ? allResult.reason.message
             : "Falha ao carregar os indicadores.",
+        );
+      }
+
+      // ⬇️ Série diária (Analytics) — montada no frontend, exatamente como no Analytics.tsx.
+      if (dailySeriesResult.status === "fulfilled") {
+        const [leadsR, assinadosR, ganhosR, protocoladosR, perdidosR] = dailySeriesResult.value;
+        setDailySeries(
+          buildDailySeries(reportPeriod.start, reportPeriod.end, {
+            leads: leadsR as unknown as RawSeriesItem[],
+            assinados: assinadosR as unknown as RawSeriesItem[],
+            ganhos: ganhosR as unknown as RawSeriesItem[],
+            protocolados: protocoladosR as unknown as RawSeriesItem[],
+            perdidos: perdidosR as unknown as RawSeriesItem[],
+          }),
+        );
+        setDailySeriesError(null);
+      } else {
+        console.warn("[Inte_comerce] série diária (Analytics) indisponível:", dailySeriesResult.reason);
+        setDailySeries([]);
+        setDailySeriesError(
+          dailySeriesResult.reason instanceof Error
+            ? dailySeriesResult.reason.message
+            : "Falha ao carregar a série diária.",
         );
       }
 
@@ -635,7 +803,7 @@ export default function Inte_comerce() {
       setLoading(false);
     }
   }, [
-    reportPeriod, equipe, colaboradorId, produto, filters.unidadeId,
+    reportPeriod, equipe, colaborador, colaboradorId, produto, filters.unidadeId,
     grouping, viewMode, selectedDay, comparisonPeriod,
   ]);
 
@@ -677,7 +845,7 @@ export default function Inte_comerce() {
   const comparisonDaily = comparisonResult?.daily ?? [];
   const hasComparison = !!comparisonResult;
 
-  // Evolução diária com sobreposição (por dia do mês)
+  // Evolução diária com sobreposição (por dia do mês) — BarChart comparativo
   const seriesData = useMemo(() => {
     const compByDom = new Map<string, InteComerceDaily>();
     for (const d of comparisonDaily) compByDom.set(d.dia.slice(-2), d);
@@ -694,6 +862,24 @@ export default function Inte_comerce() {
       };
     });
   }, [daily, comparisonDaily]);
+
+  // ─────────────────────────────────────────────────────────
+  // Evolução Diária (Analytics) — AreaChart de 5 séries.
+  // Fonte: as mesmas 6 funções de @/lib/api usadas pela Analytics.
+  // Não há mais fallback para `daily` do backend, então os campos
+  // `ganhos`, `protocolados` e `perdidos` chegam preenchidos.
+  // ─────────────────────────────────────────────────────────
+  const dailyChartData = useMemo(() => {
+    return dailySeries.map((d) => ({
+      date: d.date,
+      fullDate: d.fullDate,
+      leads: d.leads,
+      assinados: d.assinados,
+      ganhos: d.ganhos,
+      protocolados: d.protocolados,
+      perdidos: d.perdidos,
+    }));
+  }, [dailySeries]);
 
   const tableRows = useMemo<Row[]>(() => {
     if (grouping === "team") {
@@ -1679,12 +1865,12 @@ export default function Inte_comerce() {
         </div>
       </div>
 
-      {/* 5) EVOLUÇÃO DIÁRIA — sobreposição comparativa */}
+      {/* 5) EVOLUÇÃO DIÁRIA (BarChart) — sobreposição comparativa */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">
-              Evolução de recebimentos e assinaturas
+              Recebidos × Assinados por dia
             </h2>
             <p className="text-xs text-[#64748b]">
               Barras por dia; medida de comparação em tom translúcido e mês de referência em cor viva.
@@ -1812,6 +1998,128 @@ export default function Inte_comerce() {
                   radius={[4, 4, 0, 0]}
                 />
               </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </div>
+
+      {/* 6) EVOLUÇÃO DIÁRIA (Analytics) — AreaChart 5 séries
+          Fonte: fetchLeadsRecebidos / fetchAssinados / fetchGanhos /
+          fetchProtocolados / fetchPerdidos (mesmo @/lib/api da Analytics). */}
+      <div className="mb-6">
+        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <div>
+            <h2 className="text-lg font-bold text-[#0f172a]">Evolução Diária</h2>
+            <p className="text-xs text-[#64748b]">
+              Evolução diária referente a produção do período selecionado, histórico diário de leads, assinaturas, ganhos, protocolos e perdas.
+            </p>
+          </div>
+          <span className="badge">{modeLabel} · Evolução</span>
+        </div>
+
+        <div className="card p-5">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
+            <p className="text-xs text-[#64748b]">
+              Período: {dateBr(reportPeriod.start)} a {dateBr(reportPeriod.end)}
+            </p>
+          </div>
+          {dailySeriesError && (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+              Não foi possível carregar a série diária: {dailySeriesError}
+            </div>
+          )}
+          {dailyChartData.length === 0 ? (
+            <div className="flex items-center justify-center h-[320px] text-[#94a3b8] text-sm">
+              {loading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                  Aguardando período…
+                </>
+              ) : (
+                "Nenhum dado diário disponível no período."
+              )}
+            </div>
+          ) : (
+            <ResponsiveContainer width="100%" height={320}>
+              <AreaChart data={dailyChartData}>
+                <defs>
+                  <linearGradient id="colorLeadsInte" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#16A34A" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="#16A34A" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="colorAssinadosInte" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#2F6FED" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="#2F6FED" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="colorGanhosInte" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#EA8C1D" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="#EA8C1D" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="colorProtocoladosInte" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="colorPerdidosInte" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#DC2626" stopOpacity={0.2} />
+                    <stop offset="95%" stopColor="#DC2626" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                <XAxis
+                  dataKey="date"
+                  tick={{ fontSize: 10, fill: "#64748b" }}
+                  axisLine={false}
+                  tickLine={false}
+                />
+                <YAxis
+                  tick={{ fontSize: 10, fill: "#64748b" }}
+                  axisLine={false}
+                  tickLine={false}
+                  width={30}
+                />
+                <Tooltip content={<EvolucaoTooltip />} />
+                <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
+                <Area
+                  type="monotone"
+                  dataKey="leads"
+                  stroke="#16A34A"
+                  strokeWidth={2}
+                  fill="url(#colorLeadsInte)"
+                  name="Leads"
+                />
+                <Area
+                  type="monotone"
+                  dataKey="assinados"
+                  stroke="#2F6FED"
+                  strokeWidth={2}
+                  fill="url(#colorAssinadosInte)"
+                  name="Assinados"
+                />
+                <Area
+                  type="monotone"
+                  dataKey="ganhos"
+                  stroke="#EA8C1D"
+                  strokeWidth={2}
+                  fill="url(#colorGanhosInte)"
+                  name="Ganhos"
+                />
+                <Area
+                  type="monotone"
+                  dataKey="protocolados"
+                  stroke="#8B5CF6"
+                  strokeWidth={2}
+                  fill="url(#colorProtocoladosInte)"
+                  name="Protocolados"
+                />
+                <Area
+                  type="monotone"
+                  dataKey="perdidos"
+                  stroke="#DC2626"
+                  strokeWidth={2}
+                  fill="url(#colorPerdidosInte)"
+                  name="Perdidos"
+                />
+              </AreaChart>
             </ResponsiveContainer>
           )}
         </div>

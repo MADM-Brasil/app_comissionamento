@@ -30,7 +30,8 @@ const RULE_LABELS = Object.freeze({
     'Card posicionado em Isenção de IR Aposentadoria (Em Contato).',
 });
 
-const NOTIFY_STATUSES = new Set(['erro', 'bloqueado']);
+// ALTERADO: de ['erro', 'bloqueado'] para ['suporte', 'bloqueado']
+const NOTIFY_STATUSES = new Set(['suporte', 'bloqueado']);
 
 function isRetryableError(error) {
   if (error.retryable === false) return false;
@@ -256,7 +257,9 @@ async function markFailure(client, ticket, error) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const tentativas = Number(observacao._worker?.tentativas || 0);
   const retryable = isRetryableError(error) && tentativas < MAX_ATTEMPTS;
-  const statusFinal = error.blocked ? 'bloqueado' : retryable ? 'pendente' : 'erro';
+  
+  // ALTERADO: de 'erro' para 'suporte'
+  const statusFinal = error.blocked ? 'bloqueado' : retryable ? 'pendente' : 'suporte';
   const agora = new Date().toISOString();
 
   const observacaoTexto = describeFailure(error, tentativas);
@@ -291,15 +294,16 @@ async function markFailure(client, ticket, error) {
     `UPDATE app_comissionamento.tickets_movimentacao_lead
      SET observacao_sales_ops = $1::text,
          status_mapeamento = $2::text,
-         analisado_em = CASE WHEN $2::text IN ('erro','bloqueado') THEN NOW() ELSE analisado_em END,
+         analisado_em = CASE WHEN $2::text IN ('suporte','bloqueado') THEN NOW() ELSE analisado_em END,
          atualizado_em = NOW()
      WHERE id_ticket_movimentacao = $3`,
     [JSON.stringify(nova), statusFinal, ticket.id_ticket_movimentacao]
   );
 
+  // ALTERADO: de 'ERRO' para 'Aguardando Suporte'
   const supportStatus =
     statusFinal === 'bloqueado' ? 'BLOQUEADO'
-    : statusFinal === 'erro' ? 'ERRO'
+    : statusFinal === 'suporte' ? 'Aguardando Suporte'
     : 'Em Andamento';
 
   await client.query(
@@ -385,11 +389,6 @@ async function handleLinkHubTicket(ticket, client) {
 
   const context = await getDealMovementContext(dealId, portalId);
 
-  // ─────────────────────────────────────────────────────────────
-  // Resolução da origem do card (quem é o dono atual no HubSpot).
-  // Log de diagnóstico sempre, para facilitar a triagem do caso
-  // "dados corretos mas bloqueio dispara".
-  // ─────────────────────────────────────────────────────────────
   const sourceOwnerEmail = context.ownerId ? await getHubSpotOwnerEmail(context.ownerId) : null;
   const sourceOwner = sourceOwnerEmail ? await getActiveSupportUser(sourceOwnerEmail) : null;
 
@@ -475,11 +474,6 @@ async function handleLinkHubTicket(ticket, client) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Loop principal — corrigido para sobreviver a falhas transitórias de pool.
-// `pool.connect()` agora é feito dentro do try; `isProcessing` é marcado
-// antes; `client.release()` fica protegido. Nenhuma exceção escapa.
-// ─────────────────────────────────────────────────────────────────────────────
 async function processLinkHubQueue() {
   if (isProcessing) return;
   isProcessing = true;
@@ -515,9 +509,6 @@ async function processLinkHubQueue() {
       }
     }
   } catch (error) {
-    // Erros aqui são majoritariamente transitórios de banco
-    // (Connection terminated, timeout de connect, lock). Logamos e o
-    // próximo ciclo do setInterval tenta novamente com uma conexão nova.
     console.error('[linkHubBatchQueue] ciclo interrompido:', error?.message || error);
   } finally {
     if (client && hasLock) {
@@ -534,7 +525,6 @@ async function processLinkHubQueue() {
       try {
         client.release();
       } catch (releaseErr) {
-        // Conexão já morta — o pg-pool descarta sozinho.
         console.warn(
           '[linkHubBatchQueue] release falhou (conexão já encerrada):',
           releaseErr?.message || releaseErr
@@ -547,8 +537,6 @@ async function processLinkHubQueue() {
 
 export function startLinkHubBatchQueue(intervalMs = 5000) {
   const safeRun = () => {
-    // Captura defensiva: se por algum motivo processLinkHubQueue ainda
-    // lançar para fora, o processo NÃO morre.
     processLinkHubQueue().catch((err) => {
       console.error(
         '[linkHubBatchQueue] falha não tratada no ciclo:',
@@ -558,7 +546,7 @@ export function startLinkHubBatchQueue(intervalMs = 5000) {
   };
 
   const timer = setInterval(safeRun, intervalMs);
-  if (typeof timer.unref === 'function') timer.unref();   // não trava exit do processo
+  if (typeof timer.unref === 'function') timer.unref();
 
   console.log('🔄 Fila de lotes Link Hub iniciada');
   return timer;
