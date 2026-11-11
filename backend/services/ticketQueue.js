@@ -9,7 +9,7 @@
 // que decide o pipeline de destino:
 //   - Auxílio e demais produtos comuns → Closer / Em Contato.
 //   - Quinquênio/Quinqueino/Concomitante(s) → Quinquênio / Em contato.
-//   - Isenção de IR Aposentadoria (ISENCAO_IR) → Isenção de IR / Em Contato.  // [ISENÇÃO IR]
+//   - Isenção de IR Aposentadoria (ISENCAO_IR) → Isenção de IR / Em Contato.
 //
 // A busca do card no contato também é orientada pelo produto (ver
 // garantirLeadNoCloser em hubspot.js).
@@ -23,6 +23,15 @@
 // marcador `processado` divirjam (ex.: ticket devolvido a 'pendente' sem
 // revisão do resultado). Esses tickets só voltam a ser processados após
 // revisão manual e limpeza controlada do marcador.
+//
+// ─── Status "coordenador" ──────────────────────────────────────────────
+// O status `coordenador` é emitido quando o hubspot.js sinaliza bloqueio
+// temporário (regra de prazo mínimo desde a última modificação) via
+// `requiresCoordinator: true`. Esses casos NÃO são bloqueios definitivos:
+// o coordenador pode autorizar o reprocessamento com bypass da regra de
+// data (endpoint POST /tickets-movimentacao/:id/reprocessar-coordenador).
+// Os bloqueios definitivos (jurídico, ambíguo, sem owner, fallback)
+// continuam indo para `bloqueado`.
 
 import { pool } from './db.js';
 import {
@@ -68,6 +77,7 @@ const RULE_LABELS = Object.freeze({
   desqualificado_to_em_contato: 'Card desqualificado reativado no destino.',
   closer_without_owner: 'Card estava sem responsável; atribuído agora.',
   reassigned_by_last_modified_date: 'Card reatribuído com base na última modificação.',
+  reassigned_by_coordinator_validation: 'Card reatribuído com autorização do coordenador.',
   already_assigned: 'Card já estava com o responsável informado; contato alinhado.',
   ambiguous_deals: 'Contato associado a vários cards.',
   fallback_block: 'Card fora dos pipelines permitidos.',
@@ -76,6 +86,8 @@ const RULE_LABELS = Object.freeze({
   missing_email: 'Campos pendentes: preencha e-mail para tentar novamente.',
   invalid_email: 'E-mail inválido. Corrija e reenvie.',
   contact_data_mismatch: 'Dados divergentes do cadastro da HubSpot. Valide as informações registradas.',
+  contact_has_juridico_deal:
+    'Movimentação bloqueada: o contato possui um negócio no pipeline Jurídico Auditoria de Ganho.',
   // Cobre Quinquênio E Isenção de IR (produto exige pipeline dedicado).
   // [ISENÇÃO IR]
   product_pipeline_routing: 'Produto exige pipeline dedicado; movimentação executada.',
@@ -276,9 +288,13 @@ async function handleTicket(ticket, client) {
     observacaoAtual.produto ||
     ticket.metadados?.produto ||
     null;
+
   const bypassTemporalRestriction =
     observacaoAtual.validacaoCoordenador?.acao === 'autorizar' &&
     observacaoAtual.validacaoCoordenador?.bypassTemporalRestriction === true;
+
+  // Portal ID — necessário para montar o link do card.
+  const portalId = String(HUBSPOT_PORTAL_ID_CONFIGURED || '').trim();
 
   // Destino esperado pelo produto:
   //   Auxílio (e comuns)          → Closer / Em Contato.
@@ -394,7 +410,7 @@ async function handleTicket(ticket, client) {
       }
     } else if (busca.divergente) {
       // Contato divergente: apenas sinaliza suporte. NÃO altera o contato no
-      // HubSpot.
+      // HubSpot. Status final fica 'aviso' (não vai para coordenador).
       contactId = busca.contact.id;
       hubspotData.contactId = contactId;
       hubspotData.existe = true;
@@ -491,8 +507,16 @@ async function handleTicket(ticket, client) {
 
     let statusFinal = 'pendente';
     if (resultado?.blocked) {
-      statusFinal = 'bloqueado';
-      hubspotData.status = 'bloqueado';
+      // ─────────────────────────────────────────────────────────
+      // requiresCoordinator === true → status `coordenador`
+      // (bloqueio temporário por prazo mínimo; pode ser autorizado
+      //  pelo coordenador com bypass da regra de data).
+      // requiresCoordinator ausente/false → status `bloqueado`
+      // (bloqueio definitivo: jurídico, ambíguo, sem owner, fallback).
+      // ─────────────────────────────────────────────────────────
+      const isCoordinatorBlock = resultado.requiresCoordinator === true;
+      statusFinal = isCoordinatorBlock ? 'coordenador' : 'bloqueado';
+      hubspotData.status = statusFinal;
       hubspotData.mensagem = resultado.message || RULE_LABELS[resultado.ruleApplied] || 'Movimentação bloqueada pela política atual.';
       hubspotData.pipeline = resultado.pipeline || null;
       hubspotData.stage = resultado.stage || null;
@@ -568,10 +592,19 @@ async function handleTicket(ticket, client) {
       .filter(Boolean)
       .join('\n');
 
+    // ─── Link do card para o coordenador / histórico ────────────────
+    // Preferimos o negócio; se só houver contato, usamos o contato.
+    const cardLink = dealId && /^\d+$/.test(portalId)
+      ? `https://app.hubspot.com/contacts/${portalId}/record/0-3/${dealId}`
+      : (contactId && /^\d+$/.test(portalId)
+          ? `https://app.hubspot.com/contacts/${portalId}/record/0-1/${contactId}`
+          : null);
+
     const novoObservacao = {
       ...observacaoAtual,
       processado: true,
       dealId: dealId || resultado?.dealId || observacaoAtual.dealId || null,
+      link: cardLink || observacaoAtual.link || null,
       hubspot: hubspotData,
       motivoOriginal: ticket.motivo_solicitacao || '',
       observacao: observacaoFinal,
@@ -605,6 +638,7 @@ async function handleTicket(ticket, client) {
     let suporteStatus = 'EM ANDAMENTO';
     if (statusFinal === 'concluido') suporteStatus = 'CONCLUÍDO';
     else if (statusFinal === 'bloqueado') suporteStatus = 'BLOQUEADO';
+    else if (statusFinal === 'coordenador') suporteStatus = 'COORDENADOR';
     else if (statusFinal === 'erro') suporteStatus = 'ERRO';
     else if (statusFinal === 'aviso') suporteStatus = 'AVISO';
     else if (statusFinal === 'fora_pipeline') suporteStatus = 'EM ANDAMENTO';
@@ -627,7 +661,9 @@ async function handleTicket(ticket, client) {
 
     if (statusFinal !== 'concluido') {
       try {
-        const unidadeId = statusFinal === 'bloqueado'
+        // Unidade: obrigatória para coordenador/bloqueado (rota por webhook
+        // dedicado). Para os demais status mantém o fallback dos metadados.
+        const unidadeId = (statusFinal === 'bloqueado' || statusFinal === 'coordenador')
           ? await requesterUnitId(client, ticket.metadados)
           : (ticket.metadados?.unidade_id ?? ticket.metadados?.unidadeId ?? null);
         const notification = await teamsNotificador.enviar({
@@ -648,13 +684,17 @@ async function handleTicket(ticket, client) {
           telefone: ticket.telefone_cliente_informado || 'N/A',
           equipeDestino: ticket.equipe_destino_nome || 'N/A',
           assessorDestino: ticket.colaborador_destino_nome || 'N/A',
-          status: statusFinal === 'bloqueado' ? 'coordenador' : statusFinal,
+          // O notificador usa `status === 'coordenador'` para montar o cartão
+          // de validação. Bloqueio definitivo e bloqueio por prazo mínimo
+          // compartilham o mesmo cartão do coordenador (o motivo fica no
+          // campo `mensagem`).
+          status: (statusFinal === 'bloqueado' || statusFinal === 'coordenador')
+            ? 'coordenador'
+            : statusFinal,
           unidadeId,
           idTicketMovimentacao: ticket.id_ticket_movimentacao,
           idTicket: ticket.ticket_id,
-          link: dealId && /^\d+$/.test(String(HUBSPOT_PORTAL_ID_CONFIGURED || ''))
-            ? `https://app.hubspot.com/contacts/${HUBSPOT_PORTAL_ID_CONFIGURED}/record/0-3/${dealId}`
-            : null,
+          link: cardLink || null,
           dealId: dealId || null,
           mensagem: observacaoFinal || 'N/A',
           regra: hubspotData.ruleApplied || null,
@@ -674,8 +714,18 @@ async function handleTicket(ticket, client) {
     }
   } catch (error) {
     console.error(`Erro na integração HubSpot (ticket ${ticket.id_ticket_movimentacao}):`, error);
+
+    // Fallback do link: se temos o contato, priorizamos o card do contato
+    // (o negócio pode não existir ainda quando o erro acontece).
+    const linkErro = contactId && /^\d+$/.test(portalId)
+      ? `https://app.hubspot.com/contacts/${portalId}/record/0-1/${contactId}`
+      : (dealId && /^\d+$/.test(portalId)
+          ? `https://app.hubspot.com/contacts/${portalId}/record/0-3/${dealId}`
+          : null);
+
     const obsErro = JSON.stringify({
       ...observacaoAtual,
+      link: linkErro || observacaoAtual.link || null,
       hubspot: { ...hubspotData, erro: true, status: 'erro', mensagem: error.message },
       motivoOriginal: ticket.motivo_solicitacao || '',
       observacao: [

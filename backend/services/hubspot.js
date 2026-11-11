@@ -720,7 +720,7 @@ function temporalCheck(deal, { bypassTimeLimit = false } = {}) {
     [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
     [STAGE_ENTRADA_ID]: 24,
     [STAGE_EM_CONTATO_ID]: 24,
-    [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 24,   
+    [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 24,
   };
 
   const currentStage = String(deal.stage ?? '');
@@ -771,32 +771,32 @@ export async function garantirLeadNoCloser(
   return withLocks([`contact:${id(contactId)}`], async () => {
     const destination = movementDestination(produto);
 
-const allDeals = await getContactDeals(contactId);
+    const allDeals = await getContactDeals(contactId);
 
-// Bloqueia antes de qualquer criação, movimentação ou sincronização
-// se o contato possui negócio no pipeline Jurídico Auditoria de Ganho.
-const negocioJuridico = allDeals.find(
-  d => String(d.pipeline) === String(PIPELINE_JURIDICO_AUDITORIA_ID)
-);
+    // Bloqueia antes de qualquer criação, movimentação ou sincronização
+    // se o contato possui negócio no pipeline Jurídico Auditoria de Ganho.
+    const negocioJuridico = allDeals.find(
+      d => String(d.pipeline) === String(PIPELINE_JURIDICO_AUDITORIA_ID)
+    );
 
-if (negocioJuridico) {
-  return assignmentResult(negocioJuridico, {
-    blocked: true,
-    ruleApplied: 'contact_has_juridico_deal',
-    message:
-      'Movimentação bloqueada: o contato possui um negócio no pipeline ' +
-      'Jurídico Auditoria de Ganho. Encaminhe o caso para validação do Juridico.',
-  });
-}
+    if (negocioJuridico) {
+      return assignmentResult(negocioJuridico, {
+        blocked: true,
+        ruleApplied: 'contact_has_juridico_deal',
+        message:
+          'Movimentação bloqueada: o contato possui um negócio no pipeline ' +
+          'Jurídico Auditoria de Ganho. Encaminhe o caso para validação do Juridico.',
+      });
+    }
 
-const relevantPipelines = [
-  String(PIPELINE_BASE_LEADS_ID),
-  String(destination.pipeline),
-];
+    const relevantPipelines = [
+      String(PIPELINE_BASE_LEADS_ID),
+      String(destination.pipeline),
+    ];
 
-const deals = allDeals.filter(d =>
-  relevantPipelines.includes(String(d.pipeline))
-);
+    const deals = allDeals.filter(d =>
+      relevantPipelines.includes(String(d.pipeline))
+    );
 
     if (deals.length > 1) {
       return assignmentResult(null, {
@@ -835,6 +835,10 @@ const deals = allDeals.filter(d =>
       const check = temporalCheck(deal, { bypassTimeLimit: bypassTemporalRestriction });
       if (!check.allowed) return assignmentResult(deal, {
         blocked: true,
+        // [NOVO] sinaliza que este bloqueio pode ser autorizado pelo coordenador.
+        // Os demais motivos (jurídico, ambíguo, owner_missing, fallback) não
+        // recebem este flag e continuam exigindo tratamento manual.
+        requiresCoordinator: true,
         ruleApplied: 'owned_by_another_recent_activity',
         message: `${RULE_MESSAGES.owned_by_another_recent_activity} ${check.reason}.`,
         requiredHours: check.requiredHours,
