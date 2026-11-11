@@ -321,12 +321,13 @@ const MOVIMENTACOES_STATUS_COLUMNS = [
   "concluido",
 ];
 
+// Colunas visíveis no SalesOps (aba Movimentações).
+// "erro" removido — "suporte" permanece visível no lugar.
 const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
   "suporte",
   "aviso",
   "coordenador",
   "bloqueado",
-  "erro",
   "concluido",
 ];
 
@@ -1862,9 +1863,6 @@ function ReportarTab() {
     descricao: "",
   });
 
-  // ── CORREÇÃO DO ERRO DE TIPAGEM ────────────────────────────────────
-  // `status` precisa ser do tipo `ReportItem["status"]` para que
-  // `setReports(prev.map(...))` continue compatível com `ReportItem[]`.
   const [editingTicket, setEditingTicket] = useState<ReportItem | null>(null);
   const [editForm, setEditForm] = useState<{ status: ReportItem["status"]; observacao_sales_ops: string }>({
     status: "ENVIADO",
@@ -3628,6 +3626,10 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
   const [draggingTicketId, setDraggingTicketId] = useState<number | null>(null);
   const [dragOverColuna, setDragOverColuna] = useState<string | null>(null);
 
+  // ── Filtro de período (mesmo padrão da Visão SalesOps) ────────────
+  const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
+  const [filterDataFim, setFilterDataFim] = useState(getTodayString());
+
   const [editForm, setEditForm] = useState<{
     observacao_sales_ops: string;
     nome_cliente_informado: string;
@@ -3877,16 +3879,22 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
     }
   };
 
+  // ── Filtro por período (mesmo comportamento de MovimentacoesSuporteTab) ──
+  const filteredTickets = useMemo(
+    () => tickets.filter((t) => isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim)),
+    [tickets, filterDataInicio, filterDataFim],
+  );
+
   const ticketsPorColuna = useMemo(() => {
     const grupos: Record<string, TicketMovimentacao[]> = {};
     for (const coluna of COORDENADOR_STATUS_COLUMNS) grupos[coluna] = [];
-    for (const ticket of tickets) {
+    for (const ticket of filteredTickets) {
       const status = normalizeStatus(ticket.status_mapeamento) || "coordenador";
       if (!COORDENADOR_STATUS_COLUMNS.includes(status)) continue;
       grupos[status].push(ticket);
     }
     return grupos;
-  }, [tickets]);
+  }, [filteredTickets]);
 
   const isConcluido = normalizeStatus(editingTicket?.status_mapeamento) === "concluido";
   const jaBloqueado = normalizeStatus(editingTicket?.status_mapeamento) === "bloqueado";
@@ -3903,14 +3911,31 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
               {!isAdmin && unidadeId != null ? ` — unidade ${unidadeId}` : ""}.
             </p>
           </div>
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="px-3 py-1 text-sm rounded bg-[#f1f5f9] hover:bg-[#e2e8f0] flex items-center gap-1 disabled:opacity-50"
-          >
-            <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} />
-            Atualizar
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              className="px-3 py-1 text-sm rounded bg-[#f1f5f9] hover:bg-[#e2e8f0] flex items-center gap-1 disabled:opacity-50"
+            >
+              <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} />
+              Atualizar
+            </button>
+            <input
+              type="date"
+              value={filterDataInicio}
+              onChange={(e) => setFilterDataInicio(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data inicial"
+            />
+            <span className="text-sm text-[#64748b]">até</span>
+            <input
+              type="date"
+              value={filterDataFim}
+              onChange={(e) => setFilterDataFim(e.target.value)}
+              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
+              title="Data final"
+            />
+          </div>
         </div>
 
         {message && (
@@ -3928,8 +3953,8 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
           <div className="flex justify-center py-8">
             <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
           </div>
-        ) : tickets.length === 0 ? (
-          <div className="text-center py-8 text-[#64748b]">Nenhum caso aguardando validação.</div>
+        ) : filteredTickets.length === 0 ? (
+          <div className="text-center py-8 text-[#64748b]">Nenhum caso encontrado no período.</div>
         ) : (
           <div className="kanban-scroll flex gap-3 overflow-x-auto pb-3">
             {COORDENADOR_STATUS_COLUMNS.map((coluna) => {
