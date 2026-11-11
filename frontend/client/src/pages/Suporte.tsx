@@ -32,16 +32,41 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { API_BASE } from "@/lib/api";
-// [CHANGELOG] Adicionado `getEffectiveAccessLevel` para reconhecer o
-// novo nível ASSESSOR_PLUS (promoção por e-mail). O alias
-// `getAccessLevel as resolveAccessLevel` foi removido porque não era
-// mais utilizado em nenhum ponto do arquivo.
-import { getEffectiveAccessLevel, LEVELS } from "@/lib/accessControl";
+import { getAccessLevel as resolveAccessLevel, LEVELS } from "@/lib/accessControl";
+
+// ---------------------- safeJson ----------------------
+async function safeJson(res: Response): Promise<any> {
+  const contentType = (res.headers.get("content-type") || "").toLowerCase();
+  const rawText = await res.text();
+
+  if (!rawText) {
+    if (!res.ok) throw new Error(`Servidor retornou ${res.status} (resposta vazia)`);
+    return {};
+  }
+  if (contentType.includes("application/json")) {
+    try {
+      return JSON.parse(rawText);
+    } catch {
+      throw new Error(`JSON inválido (${res.status}): ${rawText.slice(0, 200)}`);
+    }
+  }
+  const preview = rawText
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+
+  throw new Error(
+    `Servidor retornou ${res.status} (${contentType || "sem content-type"}). ` +
+      `Não é JSON. Preview: "${preview || "resposta vazia"}"`,
+  );
+}
 
 // ---------------------- Tipos ----------------------
 interface MovementItem {
   id: string;
-  ticket?: TicketMovimentacao;
   timestamp: string;
   cliente: string;
   email: string;
@@ -50,7 +75,15 @@ interface MovementItem {
   origem: string;
   equipe: string;
   assessor: string;
-  status: string;
+  status:
+    | "pendente"
+    | "processando"
+    | "concluido"
+    | "suporte"
+    | "aviso"
+    | "erro"
+    | "coordenador"
+    | "bloqueado";
   resultado: string;
   usuario: string;
   atualizadoEm: string;
@@ -64,7 +97,6 @@ interface MovementItem {
     status?: string;
     erro?: boolean;
     mensagem?: string;
-    link?: string;
   };
 }
 
@@ -77,15 +109,23 @@ interface ReportItem {
   descricaoResumida: string;
   solicitante: string;
   equipe: string;
-  status: "ENVIADO" | "SUSPEITO" | "CONCLUÍDO" | "ERRO" | "BLOQUEADO" | "REVISÃO" | "ANALISE" | "CANCELADO";
+  status:
+    | "ENVIADO"
+    | "SUSPEITO"
+    | "CONCLUÍDO"
+    | "ERRO"
+    | "BLOQUEADO"
+    | "REVISÃO"
+    | "ANALISE"
+    | "CANCELADO";
   observacao_sales_ops: string;
   ultimaAtualizacao: string;
 }
 
 interface TicketMovimentacao {
   id_ticket_movimentacao: number;
-  id_ticket?: number;
   crm_origem: string;
+  crm_lead_id?: string | null;
   tipo_solicitacao: string;
   nome_cliente_informado: string;
   sobrenome_cliente_informado: string;
@@ -102,25 +142,10 @@ interface TicketMovimentacao {
   motivo_solicitacao?: string;
   criado_em: string;
   produto?: string | null;
-  ticket_titulo?: string;
-  ticket_descricao?: string;
-  solicitante_nome?: string;
-  solicitante_email?: string;
+  link?: string | null;
+  ruleApplied?: string | null;
+  isJuridicoBlocked?: boolean;
   unidade_id?: number | null;
-  link_card?: string | null;
-  observacao?: string;
-  observacao_data?: Record<string, unknown>;
-  validacaoCoordenador?: {
-    acao?: string;
-    usuario?: string;
-    nome?: string;
-    em?: string;
-  };
-  hubspot?: {
-    mensagem?: string;
-    pipelineNome?: string | null;
-    stageNome?: string | null;
-  };
 }
 
 interface TicketSuporte {
@@ -171,35 +196,22 @@ interface EscopoSuporte {
 // ---------------------- Helpers ----------------------
 const formatPhoneInput = (phone: string): string => {
   let numbers = phone.replace(/\D/g, "");
-
-  if (numbers.startsWith("55") && numbers.length >= 12) {
-    numbers = numbers.slice(2);
-  }
-
+  if (numbers.startsWith("55") && numbers.length >= 12) numbers = numbers.slice(2);
   numbers = numbers.slice(0, 11);
-
-  if (numbers.length <= 2) {
-    return numbers;
-  } else if (numbers.length <= 6) {
-    return `(${numbers.slice(0, 2)}) ${numbers.slice(2)}`;
-  } else if (numbers.length <= 10) {
-    return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 6)}-${numbers.slice(6)}`;
-  } else {
-    return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7)}`;
-  }
+  if (numbers.length <= 2) return numbers;
+  if (numbers.length <= 6) return `(${numbers.slice(0, 2)}) ${numbers.slice(2)}`;
+  if (numbers.length <= 10) return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 6)}-${numbers.slice(6)}`;
+  return `(${numbers.slice(0, 2)}) ${numbers.slice(2, 7)}-${numbers.slice(7)}`;
 };
 
 const isValidBrazilianPhone = (phone: string): boolean => {
-  const digits = phone.replace(/\D/g, '');
+  const digits = phone.replace(/\D/g, "");
   if (digits.length !== 10 && digits.length !== 11) return false;
-
   const ddd = digits.slice(0, 2);
   const number = digits.slice(2);
   const dddNum = parseInt(ddd, 10);
-
   if (isNaN(dddNum) || dddNum < 11 || dddNum > 99) return false;
   if (number.length !== 8 && number.length !== 9) return false;
-
   return true;
 };
 
@@ -211,43 +223,31 @@ const formatCPF = (cpf: string): string => {
   return `${numbers.slice(0, 3)}.${numbers.slice(3, 6)}.${numbers.slice(6, 9)}-${numbers.slice(9, 11)}`;
 };
 
-const normalize = (str: string): string => (str || '').trim().toLowerCase();
+const normalize = (str: string): string => (str || "").trim().toLowerCase();
 
 const normalizeKey = (str: string): string =>
-  String(str || '')
-    .trim()
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/\s+/g, ' ');
+  String(str || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
 
-/**
- * [CHANGELOG] Antes recebia `cargo`/`status` e usava `resolveAccessLevel`
- * (= getAccessLevel), que IGNORA a whitelist ASSESSOR_PLUS. Um assessor
- * promovido por e-mail continuava caindo como `LEVELS.ASSESSOR` (2),
- * `canAccessPage` dava `false` e a página redirecionava para "/" —
- * gerando o loop infinito de redirect reportado no console.
- *
- * Agora recebe o USUÁRIO COMPLETO (com `email`) e delega para
- * `getEffectiveAccessLevel`, que aplica a promoção ASSESSOR_PLUS:
- *
- *   cargo "assessor" + email em ASSESSOR_PLUS_EMAILS  →  nível 4
- *   cargo "assessor" (fora da whitelist)              →  nível 2
- *   cargo "supervisor"/"coordenador"/etc.             →  nível normal
- *
- * O fallback histórico para cargos legados tipo "supervisor xxx"
- * (não mapeados em CARGO_LEVELS) foi mantido.
- */
-function getSupportAccessLevel(user?: {
-  email?: string;
-  cargo?: string;
-  status?: string;
-} | null): number {
-  const level = getEffectiveAccessLevel(user);
-  if (level === LEVELS.NONE && normalize(user?.cargo || '').startsWith('supervisor')) {
-    return LEVELS.SUPERVISAO;
+// ─────────────────────────────────────────────────────────────────────
+// Resolução de nível para a página de Suporte.
+//
+// Corrige o caso ASSESSOR_PLUS: caso o enum do frontend tenha
+// ASSESSOR_PLUS abaixo de SUPERVISAO (por divergência histórica com o
+// backend), promovemos o nível para SUPERVISAO — assim a checagem de
+// `canAccessPage` e a renderização das abas não regridem.
+// ─────────────────────────────────────────────────────────────────────
+function getSupportAccessLevel(cargo?: string, status?: string): number {
+  const level = resolveAccessLevel(cargo, status);
+
+  // ASSESSOR_PLUS deve ser tratado no mínimo como SUPERVISAO nesta página.
+  if (level === LEVELS.ASSESSOR_PLUS) {
+    return Math.max(level, LEVELS.SUPERVISAO);
   }
-  return level;
+
+  // Fallback: cargos que começam com "supervisor" mas não estão mapeados.
+  return level === LEVELS.NONE && normalize(cargo || "").startsWith("supervisor")
+    ? LEVELS.SUPERVISAO
+    : level;
 }
 
 const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string): boolean => {
@@ -258,38 +258,11 @@ const isWithinDateRange = (dateISO: string, startDate?: string, endDate?: string
   return true;
 };
 
-async function fetchAllSupportPages<T>(endpoint: string): Promise<T[]> {
-  const items: T[] = [];
-  let page = 1;
-  let hasMore = true;
-
-  while (hasMore) {
-    const separator = endpoint.includes('?') ? '&' : '?';
-    const res = await fetch(`${endpoint}${separator}page=${page}&limit=200`, {
-      credentials: 'include',
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || `Erro HTTP ${res.status}`);
-    if (!data.success || !Array.isArray(data.data) || typeof data.pagination?.hasMore !== 'boolean') {
-      throw new Error('Resposta inválida ao carregar os casos de suporte.');
-    }
-
-    items.push(...data.data);
-    hasMore = data.pagination.hasMore;
-    if (hasMore && data.data.length === 0) {
-      throw new Error('A paginação dos casos de suporte não avançou.');
-    }
-    page += 1;
-  }
-
-  return items;
-}
-
 const getTodayString = (): string => {
   const now = new Date();
   const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 };
 
@@ -304,12 +277,14 @@ const getStatusInfo = (status: string) => {
     no_pipeline: { label: "No Pipeline", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
     fora_pipeline: { label: "Fora do Pipeline", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
     bloqueado: { label: "Bloqueado", icon: <Ban className="w-3 h-3" />, className: "bg-red-100 text-red-800" },
-    coordenador: { label: "Coordenador", icon: <Users className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
+    // Status novo: bloqueio temporário por prazo mínimo, endereçado ao coordenador.
+    coordenador: { label: "Coordenador", icon: <AlertCircle className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
     ENVIADO: { label: "Enviado", icon: <Send className="w-3 h-3" />, className: "bg-blue-50 text-blue-700" },
     SUSPEITO: { label: "Suspeito", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
     CONCLUÍDO: { label: "Concluído", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
     ERRO: { label: "Erro", icon: <AlertCircle className="w-3 h-3" />, className: "bg-red-50 text-red-700" },
     BLOQUEADO: { label: "Bloqueado", icon: <X className="w-3 h-3" />, className: "bg-red-100 text-red-800" },
+    COORDENADOR: { label: "Coordenador", icon: <AlertCircle className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
     ANALISE: { label: "Análise", icon: <Eye className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
     REVISÃO: { label: "Revisão", icon: <Eye className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
     CANCELADO: { label: "Cancelado", icon: <Ban className="w-3 h-3" />, className: "bg-gray-100 text-gray-500" },
@@ -317,31 +292,61 @@ const getStatusInfo = (status: string) => {
   return map[status] || { label: status, icon: <FileText className="w-3 h-3" />, className: "bg-gray-100 text-gray-600" };
 };
 
-// Todos os status possíveis de uma movimentação (não removido do sistema,
-// só não aparecem todos como coluna no quadro — ver MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS).
 const MOVIMENTACOES_STATUS_COLUMNS = [
-  'pendente', 'processando', 'suporte', 'aviso', 'coordenador', 'bloqueado', 'erro', 'fora_pipeline', 'no_pipeline', 'concluido',
+  "pendente",
+  "processando",
+  "suporte",
+  "aviso",
+  "coordenador",
+  "bloqueado",
+  "erro",
+  "fora_pipeline",
+  "no_pipeline",
+  "concluido",
 ];
 
-// Colunas exibidas no quadro de funis de Movimentações (Visão SalesOps).
-// Pendente/Processando/Fora do Pipeline/No Pipeline ficam ocultos, mas um
-// ticket que esteja num desses status continua existindo normalmente.
 const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
-  'suporte', 'aviso', 'coordenador', 'bloqueado', 'erro', 'concluido',
+  "suporte",
+  "aviso",
+  "coordenador",
+  "bloqueado",
+  "erro",
+  "concluido",
 ];
 
 const EXCLUDED_TEAMS = [
-  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
-  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
-  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
-  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
-  'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice','Equipe Debora',
-  'Equipe Gabriela Toledo',
+  "Coordenacao Closer",
+  "Departamento Backoffice",
+  "Diretoria",
+  "Departamento Marketing",
+  "Departamento Comercial",
+  "Equipe Erika",
+  "Equipe Leonardo",
+  "Equipe Leticia",
+  "Equipe Michael",
+  "Equipe Erica",
+  "Equipe Thales",
+  "Equipe Yuri",
+  "Equipe Rodolfo",
+  "Equipe Jennifer",
+  "Equipe Natalia",
+  "Equipe Maria Eduarda",
+  "Equipe Reciclagem",
+  "",
+  "Equipe",
+  "Equipe Camila",
+  "Sales Ops",
+  "Equipe Elizandra",
+  "Equipe Bruno Abreu",
+  "Equipe Lucas Magno",
+  "Equipe SP1",
+  "Equipe Marcia",
+  "Equipe Lucilene",
+  "backoffice",
 ];
 
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
-
-const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane', 'equipe leticia mathias'];
+const EQUIPES_TRAVADAS_DESTINO = ["equipe tatiane", "equipe leticia mathias"];
 
 function isEquipeTravadaDestino(nome: string): boolean {
   const n = normalizeKey(nome);
@@ -351,64 +356,52 @@ function isEquipeTravadaDestino(nome: string): boolean {
 const isExcludedTeam = (teamName: string): boolean => {
   if (!teamName) return false;
   const n = teamName.trim().toLowerCase();
-  return EXCLUDED_TEAMS.some(t => t.trim().toLowerCase() === n);
+  return EXCLUDED_TEAMS.some((t) => t.trim().toLowerCase() === n);
 };
 
-// =====================================================================
-// PRODUTO
-// =====================================================================
 const PRODUCT = Object.freeze({
-  QUINQUENIO:       'quinquenio',
-  AUXILIO_ACIDENTE: 'auxilio_acidente',
-  FATOR_K:          'Fator K',
-  CONCOMITANTE:     'Concomitante',
-  BPC_LOAS:         'BPC/LOAS',
-  ISENCAO_IR:       'Isenção de IR Aposentadoria',
+  QUINQUENIO: "quinquenio",
+  AUXILIO_ACIDENTE: "auxilio_acidente",
+  FATOR_K: "Fator K",
+  CONCOMITANTE: "Concomitante",
+  BPC_LOAS: "BPC/LOAS",
+  ISENCAO_IR: "Isenção de IR Aposentadoria",
 });
 
 const PRODUCT_LABELS: Record<string, string> = {
-  [PRODUCT.QUINQUENIO]:       'Quinquenio',
-  [PRODUCT.AUXILIO_ACIDENTE]: 'Auxilio Acidente',
-  [PRODUCT.FATOR_K]:          'Fator K',
-  [PRODUCT.CONCOMITANTE]:     'Concomitante',
-  [PRODUCT.BPC_LOAS]:         'BPC/LOAS',
-  [PRODUCT.ISENCAO_IR]:       'Isenção de IR Aposentadoria',
+  [PRODUCT.QUINQUENIO]: "Quinquenio",
+  [PRODUCT.AUXILIO_ACIDENTE]: "Auxilio Acidente",
+  [PRODUCT.FATOR_K]: "Fator K",
+  [PRODUCT.CONCOMITANTE]: "Concomitante",
+  [PRODUCT.BPC_LOAS]: "BPC/LOAS",
+  [PRODUCT.ISENCAO_IR]: "Isenção de IR Aposentadoria",
 };
 
 function maskProduct(value?: string | null): string {
-  if (!value) return '';
+  if (!value) return "";
   const key = String(value);
   if (PRODUCT_LABELS[key]) return PRODUCT_LABELS[key];
-  return key
-    .split(/[_\s]+/)
-    .filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
+  return key.split(/[_\s]+/).filter(Boolean).map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
 const FALLBACK_PRODUTO_DEFAULT = PRODUCT.AUXILIO_ACIDENTE;
 
 const FALLBACK_PRODUTOS_POR_EQUIPE: Record<string, ProdutoConfig> = {
-  [normalizeKey('Equipe Tatiane')]: {
+  [normalizeKey("Equipe Tatiane")]: {
     default: PRODUCT.QUINQUENIO,
     options: [PRODUCT.QUINQUENIO, PRODUCT.CONCOMITANTE],
     allowChange: true,
   },
-
-  [normalizeKey('Equipe Leticia Mathias')]: {
+  [normalizeKey("Equipe Leticia Mathias")]: {
     default: PRODUCT.ISENCAO_IR,
     options: [PRODUCT.ISENCAO_IR],
     allowChange: true,
   },
 };
 
-function findProdutoConfig(
-  mapa: Record<string, ProdutoConfig> | undefined,
-  equipe: string,
-): ProdutoConfig | null {
+function findProdutoConfig(mapa: Record<string, ProdutoConfig> | undefined, equipe: string): ProdutoConfig | null {
   if (!equipe) return null;
   const key = normalizeKey(equipe);
-
   if (mapa) {
     for (const [k, v] of Object.entries(mapa)) {
       if (normalizeKey(k) === key) {
@@ -420,93 +413,86 @@ function findProdutoConfig(
       }
     }
   }
-
   const hit = FALLBACK_PRODUTOS_POR_EQUIPE[key];
   return hit ? { ...hit, options: [...hit.options] } : null;
 }
 
 function getCsrfHeaders() {
-  const token = localStorage.getItem('csrfToken') || '';
-  return {
-    'Content-Type': 'application/json',
-    'x-csrf-token': token,
-  };
+  const token = localStorage.getItem("csrfToken") || "";
+  return { "Content-Type": "application/json", "x-csrf-token": token };
 }
 
+// ---------------------- URL params ----------------------
+type ActiveTab = "movimentacao" | "busca" | "reportar" | "salesops" | "coordenador";
+
+function readUrlParams(): { aba: string | null; id: number | null } {
+  if (typeof window === "undefined") return { aba: null, id: null };
+  const params = new URLSearchParams(window.location.search);
+  const aba = params.get("aba");
+  const idParam = params.get("id");
+  const id = idParam && /^\d+$/.test(idParam) ? Number(idParam) : null;
+  return { aba, id };
+}
+
+// =====================================================================
+// RAIZ
+// =====================================================================
 export default function Suporte() {
   const { currentUser: accessUser } = useAccessControl();
-  // [CHANGELOG] Passa o usuário completo (com `email`) para que
-  // `getEffectiveAccessLevel` reconheça ASSESSOR_PLUS.
-  const accessLevel = getSupportAccessLevel(accessUser);
+  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
 
-  // Nível JURIDICO: acesso exclusivo à aba Busca Cliente.
   const isJuridico = accessLevel === LEVELS.JURIDICO;
+  const isAdmin = accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
+  const isCoordenador = accessLevel === LEVELS.COORDENADOR;
+  // Importante: comparamos por igualdade no nível resolvido do usuário, e
+  // adicionalmente por cargo — para cobrir o caso em que o enum do frontend
+  // difere do backend.
+  const isAssessorPlus =
+    accessLevel === LEVELS.ASSESSOR_PLUS ||
+    normalize(accessUser?.cargo || "").includes("assessor plus");
 
-  // [CHANGELOG] ASSESSOR_PLUS também inicia em "reportar" — mesma UX
-  // do coordenador (que é o nível com quem ele compartilha permissões).
-  // Nada a mudar aqui: `isJuridico` já é `false` para ASSESSOR_PLUS.
-  const coordinatorRequested =
-    new URLSearchParams(window.location.search).get("aba") === "coordenador";
-  const initialCoordinatorCaseId = new URLSearchParams(window.location.search).get("id");
-  const isCoordinator = accessLevel >= LEVELS.COORDENADOR;
-  const [activeTab, setActiveTab] = useState<
-    "movimentacao" | "busca" | "reportar" | "salesops" | "coordenador"
-  >(
-    isJuridico ? "busca" : coordinatorRequested && isCoordinator ? "coordenador" : "reportar"
+  const canSeeCoordenadorTab = isAdmin || isCoordenador || isAssessorPlus;
+
+  const initialParams = readUrlParams();
+  const startsInCoordenador = initialParams.aba === "coordenador" && canSeeCoordenadorTab;
+
+  const [activeTab, setActiveTab] = useState<ActiveTab>(
+    isJuridico ? "busca" : startsInCoordenador ? "coordenador" : "reportar",
   );
 
-  // Liberação da página para JURIDICO e ASSESSOR_PLUS (ambos têm
-  // accessLevel >= SUPERVISAO após a promoção).
-  const canAccessPage = accessLevel >= LEVELS.SUPERVISAO || isJuridico;
+  const [focusTicketId, setFocusTicketId] = useState<number | null>(startsInCoordenador ? initialParams.id : null);
 
-  const isAdmin = useMemo(() => {
-    return accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
-  }, [accessLevel]);
+  // ASSESSOR_PLUS também libera a página. Mantemos `>= SUPERVISAO` para
+  // preservar todos os níveis superiores.
+  const canAccessPage =
+    accessLevel >= LEVELS.SUPERVISAO || isJuridico || isAssessorPlus;
 
-  // Se o nível de acesso mudar (ex.: hidratação tardia do usuário)
-  // e virar JURIDICO, força a aba para "busca".
   useEffect(() => {
-    if (isJuridico && activeTab !== "busca") {
-      setActiveTab("busca");
-    }
+    if (isJuridico && activeTab !== "busca") setActiveTab("busca");
   }, [isJuridico, activeTab]);
-
-  useEffect(() => {
-    if (!isCoordinator && activeTab === "coordenador") {
-      setActiveTab(isJuridico ? "busca" : "reportar");
-    }
-  }, [activeTab, isCoordinator, isJuridico]);
 
   if (!canAccessPage) return <Redirect to="/" />;
 
-  // Tabs visíveis — JURIDICO só vê "Busca Cliente".
-  // ASSESSOR_PLUS vê Movimentar / Busca / Reportar (como coordenador);
-  // SalesOps continua oculto porque `isAdmin` é `false`.
-  const tabs = [
+  const tabs: Array<{ id: ActiveTab; label: string; icon: typeof Search }> = [
     { id: "reportar", label: "Reportar", icon: Search },
     { id: "movimentacao", label: "Movimentar", icon: ClipboardList },
     { id: "busca", label: "Busca Cliente", icon: Users },
-    ...(isCoordinator ? [{ id: "coordenador", label: "Visão Coordenador", icon: CheckCircle }] : []),
-    ...(isAdmin ? [{ id: "salesops", label: "Visão SalesOps", icon: ChartNoAxesCombined }] : []),
-  ] as const;
+  ];
+  if (canSeeCoordenadorTab) tabs.push({ id: "coordenador", label: "Visão Coordenador", icon: AlertTriangle });
+  if (isAdmin) tabs.push({ id: "salesops", label: "Visão SalesOps", icon: ChartNoAxesCombined });
 
-  const visibleTabs = isJuridico
-    ? tabs.filter(t => t.id === "busca")
-    : tabs;
+  const visibleTabs = isJuridico ? tabs.filter((t) => t.id === "busca") : tabs;
 
   return (
     <DashboardLayout title="Suporte Operacional" subtitle="Movimentação de leads e reporte de problemas">
       <div className="mb-6 border-b border-[#e2e8f0]">
-        <div className="flex gap-2">
-          {visibleTabs.map(tab => (
+        <div className="flex gap-2 flex-wrap">
+          {visibleTabs.map((tab) => (
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveTab(tab.id as typeof activeTab)}
-              className={cn(
-                "filter-pill",
-                activeTab === tab.id && "active"
-              )}
+              onClick={() => setActiveTab(tab.id)}
+              className={cn("filter-pill", activeTab === tab.id && "active")}
             >
               <span className="inline-flex items-center gap-2">
                 <tab.icon className="w-4 h-4 shrink-0" aria-hidden="true" />
@@ -516,27 +502,25 @@ export default function Suporte() {
           ))}
         </div>
       </div>
-      {/* Guards defensivos — JURIDICO não renderiza nada além de Busca Cliente. */}
+
       {activeTab === "movimentacao" && !isJuridico && <MovimentacaoTab />}
       {activeTab === "busca" && <BuscaClienteTab />}
       {activeTab === "reportar" && !isJuridico && <ReportarTab />}
-      {activeTab === "salesops" && isAdmin && !isJuridico && <SalesOpsTab />}
-      {activeTab === "coordenador" && isCoordinator && !isJuridico && (
-        <CoordinatorValidationTab initialCaseId={initialCoordinatorCaseId} />
+      {activeTab === "coordenador" && canSeeCoordenadorTab && !isJuridico && (
+        <CoordenadorTab initialTicketId={focusTicketId} />
       )}
+      {activeTab === "salesops" && isAdmin && !isJuridico && <SalesOpsTab />}
     </DashboardLayout>
   );
 }
 
+// =====================================================================
+// Movimentação
+// =====================================================================
 function MovimentacaoTab() {
   const { currentUser, setCurrentUser } = useAppStore();
   const { currentUser: accessUser } = useAccessControl();
-  // [CHANGELOG] Passa o usuário completo — necessário para o
-  // `getEffectiveAccessLevel` reconhecer ASSESSOR_PLUS.
-  // Importante: `isSupervisor` continua sendo `accessLevel === SUPERVISAO`,
-  // portanto ASSESSOR_PLUS (4) NÃO é supervisor → herda as regras de
-  // coordenador ao movimentar cards (sem travas de equipe/unidade).
-  const accessLevel = getSupportAccessLevel(accessUser);
+  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
   const isSupervisor = accessLevel === LEVELS.SUPERVISAO;
 
   const [firstName, setFirstName] = useState("");
@@ -554,24 +538,11 @@ function MovimentacaoTab() {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
   const [movements, setMovements] = useState<MovementItem[]>([]);
-  const [historyEditTicket, setHistoryEditTicket] = useState<TicketMovimentacao | null>(null);
-  const [historyEditForm, setHistoryEditForm] = useState({
-    nome_cliente_informado: '',
-    sobrenome_cliente_informado: '',
-    email_cliente_informado: '',
-    telefone_cliente_informado: '',
-    cpf_cliente_informado: '',
-    origem_cliente_informada: '',
-  });
-  const [savingHistoryEdit, setSavingHistoryEdit] = useState(false);
-  const [historyReprocessTicket, setHistoryReprocessTicket] = useState<TicketMovimentacao | null>(null);
-  const [historyReprocessing, setHistoryReprocessing] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [loadingHistory, setLoadingHistory] = useState(true);
   const isSubmitting = useRef(false);
-  const historyRequestInFlight = useRef(false);
 
   const [escopo, setEscopo] = useState<EscopoSuporte | null>(null);
   const [loadingEscopo, setLoadingEscopo] = useState(true);
@@ -581,16 +552,18 @@ function MovimentacaoTab() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
+        const res = await fetch(`${API_BASE}/auth/me`, { credentials: "include" });
         if (!res.ok) return;
-        const data = await res.json();
+        const data = await safeJson(res);
         if (cancelled || !data?.success || !data.user) return;
         setCurrentUser(data.user);
       } catch (err) {
-        console.warn('[MovimentacaoTab] Falha ao atualizar sessão:', err);
+        console.warn("[MovimentacaoTab] Falha ao atualizar sessão:", err);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [setCurrentUser]);
 
   useEffect(() => {
@@ -599,64 +572,53 @@ function MovimentacaoTab() {
       setLoadingEscopo(true);
       setEscopoError(null);
       try {
-        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: 'include' });
-        const data = await res.json().catch(() => ({}));
+        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
+        const data = await safeJson(res);
         if (cancelled) return;
+
         if (!res.ok || !data.success) {
-          throw new Error(data?.error || `Erro HTTP ${res.status}`);
+          // Mensagem mais amigável para o caso de permissão.
+          const backendMsg = String(data?.error || "");
+          const isPermission = /sem acesso|perfil/i.test(backendMsg) || res.status === 403;
+          throw new Error(
+            isPermission
+              ? "Seu perfil ainda não tem acesso à aba de movimentação. Contate o administrador."
+              : backendMsg || `Erro HTTP ${res.status}`,
+          );
         }
+
         setEscopo(data.data as EscopoSuporte);
       } catch (err: any) {
         if (cancelled) return;
-        console.error('[MovimentacaoTab] Erro ao carregar escopo:', err);
-        setEscopoError(err.message || 'Falha ao carregar equipes e assessores disponíveis.');
+        console.error("[MovimentacaoTab] Erro ao carregar escopo:", err);
+        setEscopoError(err.message || "Falha ao carregar equipes e assessores disponíveis.");
       } finally {
         if (!cancelled) setLoadingEscopo(false);
       }
     };
     carregarEscopo();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const supervisorTeam =
-    (accessUser as any)?.equipe
-    || (accessUser as any)?.nome_equipe
-    || currentUser?.equipe
-    || "";
+    (accessUser as any)?.equipe || (accessUser as any)?.nome_equipe || currentUser?.equipe || "";
 
-  const unidadeSupervisorRaw = escopo?.usuario?.unidadeId != null
-    ? escopo.usuario.unidadeId
-    : (accessUser as any)?.unidade_id;
+  const unidadeSupervisorRaw = escopo?.usuario?.unidadeId != null ? escopo.usuario.unidadeId : (accessUser as any)?.unidade_id;
   const unidadeSupervisor = unidadeSupervisorRaw != null ? Number(unidadeSupervisorRaw) : null;
 
-  const unidadeTravadaPorUnidade = isSupervisor
-    && unidadeSupervisor != null
-    && UNIDADES_TRAVADAS_EQUIPE.includes(unidadeSupervisor);
-
-  const unidadeTravadaPorEquipe = isSupervisor
-    && !!supervisorTeam
-    && isEquipeTravadaDestino(supervisorTeam);
-
+  const unidadeTravadaPorUnidade = isSupervisor && unidadeSupervisor != null && UNIDADES_TRAVADAS_EQUIPE.includes(unidadeSupervisor);
+  const unidadeTravadaPorEquipe = isSupervisor && !!supervisorTeam && isEquipeTravadaDestino(supervisorTeam);
   const unidadeTravada = unidadeTravadaPorUnidade || unidadeTravadaPorEquipe;
-
-  const deveOcultarEquipesReservadas = isSupervisor
-    && unidadeSupervisor === 1
-    && !unidadeTravadaPorEquipe;
-
-  const restringirDestinoAoTimeSupervisor = isSupervisor
-    && !!supervisorTeam
-    && (movimentacaoEmMassa || unidadeTravada);
+  const deveOcultarEquipesReservadas = isSupervisor && unidadeSupervisor === 1 && !unidadeTravadaPorEquipe;
+  const restringirDestinoAoTimeSupervisor = isSupervisor && !!supervisorTeam && (movimentacaoEmMassa || unidadeTravada);
 
   const equipesDisponiveis = useMemo(() => {
     if (!escopo) return [];
-    let lista = escopo.equipes.filter(nome => !isExcludedTeam(nome));
-
-    if (deveOcultarEquipesReservadas) {
-      lista = lista.filter(nome => !isEquipeTravadaDestino(nome));
-    }
-    if (restringirDestinoAoTimeSupervisor) {
-      lista = lista.filter(nome => normalize(nome) === normalize(supervisorTeam));
-    }
+    let lista = escopo.equipes.filter((nome) => !isExcludedTeam(nome));
+    if (deveOcultarEquipesReservadas) lista = lista.filter((nome) => !isEquipeTravadaDestino(nome));
+    if (restringirDestinoAoTimeSupervisor) lista = lista.filter((nome) => normalize(nome) === normalize(supervisorTeam));
     return lista;
   }, [escopo, restringirDestinoAoTimeSupervisor, supervisorTeam, deveOcultarEquipesReservadas]);
 
@@ -666,32 +628,21 @@ function MovimentacaoTab() {
       setEquipe(supervisorTeam);
       return;
     }
-    if (!equipe) {
-      setEquipe(supervisorTeam);
-    }
+    if (!equipe) setEquipe(supervisorTeam);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSupervisor, supervisorTeam, movimentacaoEmMassa, unidadeTravada]);
 
   const assessoresDisponiveis = useMemo(() => {
     if (!escopo?.assessores?.length) return [];
-    let filtered = escopo.assessores.filter(a => !isExcludedTeam(a.equipeNome));
-
-    if (deveOcultarEquipesReservadas) {
-      filtered = filtered.filter(a => !isEquipeTravadaDestino(a.equipeNome));
-    }
-    if (restringirDestinoAoTimeSupervisor) {
-      filtered = filtered.filter(a => normalize(a.equipeNome) === normalize(supervisorTeam));
-    }
-    if (equipe) {
-      filtered = filtered.filter(a => normalize(a.equipeNome) === normalize(equipe));
-    }
-    return filtered
-      .map(a => ({ id: a.id, nome: a.nome, email: a.email }))
-      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    let filtered = escopo.assessores.filter((a) => !isExcludedTeam(a.equipeNome));
+    if (deveOcultarEquipesReservadas) filtered = filtered.filter((a) => !isEquipeTravadaDestino(a.equipeNome));
+    if (restringirDestinoAoTimeSupervisor) filtered = filtered.filter((a) => normalize(a.equipeNome) === normalize(supervisorTeam));
+    if (equipe) filtered = filtered.filter((a) => normalize(a.equipeNome) === normalize(equipe));
+    return filtered.map((a) => ({ id: a.id, nome: a.nome, email: a.email })).sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
   }, [escopo, equipe, restringirDestinoAoTimeSupervisor, supervisorTeam, deveOcultarEquipesReservadas]);
 
   useEffect(() => {
-    if (assessorId && !assessoresDisponiveis.find(a => a.id === assessorId)) setAssessorId("");
+    if (assessorId && !assessoresDisponiveis.find((a) => a.id === assessorId)) setAssessorId("");
   }, [assessoresDisponiveis, assessorId]);
 
   const produtoConfig: ProdutoConfig = useMemo(() => {
@@ -699,11 +650,7 @@ function MovimentacaoTab() {
     const hit = findProdutoConfig(mapaBackend, equipe);
     if (hit) return hit;
     const defaultGlobal = escopo?.produtos?.default || FALLBACK_PRODUTO_DEFAULT;
-    return {
-      default: defaultGlobal,
-      options: [defaultGlobal],
-      allowChange: false,
-    };
+    return { default: defaultGlobal, options: [defaultGlobal], allowChange: false };
   }, [escopo, equipe]);
 
   useEffect(() => {
@@ -712,27 +659,25 @@ function MovimentacaoTab() {
       if (produto !== produtoConfig.default) setProduto(produtoConfig.default);
       return;
     }
-    if (!produtoConfig.options.includes(produto)) {
-      setProduto(produtoConfig.default);
-    }
+    if (!produtoConfig.options.includes(produto)) setProduto(produtoConfig.default);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [equipe, produtoConfig.allowChange, produtoConfig.default, produtoConfig.options.join('|')]);
+  }, [equipe, produtoConfig.allowChange, produtoConfig.default, produtoConfig.options.join("|")]);
 
-  const loadUserHistory = async (silent = false) => {
+  const loadUserHistory = async () => {
     if (!currentUser?.nome) return;
-    if (historyRequestInFlight.current) return;
-    historyRequestInFlight.current = true;
-    if (!silent) setLoadingHistory(true);
     try {
       const params = new URLSearchParams({ colaborador_origem_nome: currentUser.nome });
-      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao?${params}`, { credentials: 'include' });
-      if (!res.ok) throw new Error('Erro ao carregar histórico');
-      const data = await res.json();
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao?${params}`, { credentials: "include" });
+      if (!res.ok) {
+        const data = await safeJson(res);
+        throw new Error(data?.error || "Erro ao carregar histórico");
+      }
+      const data = await safeJson(res);
       if (data.success) {
         const historico: MovementItem[] = (data.data || []).map((ticket: any) => {
           let hubspotData;
           let motivoOriginal = "Registro Concluido";
-          let observacao = '';
+          let observacao = "";
           let produtoHistorico: string | null = ticket.produto || null;
 
           if (ticket.observacao_sales_ops) {
@@ -742,18 +687,18 @@ function MovimentacaoTab() {
               if (parsed.motivoOriginal) motivoOriginal = parsed.motivoOriginal;
               if (parsed.observacao) observacao = parsed.observacao;
               if (!produtoHistorico && parsed.produto) produtoHistorico = parsed.produto;
-            } catch (e) {
+            } catch {
               observacao = ticket.observacao_sales_ops;
             }
           }
 
           return {
             id: `db_${ticket.id_ticket_movimentacao}`,
-            ticket: ticket as TicketMovimentacao,
             timestamp: ticket.criado_em,
-            cliente: ticket.crm_origem === 'HUBSPOT_LINK'
-              ? hubspotData?.dealName || `Deal ${ticket.crm_lead_id || ''}`.trim()
-              : `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`,
+            cliente:
+              ticket.crm_origem === "HUBSPOT_LINK"
+                ? hubspotData?.dealName || `Deal ${ticket.crm_lead_id || ""}`.trim()
+                : `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`,
             email: ticket.email_cliente_informado,
             telefone: ticket.telefone_cliente_informado || "Não informado",
             cpf: ticket.cpf_cliente_informado || "Não informado",
@@ -772,35 +717,41 @@ function MovimentacaoTab() {
         setMovements(historico);
       }
     } catch (err: any) {
-      console.error('Erro ao carregar histórico:', err);
+      console.error("Erro ao carregar histórico:", err);
     } finally {
-      historyRequestInFlight.current = false;
-      if (!silent) setLoadingHistory(false);
+      setLoadingHistory(false);
     }
   };
 
   useEffect(() => {
-    if (!currentUser?.nome) return;
-
-    void loadUserHistory();
-    const intervalId = setInterval(() => {
-      if (!document.hidden) void loadUserHistory(true);
-    }, 10000);
-    const handleVisibilityChange = () => {
-      if (!document.hidden) void loadUserHistory(true);
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
+    loadUserHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.nome]);
+
+  useEffect(() => {
+    const hasPending = movements.some(
+      (m) => m.status === "pendente" || m.status === "processando",
+    );
+    if (!hasPending) return;
+    const intervalId = setInterval(() => {
+      loadUserHistory();
+    }, 10000);
+    return () => clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movements]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting.current) return;
 
-    const hubLinks = [...new Set(hubLink.split(/[\r\n\s,;]+/).map(link => link.trim()).filter(Boolean))];
+    const hubLinks = [
+      ...new Set(
+        hubLink
+          .split(/[\r\n\s,;]+/)
+          .map((link) => link.trim())
+          .filter(Boolean),
+      ),
+    ];
     if (movimentacaoEmMassa && hubLinks.length === 0) {
       setMessage({ text: "Informe ao menos um link HubSpot", type: "error" });
       return;
@@ -810,16 +761,27 @@ function MovimentacaoTab() {
       return;
     }
     if (!movimentacaoEmMassa) {
-      if (!firstName.trim()) { setMessage({ text: "Nome é obrigatório", type: "error" }); return; }
-      if (!lastName.trim()) { setMessage({ text: "Sobrenome é obrigatório", type: "error" }); return; }
-      if (!telefone.trim()) { setMessage({ text: "Telefone é obrigatório", type: "error" }); return; }
+      if (!firstName.trim()) {
+        setMessage({ text: "Nome é obrigatório", type: "error" });
+        return;
+      }
+      if (!lastName.trim()) {
+        setMessage({ text: "Sobrenome é obrigatório", type: "error" });
+        return;
+      }
+      if (!telefone.trim()) {
+        setMessage({ text: "Telefone é obrigatório", type: "error" });
+        return;
+      }
       if (!isValidBrazilianPhone(telefone)) {
         setMessage({ text: "Telefone inválido. Informe DDD + número (ex.: 11 00000-1234).", type: "error" });
         return;
       }
     }
-
-    if (!equipe || !assessorId) { setMessage({ text: "Selecione equipe e assessor", type: "error" }); return; }
+    if (!equipe || !assessorId) {
+      setMessage({ text: "Selecione equipe e assessor", type: "error" });
+      return;
+    }
 
     const produtoSelecionado = produto || produtoConfig.default;
     if (!produtoConfig.options.includes(produtoSelecionado)) {
@@ -831,21 +793,21 @@ function MovimentacaoTab() {
     setLoading(true);
     setMessage(null);
 
-    const assessorSelecionado = assessoresDisponiveis.find(a => a.id === assessorId);
+    const assessorSelecionado = assessoresDisponiveis.find((a) => a.id === assessorId);
     const assessorNome = assessorSelecionado?.nome || assessorId;
-    const assessorEmail = assessorSelecionado?.email || '';
+    const assessorEmail = assessorSelecionado?.email || "";
 
     if (movimentacaoEmMassa) {
       try {
-        const idempotencyKey = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-          const r = Math.random() * 16 | 0;
-          const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        const idempotencyKey = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+          const r = (Math.random() * 16) | 0;
+          const v = c === "x" ? r : (r & 0x3) | 0x8;
           return v.toString(16);
         });
         const response = await fetch(`${API_BASE}/suporte/movimentacoes-linkhub/lotes`, {
-          method: 'POST',
+          method: "POST",
           headers: getCsrfHeaders(),
-          credentials: 'include',
+          credentials: "include",
           body: JSON.stringify({
             links: hubLinks,
             equipe_destino_nome: equipe,
@@ -855,30 +817,32 @@ function MovimentacaoTab() {
             produto: produtoSelecionado,
           }),
         });
-        const result = await response.json();
+        const result = await safeJson(response);
         if (!response.ok) throw new Error(result.error || `Erro HTTP ${response.status}`);
         await loadUserHistory();
         setMessage({
-          text: `Lote ${result.id_lote} enfileirado com ${result.total_itens} cards.${result.duplicados_removidos ? ` ${result.duplicados_removidos} duplicado(s) removido(s).` : ''}`,
-          type: 'success',
+          text: `Lote ${result.id_lote} enfileirado com ${result.total_itens} cards.${result.duplicados_removidos ? ` ${result.duplicados_removidos} duplicado(s) removido(s).` : ""}`,
+          type: "success",
         });
-        setHubLink('');
+        setHubLink("");
       } catch (error: any) {
-        setMessage({ text: error.message || 'Erro ao enfileirar lote Link Hub.', type: 'error' });
+        setMessage({ text: error.message || "Erro ao enfileirar lote Link Hub.", type: "error" });
       } finally {
         setLoading(false);
-        setTimeout(() => { isSubmitting.current = false; }, 500);
+        setTimeout(() => {
+          isSubmitting.current = false;
+        }, 500);
       }
       return;
     }
 
-    const idempotencyKey = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-      const r = Math.random() * 16 | 0;
-      const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    const idempotencyKey = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      const v = c === "x" ? r : (r & 0x3) | 0x8;
       return v.toString(16);
     });
 
-    const telefoneSemMascara = telefone.replace(/\D/g, '');
+    const telefoneSemMascara = telefone.replace(/\D/g, "");
     const telefoneCompleto = `+55-${telefoneSemMascara.slice(0, 2)}-${telefoneSemMascara.slice(2, 7)}-${telefoneSemMascara.slice(7)}`;
 
     const payload = {
@@ -891,9 +855,9 @@ function MovimentacaoTab() {
       cpf_cliente_informado: cpf || null,
       origem_cliente_informada: origem || null,
       tipo_solicitacao: "Movimentação",
-      colaborador_origem_nome: currentUser?.nome || currentUser?.email || 'frontend',
-      colaborador_origem_email: currentUser?.email || '',
-      equipe_origem_nome: currentUser?.equipe || '',
+      colaborador_origem_nome: currentUser?.nome || currentUser?.email || "frontend",
+      colaborador_origem_email: currentUser?.email || "",
+      equipe_origem_nome: currentUser?.equipe || "",
       colaborador_destino_nome: assessorNome,
       colaborador_destino_email: assessorEmail,
       equipe_destino_nome: equipe,
@@ -906,50 +870,59 @@ function MovimentacaoTab() {
 
     try {
       const response = await fetch(`${API_BASE}/suporte/ticket-movimentacao`, {
-        method: 'POST',
+        method: "POST",
         headers: getCsrfHeaders(),
-        credentials: 'include',
+        credentials: "include",
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await safeJson(response);
         throw new Error(errorData.error || `Erro HTTP ${response.status}`);
       }
-      const result = await response.json();
+      const result = await safeJson(response);
       setMessage({ text: result.message || "Solicitação registrada e enfileirada.", type: result.success ? "success" : "error" });
       await loadUserHistory();
       if (result.success) {
-        setFirstName(""); setHubLink(""); setLastName(""); setEmail(""); setTelefone(""); setCpf(""); setOrigem("");
+        setFirstName("");
+        setHubLink("");
+        setLastName("");
+        setEmail("");
+        setTelefone("");
+        setCpf("");
+        setOrigem("");
         setProduto(isSupervisor ? produtoConfig.default : "");
         if (!isSupervisor) setEquipe("");
-        setAssessorId(""); setMovimentacaoEmMassa(false);
+        setAssessorId("");
+        setMovimentacaoEmMassa(false);
       }
     } catch (err: any) {
       setMessage({ text: err.message || "Erro na movimentação", type: "error" });
       await loadUserHistory();
     } finally {
       setLoading(false);
-      setTimeout(() => { isSubmitting.current = false; }, 500);
+      setTimeout(() => {
+        isSubmitting.current = false;
+      }, 500);
     }
   };
 
-  const filteredMovements = movements.filter(m => {
+  const filteredMovements = movements.filter((m) => {
     const statusMatch = filterStatus === "todos" || m.status === filterStatus;
     if (!statusMatch) return false;
     return isWithinDateRange(m.timestamp, filterDataInicio, filterDataFim);
   });
-  const statusOptions = ["todos", "pendente", "processando", "concluido", "suporte", "aviso", "coordenador", "erro"];
+  const statusOptions = ["todos", "pendente", "processando", "concluido", "suporte", "aviso", "erro", "coordenador", "bloqueado"];
 
   const exportHistory = () => {
     if (movements.length === 0) return;
     const headers = ["Data/Hora", "Cliente", "E-mail", "Telefone", "CPF", "Equipe", "Assessor", "Produto", "Status", "HubSpot", "Resultado"];
-    const rows = movements.map(m => {
+    const rows = movements.map((m) => {
       const hubspotInfo = m.hubspot
         ? m.hubspot.erro
           ? "Erro"
-          : m.hubspot.status === 'bloqueado'
+          : m.hubspot.status === "bloqueado"
             ? m.hubspot.mensagem || "Bloqueado"
-            : `${m.hubspot.existe ? "Existe" : "Não existe"}${m.hubspot.pipeline ? ` - ${m.hubspot.pipeline}/${m.hubspot.stage}` : ""}${m.hubspot.status === 'no_pipeline' ? " (no pipeline)" : ""}`
+            : `${m.hubspot.existe ? "Existe" : "Não existe"}${m.hubspot.pipeline ? ` - ${m.hubspot.pipeline}/${m.hubspot.stage}` : ""}${m.hubspot.status === "no_pipeline" ? " (no pipeline)" : ""}`
         : "Não verificado";
       return [
         new Date(m.timestamp).toLocaleString("pt-BR"),
@@ -969,104 +942,16 @@ function MovimentacaoTab() {
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `movimentacoes_${new Date().toISOString().split("T")[0]}.csv`;
-    a.click(); URL.revokeObjectURL(url);
+    a.href = url;
+    a.download = `movimentacoes_${new Date().toISOString().split("T")[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const clearHistory = () => {
     if (confirm("Limpar todo o histórico local?")) {
-      setMovements([]); setMessage({ text: "Histórico local limpo.", type: "success" });
-    }
-  };
-
-  const historyReprocessableStatuses = new Set([
-    'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
-  ]);
-  const openHistoryEdit = (ticket: TicketMovimentacao) => {
-    setHistoryEditTicket(ticket);
-    setHistoryEditForm({
-      nome_cliente_informado: ticket.nome_cliente_informado || '',
-      sobrenome_cliente_informado: ticket.sobrenome_cliente_informado || '',
-      email_cliente_informado: ticket.email_cliente_informado || '',
-      telefone_cliente_informado: ticket.telefone_cliente_informado || '',
-      cpf_cliente_informado: ticket.cpf_cliente_informado || '',
-      origem_cliente_informada: ticket.origem_cliente_informada || '',
-    });
-  };
-  const saveHistoryCorrections = async () => {
-    if (!historyEditTicket) return;
-    setSavingHistoryEdit(true);
-    try {
-      const response = await fetch(
-        `${API_BASE}/suporte/tickets-movimentacao/${historyEditTicket.id_ticket_movimentacao}`,
-        {
-          method: 'PATCH',
-          headers: getCsrfHeaders(),
-          credentials: 'include',
-          body: JSON.stringify(historyEditForm),
-        },
-      );
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Erro ao corrigir os dados do caso.');
-      }
-      setMovements(previous => previous.map(movement =>
-        movement.ticket?.id_ticket_movimentacao === historyEditTicket.id_ticket_movimentacao
-          ? {
-              ...movement,
-              cliente: `${historyEditForm.nome_cliente_informado} ${historyEditForm.sobrenome_cliente_informado}`.trim(),
-              email: historyEditForm.email_cliente_informado,
-              telefone: historyEditForm.telefone_cliente_informado,
-              cpf: historyEditForm.cpf_cliente_informado,
-              origem: historyEditForm.origem_cliente_informada,
-              ticket: movement.ticket ? { ...movement.ticket, ...historyEditForm } : undefined,
-            }
-          : movement
-      ));
-      setHistoryEditTicket(null);
-      setMessage({ text: 'Dados corrigidos. Agora você pode reprocessar o caso.', type: 'success' });
-      await loadUserHistory();
-    } catch (error) {
-      setMessage({
-        text: error instanceof Error ? error.message : 'Erro ao corrigir os dados do caso.',
-        type: 'error',
-      });
-    } finally {
-      setSavingHistoryEdit(false);
-    }
-  };
-  const reprocessHistoryTicket = async ({ force, observacao }: { force: boolean; observacao: string }) => {
-    if (!historyReprocessTicket) return;
-    setHistoryReprocessing(true);
-    try {
-      const response = await fetch(
-        `${API_BASE}/suporte/tickets-movimentacao/${historyReprocessTicket.id_ticket_movimentacao}/reprocessar`,
-        {
-          method: 'POST',
-          headers: getCsrfHeaders(),
-          credentials: 'include',
-          body: JSON.stringify({ force, observacao }),
-        },
-      );
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || 'Erro ao reprocessar o caso.');
-      }
-      setMovements(previous => previous.map(movement =>
-        movement.ticket?.id_ticket_movimentacao === historyReprocessTicket.id_ticket_movimentacao
-          ? { ...movement, status: 'pendente' }
-          : movement
-      ));
-      setHistoryReprocessTicket(null);
-      setMessage({ text: data.message || 'Caso reenfileirado para reprocessamento.', type: 'success' });
-      window.setTimeout(() => { void loadUserHistory(); }, 5000);
-    } catch (error) {
-      setMessage({
-        text: error instanceof Error ? error.message : 'Erro ao reprocessar o caso.',
-        type: 'error',
-      });
-    } finally {
-      setHistoryReprocessing(false);
+      setMovements([]);
+      setMessage({ text: "Histórico local limpo.", type: "success" });
     }
   };
 
@@ -1098,9 +983,7 @@ function MovimentacaoTab() {
               }}
               className={cn(
                 "flex items-start gap-3 text-left p-4 rounded-lg border-2 transition-colors",
-                modoEscolhido === "movimentar"
-                  ? "border-[#2F6FED] bg-blue-50"
-                  : "border-[#e2e8f0] bg-white hover:border-[#2F6FED]/50"
+                modoEscolhido === "movimentar" ? "border-[#2F6FED] bg-blue-50" : "border-[#e2e8f0] bg-white hover:border-[#2F6FED]/50",
               )}
             >
               <ArrowRightLeft className={cn("w-5 h-5 mt-0.5 flex-shrink-0", modoEscolhido === "movimentar" ? "text-[#2F6FED]" : "text-[#64748b]")} />
@@ -1120,273 +1003,233 @@ function MovimentacaoTab() {
               }}
               className={cn(
                 "flex items-start gap-3 text-left p-4 rounded-lg border-2 transition-colors",
-                modoEscolhido === "criar"
-                  ? "border-[#2F6FED] bg-blue-50"
-                  : "border-[#e2e8f0] bg-white hover:border-[#2F6FED]/50"
+                modoEscolhido === "criar" ? "border-[#2F6FED] bg-blue-50" : "border-[#e2e8f0] bg-white hover:border-[#2F6FED]/50",
               )}
             >
               <UserPlus className={cn("w-5 h-5 mt-0.5 flex-shrink-0", modoEscolhido === "criar" ? "text-[#2F6FED]" : "text-[#64748b]")} />
               <div>
-                <div className="text-sm font-semibold text-[#0f172a]">Movimentar Lead</div>
+                <div className="text-sm font-semibold text-[#0f172a]">Criar Lead</div>
                 <div className="text-xs text-[#64748b] mt-0.5">Informe os dados do cliente para cadastrar e movimentar um novo lead.</div>
               </div>
             </button>
           </div>
           {modoEscolhido && (
-          <>
-          <p className="mt-1 text-xs text-[#64748b]">
-              {movimentacaoEmMassa
-                ? "Modo de alteração por link hub: Os links são lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado. Pode ser feito o ajuste "
-                : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso não o localize vai cadastra-lo(Caso todos os dados necessários estejam preenchidos)."}
-            </p>
+            <>
+              <p className="mt-1 text-xs text-[#64748b]">
+                {movimentacaoEmMassa
+                  ? "Modo de alteração por link hub: Os links são lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado. Pode ser feito o ajuste "
+                  : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso não o localize vai cadastra-lo(Caso todos os dados necessários estejam preenchidos)."}
+              </p>
 
-          {restringirDestinoAoTimeSupervisor && (
-            <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800" role="note">
-              {movimentacaoEmMassa ? (
-                <>Como supervisor, você só pode direcionar movimentações por Link Hub para assessores da sua equipe (<strong>{supervisorTeam}</strong>).</>
-              ) : (
-                <>Como supervisor, você só pode movimentar leads para assessores da sua equipe (<strong>{supervisorTeam}</strong>).</>
+              {restringirDestinoAoTimeSupervisor && (
+                <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800" role="note">
+                  {movimentacaoEmMassa ? (
+                    <>
+                      Como supervisor, você só pode direcionar movimentações por Link Hub para assessores da sua equipe (<strong>{supervisorTeam}</strong>).
+                    </>
+                  ) : (
+                    <>
+                      Como supervisor, você só pode movimentar leads para assessores da sua equipe (<strong>{supervisorTeam}</strong>).
+                    </>
+                  )}
+                </div>
               )}
-            </div>
-          )}
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {movimentacaoEmMassa && (
-              <div className="md:col-span-2">
-                <label className="block text-sm font-medium text-[#0f172a] mb-1">
-                  Links HubSpot *
-                </label>
-                <textarea
-                  value={hubLink}
-                  onChange={e => setHubLink(e.target.value)}
-                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg resize-y"
-                  rows={4}
-                  placeholder="Cole um link HubSpot por linha (máx. 50)"
-                  required={movimentacaoEmMassa}
-                />
-                <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
-                  Certifique-se de que os links informados estão corretos antes da alteração do responsável para o colaborador{" "}
-                  {assessoresDisponiveis.find(assessor => assessor.id === assessorId)?.nome ||
-                    "[Selecione um colaborador]"}.
-                </p>
-              </div>
-            )}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {movimentacaoEmMassa && (
+                  <div className="md:col-span-2">
+                    <label className="block text-sm font-medium text-[#0f172a] mb-1">Links HubSpot *</label>
+                    <textarea
+                      value={hubLink}
+                      onChange={(e) => setHubLink(e.target.value)}
+                      className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg resize-y"
+                      rows={4}
+                      placeholder="Cole um link HubSpot por linha (máx. 50)"
+                      required={movimentacaoEmMassa}
+                    />
+                    <p className="mt-2 rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
+                      Certifique-se de que os links informados estão corretos antes da alteração do responsável para o colaborador{" "}
+                      {assessoresDisponiveis.find((assessor) => assessor.id === assessorId)?.nome || "[Selecione um colaborador]"}.
+                    </p>
+                  </div>
+                )}
 
-            {!movimentacaoEmMassa && (
-              <>
+                {!movimentacaoEmMassa && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-[#0f172a] mb-1">Nome *</label>
+                      <input type="text" value={firstName} onChange={(e) => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome *</label>
+                      <input type="text" value={lastName} onChange={(e) => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label>
+                      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label>
+                      <select value={origem} onChange={(e) => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg">
+                        <option value="">Selecionar origem</option>
+                        <option value="discadora">Discadora</option>
+                        <option value="cat">CAT</option>
+                        <option value="indicacao">Indicação</option>
+                        <option value="trafego_pago">Marketing</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone *</label>
+                      <div className="flex items-center">
+                        <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">+55</span>
+                        <input
+                          type="tel"
+                          value={telefone}
+                          onChange={(e) => setTelefone(formatPhoneInput(e.target.value))}
+                          onBlur={() => telefone && setTelefone(formatPhoneInput(telefone))}
+                          className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
+                          placeholder="(00) 00000-0000"
+                          required
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label>
+                      <input type="text" value={cpf} onChange={(e) => setCpf(e.target.value)} onBlur={() => cpf && setCpf(formatCPF(cpf))} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" />
+                    </div>
+                  </>
+                )}
+
                 <div>
-                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Nome *</label>
-                  <input type="text" value={firstName} onChange={e => setFirstName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Sobrenome *</label>
-                  <input type="text" value={lastName} onChange={e => setLastName(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-[#0f172a] mb-1">E-mail</label>
-                  <input type="email" value={email} onChange={e => setEmail(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Origem do Lead</label>
-                  <select value={origem} onChange={e => setOrigem(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg">
-                    <option value="">Selecionar origem</option>
-                    <option value="discadora">Discadora</option>
-                    <option value="cat">CAT</option>
-                    <option value="indicacao">Indicação</option>
-                    <option value="trafego_pago">Marketing</option>
+                  <label
+                    className="block text-sm font-medium text-[#0f172a] mb-1"
+                    title={
+                      restringirDestinoAoTimeSupervisor
+                        ? movimentacaoEmMassa
+                          ? "Supervisores só podem movimentar por Link Hub para a própria equipe."
+                          : "Supervisores só podem movimentar leads para a própria equipe."
+                        : undefined
+                    }
+                  >
+                    Equipe Destino *
+                  </label>
+                  <select value={equipe} onChange={(e) => setEquipe(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required disabled={loadingEscopo || restringirDestinoAoTimeSupervisor}>
+                    <option value="" disabled>
+                      {loadingEscopo ? "Carregando..." : equipesDisponiveis.length === 0 ? "Nenhuma equipe disponível" : "Selecione equipe"}
+                    </option>
+                    {equipesDisponiveis.map((nome) => (
+                      <option key={nome} value={nome}>
+                        {nome}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Telefone *</label>
-                  <div className="flex items-center">
-                    <span className="px-3 py-2 bg-[#f1f5f9] border border-r-0 border-[#e2e8f0] rounded-l-lg text-sm text-[#64748b]">+55</span>
+                  <label className="block text-sm font-medium text-[#0f172a] mb-1">Assessor Destino *</label>
+                  <select value={assessorId} onChange={(e) => setAssessorId(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required disabled={loadingEscopo}>
+                    <option value="" disabled>
+                      {loadingEscopo ? "Carregando..." : assessoresDisponiveis.length === 0 ? "Nenhum assessor disponível" : "Selecione colaborador"}
+                    </option>
+                    {assessoresDisponiveis.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.nome}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="md:col-span-2">
+                  <label
+                    htmlFor="mov-produto"
+                    className="block text-sm font-medium text-[#0f172a] mb-1"
+                    title={produtoConfig.allowChange ? "Esta equipe permite escolher entre os produtos listados." : "O produto é definido automaticamente pela equipe selecionada."}
+                  >
+                    Produto {!produtoConfig.allowChange && <span className="text-[#94a3b8]">(definido pela equipe)</span>}
+                  </label>
+
+                  {produtoConfig.allowChange ? (
+                    <select id="mov-produto" value={produto} onChange={(e) => setProduto(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" disabled={!equipe} required>
+                      <option value="" disabled>
+                        {equipe ? "Selecione o produto" : "Selecione a equipe primeiro"}
+                      </option>
+                      {produtoConfig.options.map((opt) => (
+                        <option key={opt} value={opt}>
+                          {maskProduct(opt)}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
                     <input
-                      type="tel"
-                      value={telefone}
-                      onChange={e => setTelefone(formatPhoneInput(e.target.value))}
-                      onBlur={() => telefone && setTelefone(formatPhoneInput(telefone))}
-                      className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
-                      placeholder="(00) 00000-0000"
-                      required
+                      id="mov-produto"
+                      type="text"
+                      value={equipe ? maskProduct(produto) : ""}
+                      readOnly
+                      className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg bg-[#f8fafc] text-[#475569] cursor-not-allowed"
+                      placeholder={equipe ? "" : "Selecione a equipe primeiro"}
                     />
-                  </div>
+                  )}
+
+                  {produtoConfig.allowChange && equipe && (
+                    <p className="mt-1 text-xs text-[#64748b]">
+                      A equipe <strong>{equipe}</strong> pode alternar entre: {produtoConfig.options.map(maskProduct).join(" / ")}.
+                    </p>
+                  )}
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-[#0f172a] mb-1">CPF</label>
-                  <input
-                    type="text"
-                    value={cpf}
-                    onChange={e => setCpf(e.target.value)}
-                    onBlur={() => cpf && setCpf(formatCPF(cpf))}
-                    className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                  />
+              </div>
+
+              {escopoError && (
+                <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">
+                  Erro ao carregar escopo: {escopoError}
                 </div>
-              </>
-            )}
+              )}
 
-            <div>
-              <label
-                className="block text-sm font-medium text-[#0f172a] mb-1"
-                title={
-                  restringirDestinoAoTimeSupervisor
-                    ? (movimentacaoEmMassa
-                        ? "Supervisores só podem movimentar por Link Hub para a própria equipe."
-                        : "Supervisores só podem movimentar leads para a própria equipe.")
-                    : undefined
-                }
-              >
-                Equipe Destino *
-              </label>
-              <select
-                value={equipe}
-                onChange={e => setEquipe(e.target.value)}
-                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                required
-                disabled={loadingEscopo || restringirDestinoAoTimeSupervisor}
-              >
-                <option value="" disabled>
-                  {loadingEscopo
-                    ? "Carregando..."
-                    : equipesDisponiveis.length === 0
-                      ? "Nenhuma equipe disponível"
-                      : "Selecione equipe"}
-                </option>
-                {equipesDisponiveis.map(nome => (
-                  <option key={nome} value={nome}>{nome}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-[#0f172a] mb-1">Assessor Destino *</label>
-              <select
-                value={assessorId}
-                onChange={e => setAssessorId(e.target.value)}
-                className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                required
-                disabled={loadingEscopo}
-              >
-                <option value="" disabled>
-                  {loadingEscopo
-                    ? "Carregando..."
-                    : assessoresDisponiveis.length === 0
-                      ? "Nenhum assessor disponível"
-                      : "Selecione colaborador"}
-                </option>
-                {assessoresDisponiveis.map(a => (
-                  <option key={a.id} value={a.id}>{a.nome}</option>
-                ))}
-              </select>
-            </div>
-
-            <div className="md:col-span-2">
-              <label
-                htmlFor="mov-produto"
-                className="block text-sm font-medium text-[#0f172a] mb-1"
-                title={
-                  produtoConfig.allowChange
-                    ? 'Esta equipe permite escolher entre os produtos listados.'
-                    : 'O produto é definido automaticamente pela equipe selecionada.'
-                }
-              >
-                Produto{' '}
-                {!produtoConfig.allowChange && (
-                  <span className="text-[#94a3b8]">(definido pela equipe)</span>
-                )}
-              </label>
-
-              {produtoConfig.allowChange ? (
-                <select
-                  id="mov-produto"
-                  value={produto}
-                  onChange={e => setProduto(e.target.value)}
-                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
-                  disabled={!equipe}
-                  required
+              {message && (
+                <div
+                  className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}
+                  role="status"
                 >
-                  <option value="" disabled>
-                    {equipe ? 'Selecione o produto' : 'Selecione a equipe primeiro'}
-                  </option>
-                  {produtoConfig.options.map(opt => (
-                    <option key={opt} value={opt}>{maskProduct(opt)}</option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  id="mov-produto"
-                  type="text"
-                  value={equipe ? maskProduct(produto) : ''}
-                  readOnly
-                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg bg-[#f8fafc] text-[#475569] cursor-not-allowed"
-                  placeholder={equipe ? '' : 'Selecione a equipe primeiro'}
-                />
+                  {message.text}
+                </div>
               )}
 
-              {produtoConfig.allowChange && equipe && (
-                <p className="mt-1 text-xs text-[#64748b]">
-                  A equipe <strong>{equipe}</strong> pode alternar entre:{' '}
-                  {produtoConfig.options.map(maskProduct).join(' / ')}.
-                </p>
-              )}
-            </div>
-          </div>
-
-          {escopoError && (
-            <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">
-              Erro ao carregar escopo: {escopoError}
-            </div>
-          )}
-
-          {message && (
-            <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")} role="status">
-              {message.text}
-            </div>
-          )}
-
-          <div className="flex justify-end">
-            <button
-              type="submit"
-              disabled={loading || loadingEscopo}
-              className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50"
-            >
-              {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-              {loading
-                ? "Enviando..."
-                : movimentacaoEmMassa
-                  ? "Registrar mudança de responsável"
-                  : "Registrar Movimentação"}
-            </button>
-          </div>
-          </>
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={loading || loadingEscopo}
+                  className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50"
+                >
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                  {loading ? "Enviando..." : movimentacaoEmMassa ? "Registrar mudança de responsável" : "Registrar Movimentação"}
+                </button>
+              </div>
+            </>
           )}
         </form>
       </div>
 
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <div>
-            <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
-            <p className="text-xs text-[#64748b]">Atualização automática a cada 10 segundos</p>
-          </div>
+          <h2 className="text-lg font-bold text-[#0f172a]">Histórico</h2>
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => loadUserHistory()}
+              onClick={loadUserHistory}
               disabled={loadingHistory}
               className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0] disabled:opacity-50"
               title="Recarregar o histórico"
             >
               <RefreshCw className={cn("w-3 h-3", loadingHistory && "animate-spin")} /> Atualizar
             </button>
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
-              {statusOptions.map(s => (
+            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
+              {statusOptions.map((s) => (
                 <option key={s} value={s}>
                   {s === "todos" ? "Todos" : s.charAt(0).toUpperCase() + s.slice(1)}
                 </option>
               ))}
             </select>
-            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
+            <input type="date" value={filterDataInicio} onChange={(e) => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
+            <input type="date" value={filterDataFim} onChange={(e) => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
             <button onClick={exportHistory} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]">
               <Download className="w-3 h-3" /> Exportar
             </button>
@@ -1396,7 +1239,9 @@ function MovimentacaoTab() {
           </div>
         </div>
         {loadingHistory ? (
-          <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>
+          <div className="flex justify-center py-8">
+            <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
+          </div>
         ) : filteredMovements.length === 0 ? (
           <div className="text-center py-8 text-[#64748b]">Nenhuma movimentação registrada no período</div>
         ) : (
@@ -1412,13 +1257,11 @@ function MovimentacaoTab() {
                   <th>Status</th>
                   <th>Obs. Comercial</th>
                   <th>Resultado</th>
-                  {isSupervisor && <th>Ações</th>}
                 </tr>
               </thead>
               <tbody>
-                {filteredMovements.map(m => {
+                {filteredMovements.map((m) => {
                   const info = getStatusInfo(m.status);
-                  const ticket = m.ticket;
                   return (
                     <tr key={m.id}>
                       <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
@@ -1432,56 +1275,18 @@ function MovimentacaoTab() {
                         <div>{m.equipe}</div>
                         <small>{m.assessor}</small>
                       </td>
-                      <td className="text-[#475569]" title={m.produto || ''}>
-                        {m.produto ? maskProduct(m.produto) : '—'}
+                      <td className="text-[#475569]" title={m.produto || ""}>
+                        {m.produto ? maskProduct(m.produto) : "—"}
                       </td>
                       <td>
                         <span className={cn("badge", info.className)} title={m.hubspot?.mensagem || info.label}>
                           {info.icon} {info.label}
                         </span>
                       </td>
-                      <td className="max-w-[200px] whitespace-pre-wrap break-words" title={m.observacao_sales_ops || ''}>
-                        {m.observacao_sales_ops || '—'}
-                        {m.hubspot?.link && (
-                          <a
-                            href={m.hubspot.link}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="mt-1 inline-flex items-center gap-1 text-[#2F6FED] hover:underline"
-                          >
-                            Abrir card <ExternalLink className="h-3 w-3" />
-                          </a>
-                        )}
+                      <td className="max-w-[200px] whitespace-pre-wrap break-words" title={m.observacao_sales_ops || ""}>
+                        {m.observacao_sales_ops || "—"}
                       </td>
                       <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
-                      {isSupervisor && (
-                        <td>
-                          {ticket && historyReprocessableStatuses.has(m.status.toLowerCase()) && (
-                            <div className="flex items-center gap-1">
-                              {ticket.crm_origem !== 'HUBSPOT_LINK' && (
-                                <button
-                                  type="button"
-                                  onClick={() => openHistoryEdit(ticket)}
-                                  className="rounded p-2 text-[#64748b] hover:bg-[#f1f5f9] hover:text-[#2F6FED]"
-                                  title="Corrigir os dados do caso"
-                                  aria-label="Corrigir os dados do caso"
-                                >
-                                  <Edit2 className="h-4 w-4" />
-                                </button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => setHistoryReprocessTicket(ticket)}
-                                className="rounded p-2 text-amber-700 hover:bg-amber-50"
-                                title="Reprocessar caso"
-                                aria-label="Reprocessar caso"
-                              >
-                                <RotateCcw className="h-4 w-4" />
-                              </button>
-                            </div>
-                          )}
-                        </td>
-                      )}
                     </tr>
                   );
                 })}
@@ -1490,86 +1295,13 @@ function MovimentacaoTab() {
           </div>
         )}
       </div>
-      <EditModal
-        isOpen={historyEditTicket !== null}
-        onClose={() => setHistoryEditTicket(null)}
-        title={`Corrigir caso #${historyEditTicket?.id_ticket_movimentacao || ''}`}
-        onSave={saveHistoryCorrections}
-        saving={savingHistoryEdit}
-      >
-        <p className="text-sm text-[#64748b]">
-          Corrija os dados do cliente e salve. Depois, use “Reprocessar” no histórico para reenviar o caso.
-        </p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <label className="text-sm font-medium text-[#334155]">
-            Nome
-            <input
-              value={historyEditForm.nome_cliente_informado}
-              onChange={event => setHistoryEditForm(form => ({ ...form, nome_cliente_informado: event.target.value }))}
-              maxLength={500}
-              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
-            />
-          </label>
-          <label className="text-sm font-medium text-[#334155]">
-            Sobrenome
-            <input
-              value={historyEditForm.sobrenome_cliente_informado}
-              onChange={event => setHistoryEditForm(form => ({ ...form, sobrenome_cliente_informado: event.target.value }))}
-              maxLength={500}
-              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
-            />
-          </label>
-          <label className="text-sm font-medium text-[#334155]">
-            E-mail
-            <input
-              type="email"
-              value={historyEditForm.email_cliente_informado}
-              onChange={event => setHistoryEditForm(form => ({ ...form, email_cliente_informado: event.target.value }))}
-              maxLength={254}
-              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
-            />
-          </label>
-          <label className="text-sm font-medium text-[#334155]">
-            Telefone
-            <input
-              value={historyEditForm.telefone_cliente_informado}
-              onChange={event => setHistoryEditForm(form => ({ ...form, telefone_cliente_informado: event.target.value }))}
-              maxLength={50}
-              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
-            />
-          </label>
-          <label className="text-sm font-medium text-[#334155]">
-            CPF
-            <input
-              value={historyEditForm.cpf_cliente_informado}
-              onChange={event => setHistoryEditForm(form => ({ ...form, cpf_cliente_informado: event.target.value }))}
-              maxLength={30}
-              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
-            />
-          </label>
-          <label className="text-sm font-medium text-[#334155]">
-            Origem
-            <input
-              value={historyEditForm.origem_cliente_informada}
-              onChange={event => setHistoryEditForm(form => ({ ...form, origem_cliente_informada: event.target.value }))}
-              maxLength={500}
-              className="mt-1 w-full rounded-lg border border-[#e2e8f0] px-3 py-2"
-            />
-          </label>
-        </div>
-      </EditModal>
-      <ReprocessModal
-        isOpen={historyReprocessTicket !== null}
-        onClose={() => setHistoryReprocessTicket(null)}
-        ticket={historyReprocessTicket}
-        onConfirm={reprocessHistoryTicket}
-        saving={historyReprocessing}
-      />
     </div>
   );
 }
 
-// ---------------------- Aba Busca Cliente ----------------------
+// =====================================================================
+// Busca Cliente
+// =====================================================================
 interface BuscaClienteResultado {
   found: boolean;
   divergente?: boolean;
@@ -1597,15 +1329,8 @@ interface BuscaClienteResultado {
 }
 
 function BuscaClienteTab() {
-  // Identifica o nível do solicitante — JURIDICO ignora a restrição
-  // por equipe e exibe o resultado integral.
-  //
-  // [CHANGELOG] Passa o usuário completo para `getSupportAccessLevel`
-  // — necessário para reconhecer ASSESSOR_PLUS. Sem isso, um assessor
-  // promovido por e-mail era tratado como assessor comum aqui e não
-  // conseguia enxergar os dados completos (quando aplicável).
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser);
+  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
   const isJuridico = accessLevel === LEVELS.JURIDICO;
 
   const [telefone, setTelefone] = useState("");
@@ -1625,21 +1350,21 @@ function BuscaClienteTab() {
     setErroEnvioSuporte(null);
     try {
       const res = await fetch(`${API_BASE}/suporte/buscar-cliente/enviar-suporte`, {
-        method: 'POST',
+        method: "POST",
         headers: getCsrfHeaders(),
-        credentials: 'include',
+        credentials: "include",
         body: JSON.stringify({
-          telefone: telefone.replace(/\D/g, ''),
-          cpf: cpf.replace(/\D/g, ''),
+          telefone: telefone.replace(/\D/g, ""),
+          cpf: cpf.replace(/\D/g, ""),
           email: email.trim(),
           motivo: resultado.motivo,
         }),
       });
-      const data = await res.json();
-      if (!res.ok || !data.success) throw new Error(data.error || 'Erro ao enviar para o suporte');
+      const data = await safeJson(res);
+      if (!res.ok || !data.success) throw new Error(data.error || "Erro ao enviar para o suporte");
       setEnviadoSuporte(true);
     } catch (err: any) {
-      setErroEnvioSuporte(err.message || 'Erro ao enviar para o suporte');
+      setErroEnvioSuporte(err.message || "Erro ao enviar para o suporte");
     } finally {
       setEnviandoSuporte(false);
     }
@@ -1647,8 +1372,8 @@ function BuscaClienteTab() {
 
   const handleBuscar = async (e: React.FormEvent) => {
     e.preventDefault();
-    const telefoneDigits = telefone.replace(/\D/g, '');
-    const cpfDigits = cpf.replace(/\D/g, '');
+    const telefoneDigits = telefone.replace(/\D/g, "");
+    const cpfDigits = cpf.replace(/\D/g, "");
     const emailLimpo = email.trim();
 
     if (!telefoneDigits && !cpfDigits && !emailLimpo) {
@@ -1665,33 +1390,28 @@ function BuscaClienteTab() {
 
     try {
       const params = new URLSearchParams();
-      if (telefoneDigits) params.set('telefone', telefoneDigits);
-      if (cpfDigits) params.set('cpf', cpfDigits);
-      if (emailLimpo) params.set('email', emailLimpo);
+      if (telefoneDigits) params.set("telefone", telefoneDigits);
+      if (cpfDigits) params.set("cpf", cpfDigits);
+      if (emailLimpo) params.set("email", emailLimpo);
 
-      const res = await fetch(`${API_BASE}/suporte/buscar-cliente?${params.toString()}`, { credentials: 'include' });
-      const data = await res.json();
-      if (!res.ok || !data.success) throw new Error(data.error || 'Erro ao buscar cliente');
+      const res = await fetch(`${API_BASE}/suporte/buscar-cliente?${params.toString()}`, { credentials: "include" });
+      const data = await safeJson(res);
+      if (!res.ok || !data.success) throw new Error(data.error || "Erro ao buscar cliente");
       setResultado(data.data as BuscaClienteResultado);
     } catch (err: any) {
-      setErro(err.message || 'Erro ao buscar cliente');
+      setErro(err.message || "Erro ao buscar cliente");
     } finally {
       setLoading(false);
     }
   };
 
-  // JURIDICO: ignora a sinalização `restrito` do backend e exibe o
-  // resultado completo. Demais níveis continuam bloqueados quando o
-  // cliente está em outra equipe.
-  const showRestritoBlock = !!resultado?.restrito && !isJuridico;
+  const showRestritoBlock = !!resultado?.restrito && !isJuridico && !resultado?.contato;
 
   return (
     <div className="space-y-6 animate-fade-in-up">
       <div className="card p-5">
         <h2 className="text-lg font-bold text-[#0f172a] mb-1">Busca Cliente</h2>
-        <p className="text-xs text-[#64748b] mb-4">
-          Procure um cliente na HubSpot por telefone, CPF ou e-mail. Preencha pelo menos um campo.
-        </p>
+        <p className="text-xs text-[#64748b] mb-4">Procure um cliente na HubSpot por telefone, CPF ou e-mail. Preencha pelo menos um campo.</p>
         <form onSubmit={handleBuscar} className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
@@ -1701,7 +1421,7 @@ function BuscaClienteTab() {
                 <input
                   type="tel"
                   value={telefone}
-                  onChange={e => setTelefone(formatPhoneInput(e.target.value))}
+                  onChange={(e) => setTelefone(formatPhoneInput(e.target.value))}
                   onBlur={() => telefone && setTelefone(formatPhoneInput(telefone))}
                   className="w-full px-3 py-2 border border-[#e2e8f0] rounded-r-lg"
                   placeholder="(00) 00000-0000"
@@ -1713,7 +1433,7 @@ function BuscaClienteTab() {
               <input
                 type="text"
                 value={cpf}
-                onChange={e => setCpf(e.target.value)}
+                onChange={(e) => setCpf(e.target.value)}
                 onBlur={() => cpf && setCpf(formatCPF(cpf))}
                 className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
                 placeholder="000.000.000-00"
@@ -1724,7 +1444,7 @@ function BuscaClienteTab() {
               <input
                 type="email"
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                onChange={(e) => setEmail(e.target.value)}
                 className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
                 placeholder="cliente@email.com"
               />
@@ -1732,7 +1452,9 @@ function BuscaClienteTab() {
           </div>
 
           {erro && (
-            <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">{erro}</div>
+            <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">
+              {erro}
+            </div>
           )}
 
           <div className="flex justify-end">
@@ -1772,7 +1494,9 @@ function BuscaClienteTab() {
               ) : (
                 <>
                   {erroEnvioSuporte && (
-                    <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">{erroEnvioSuporte}</div>
+                    <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700" role="status">
+                      {erroEnvioSuporte}
+                    </div>
                   )}
                   <button
                     type="button"
@@ -1788,12 +1512,15 @@ function BuscaClienteTab() {
             </div>
           ) : (
             <div className="space-y-4">
-              {/* JURIDICO: nota informativa quando o cliente pertence a
-                  outra equipe. Os dados completos abaixo continuam
-                  sendo exibidos normalmente. */}
-              {isJuridico && resultado.restrito && resultado.motivo && (
-                <div className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-800" role="note">
-                  <strong>Acesso jurídico:</strong> {resultado.motivo} — exibindo dados completos conforme nível de acesso.
+              {resultado.restrito && resultado.motivo && (
+                <div
+                  className={cn(
+                    "rounded-md px-3 py-2 text-xs border",
+                    isJuridico ? "bg-blue-50 border-blue-200 text-blue-800" : "bg-amber-50 border-amber-200 text-amber-800",
+                  )}
+                  role="note"
+                >
+                  <strong>{isJuridico ? "Acesso jurídico:" : "Aviso:"}</strong> {resultado.motivo}
                 </div>
               )}
 
@@ -1807,6 +1534,7 @@ function BuscaClienteTab() {
                 <div className="text-xs text-[#94a3b8] mb-0.5">Nome</div>
                 <div className="text-lg font-semibold text-[#0f172a]">{resultado.contato?.nome || "—"}</div>
               </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <div className="text-xs text-[#94a3b8] mb-0.5">Telefone</div>
@@ -1821,6 +1549,7 @@ function BuscaClienteTab() {
                   <div className="text-[#0f172a]">{resultado.contato?.cpf || "—"}</div>
                 </div>
               </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 border-t border-[#e2e8f0]">
                 <div>
                   <div className="text-xs text-[#94a3b8] mb-0.5">Pipeline</div>
@@ -1835,7 +1564,8 @@ function BuscaClienteTab() {
                   <div className="text-[#0f172a] font-medium">{resultado.responsavel?.nome || "—"}</div>
                 </div>
               </div>
-              {resultado.link && (
+
+              {resultado.link ? (
                 <a
                   href={resultado.link}
                   target="_blank"
@@ -1845,7 +1575,12 @@ function BuscaClienteTab() {
                   <ExternalLink className="w-4 h-4" />
                   Abrir card na HubSpot
                 </a>
-              )}
+              ) : resultado.restrito && !isJuridico ? (
+                <span className="inline-flex items-center gap-2 text-sm text-[#94a3b8]">
+                  <Ban className="w-4 h-4" />
+                  Link do card bloqueado — cliente pertence a outra equipe
+                </span>
+              ) : null}
             </div>
           )}
         </div>
@@ -1854,7 +1589,9 @@ function BuscaClienteTab() {
   );
 }
 
-// ---------------------- Aba Reportar ----------------------
+// =====================================================================
+// Reportar
+// =====================================================================
 function ReportarTab() {
   const { currentUser } = useAppStore();
 
@@ -1871,112 +1608,94 @@ function ReportarTab() {
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [loadingReports, setLoadingReports] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const reportsRequestInFlight = useRef(false);
 
-  const loadUserReports = async (silent = false) => {
+  const loadUserReports = async () => {
     if (!currentUser?.email) {
       setLoadingReports(false);
       return;
     }
-    if (reportsRequestInFlight.current) return;
-    reportsRequestInFlight.current = true;
     try {
-      if (!silent) {
-        setLoadingReports(true);
-        setLoadError(null);
-      }
-      const res = await fetch(
-        `${API_BASE}/suporte/ticket-suporte?solicitante_email=${encodeURIComponent(currentUser.email)}`,
-        { credentials: 'include' }
-      );
+      setLoadingReports(true);
+      setLoadError(null);
+      const res = await fetch(`${API_BASE}/suporte/ticket-suporte?solicitante_email=${encodeURIComponent(currentUser.email)}`, {
+        credentials: "include",
+      });
       if (!res.ok) throw new Error(`Erro ${res.status}: ${res.statusText}`);
-      const data = await res.json();
+      const data = await safeJson(res);
       if (data.success && Array.isArray(data.data)) {
-        setLoadError(null);
         const mapped: ReportItem[] = data.data.map((ticket: any) => ({
           id: `REP_${ticket.id_ticket_suporte}`,
           data: ticket.criado_em,
-          titulo: ticket.titulo || ticket.assunto || '',
-          assunto: ticket.assunto || ticket.titulo || '',
-          descricao: ticket.descricao || '',
-          descricaoResumida: ticket.descricao
-            ? ticket.descricao.length > 200
-              ? ticket.descricao.substring(0, 200) + "..."
-              : ticket.descricao
-            : '',
+          titulo: ticket.titulo || ticket.assunto || "",
+          assunto: ticket.assunto || ticket.titulo || "",
+          descricao: ticket.descricao || "",
+          descricaoResumida: ticket.descricao ? (ticket.descricao.length > 200 ? ticket.descricao.substring(0, 200) + "..." : ticket.descricao) : "",
           solicitante: ticket.solicitante_nome,
           equipe: ticket.equipe_nome,
           status: ticket.status || "ENVIADO",
-          observacao_sales_ops: ticket.observacao_sales_ops || '',
+          observacao_sales_ops: ticket.observacao_sales_ops || "",
           ultimaAtualizacao: ticket.criado_em,
         }));
         setReports(mapped);
       } else {
-        setLoadError('Formato de resposta inesperado da API.');
+        setLoadError("Formato de resposta inesperado da API.");
       }
     } catch (err: any) {
-      console.error('Erro ao carregar reportes:', err);
-      setLoadError(err.message || 'Erro desconhecido ao carregar reportes.');
+      console.error("Erro ao carregar reportes:", err);
+      setLoadError(err.message || "Erro desconhecido ao carregar reportes.");
     } finally {
-      reportsRequestInFlight.current = false;
-      if (!silent) setLoadingReports(false);
+      setLoadingReports(false);
     }
   };
 
   useEffect(() => {
-    if (!currentUser?.email) {
-      setLoadingReports(false);
-      return;
-    }
-
-    void loadUserReports();
-    const intervalId = setInterval(() => {
-      if (!document.hidden) void loadUserReports(true);
-    }, 10000);
-    const handleVisibilityChange = () => {
-      if (!document.hidden) void loadUserReports(true);
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
+    if (currentUser?.email) loadUserReports();
+    else setLoadingReports(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.email]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!titulo.trim()) { setMessage({ text: "Preencha o título", type: "error" }); return; }
-    if (!assunto || !descricao.trim()) { setMessage({ text: "Preencha assunto e descrição", type: "error" }); return; }
-    if (descricao.replace(/\n/g, "").length < 10) { setMessage({ text: "Descrição muito curta", type: "error" }); return; }
-    if (files.length === 0) { setMessage({ text: "Necessário 1 print para o envio", type: "error" }); return; }
+    if (!titulo.trim()) {
+      setMessage({ text: "Preencha o título", type: "error" });
+      return;
+    }
+    if (!assunto || !descricao.trim()) {
+      setMessage({ text: "Preencha assunto e descrição", type: "error" });
+      return;
+    }
+    if (descricao.replace(/\n/g, "").length < 10) {
+      setMessage({ text: "Descrição muito curta", type: "error" });
+      return;
+    }
+    if (files.length === 0) {
+      setMessage({ text: "Necessário 1 print para o envio", type: "error" });
+      return;
+    }
 
     setLoading(true);
     setMessage(null);
 
     try {
       const formData = new FormData();
-      formData.append('titulo', titulo.trim());
-      formData.append('assunto', assunto);
-      formData.append('descricao', descricao);
-      formData.append('solicitante_nome', currentUser?.nome || '');
-      formData.append('solicitante_email', currentUser?.email || '');
-      formData.append('equipe_nome', currentUser?.equipe || '');
+      formData.append("titulo", titulo.trim());
+      formData.append("assunto", assunto);
+      formData.append("descricao", descricao);
+      formData.append("solicitante_nome", currentUser?.nome || "");
+      formData.append("solicitante_email", currentUser?.email || "");
+      formData.append("equipe_nome", currentUser?.equipe || "");
 
-      files.forEach((file) => {
-        formData.append('arquivos', file, file.name);
-      });
+      files.forEach((file) => formData.append("arquivos", file, file.name));
 
       const res = await fetch(`${API_BASE}/suporte/ticket-suporte`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'x-csrf-token': localStorage.getItem('csrfToken') || '',
-        },
+        method: "POST",
+        credentials: "include",
+        headers: { "x-csrf-token": localStorage.getItem("csrfToken") || "" },
         body: formData,
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao registrar ticket');
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao registrar ticket");
 
       setMessage({ text: "Reporte registado com sucesso.", type: "success" });
       setTitulo("");
@@ -1998,16 +1717,13 @@ function ReportarTab() {
     if (e.target.files) setFiles(Array.from(e.target.files));
   };
 
-  const removeFile = (index: number) => {
-    setFiles(prev => prev.filter((_, i) => i !== index));
-  };
+  const removeFile = (index: number) => setFiles((prev) => prev.filter((_, i) => i !== index));
 
   const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const newFiles = Array.from(e.dataTransfer.files);
-      setFiles(prev => [...prev, ...newFiles]);
+      setFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
       e.dataTransfer.clearData();
     }
   };
@@ -2027,13 +1743,13 @@ function ReportarTab() {
     try {
       const numericId = id.replace("REP_", "");
       const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${numericId}`, {
-        method: 'PATCH',
+        method: "PATCH",
         headers: getCsrfHeaders(),
-        credentials: 'include',
-        body: JSON.stringify({ status: 'CANCELADO' }),
+        credentials: "include",
+        body: JSON.stringify({ status: "CANCELADO" }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao cancelar solicitação');
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao cancelar solicitação");
       setMessage({ text: "Solicitação cancelada com sucesso.", type: "success" });
       await loadUserReports();
     } catch (err: any) {
@@ -2044,23 +1760,25 @@ function ReportarTab() {
   const exportReports = () => {
     if (reports.length === 0) return;
     const headers = ["Data", "Título", "Assunto", "Status", "Solicitante", "Equipe", "Obs. Comercial"];
-    const rows = reports.map(r =>
-      [new Date(r.data).toLocaleString("pt-BR"), `"${r.titulo}"`, `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`, `"${r.observacao_sales_ops}"`].join(";")
+    const rows = reports.map((r) =>
+      [new Date(r.data).toLocaleString("pt-BR"), `"${r.titulo}"`, `"${r.assunto}"`, r.status, `"${r.solicitante}"`, `"${r.equipe}"`, `"${r.observacao_sales_ops}"`].join(";"),
     );
     const csv = [headers.join(";"), ...rows].join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `reportes_${new Date().toISOString().split("T")[0]}.csv`;
-    a.click(); URL.revokeObjectURL(url);
+    a.href = url;
+    a.download = `reportes_${new Date().toISOString().split("T")[0]}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
-  const filteredReports = reports.filter(r => {
+  const filteredReports = reports.filter((r) => {
     const statusMatch = filterStatus === "todos" || r.status === filterStatus;
     if (!statusMatch) return false;
     return isWithinDateRange(r.data, filterDataInicio, filterDataFim);
   });
-  const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "Coordenador", "ANALISE", "REVISÃO", "CANCELADO"];
+  const statusOptions = ["todos", "ENVIADO", "SUSPEITO", "CONCLUÍDO", "ERRO", "BLOQUEADO", "ANALISE", "REVISÃO", "CANCELADO"];
 
   const viewDetails = (report: ReportItem) => {
     const statusLabel = getStatusInfo(report.status).label;
@@ -2089,7 +1807,7 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
               type="text"
               id="rep-titulo"
               value={titulo}
-              onChange={e => setTitulo(e.target.value)}
+              onChange={(e) => setTitulo(e.target.value)}
               className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
               placeholder="Ex.: Erro ao carregar relatório"
               required
@@ -2099,7 +1817,7 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
 
           <div>
             <label htmlFor="rep-assunto" className="block text-sm font-medium text-[#0f172a] mb-1">Assunto</label>
-            <select id="rep-assunto" value={assunto} onChange={e => setAssunto(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>
+            <select id="rep-assunto" value={assunto} onChange={(e) => setAssunto(e.target.value)} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required>
               <option value="">Selecionar assunto</option>
               <option value="Discadora">Discadora</option>
               <option value="CRM">CRM</option>
@@ -2112,7 +1830,14 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
 
           <div>
             <label htmlFor="rep-descricao" className="block text-sm font-medium text-[#0f172a] mb-1">Descrição</label>
-            <textarea id="rep-descricao" value={descricao} onChange={e => setDescricao(e.target.value)} rows={5} className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg" required />
+            <textarea
+              id="rep-descricao"
+              value={descricao}
+              onChange={(e) => setDescricao(e.target.value)}
+              rows={5}
+              className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg"
+              required
+            />
             <div className="text-right text-xs text-[#94a3b8] mt-1">{descricao.length}/1000</div>
           </div>
 
@@ -2125,10 +1850,10 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
-              onClick={() => document.getElementById('reportar-arquivos')?.click()}
+              onClick={() => document.getElementById("reportar-arquivos")?.click()}
               className={cn(
                 "flex flex-col items-center justify-center border-2 border-dashed rounded-lg p-6 cursor-pointer transition-colors",
-                isDragging ? "border-[#2F6FED] bg-[#eff6ff]" : "border-[#cbd5e1] bg-[#f8fafc] hover:border-[#2F6FED] hover:bg-[#f0f7ff]"
+                isDragging ? "border-[#2F6FED] bg-[#eff6ff]" : "border-[#cbd5e1] bg-[#f8fafc] hover:border-[#2F6FED] hover:bg-[#f0f7ff]",
               )}
             >
               <Upload className={cn("w-8 h-8 mb-2", isDragging ? "text-[#2F6FED]" : "text-[#94a3b8]")} />
@@ -2182,7 +1907,11 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
           )}
 
           <div className="flex justify-end">
-            <button type="submit" disabled={loading} className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50">
+            <button
+              type="submit"
+              disabled={loading}
+              className="bg-[#2F6FED] text-white px-6 py-2 rounded-lg font-semibold flex items-center gap-2 hover:bg-[#2F6FED]/90 transition-colors disabled:opacity-50"
+            >
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
               {loading ? "Enviando..." : "Enviar Reporte"}
             </button>
@@ -2192,38 +1921,37 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
 
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
-          <div>
-            <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
-            <p className="text-xs text-[#64748b]">Atualização automática a cada 10 segundos</p>
-          </div>
+          <h2 className="text-lg font-bold text-[#0f172a]">Meus Reportes</h2>
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => loadUserReports()}
+              onClick={loadUserReports}
               disabled={loadingReports}
               className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0] disabled:opacity-50"
               title="Recarregar os reportes"
             >
               <RefreshCw className={cn("w-3 h-3", loadingReports && "animate-spin")} /> Atualizar
             </button>
-            <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
-              {statusOptions.map(s => <option key={s} value={s}>{s === "todos" ? "Todos" : s}</option>)}
+            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm">
+              {statusOptions.map((s) => (
+                <option key={s} value={s}>
+                  {s === "todos" ? "Todos" : s}
+                </option>
+              ))}
             </select>
-            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
+            <input type="date" value={filterDataInicio} onChange={(e) => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
+            <input type="date" value={filterDataFim} onChange={(e) => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
             <button type="button" onClick={exportReports} className="text-sm bg-[#f1f5f9] px-3 py-1 rounded flex items-center gap-1 hover:bg-[#e2e8f0]">
               <Download className="w-3 h-3" /> Exportar
             </button>
           </div>
         </div>
-        {loadError && (
-          <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700 mb-4">
-            Erro ao carregar reportes: {loadError}
-          </div>
-        )}
+        {loadError && <div className="p-3 rounded-lg text-sm bg-red-50 text-red-700 mb-4">Erro ao carregar reportes: {loadError}</div>}
         {loadingReports ? (
-          <div className="flex justify-center py-8"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>
+          <div className="flex justify-center py-8">
+            <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
+          </div>
         ) : filteredReports.length === 0 ? (
           <div className="text-center py-8 text-[#64748b]">Nenhum reporte encontrado no período</div>
         ) : (
@@ -2239,7 +1967,7 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
                 </tr>
               </thead>
               <tbody>
-                {filteredReports.map(r => {
+                {filteredReports.map((r) => {
                   const info = getStatusInfo(r.status);
                   const canCancel = r.status === "ENVIADO" || r.status === "REVISÃO";
                   return (
@@ -2252,19 +1980,18 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
                       <td className="max-w-[200px] whitespace-pre-wrap break-words" title={r.observacao_sales_ops}>
                         {r.observacao_sales_ops || "—"}
                       </td>
-                      <td><span className={cn("badge", info.className)}>{info.icon} {info.label}</span></td>
+                      <td>
+                        <span className={cn("badge", info.className)}>
+                          {info.icon} {info.label}
+                        </span>
+                      </td>
                       <td>
                         <div className="flex items-center gap-2">
                           <button type="button" onClick={() => viewDetails(r)} className="text-[#2F6FED] hover:text-[#2F6FED]/80" title="Ver detalhes">
                             <Eye className="w-4 h-4" />
                           </button>
                           {canCancel && (
-                            <button
-                              type="button"
-                              onClick={() => cancelRequest(r.id)}
-                              className="text-red-500 hover:text-red-700"
-                              title="Cancelar solicitação"
-                            >
+                            <button type="button" onClick={() => cancelRequest(r.id)} className="text-red-500 hover:text-red-700" title="Cancelar solicitação">
                               <Ban className="w-4 h-4" />
                             </button>
                           )}
@@ -2282,38 +2009,37 @@ ${report.observacao_sales_ops ? `\nObs. Comercial:\n${report.observacao_sales_op
   );
 }
 
-// ---------------------- Visão SalesOps ----------------------
+// =====================================================================
+// SalesOps (abas)
+// =====================================================================
 function SalesOpsTab() {
   const [subTab, setSubTab] = useState<"movimentacoes" | "reportes">("reportes");
-
   return (
     <div className="space-y-4">
       <div className="flex gap-2 border-b border-[#e2e8f0] pb-2">
         {[
           { id: "reportes", label: "Reportes" },
           { id: "movimentacoes", label: "Movimentações" },
-        ].map(tab => (
+        ].map((tab) => (
           <button
             key={tab.id}
             type="button"
             onClick={() => setSubTab(tab.id as typeof subTab)}
-            className={cn(
-              "filter-pill",
-              subTab === tab.id && "active"
-            )}
+            className={cn("filter-pill", subTab === tab.id && "active")}
           >
             {tab.label}
           </button>
         ))}
       </div>
-
       {subTab === "movimentacoes" && <MovimentacoesSuporteTab />}
       {subTab === "reportes" && <ReportesSuporteTab />}
     </div>
   );
 }
 
-// ---------------------- Modal de Edição (Reutilizável) ----------------------
+// =====================================================================
+// EditModal (reutilizável, com botões opcionais Concluir, Bloquear e Reprocessar)
+// =====================================================================
 interface EditModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -2321,31 +2047,57 @@ interface EditModalProps {
   children: React.ReactNode;
   onSave: () => void;
   saving: boolean;
+  // Ações opcionais — usadas nas visões SalesOps / Coordenador.
   onConcluir?: () => void;
   concluindo?: boolean;
   concluirDisabled?: boolean;
   concluirTitle?: string;
+  // Ação de Bloquear (mantém o caso em revisão / em blocked queue).
+  onBloquear?: () => void;
+  bloqueando?: boolean;
+  bloquearDisabled?: boolean;
+  bloquearTitle?: string;
+  // Ação de Reprocessar (autorização do coordenador com bypass da regra
+  // temporal — usada na Visão Coordenador).
+  onReprocessar?: () => void;
+  reprocessando?: boolean;
+  reprocessarDisabled?: boolean;
+  reprocessarTitle?: string;
 }
 
 function EditModal({
-  isOpen, onClose, title, children, onSave, saving,
-  onConcluir, concluindo = false, concluirDisabled = false, concluirTitle,
+  isOpen,
+  onClose,
+  title,
+  children,
+  onSave,
+  saving,
+  onConcluir,
+  concluindo = false,
+  concluirDisabled = false,
+  concluirTitle,
+  onBloquear,
+  bloqueando = false,
+  bloquearDisabled = false,
+  bloquearTitle,
+  onReprocessar,
+  reprocessando = false,
+  reprocessarDisabled = false,
+  reprocessarTitle,
 }: EditModalProps) {
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl p-6 max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-lg font-bold text-[#0f172a]">{title}</h3>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <div className="space-y-4">
-          {children}
-        </div>
-        <div className="flex justify-end gap-3 mt-6">
+        <div className="space-y-4">{children}</div>
+        <div className="flex justify-end gap-3 mt-6 flex-wrap">
           <button
             type="button"
             onClick={onClose}
@@ -2356,22 +2108,46 @@ function EditModal({
           <button
             type="button"
             onClick={onSave}
-            disabled={saving || concluindo}
+            disabled={saving || concluindo || bloqueando || reprocessando}
             className="px-4 py-2 bg-[#2F6FED] text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-[#2F6FED]/90 disabled:opacity-50"
           >
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             {saving ? "Salvando..." : "Salvar"}
           </button>
+          {onBloquear && (
+            <button
+              type="button"
+              onClick={onBloquear}
+              disabled={saving || concluindo || bloqueando || reprocessando || bloquearDisabled}
+              title={bloquearTitle}
+              className="px-4 py-2 bg-amber-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-amber-700 disabled:opacity-50"
+            >
+              {bloqueando ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4" />}
+              {bloqueando ? "Bloqueando..." : "Bloquear"}
+            </button>
+          )}
+          {onReprocessar && (
+            <button
+              type="button"
+              onClick={onReprocessar}
+              disabled={saving || concluindo || bloqueando || reprocessando || reprocessarDisabled}
+              title={reprocessarTitle}
+              className="px-4 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-purple-700 disabled:opacity-50"
+            >
+              {reprocessando ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+              {reprocessando ? "Reprocessando..." : "Reprocessar"}
+            </button>
+          )}
           {onConcluir && (
             <button
               type="button"
               onClick={onConcluir}
-              disabled={saving || concluindo || concluirDisabled}
+              disabled={saving || concluindo || bloqueando || reprocessando || concluirDisabled}
               title={concluirTitle}
               className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-green-700 disabled:opacity-50"
             >
               {concluindo ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-              {concluindo ? 'Concluindo...' : 'Concluir'}
+              {concluindo ? "Concluindo..." : "Concluir"}
             </button>
           )}
         </div>
@@ -2380,7 +2156,9 @@ function EditModal({
   );
 }
 
-// ---------------------- Modal de Reprocessamento ----------------------
+// =====================================================================
+// ReprocessModal
+// =====================================================================
 interface ReprocessModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -2394,27 +2172,31 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
   const [observacao, setObservacao] = useState("");
 
   useEffect(() => {
-    if (isOpen) { setForce(false); setObservacao(""); }
+    if (isOpen) {
+      setForce(false);
+      setObservacao("");
+    }
   }, [isOpen]);
 
   if (!isOpen || !ticket) return null;
 
   const escritaParcial = (() => {
     try {
-      const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
+      const parsed = JSON.parse(ticket.observacao_sales_ops || "{}");
       return Boolean(
-        parsed?.hubspot?.resultadoParcial || parsed?.resultadoParcial ||
-        parsed?.requiresReconciliation || parsed?.hubspot?.requiresReconciliation
+        parsed?.hubspot?.resultadoParcial || parsed?.resultadoParcial || parsed?.requiresReconciliation || parsed?.hubspot?.requiresReconciliation,
       );
-    } catch { return false; }
+    } catch {
+      return false;
+    }
   })();
 
   const motivoAtual = (() => {
     try {
-      const parsed = JSON.parse(ticket.observacao_sales_ops || '{}');
-      return parsed?.hubspot?.mensagem || parsed?.observacao || '—';
+      const parsed = JSON.parse(ticket.observacao_sales_ops || "{}");
+      return parsed?.hubspot?.mensagem || parsed?.observacao || "—";
     } catch {
-      return ticket.observacao_sales_ops || '—';
+      return ticket.observacao_sales_ops || "—";
     }
   })();
 
@@ -2422,9 +2204,7 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6">
         <div className="flex justify-between items-center mb-4">
-          <h3 className="text-lg font-bold text-[#0f172a]">
-            Reprocessar Movimentação #{ticket.id_ticket_movimentacao}
-          </h3>
+          <h3 className="text-lg font-bold text-[#0f172a]">Reprocessar Movimentação #{ticket.id_ticket_movimentacao}</h3>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
             <X className="w-5 h-5" />
           </button>
@@ -2433,7 +2213,7 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
         <div className="space-y-4">
           <div className="text-sm text-[#475569]">
             <div><strong>Status atual:</strong> {ticket.status_mapeamento}</div>
-            <div><strong>Cliente:</strong> {`${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`.trim() || '—'}</div>
+            <div><strong>Cliente:</strong> {`${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`.trim() || "—"}</div>
             <div><strong>Destino:</strong> {ticket.equipe_destino_nome} / {ticket.colaborador_destino_nome}</div>
           </div>
 
@@ -2444,31 +2224,22 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
 
           {escritaParcial && (
             <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800">
-              <strong>Atenção:</strong> este ticket registrou gravação parcial no HubSpot.
-              Verifique o estado atual do card e do contato no CRM antes de prosseguir.
-              Ao continuar, marque a caixa abaixo para confirmar.
+              <strong>Atenção:</strong> este ticket registrou gravação parcial no HubSpot. Verifique o estado atual do card e do contato no CRM antes de prosseguir. Ao continuar, marque a caixa abaixo para confirmar.
             </div>
           )}
 
           {escritaParcial && (
             <label className="flex items-center gap-2 text-sm text-[#0f172a]">
-              <input
-                type="checkbox"
-                checked={force}
-                onChange={e => setForce(e.target.checked)}
-                className="h-4 w-4 rounded border-[#cbd5e1] text-[#2F6FED] focus:ring-[#2F6FED]"
-              />
+              <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} className="h-4 w-4 rounded border-[#cbd5e1] text-[#2F6FED] focus:ring-[#2F6FED]" />
               Confirmo que revisei o HubSpot e quero reprocessar mesmo assim
             </label>
           )}
 
           <div>
-            <label className="block text-sm font-medium text-[#0f172a] mb-1">
-              Observação (opcional)
-            </label>
+            <label className="block text-sm font-medium text-[#0f172a] mb-1">Observação (opcional)</label>
             <textarea
               value={observacao}
-              onChange={e => setObservacao(e.target.value)}
+              onChange={(e) => setObservacao(e.target.value)}
               rows={3}
               placeholder="Ex.: ajustei o cadastro da colaboradora; pode reprocessar."
               className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
@@ -2477,11 +2248,7 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
         </div>
 
         <div className="flex justify-end gap-3 mt-6">
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm font-medium text-[#475569] hover:bg-[#f1f5f9]"
-          >
+          <button type="button" onClick={onClose} className="px-4 py-2 border border-[#e2e8f0] rounded-lg text-sm font-medium text-[#475569] hover:bg-[#f1f5f9]">
             Cancelar
           </button>
           <button
@@ -2491,7 +2258,7 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
             className="px-4 py-2 bg-[#2F6FED] text-white rounded-lg text-sm font-medium flex items-center gap-2 hover:bg-[#2F6FED]/90 disabled:opacity-50"
           >
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
-            {saving ? 'Reprocessando...' : 'Reprocessar'}
+            {saving ? "Reprocessando..." : "Reprocessar"}
           </button>
         </div>
       </div>
@@ -2499,12 +2266,13 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
   );
 }
 
-// ---------------------- Tabela de movimentações (SalesOps) ----------------------
+// =====================================================================
+// MovimentacoesSuporteTab (SalesOps)
+// =====================================================================
 function MovimentacoesSuporteTab() {
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
@@ -2519,14 +2287,14 @@ function MovimentacoesSuporteTab() {
     cpf_cliente_informado: string;
     origem_cliente_informada: string;
   }>({
-    status_mapeamento: '',
-    observacao_sales_ops: '',
-    nome_cliente_informado: '',
-    sobrenome_cliente_informado: '',
-    email_cliente_informado: '',
-    telefone_cliente_informado: '',
-    cpf_cliente_informado: '',
-    origem_cliente_informada: '',
+    status_mapeamento: "",
+    observacao_sales_ops: "",
+    nome_cliente_informado: "",
+    sobrenome_cliente_informado: "",
+    email_cliente_informado: "",
+    telefone_cliente_informado: "",
+    cpf_cliente_informado: "",
+    origem_cliente_informada: "",
   });
   const [saving, setSaving] = useState(false);
   const [concluindo, setConcluindo] = useState(false);
@@ -2536,21 +2304,16 @@ function MovimentacoesSuporteTab() {
   const [draggingTicketId, setDraggingTicketId] = useState<number | null>(null);
   const [dragOverColuna, setDragOverColuna] = useState<string | null>(null);
 
-  const STATUS_REPROCESSAVEIS = new Set([
-    'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
-  ]);
+  const STATUS_REPROCESSAVEIS = new Set(["erro", "bloqueado", "aviso", "suporte", "fora_pipeline"]);
 
   const carregarTickets = async () => {
     try {
-      const data = await fetchAllSupportPages<TicketMovimentacao>(
-        `${API_BASE}/suporte/tickets-movimentacao?todos=1`,
-      );
-      setTickets(data);
-    } catch (err) {
-      setMessage({
-        text: err instanceof Error ? err.message : "Erro ao carregar tickets",
-        type: "error",
-      });
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao?todos=1`, { credentials: "include" });
+      const data = await safeJson(res);
+      if (data.success) setTickets(data.data);
+      else setMessage({ text: data.error || "Erro ao carregar tickets", type: "error" });
+    } catch (err: any) {
+      setMessage({ text: err.message || "Erro ao carregar tickets", type: "error" });
     } finally {
       setLoading(false);
     }
@@ -2567,40 +2330,41 @@ function MovimentacoesSuporteTab() {
 
   useEffect(() => {
     carregarTickets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const openEditModal = (ticket: TicketMovimentacao) => {
     setEditingTicket(ticket);
-    let observacao = ticket.observacao_sales_ops || '';
+    let observacao = ticket.observacao_sales_ops || "";
     try {
       const parsed = JSON.parse(observacao);
       observacao = parsed.observacao || observacao;
-    } catch (e) {
-      // Mantém texto puro
+    } catch {
+      /* mantém */
     }
     setEditForm({
-      status_mapeamento: ticket.status_mapeamento || 'pendente',
+      status_mapeamento: ticket.status_mapeamento || "pendente",
       observacao_sales_ops: observacao,
-      nome_cliente_informado: ticket.nome_cliente_informado || '',
-      sobrenome_cliente_informado: ticket.sobrenome_cliente_informado || '',
-      email_cliente_informado: ticket.email_cliente_informado || '',
-      telefone_cliente_informado: ticket.telefone_cliente_informado || '',
-      cpf_cliente_informado: ticket.cpf_cliente_informado || '',
-      origem_cliente_informada: ticket.origem_cliente_informada || '',
+      nome_cliente_informado: ticket.nome_cliente_informado || "",
+      sobrenome_cliente_informado: ticket.sobrenome_cliente_informado || "",
+      email_cliente_informado: ticket.email_cliente_informado || "",
+      telefone_cliente_informado: ticket.telefone_cliente_informado || "",
+      cpf_cliente_informado: ticket.cpf_cliente_informado || "",
+      origem_cliente_informada: ticket.origem_cliente_informada || "",
     });
   };
 
   const closeEditModal = () => {
     setEditingTicket(null);
     setEditForm({
-      status_mapeamento: '',
-      observacao_sales_ops: '',
-      nome_cliente_informado: '',
-      sobrenome_cliente_informado: '',
-      email_cliente_informado: '',
-      telefone_cliente_informado: '',
-      cpf_cliente_informado: '',
-      origem_cliente_informada: '',
+      status_mapeamento: "",
+      observacao_sales_ops: "",
+      nome_cliente_informado: "",
+      sobrenome_cliente_informado: "",
+      email_cliente_informado: "",
+      telefone_cliente_informado: "",
+      cpf_cliente_informado: "",
+      origem_cliente_informada: "",
     });
   };
 
@@ -2617,47 +2381,43 @@ function MovimentacoesSuporteTab() {
         origem_cliente_informada: editForm.origem_cliente_informada,
         observacao_sales_ops: editForm.observacao_sales_ops,
       };
-      // Link Hub só altera status pelo botão "Concluir".
-      if (editingTicket.crm_origem !== 'HUBSPOT_LINK') {
+      if (editingTicket.crm_origem !== "HUBSPOT_LINK") {
         payload.status_mapeamento = editForm.status_mapeamento;
       }
 
-      const res = await fetch(
-        `${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`,
-        {
-          method: 'PATCH',
-          headers: getCsrfHeaders(),
-          credentials: 'include',
-          body: JSON.stringify(payload),
-        }
-      );
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao atualizar');
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`, {
+        method: "PATCH",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao atualizar");
 
-      setTickets(prev => prev.map(t => {
-        if (t.id_ticket_movimentacao !== editingTicket.id_ticket_movimentacao) return t;
-        let novoObservacao;
-        try {
-          const current = JSON.parse(t.observacao_sales_ops || '{}');
-          current.observacao = editForm.observacao_sales_ops;
-          novoObservacao = JSON.stringify(current);
-        } catch {
-          novoObservacao = JSON.stringify({ observacao: editForm.observacao_sales_ops });
-        }
-        return {
-          ...t,
-          status_mapeamento: editingTicket.crm_origem === 'HUBSPOT_LINK'
-            ? t.status_mapeamento
-            : editForm.status_mapeamento,
-          nome_cliente_informado: editForm.nome_cliente_informado,
-          sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
-          email_cliente_informado: editForm.email_cliente_informado,
-          telefone_cliente_informado: editForm.telefone_cliente_informado,
-          cpf_cliente_informado: editForm.cpf_cliente_informado,
-          origem_cliente_informada: editForm.origem_cliente_informada,
-          observacao_sales_ops: novoObservacao,
-        };
-      }));
+      setTickets((prev) =>
+        prev.map((t) => {
+          if (t.id_ticket_movimentacao !== editingTicket.id_ticket_movimentacao) return t;
+          let novoObservacao;
+          try {
+            const current = JSON.parse(t.observacao_sales_ops || "{}");
+            current.observacao = editForm.observacao_sales_ops;
+            novoObservacao = JSON.stringify(current);
+          } catch {
+            novoObservacao = JSON.stringify({ observacao: editForm.observacao_sales_ops });
+          }
+          return {
+            ...t,
+            status_mapeamento: editingTicket.crm_origem === "HUBSPOT_LINK" ? t.status_mapeamento : editForm.status_mapeamento,
+            nome_cliente_informado: editForm.nome_cliente_informado,
+            sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+            email_cliente_informado: editForm.email_cliente_informado,
+            telefone_cliente_informado: editForm.telefone_cliente_informado,
+            cpf_cliente_informado: editForm.cpf_cliente_informado,
+            origem_cliente_informada: editForm.origem_cliente_informada,
+            observacao_sales_ops: novoObservacao,
+          };
+        }),
+      );
 
       setMessage({ text: "Ticket atualizado com sucesso.", type: "success" });
       closeEditModal();
@@ -2670,9 +2430,7 @@ function MovimentacoesSuporteTab() {
 
   const handleConcluir = async () => {
     if (!editingTicket) return;
-    if (!confirm('Deseja concluir este caso? O status será alterado para "Concluído".')) {
-      return;
-    }
+    if (!confirm('Deseja concluir este caso? O status será alterado para "Concluído".')) return;
     setConcluindo(true);
     try {
       const payload: Record<string, unknown> = {
@@ -2683,158 +2441,146 @@ function MovimentacoesSuporteTab() {
         cpf_cliente_informado: editForm.cpf_cliente_informado,
         origem_cliente_informada: editForm.origem_cliente_informada,
         observacao_sales_ops: editForm.observacao_sales_ops,
-        status_mapeamento: 'concluido',
+        status_mapeamento: "concluido",
       };
 
-      const res = await fetch(
-        `${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`,
-        {
-          method: 'PATCH',
-          headers: getCsrfHeaders(),
-          credentials: 'include',
-          body: JSON.stringify(payload),
-        }
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`, {
+        method: "PATCH",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao concluir");
+
+      setTickets((prev) =>
+        prev.map((t) => {
+          if (t.id_ticket_movimentacao !== editingTicket.id_ticket_movimentacao) return t;
+          let novoObservacao;
+          try {
+            const current = JSON.parse(t.observacao_sales_ops || "{}");
+            current.observacao = editForm.observacao_sales_ops;
+            novoObservacao = JSON.stringify(current);
+          } catch {
+            novoObservacao = JSON.stringify({ observacao: editForm.observacao_sales_ops });
+          }
+          return {
+            ...t,
+            status_mapeamento: "concluido",
+            nome_cliente_informado: editForm.nome_cliente_informado,
+            sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+            email_cliente_informado: editForm.email_cliente_informado,
+            telefone_cliente_informado: editForm.telefone_cliente_informado,
+            cpf_cliente_informado: editForm.cpf_cliente_informado,
+            origem_cliente_informada: editForm.origem_cliente_informada,
+            observacao_sales_ops: novoObservacao,
+          };
+        }),
       );
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao concluir');
 
-      setTickets(prev => prev.map(t => {
-        if (t.id_ticket_movimentacao !== editingTicket.id_ticket_movimentacao) return t;
-        let novoObservacao;
-        try {
-          const current = JSON.parse(t.observacao_sales_ops || '{}');
-          current.observacao = editForm.observacao_sales_ops;
-          novoObservacao = JSON.stringify(current);
-        } catch {
-          novoObservacao = JSON.stringify({ observacao: editForm.observacao_sales_ops });
-        }
-        return {
-          ...t,
-          status_mapeamento: 'concluido',
-          nome_cliente_informado: editForm.nome_cliente_informado,
-          sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
-          email_cliente_informado: editForm.email_cliente_informado,
-          telefone_cliente_informado: editForm.telefone_cliente_informado,
-          cpf_cliente_informado: editForm.cpf_cliente_informado,
-          origem_cliente_informada: editForm.origem_cliente_informada,
-          observacao_sales_ops: novoObservacao,
-        };
-      }));
-
-      setMessage({ text: 'Caso concluído com sucesso.', type: 'success' });
+      setMessage({ text: "Caso concluído com sucesso.", type: "success" });
       closeEditModal();
-      setTimeout(() => { carregarTickets(); }, 1500);
+      setTimeout(() => {
+        carregarTickets();
+      }, 1500);
     } catch (err: any) {
-      setMessage({ text: err.message, type: 'error' });
+      setMessage({ text: err.message, type: "error" });
     } finally {
       setConcluindo(false);
     }
   };
 
   const moverTicketParaStatus = async (ticketId: number, novoStatus: string) => {
-    const ticketAtual = tickets.find(t => t.id_ticket_movimentacao === ticketId);
+    const ticketAtual = tickets.find((t) => t.id_ticket_movimentacao === ticketId);
     if (!ticketAtual || ticketAtual.status_mapeamento === novoStatus) return;
 
     const statusAnterior = ticketAtual.status_mapeamento;
-    setTickets(prev => prev.map(t =>
-      t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: novoStatus } : t
-    ));
+    setTickets((prev) =>
+      prev.map((t) => (t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: novoStatus } : t)),
+    );
 
     try {
       const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${ticketId}`, {
-        method: 'PATCH',
+        method: "PATCH",
         headers: getCsrfHeaders(),
-        credentials: 'include',
+        credentials: "include",
         body: JSON.stringify({ status_mapeamento: novoStatus }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao mover ticket');
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao mover ticket");
     } catch (err: any) {
-      // Reverte em caso de falha
-      setTickets(prev => prev.map(t =>
-        t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: statusAnterior } : t
-      ));
-      setMessage({ text: err.message || 'Erro ao mover ticket', type: 'error' });
+      setTickets((prev) =>
+        prev.map((t) => (t.id_ticket_movimentacao === ticketId ? { ...t, status_mapeamento: statusAnterior } : t)),
+      );
+      setMessage({ text: err.message || "Erro ao mover ticket", type: "error" });
     }
   };
 
-  const openReprocessModal = (ticket: TicketMovimentacao) => {
-    setReprocessingTicket(ticket);
-  };
-
-  const closeReprocessModal = () => {
-    setReprocessingTicket(null);
-  };
+  const openReprocessModal = (ticket: TicketMovimentacao) => setReprocessingTicket(ticket);
+  const closeReprocessModal = () => setReprocessingTicket(null);
 
   const reprocessarTicket = async ({ force, observacao }: { force: boolean; observacao: string }) => {
     if (!reprocessingTicket) return;
     setReprocessing(true);
     try {
-      const res = await fetch(
-        `${API_BASE}/suporte/tickets-movimentacao/${reprocessingTicket.id_ticket_movimentacao}/reprocessar`,
-        {
-          method: 'POST',
-          headers: getCsrfHeaders(),
-          credentials: 'include',
-          body: JSON.stringify({ force, observacao }),
-        }
-      );
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao reprocessar');
-
-      setTickets(prev => prev.map(t =>
-        t.id_ticket_movimentacao === reprocessingTicket.id_ticket_movimentacao
-          ? { ...t, status_mapeamento: 'pendente' }
-          : t
-      ));
-
-      setMessage({
-        text: data.message || 'Ticket reenfileirado para reprocessamento.',
-        type: 'success',
+      const res = await fetch(`${API_BASE}/suporte/tickets-movimentacao/${reprocessingTicket.id_ticket_movimentacao}/reprocessar`, {
+        method: "POST",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({ force, observacao }),
       });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao reprocessar");
+
+      setTickets((prev) =>
+        prev.map((t) =>
+          t.id_ticket_movimentacao === reprocessingTicket.id_ticket_movimentacao ? { ...t, status_mapeamento: "pendente" } : t,
+        ),
+      );
+
+      setMessage({ text: data.message || "Ticket reenfileirado para reprocessamento.", type: "success" });
       closeReprocessModal();
-      setTimeout(() => { carregarTickets(); }, 5000);
+      setTimeout(() => {
+        carregarTickets();
+      }, 5000);
     } catch (err: any) {
-      setMessage({ text: err.message, type: 'error' });
+      setMessage({ text: err.message, type: "error" });
     } finally {
       setReprocessing(false);
     }
   };
 
-  const filteredTickets = tickets.filter(t => {
-    const query = normalizeKey(searchTerm);
-    const nameMatches = !query || [
-      t.nome_cliente_informado,
-      t.sobrenome_cliente_informado,
-      t.colaborador_origem_nome,
-      t.colaborador_destino_nome,
-      t.equipe_destino_nome,
-      t.motivo_solicitacao,
-      t.observacao_sales_ops,
-    ].some(value => normalizeKey(String(value || '')).includes(query));
-    return nameMatches && isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
-  });
+  const filteredTickets = tickets.filter((t) => isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim));
 
   const ticketsPorColuna = useMemo(() => {
     const grupos: Record<string, TicketMovimentacao[]> = {};
     for (const coluna of MOVIMENTACOES_STATUS_COLUMNS) grupos[coluna] = [];
     for (const ticket of filteredTickets) {
-      const status = ticket.status_mapeamento || 'pendente';
+      const status = ticket.status_mapeamento || "pendente";
       if (!grupos[status]) grupos[status] = [];
       grupos[status].push(ticket);
     }
     return grupos;
   }, [filteredTickets]);
 
-  const colunasExibidas = MOVIMENTACOES_STATUS_COLUMNS.filter(coluna =>
-    MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS.includes(coluna) || (ticketsPorColuna[coluna]?.length || 0) > 0
+  const colunasExibidas = MOVIMENTACOES_STATUS_COLUMNS.filter(
+    (coluna) => MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS.includes(coluna) || (ticketsPorColuna[coluna]?.length || 0) > 0,
   );
 
-  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>;
+  if (loading)
+    return (
+      <div className="flex justify-center py-12">
+        <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
+      </div>
+    );
 
   return (
     <div className="space-y-4">
-      {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}>{message.text}</div>}
+      {message && (
+        <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}>
+          {message.text}
+        </div>
+      )}
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Movimentações (Suporte)</h2>
@@ -2848,21 +2594,9 @@ function MovimentacoesSuporteTab() {
             >
               <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} /> Atualizar
             </button>
-
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]" />
-              <input
-                type="search"
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                placeholder="Buscar por nome do caso..."
-                aria-label="Buscar movimentações por nome do caso"
-                className="pl-8 pr-3 py-1.5 border border-[#e2e8f0] rounded text-sm"
-              />
-            </div>
-            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
+            <input type="date" value={filterDataInicio} onChange={(e) => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
+            <input type="date" value={filterDataFim} onChange={(e) => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
           </div>
         </div>
 
@@ -2870,7 +2604,7 @@ function MovimentacoesSuporteTab() {
           <div className="text-center py-8 text-[#64748b]">Nenhum ticket de movimentação encontrado</div>
         ) : (
           <div className="kanban-scroll flex gap-3 overflow-x-auto pb-3">
-            {colunasExibidas.map(coluna => {
+            {colunasExibidas.map((coluna) => {
               const statusInfo = getStatusInfo(coluna);
               const ticketsColuna = ticketsPorColuna[coluna] || [];
               const isDragOver = dragOverColuna === coluna;
@@ -2879,14 +2613,17 @@ function MovimentacoesSuporteTab() {
                   key={coluna}
                   className={cn(
                     "flex-1 min-w-[220px] h-[65vh] flex flex-col bg-[#f8fafc] rounded-lg border-2 transition-colors",
-                    isDragOver ? "border-[#2F6FED] bg-blue-50" : "border-[#e2e8f0]"
+                    isDragOver ? "border-[#2F6FED] bg-blue-50" : "border-[#e2e8f0]",
                   )}
-                  onDragOver={(e) => { e.preventDefault(); setDragOverColuna(coluna); }}
-                  onDragLeave={() => setDragOverColuna(prev => prev === coluna ? null : prev)}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragOverColuna(coluna);
+                  }}
+                  onDragLeave={() => setDragOverColuna((prev) => (prev === coluna ? null : prev))}
                   onDrop={(e) => {
                     e.preventDefault();
                     setDragOverColuna(null);
-                    const ticketId = Number(e.dataTransfer.getData('text/plain'));
+                    const ticketId = Number(e.dataTransfer.getData("text/plain"));
                     if (ticketId) moverTicketParaStatus(ticketId, coluna);
                     setDraggingTicketId(null);
                   }}
@@ -2901,25 +2638,30 @@ function MovimentacoesSuporteTab() {
                     {ticketsColuna.length === 0 ? (
                       <div className="text-center py-6 text-xs text-[#94a3b8]">Nenhum ticket</div>
                     ) : (
-                      ticketsColuna.map(ticket => (
+                      ticketsColuna.map((ticket) => (
                         <div
                           key={ticket.id_ticket_movimentacao}
                           draggable
                           onDragStart={(e) => {
-                            e.dataTransfer.setData('text/plain', String(ticket.id_ticket_movimentacao));
-                            e.dataTransfer.effectAllowed = 'move';
+                            e.dataTransfer.setData("text/plain", String(ticket.id_ticket_movimentacao));
+                            e.dataTransfer.effectAllowed = "move";
                             setDraggingTicketId(ticket.id_ticket_movimentacao);
                           }}
-                          onDragEnd={() => { setDraggingTicketId(null); setDragOverColuna(null); }}
+                          onDragEnd={() => {
+                            setDraggingTicketId(null);
+                            setDragOverColuna(null);
+                          }}
                           onClick={() => openEditModal(ticket)}
                           className={cn(
                             "w-full text-left bg-white border border-[#e2e8f0] rounded-lg p-3 cursor-grab active:cursor-grabbing hover:border-[#2F6FED] hover:shadow-sm transition-colors",
-                            draggingTicketId === ticket.id_ticket_movimentacao && "opacity-40"
+                            draggingTicketId === ticket.id_ticket_movimentacao && "opacity-40",
                           )}
                         >
                           <div className="flex items-center justify-between mb-1">
                             <span className="text-xs text-[#94a3b8]">#{ticket.id_ticket_movimentacao}</span>
-                            <span className="text-xs text-[#94a3b8] whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</span>
+                            <span className="text-xs text-[#94a3b8] whitespace-nowrap">
+                              {new Date(ticket.criado_em).toLocaleDateString("pt-BR")}
+                            </span>
                           </div>
                           <div className="text-sm font-medium text-[#0f172a]">
                             {ticket.nome_cliente_informado} {ticket.sobrenome_cliente_informado}
@@ -2939,153 +2681,167 @@ function MovimentacoesSuporteTab() {
       <EditModal
         isOpen={editingTicket !== null}
         onClose={closeEditModal}
-        title={`Movimentação #${editingTicket?.id_ticket_movimentacao || ''}`}
+        title={`Movimentação #${editingTicket?.id_ticket_movimentacao || ""}`}
         onSave={saveEdit}
         saving={saving}
         onConcluir={handleConcluir}
         concluindo={concluindo}
-        concluirDisabled={editingTicket?.status_mapeamento === 'concluido'}
-        concluirTitle={editingTicket?.status_mapeamento === 'concluido' ? 'Este caso já está concluído.' : undefined}
+        concluirDisabled={editingTicket?.status_mapeamento === "concluido"}
+        concluirTitle={editingTicket?.status_mapeamento === "concluido" ? "Este caso já está concluído." : undefined}
       >
-        {editingTicket && (() => {
-          const produtoInterno = (() => {
-            if (editingTicket.produto) return editingTicket.produto;
-            try {
-              const parsed = JSON.parse(editingTicket.observacao_sales_ops || '{}');
-              return parsed.produto || null;
-            } catch {
-              return null;
-            }
-          })();
-          const podeReprocessar = STATUS_REPROCESSAVEIS.has(
-            String(editingTicket.status_mapeamento || '').toLowerCase()
-          );
+        {editingTicket &&
+          (() => {
+            const produtoInterno = (() => {
+              if (editingTicket.produto) return editingTicket.produto;
+              try {
+                const parsed = JSON.parse(editingTicket.observacao_sales_ops || "{}");
+                return parsed.produto || null;
+              } catch {
+                return null;
+              }
+            })();
 
-          return (
-            <div className="space-y-3 mb-4 pb-4 border-b border-[#e2e8f0] text-sm">
-              <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
-                Informações do Cliente
-              </div>
+            const isJuridicoBlocked = Boolean(
+              editingTicket.isJuridicoBlocked || editingTicket.ruleApplied === "contact_has_juridico_deal",
+            );
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs text-[#94a3b8] mb-0.5">Nome</label>
-                  <input
-                    type="text"
-                    value={editForm.nome_cliente_informado}
-                    onChange={e => setEditForm(prev => ({ ...prev, nome_cliente_informado: e.target.value }))}
-                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                    placeholder="Nome do cliente"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#94a3b8] mb-0.5">Sobrenome</label>
-                  <input
-                    type="text"
-                    value={editForm.sobrenome_cliente_informado}
-                    onChange={e => setEditForm(prev => ({ ...prev, sobrenome_cliente_informado: e.target.value }))}
-                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                    placeholder="Sobrenome do cliente"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#94a3b8] mb-0.5">Telefone</label>
-                  <input
-                    type="text"
-                    value={editForm.telefone_cliente_informado}
-                    onChange={e => setEditForm(prev => ({ ...prev, telefone_cliente_informado: e.target.value }))}
-                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                    placeholder="+55-11-90000-0000"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#94a3b8] mb-0.5">E-mail</label>
-                  <input
-                    type="email"
-                    value={editForm.email_cliente_informado}
-                    onChange={e => setEditForm(prev => ({ ...prev, email_cliente_informado: e.target.value }))}
-                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                    placeholder="cliente@email.com"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#94a3b8] mb-0.5">CPF</label>
-                  <input
-                    type="text"
-                    value={editForm.cpf_cliente_informado}
-                    onChange={e => setEditForm(prev => ({ ...prev, cpf_cliente_informado: e.target.value }))}
-                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                    placeholder="000.000.000-00"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#94a3b8] mb-0.5">Origem</label>
-                  <input
-                    type="text"
-                    value={editForm.origem_cliente_informada}
-                    onChange={e => setEditForm(prev => ({ ...prev, origem_cliente_informada: e.target.value }))}
-                    className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
-                    placeholder="Discadora, CAT, Indicação..."
-                  />
-                </div>
-              </div>
+            const podeReprocessar =
+              !isJuridicoBlocked && STATUS_REPROCESSAVEIS.has(String(editingTicket.status_mapeamento || "").toLowerCase());
 
-              <div>
-                <div className="text-xs text-[#94a3b8] mb-0.5">Equipe que precisa cadastrar</div>
-                <div className="text-[#0f172a] font-medium">
-                  {editingTicket.equipe_destino_nome}
-                  {editingTicket.colaborador_destino_nome ? ` / ${editingTicket.colaborador_destino_nome}` : ''}
-                </div>
-              </div>
+            return (
+              <div className="space-y-3 mb-4 pb-4 border-b border-[#e2e8f0] text-sm">
+                <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">Informações do Cliente</div>
 
-              {produtoInterno && (
-                <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">Produto</div>
-                  <div className="text-[#0f172a]">{maskProduct(produtoInterno)}</div>
-                </div>
-              )}
-
-              {editingTicket.motivo_solicitacao && (
-                <div>
-                  <div className="text-xs text-[#94a3b8] mb-0.5">Motivo</div>
-                  <div className="text-[#0f172a] whitespace-pre-wrap break-words">
-                    {editingTicket.motivo_solicitacao}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Nome</label>
+                    <input
+                      type="text"
+                      value={editForm.nome_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, nome_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="Nome do cliente"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Sobrenome</label>
+                    <input
+                      type="text"
+                      value={editForm.sobrenome_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, sobrenome_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="Sobrenome do cliente"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Telefone</label>
+                    <input
+                      type="text"
+                      value={editForm.telefone_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, telefone_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="+55-11-90000-0000"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">E-mail</label>
+                    <input
+                      type="email"
+                      value={editForm.email_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, email_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="cliente@email.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">CPF</label>
+                    <input
+                      type="text"
+                      value={editForm.cpf_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, cpf_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="000.000.000-00"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Origem</label>
+                    <input
+                      type="text"
+                      value={editForm.origem_cliente_informada}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, origem_cliente_informada: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="Discadora, CAT, Indicação..."
+                    />
                   </div>
                 </div>
-              )}
 
-              {podeReprocessar && (
-                <button
-                  type="button"
-                  onClick={() => openReprocessModal(editingTicket)}
-                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors"
-                >
-                  <RotateCcw className="w-3 h-3" /> Reprocessar este caso
-                </button>
-              )}
-            </div>
-          );
-        })()}
+                <div>
+                  <div className="text-xs text-[#94a3b8] mb-0.5">Equipe que precisa cadastrar</div>
+                  <div className="text-[#0f172a] font-medium">
+                    {editingTicket.equipe_destino_nome}
+                    {editingTicket.colaborador_destino_nome ? ` / ${editingTicket.colaborador_destino_nome}` : ""}
+                  </div>
+                </div>
+
+                {produtoInterno && (
+                  <div>
+                    <div className="text-xs text-[#94a3b8] mb-0.5">Produto</div>
+                    <div className="text-[#0f172a]">{maskProduct(produtoInterno)}</div>
+                  </div>
+                )}
+
+                {editingTicket.motivo_solicitacao && (
+                  <div>
+                    <div className="text-xs text-[#94a3b8] mb-0.5">Motivo</div>
+                    <div className="text-[#0f172a] whitespace-pre-wrap break-words">{editingTicket.motivo_solicitacao}</div>
+                  </div>
+                )}
+
+                {editingTicket.link && (
+                  <div>
+                    <a
+                      href={editingTicket.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eff6ff] text-[#2F6FED] hover:bg-[#dbeafe] transition-colors"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Ver card na HubSpot
+                    </a>
+                  </div>
+                )}
+
+                {isJuridicoBlocked && (
+                  <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800" role="note">
+                    <strong>Bloqueio por regra Jurídica:</strong> o contato possui negócio no pipeline <em>Jurídico Auditoria de Ganho</em>. O
+                    reprocessamento automático está desabilitado — encaminhe o caso ao time Jurídico para validação.
+                  </div>
+                )}
+
+                {podeReprocessar && (
+                  <button
+                    type="button"
+                    onClick={() => openReprocessModal(editingTicket)}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors"
+                  >
+                    <RotateCcw className="w-3 h-3" /> Reprocessar este caso
+                  </button>
+                )}
+              </div>
+            );
+          })()}
 
         <div>
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
-          {editingTicket?.crm_origem === 'HUBSPOT_LINK' ? (
-            <select
-              value={editForm.status_mapeamento}
-              onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
-              className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
-            >
-              {!['coordenador', 'concluido'].includes(editForm.status_mapeamento) && (
-                <option value={editForm.status_mapeamento} disabled>
-                  {getStatusInfo(editForm.status_mapeamento).label}
-                </option>
-              )}
-              <option value="concluido">Concluído</option>
-            </select>
+          {editingTicket?.crm_origem === "HUBSPOT_LINK" ? (
+            <div className="px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm bg-[#f8fafc] text-[#475569]">
+              <strong className="capitalize">{editForm.status_mapeamento}</strong>
+              <span className="text-xs text-[#94a3b8] ml-2">— use o botão <strong>Concluir</strong> para finalizar manualmente</span>
+            </div>
           ) : (
             <select
               value={editForm.status_mapeamento}
-              onChange={e => setEditForm(prev => ({ ...prev, status_mapeamento: e.target.value }))}
+              onChange={(e) => setEditForm((prev) => ({ ...prev, status_mapeamento: e.target.value }))}
               className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
             >
               <option value="pendente">Pendente</option>
@@ -3094,6 +2850,8 @@ function MovimentacoesSuporteTab() {
               <option value="suporte">Suporte</option>
               <option value="aviso">Aviso</option>
               <option value="erro">Erro</option>
+              <option value="coordenador">Coordenador</option>
+              <option value="bloqueado">Bloqueado</option>
             </select>
           )}
         </div>
@@ -3102,7 +2860,7 @@ function MovimentacoesSuporteTab() {
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Observação SalesOps</label>
           <textarea
             value={editForm.observacao_sales_ops}
-            onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
+            onChange={(e) => setEditForm((prev) => ({ ...prev, observacao_sales_ops: e.target.value }))}
             rows={4}
             className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
             placeholder="Digite a observação..."
@@ -3121,32 +2879,30 @@ function MovimentacoesSuporteTab() {
   );
 }
 
-// ---------------------- Tabela de reportes (SalesOps) ----------------------
+// =====================================================================
+// ReportesSuporteTab
+// =====================================================================
 function ReportesSuporteTab() {
   const [tickets, setTickets] = useState<TicketSuporte[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>("todos");
   const [filterAssunto, setFilterAssunto] = useState<string>("todos");
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
   const [editingTicket, setEditingTicket] = useState<TicketSuporte | null>(null);
-  const [editForm, setEditForm] = useState<{ status: string; observacao_sales_ops: string }>({ status: '', observacao_sales_ops: '' });
+  const [editForm, setEditForm] = useState<{ status: string; observacao_sales_ops: string }>({ status: "", observacao_sales_ops: "" });
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   const carregarReportes = async () => {
     try {
-      const data = await fetchAllSupportPages<TicketSuporte>(
-        `${API_BASE}/suporte/ticket-suporte?todos=1`,
-      );
-      setTickets(data);
-    } catch (err) {
-      setMessage({
-        text: err instanceof Error ? err.message : "Erro ao carregar reportes",
-        type: "error",
-      });
+      const res = await fetch(`${API_BASE}/suporte/ticket-suporte?todos=1`, { credentials: "include" });
+      const data = await safeJson(res);
+      if (data.success) setTickets(data.data);
+      else setMessage({ text: data.error || "Erro ao carregar reportes", type: "error" });
+    } catch (err: any) {
+      setMessage({ text: err.message || "Erro ao carregar reportes", type: "error" });
     } finally {
       setLoading(false);
     }
@@ -3163,24 +2919,22 @@ function ReportesSuporteTab() {
 
   useEffect(() => {
     carregarReportes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const assuntosDisponiveis = useMemo(() => {
-    const assuntos = tickets.map(t => t.assunto).filter(Boolean);
+    const assuntos = tickets.map((t) => t.assunto).filter(Boolean);
     return Array.from(new Set(assuntos)).sort();
   }, [tickets]);
 
   const openEditModal = (ticket: TicketSuporte) => {
     setEditingTicket(ticket);
-    setEditForm({
-      status: ticket.status || 'ENVIADO',
-      observacao_sales_ops: ticket.observacao_sales_ops || '',
-    });
+    setEditForm({ status: ticket.status || "ENVIADO", observacao_sales_ops: ticket.observacao_sales_ops || "" });
   };
 
   const closeEditModal = () => {
     setEditingTicket(null);
-    setEditForm({ status: '', observacao_sales_ops: '' });
+    setEditForm({ status: "", observacao_sales_ops: "" });
   };
 
   const saveEdit = async () => {
@@ -3188,15 +2942,21 @@ function ReportesSuporteTab() {
     setSaving(true);
     try {
       const res = await fetch(`${API_BASE}/suporte/tickets-suporte/${editingTicket.id_ticket_suporte}`, {
-        method: 'PATCH',
+        method: "PATCH",
         headers: getCsrfHeaders(),
-        credentials: 'include',
+        credentials: "include",
         body: JSON.stringify(editForm),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Erro ao atualizar');
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Erro ao atualizar");
 
-      setTickets(prev => prev.map(t => t.id_ticket_suporte === editingTicket.id_ticket_suporte ? { ...t, status: editForm.status, observacao_sales_ops: editForm.observacao_sales_ops } : t));
+      setTickets((prev) =>
+        prev.map((t) =>
+          t.id_ticket_suporte === editingTicket.id_ticket_suporte
+            ? { ...t, status: editForm.status, observacao_sales_ops: editForm.observacao_sales_ops }
+            : t,
+        ),
+      );
       setMessage({ text: "Reporte atualizado com sucesso.", type: "success" });
       closeEditModal();
     } catch (err: any) {
@@ -3206,25 +2966,27 @@ function ReportesSuporteTab() {
     }
   };
 
-  const filteredTickets = tickets.filter(t => {
+  const filteredTickets = tickets.filter((t) => {
     const statusMatch = filterStatus === "todos" || t.status === filterStatus;
     const assuntoMatch = filterAssunto === "todos" || t.assunto === filterAssunto;
-    const query = normalizeKey(searchTerm);
-    const nameMatches = !query || [
-      t.titulo,
-      t.assunto,
-      t.solicitante_nome,
-      t.equipe_nome,
-    ].some(value => normalizeKey(String(value || '')).includes(query));
-    if (!statusMatch || !assuntoMatch || !nameMatches) return false;
+    if (!statusMatch || !assuntoMatch) return false;
     return isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim);
   });
 
-  if (loading) return <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" /></div>;
+  if (loading)
+    return (
+      <div className="flex justify-center py-12">
+        <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
+      </div>
+    );
 
   return (
     <div className="space-y-4">
-      {message && <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}>{message.text}</div>}
+      {message && (
+        <div className={cn("p-3 rounded-lg text-sm", message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700")}>
+          {message.text}
+        </div>
+      )}
       <div className="card p-5">
         <div className="flex flex-wrap justify-between items-center mb-4 gap-2">
           <h2 className="text-lg font-bold text-[#0f172a]">Reportes (Suporte)</h2>
@@ -3238,36 +3000,15 @@ function ReportesSuporteTab() {
             >
               <RefreshCw className={cn("w-3 h-3", refreshing && "animate-spin")} /> Atualizar
             </button>
-
-            <div className="relative">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-[#94a3b8]" />
-              <input
-                type="search"
-                value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
-                placeholder="Buscar por nome do caso..."
-                aria-label="Buscar reportes por nome do caso"
-                className="pl-8 pr-3 py-1.5 border border-[#e2e8f0] rounded text-sm"
-              />
-            </div>
-            <select
-              value={filterAssunto}
-              onChange={e => setFilterAssunto(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Filtrar por assunto"
-            >
+            <select value={filterAssunto} onChange={(e) => setFilterAssunto(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Filtrar por assunto">
               <option value="todos">Todos os assuntos</option>
-              {assuntosDisponiveis.map(assunto => (
-                <option key={assunto} value={assunto}>{assunto}</option>
+              {assuntosDisponiveis.map((assunto) => (
+                <option key={assunto} value={assunto}>
+                  {assunto}
+                </option>
               ))}
             </select>
-
-            <select
-              value={filterStatus}
-              onChange={e => setFilterStatus(e.target.value)}
-              className="px-2 py-1 border border-[#e2e8f0] rounded text-sm"
-              title="Filtrar por status"
-            >
+            <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Filtrar por status">
               <option value="todos">Todos</option>
               <option value="ENVIADO">Enviado</option>
               <option value="SUSPEITO">Suspeito</option>
@@ -3278,10 +3019,9 @@ function ReportesSuporteTab() {
               <option value="REVISÃO">Revisão</option>
               <option value="CANCELADO">Cancelado</option>
             </select>
-
-            <input type="date" value={filterDataInicio} onChange={e => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
+            <input type="date" value={filterDataInicio} onChange={(e) => setFilterDataInicio(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data inicial" />
             <span className="text-sm text-[#64748b]">até</span>
-            <input type="date" value={filterDataFim} onChange={e => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
+            <input type="date" value={filterDataFim} onChange={(e) => setFilterDataFim(e.target.value)} className="px-2 py-1 border border-[#e2e8f0] rounded text-sm" title="Data final" />
           </div>
         </div>
 
@@ -3303,12 +3043,12 @@ function ReportesSuporteTab() {
                 </tr>
               </thead>
               <tbody>
-                {filteredTickets.map(ticket => {
-                  const statusInfo = getStatusInfo(ticket.status || 'ENVIADO');
+                {filteredTickets.map((ticket) => {
+                  const statusInfo = getStatusInfo(ticket.status || "ENVIADO");
                   return (
                     <tr key={ticket.id_ticket_suporte}>
                       <td>{ticket.id_ticket_suporte}</td>
-                      <td className="whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString('pt-BR')}</td>
+                      <td className="whitespace-nowrap">{new Date(ticket.criado_em).toLocaleDateString("pt-BR")}</td>
                       <td>{ticket.solicitante_nome}</td>
                       <td>{ticket.equipe_nome}</td>
                       <td>{ticket.titulo || ticket.assunto}</td>
@@ -3343,7 +3083,7 @@ function ReportesSuporteTab() {
       <EditModal
         isOpen={editingTicket !== null}
         onClose={closeEditModal}
-        title={`Editar Reporte #${editingTicket?.id_ticket_suporte || ''}`}
+        title={`Editar Reporte #${editingTicket?.id_ticket_suporte || ""}`}
         onSave={saveEdit}
         saving={saving}
       >
@@ -3351,7 +3091,7 @@ function ReportesSuporteTab() {
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Status</label>
           <select
             value={editForm.status}
-            onChange={e => setEditForm(prev => ({ ...prev, status: e.target.value }))}
+            onChange={(e) => setEditForm((prev) => ({ ...prev, status: e.target.value }))}
             className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm"
           >
             <option value="ENVIADO">Enviado</option>
@@ -3368,7 +3108,7 @@ function ReportesSuporteTab() {
           <label className="block text-sm font-medium text-[#0f172a] mb-2">Observação SalesOps</label>
           <textarea
             value={editForm.observacao_sales_ops}
-            onChange={e => setEditForm(prev => ({ ...prev, observacao_sales_ops: e.target.value }))}
+            onChange={(e) => setEditForm((prev) => ({ ...prev, observacao_sales_ops: e.target.value }))}
             rows={5}
             className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
             placeholder="Digite a observação..."
@@ -3379,270 +3119,513 @@ function ReportesSuporteTab() {
   );
 }
 
-function CoordinatorValidationTab({ initialCaseId }: { initialCaseId: string | null }) {
-  const [cases, setCases] = useState<TicketMovimentacao[]>([]);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterDate, setFilterDate] = useState(() => {
-    const today = new Date();
-    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  });
-  const [loading, setLoading] = useState(true);
-  const [processingId, setProcessingId] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+// =====================================================================
+// CoordenadorTab — VISÃO COORDENADOR
+// =====================================================================
+// Lista de casos com status "coordenador" (bloqueio temporário por prazo
+// mínimo — pode ser autorizado pelo coordenador) e "bloqueado" (bloqueio
+// definitivo). O modal abre TODAS as informações da movimentação
+// (cliente editável, destino, produto, motivo, link do card) e oferece
+// três ações:
+//   • Salvar       — persiste cadastro + observação, sem mexer no status
+//   • Bloquear     — reenvia para status "bloqueado" com a observação
+//   • Reprocessar  — autoriza o worker a reexecutar ignorando a regra de
+//                    prazo mínimo (as demais regras continuam válidas)
+function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }) {
+  const { currentUser: accessUser } = useAccessControl();
+  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  const isAdmin = accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
+  const unidadeId = (accessUser as any)?.unidade_id != null ? Number((accessUser as any).unidade_id) : null;
 
-  const loadCases = async () => {
+  const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState<{ text: string; type: string } | null>(null);
+  const [editingTicket, setEditingTicket] = useState<TicketMovimentacao | null>(null);
+
+  const [editForm, setEditForm] = useState<{
+    observacao_sales_ops: string;
+    nome_cliente_informado: string;
+    sobrenome_cliente_informado: string;
+    email_cliente_informado: string;
+    telefone_cliente_informado: string;
+    cpf_cliente_informado: string;
+    origem_cliente_informada: string;
+  }>({
+    observacao_sales_ops: "",
+    nome_cliente_informado: "",
+    sobrenome_cliente_informado: "",
+    email_cliente_informado: "",
+    telefone_cliente_informado: "",
+    cpf_cliente_informado: "",
+    origem_cliente_informada: "",
+  });
+
+  const [saving, setSaving] = useState(false);
+  const [bloqueando, setBloqueando] = useState(false);
+  const [reprocessando, setReprocessando] = useState(false);
+  const focusConsumed = useRef(false);
+
+  const carregar = async () => {
     setLoading(true);
-    setError(null);
+    setMessage(null);
     try {
-      const data = await fetchAllSupportPages<TicketMovimentacao>(
-        `${API_BASE}/suporte/coordenador/casos`,
-      );
-      setCases(data);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Erro ao carregar casos para validação.');
+      // Busca os dois status administrativos em uma única chamada (CSV).
+      const url = `${API_BASE}/suporte/tickets-movimentacao?status_mapeamento=coordenador,bloqueado`;
+      const res = await fetch(url, { credentials: "include" });
+      const data = await safeJson(res);
+      if (!data.success) throw new Error(data.error || "Falha ao carregar");
+      let lista: TicketMovimentacao[] = data.data || [];
+
+      if (!isAdmin && unidadeId != null) {
+        lista = lista.filter((t) => {
+          const u = t.unidade_id ?? null;
+          return u == null || Number(u) === unidadeId;
+        });
+      }
+      setTickets(lista);
+    } catch (err: any) {
+      setMessage({ text: err.message, type: "error" });
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    void loadCases();
+    carregar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const query = normalizeKey(searchTerm);
-  const queryDigits = query.replace(/\D/g, '');
-  const filteredCases = cases.filter(ticket => {
-    const matchesSearch = !query || [
-      `${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`,
-      ticket.cpf_cliente_informado || '',
-      ticket.email_cliente_informado || '',
-      String(ticket.id_ticket_movimentacao),
-      String(ticket.id_ticket || ''),
-    ].some(value => normalizeKey(String(value)).includes(query)) ||
-      (/^\d+$/.test(query) &&
-        String(ticket.cpf_cliente_informado || '').replace(/\D/g, '').includes(queryDigits));
+  useEffect(() => {
+    if (!initialTicketId || focusConsumed.current) return;
+    if (tickets.length === 0) return;
+    const alvo = tickets.find((t) => t.id_ticket_movimentacao === initialTicketId);
+    if (alvo) {
+      openEditModal(alvo);
+      focusConsumed.current = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTicketId, tickets]);
 
-    if (!matchesSearch) return false;
-    // A busca deve localizar casos antigos mesmo com o filtro padrão em hoje.
-    if (query || !filterDate) return true;
-
-    if (!ticket.criado_em) return false;
-    const createdAt = new Date(ticket.criado_em);
-    if (Number.isNaN(createdAt.getTime())) return false;
-    const createdDate = `${createdAt.getFullYear()}-${String(createdAt.getMonth() + 1).padStart(2, '0')}-${String(createdAt.getDate()).padStart(2, '0')}`;
-    return createdDate === filterDate;
-  });
-
-  const handleDecision = async (ticket: TicketMovimentacao, action: 'bloquear' | 'autorizar') => {
-    const prompt = action === 'bloquear'
-      ? 'Bloquear este caso? A observação será registrada como "Bloqueado pelo Coordenador".'
-      : 'Autorizar o reprocessamento? O limite de tempo será ignorado, mas as regras de pipeline e etapa continuarão ativas.';
-    if (!window.confirm(prompt)) return;
-
-    setProcessingId(ticket.id_ticket_movimentacao);
-    setError(null);
-    setMessage(null);
+  const openEditModal = (ticket: TicketMovimentacao) => {
+    setEditingTicket(ticket);
+    let observacao = ticket.observacao_sales_ops || "";
     try {
-      const response = await fetch(
-        `${API_BASE}/suporte/coordenador/casos/${ticket.id_ticket_movimentacao}/decisao`,
-        {
-          method: 'POST',
-          headers: getCsrfHeaders(),
-          credentials: 'include',
-          body: JSON.stringify({ acao: action }),
-        },
-      );
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok || !data.success) {
-        throw new Error(data.error || `Erro HTTP ${response.status}`);
-      }
-      setMessage(data.message || 'Decisão registrada.');
-      await loadCases();
-    } catch (decisionError) {
-      setError(decisionError instanceof Error ? decisionError.message : 'Erro ao registrar a decisão.');
+      observacao = JSON.parse(observacao).observacao || observacao;
+    } catch {
+      /* mantém */
+    }
+    setEditForm({
+      observacao_sales_ops: observacao,
+      nome_cliente_informado: ticket.nome_cliente_informado || "",
+      sobrenome_cliente_informado: ticket.sobrenome_cliente_informado || "",
+      email_cliente_informado: ticket.email_cliente_informado || "",
+      telefone_cliente_informado: ticket.telefone_cliente_informado || "",
+      cpf_cliente_informado: ticket.cpf_cliente_informado || "",
+      origem_cliente_informada: ticket.origem_cliente_informada || "",
+    });
+  };
+
+  const closeEditModal = () => {
+    setEditingTicket(null);
+    setEditForm({
+      observacao_sales_ops: "",
+      nome_cliente_informado: "",
+      sobrenome_cliente_informado: "",
+      email_cliente_informado: "",
+      telefone_cliente_informado: "",
+      cpf_cliente_informado: "",
+      origem_cliente_informada: "",
+    });
+  };
+
+  const patch = async (
+    extraPayload: Record<string, unknown>,
+    mensagemSucesso: string,
+  ) => {
+    if (!editingTicket) return;
+    const res = await fetch(
+      `${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}`,
+      {
+        method: "PATCH",
+        headers: getCsrfHeaders(),
+        credentials: "include",
+        body: JSON.stringify({
+          nome_cliente_informado: editForm.nome_cliente_informado,
+          sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+          email_cliente_informado: editForm.email_cliente_informado,
+          telefone_cliente_informado: editForm.telefone_cliente_informado,
+          cpf_cliente_informado: editForm.cpf_cliente_informado,
+          origem_cliente_informada: editForm.origem_cliente_informada,
+          observacao_sales_ops: editForm.observacao_sales_ops,
+          ...extraPayload,
+        }),
+      },
+    );
+    const data = await safeJson(res);
+    if (!res.ok || !data.success) throw new Error(data.error || "Erro ao salvar");
+    setMessage({ text: mensagemSucesso, type: "success" });
+    closeEditModal();
+    await carregar();
+  };
+
+  const salvar = async () => {
+    setSaving(true);
+    try {
+      await patch({}, "Alterações salvas (status mantido).");
+    } catch (err: any) {
+      setMessage({ text: err.message, type: "error" });
     } finally {
-      setProcessingId(null);
+      setSaving(false);
     }
   };
 
+  const bloquear = async () => {
+    if (!editingTicket) return;
+    if (!confirm("Manter este caso como BLOQUEADO com a observação informada?")) return;
+    setBloqueando(true);
+    try {
+      await patch(
+        { status_mapeamento: "bloqueado" },
+        "Caso bloqueado — permanece na fila do coordenador.",
+      );
+    } catch (err: any) {
+      setMessage({ text: err.message, type: "error" });
+    } finally {
+      setBloqueando(false);
+    }
+  };
+
+  const reprocessar = async () => {
+    if (!editingTicket) return;
+    if (!confirm(
+      "Autorizar o reprocessamento agora? A regra de prazo mínimo (24h) será IGNORADA " +
+      "para este caso; todas as demais regras continuam sendo aplicadas.",
+    )) return;
+
+    setReprocessando(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/suporte/tickets-movimentacao/${editingTicket.id_ticket_movimentacao}/reprocessar-coordenador`,
+        {
+          method: "POST",
+          headers: getCsrfHeaders(),
+          credentials: "include",
+          body: JSON.stringify({
+            // envia as edições do modal para o worker trabalhar com dados corretos
+            nome_cliente_informado: editForm.nome_cliente_informado,
+            sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
+            email_cliente_informado: editForm.email_cliente_informado,
+            telefone_cliente_informado: editForm.telefone_cliente_informado,
+            cpf_cliente_informado: editForm.cpf_cliente_informado,
+            origem_cliente_informada: editForm.origem_cliente_informada,
+            observacao: editForm.observacao_sales_ops,
+          }),
+        },
+      );
+      const data = await safeJson(res);
+      if (!res.ok || !data.success) throw new Error(data.error || "Erro ao reprocessar");
+
+      setMessage({ text: data.message || "Caso reenfileirado com autorização.", type: "success" });
+      closeEditModal();
+      await carregar();
+    } catch (err: any) {
+      setMessage({ text: err.message, type: "error" });
+    } finally {
+      setReprocessando(false);
+    }
+  };
+
+  const jaBloqueado = editingTicket?.status_mapeamento === "bloqueado";
+
   return (
     <div className="space-y-4">
-      <div className="card flex flex-wrap items-center justify-between gap-3 p-5">
-        <div>
-          <h2 className="text-lg font-bold text-[#0f172a]">Visão Coordenador</h2>
-          <p className="mt-1 text-sm text-[#64748b]">
-            Casos bloqueados aguardando análise. Ao reprocessar, apenas a restrição de tempo é ignorada;
-            pipelines, etapas e demais validações continuam valendo.
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[#94a3b8]" />
-            <input
-              type="search"
-              value={searchTerm}
-              onChange={event => setSearchTerm(event.target.value)}
-              placeholder="Nome, número, CPF ou e-mail"
-              aria-label="Buscar casos por nome do cliente, número, CPF ou e-mail"
-              className="w-full rounded-lg border border-[#e2e8f0] py-2 pl-9 pr-3 text-sm text-[#334155] sm:w-64"
-            />
+      <div className="card p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-lg font-bold text-[#0f172a]">Visão Coordenador</h2>
+            <p className="text-xs text-[#64748b] mt-0.5">
+              Casos com status <strong>Coordenador</strong> (prazo mínimo) e <strong>Bloqueado</strong> que precisam da sua validação
+              {!isAdmin && unidadeId != null ? ` — unidade ${unidadeId}` : ""}.
+            </p>
           </div>
-          <label className="flex items-center gap-2 text-sm text-[#64748b]">
-            Data:
-            <input
-              type="date"
-              value={filterDate}
-              onChange={event => setFilterDate(event.target.value)}
-              className="rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm text-[#334155]"
-              aria-label="Filtrar casos pela data"
-            />
-          </label>
-          {filterDate && (
-            <button
-              type="button"
-              onClick={() => setFilterDate('')}
-              className="rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm font-medium text-[#334155] hover:bg-[#f8fafc]"
-            >
-              Todas as datas
-            </button>
-          )}
           <button
-            type="button"
-            onClick={() => void loadCases()}
+            onClick={carregar}
             disabled={loading}
-            className="inline-flex items-center gap-2 rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm font-medium text-[#334155] hover:bg-[#f8fafc] disabled:opacity-50"
+            className="px-3 py-1 text-sm rounded bg-[#f1f5f9] hover:bg-[#e2e8f0] flex items-center gap-1 disabled:opacity-50"
           >
-            <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+            <RefreshCw className={cn("w-3 h-3", loading && "animate-spin")} />
             Atualizar
           </button>
         </div>
+
+        {message && (
+          <div
+            className={cn(
+              "p-3 rounded-lg text-sm mb-3",
+              message.type === "success" ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700",
+            )}
+          >
+            {message.text}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex justify-center py-8">
+            <Loader2 className="w-6 h-6 animate-spin text-[#2F6FED]" />
+          </div>
+        ) : tickets.length === 0 ? (
+          <div className="text-center py-8 text-[#64748b]">Nenhum caso aguardando validação.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="simple-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Data</th>
+                  <th>Cliente</th>
+                  <th>Equipe destino</th>
+                  <th>Assessor destino</th>
+                  <th>Status</th>
+                  <th>Motivo</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tickets.map((t) => {
+                  const info = getStatusInfo(t.status_mapeamento || "bloqueado");
+                  let motivo = "";
+                  try {
+                    motivo = JSON.parse(t.observacao_sales_ops || "{}").observacao || "";
+                  } catch {
+                    motivo = t.observacao_sales_ops || "";
+                  }
+                  return (
+                    <tr key={t.id_ticket_movimentacao}>
+                      <td className="text-xs text-[#94a3b8]">#{t.id_ticket_movimentacao}</td>
+                      <td className="text-xs whitespace-nowrap">{new Date(t.criado_em).toLocaleDateString("pt-BR")}</td>
+                      <td className="text-xs">
+                        {t.nome_cliente_informado} {t.sobrenome_cliente_informado}
+                      </td>
+                      <td className="text-xs">{t.equipe_destino_nome}</td>
+                      <td className="text-xs">{t.colaborador_destino_nome}</td>
+                      <td>
+                        <span className={cn("badge", info.className)}>
+                          {info.icon} {info.label}
+                        </span>
+                      </td>
+                      <td className="text-xs max-w-xs truncate" title={motivo}>
+                        {motivo || "—"}
+                      </td>
+                      <td>
+                        <button
+                          onClick={() => openEditModal(t)}
+                          className="text-[#2F6FED] hover:underline text-xs font-medium"
+                        >
+                          Validar
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
-      {message && (
-        <div className="rounded-lg bg-green-50 p-3 text-sm text-green-700" role="status">{message}</div>
-      )}
-      {error && (
-        <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700" role="alert">{error}</div>
-      )}
-      {loading ? (
-        <div className="flex items-center justify-center gap-2 py-10 text-sm text-[#64748b]">
-          <Loader2 className="h-4 w-4 animate-spin" /> Carregando casos...
-        </div>
-      ) : cases.length === 0 ? (
-        <div className="card p-8 text-center text-sm text-[#64748b]">
-          Nenhum caso bloqueado aguardando validação.
-        </div>
-      ) : filteredCases.length === 0 ? (
-        <div className="card p-8 text-center text-sm text-[#64748b]">
-          {query
-            ? 'Nenhum caso encontrado para essa busca.'
-            : `Nenhum caso encontrado para ${filterDate ? new Date(`${filterDate}T00:00:00`).toLocaleDateString('pt-BR') : 'as datas selecionadas'}.`}
-        </div>
-      ) : (
-        filteredCases.map(ticket => {
-          const requesterUnit = ticket.unidade_id != null ? `Unidade ${ticket.unidade_id}` : 'Unidade não informada';
-          const observation = ticket.observacao || ticket.hubspot?.mensagem || 'Sem observação registrada.';
-          const alreadyBlockedByCoordinator = ticket.validacaoCoordenador?.acao === 'bloquear';
-          return (
-            <article
-              key={ticket.id_ticket_movimentacao}
-              id={`caso-coordenador-${ticket.id_ticket_movimentacao}`}
-              className={cn(
-                "card space-y-4 p-5",
-                initialCaseId === String(ticket.id_ticket_movimentacao) && "ring-2 ring-[#2F6FED]",
-              )}
-            >
-              <header className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h3 className="font-semibold text-[#0f172a]">
-                    {ticket.ticket_titulo || `${ticket.nome_cliente_informado} ${ticket.sobrenome_cliente_informado}`.trim() || `Caso #${ticket.id_ticket_movimentacao}`}
-                  </h3>
-                  <p className="mt-1 text-xs text-[#64748b]">
-                    Caso #{ticket.id_ticket_movimentacao}
-                    {ticket.id_ticket ? ` · Ticket #${ticket.id_ticket}` : ''}
-                    {ticket.criado_em ? ` · ${new Date(ticket.criado_em).toLocaleString('pt-BR')}` : ''}
-                  </p>
-                </div>
-                <span className={cn("badge", getStatusInfo(ticket.status_mapeamento).className)}>
-                  {getStatusInfo(ticket.status_mapeamento).icon} {getStatusInfo(ticket.status_mapeamento).label}
-                </span>
-              </header>
+      <EditModal
+        isOpen={editingTicket !== null}
+        onClose={closeEditModal}
+        title={`Validação #${editingTicket?.id_ticket_movimentacao || ""}`}
+        onSave={salvar}
+        saving={saving}
+        onBloquear={bloquear}
+        bloqueando={bloqueando}
+        bloquearDisabled={jaBloqueado}
+        bloquearTitle={jaBloqueado ? "Este caso já está bloqueado." : "Manter bloqueado com a observação atual"}
+        onReprocessar={reprocessar}
+        reprocessando={reprocessando}
+        reprocessarDisabled={
+          editingTicket
+            ? !["coordenador", "bloqueado"].includes(String(editingTicket.status_mapeamento || "").toLowerCase())
+            : false
+        }
+        reprocessarTitle={
+          editingTicket?.crm_origem === "HUBSPOT_LINK"
+            ? "Reprocessa o Link Hub mantendo as demais regras."
+            : "Reprocessa ignorando a regra de prazo mínimo de 24h. As demais regras continuam válidas."
+        }
+      >
+        {editingTicket && (() => {
+          const produtoInterno = (() => {
+            if (editingTicket.produto) return editingTicket.produto;
+            try {
+              const parsed = JSON.parse(editingTicket.observacao_sales_ops || "{}");
+              return parsed.produto || null;
+            } catch {
+              return null;
+            }
+          })();
 
-              {ticket.ticket_descricao && (
-                <p className="whitespace-pre-wrap break-words text-sm text-[#475569]">{ticket.ticket_descricao}</p>
-              )}
-
-              <dl className="grid grid-cols-1 gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-                <div><dt className="text-xs text-[#94a3b8]">Cliente</dt><dd className="break-words font-medium">{`${ticket.nome_cliente_informado || ''} ${ticket.sobrenome_cliente_informado || ''}`.trim() || 'Não informado'}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">Telefone</dt><dd>{ticket.telefone_cliente_informado || 'Não informado'}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">E-mail do cliente</dt><dd className="break-words">{ticket.email_cliente_informado || 'Não informado'}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">CPF</dt><dd>{ticket.cpf_cliente_informado || 'Não informado'}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">Origem / produto</dt><dd>{ticket.crm_origem || '—'}{ticket.produto ? ` · ${maskProduct(ticket.produto)}` : ''}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">Solicitante</dt><dd className="break-words">{ticket.solicitante_nome || ticket.colaborador_origem_nome || 'Não informado'}{ticket.solicitante_email ? ` · ${ticket.solicitante_email}` : ''}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">Unidade / equipe de origem</dt><dd>{requesterUnit}{ticket.equipe_origem_nome ? ` · ${ticket.equipe_origem_nome}` : ''}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">Equipe / assessor destino</dt><dd>{ticket.equipe_destino_nome || '—'}{ticket.colaborador_destino_nome ? ` · ${ticket.colaborador_destino_nome}` : ''}</dd></div>
-                <div><dt className="text-xs text-[#94a3b8]">Pipeline / etapa</dt><dd>{ticket.hubspot?.pipelineNome || '—'} / {ticket.hubspot?.stageNome || '—'}</dd></div>
-              </dl>
-
-              {ticket.motivo_solicitacao && (
-                <div>
-                  <div className="text-xs text-[#94a3b8]">Motivo da solicitação</div>
-                  <p className="whitespace-pre-wrap break-words text-sm text-[#475569]">{ticket.motivo_solicitacao}</p>
-                </div>
-              )}
-              <div>
-                <div className="text-xs text-[#94a3b8]">Observação / validação HubSpot</div>
-                <p className="whitespace-pre-wrap break-words text-sm text-[#475569]">{observation}</p>
-              </div>
-              {alreadyBlockedByCoordinator && (
-                <p className="text-sm font-medium text-red-700">
-                  Bloqueado pelo Coordenador
-                  {ticket.validacaoCoordenador?.em
-                    ? ` em ${new Date(ticket.validacaoCoordenador.em).toLocaleString('pt-BR')}`
-                    : ''}
-                </p>
-              )}
-
-              <footer className="flex flex-wrap items-center gap-2 border-t border-[#e2e8f0] pt-3">
-                {ticket.link_card && (
-                  <a
-                    href={ticket.link_card}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 rounded-lg border border-[#e2e8f0] px-3 py-2 text-sm text-[#2F6FED] hover:bg-blue-50"
-                  >
-                    Ver card HubSpot <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
-                )}
-                <div className="flex-1" />
-                {!alreadyBlockedByCoordinator && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void handleDecision(ticket, 'bloquear')}
-                      disabled={processingId !== null}
-                      className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
-                    >
-                      {processingId === ticket.id_ticket_movimentacao && <Loader2 className="h-4 w-4 animate-spin" />}
-                      Bloquear
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleDecision(ticket, 'autorizar')}
-                      disabled={processingId !== null}
-                      className="inline-flex items-center gap-2 rounded-lg bg-[#2F6FED] px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                    >
-                      {processingId === ticket.id_ticket_movimentacao && <Loader2 className="h-4 w-4 animate-spin" />}
-                      Reprocessar
-                    </button>
-                  </>
-                )}
-              </footer>
-            </article>
+          const isJuridicoBlocked = Boolean(
+            editingTicket.isJuridicoBlocked || editingTicket.ruleApplied === "contact_has_juridico_deal",
           );
-        })
-      )}
+
+          const infoStatus = getStatusInfo(editingTicket.status_mapeamento || "bloqueado");
+
+          return (
+            <div className="space-y-4">
+              {/* Cabeçalho de status */}
+              <div className="flex items-center justify-between">
+                <span className={cn("badge", infoStatus.className)}>
+                  {infoStatus.icon} {infoStatus.label}
+                </span>
+                <span className="text-xs text-[#94a3b8]">
+                  Solicitante: {editingTicket.colaborador_origem_nome || "—"} ·{" "}
+                  {editingTicket.equipe_origem_nome || "sem equipe"}
+                </span>
+              </div>
+
+              {/* Informações do cliente (editável) */}
+              <div className="space-y-3 pb-4 border-b border-[#e2e8f0] text-sm">
+                <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
+                  Informações do Cliente
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Nome</label>
+                    <input
+                      type="text"
+                      value={editForm.nome_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, nome_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="Nome do cliente"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Sobrenome</label>
+                    <input
+                      type="text"
+                      value={editForm.sobrenome_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, sobrenome_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="Sobrenome do cliente"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Telefone</label>
+                    <input
+                      type="text"
+                      value={editForm.telefone_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, telefone_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="+55-11-90000-0000"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">E-mail</label>
+                    <input
+                      type="email"
+                      value={editForm.email_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, email_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="cliente@email.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">CPF</label>
+                    <input
+                      type="text"
+                      value={editForm.cpf_cliente_informado}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, cpf_cliente_informado: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="000.000.000-00"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#94a3b8] mb-0.5">Origem</label>
+                    <input
+                      type="text"
+                      value={editForm.origem_cliente_informada}
+                      onChange={(e) => setEditForm((prev) => ({ ...prev, origem_cliente_informada: e.target.value }))}
+                      className="w-full px-2 py-1.5 border border-[#e2e8f0] rounded text-sm"
+                      placeholder="Discadora, CAT, Indicação..."
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Destino / produto / motivo (read-only) */}
+              <div className="space-y-2 text-sm pb-4 border-b border-[#e2e8f0]">
+                <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
+                  Dados da Movimentação
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <div className="text-xs text-[#94a3b8] mb-0.5">Equipe destino</div>
+                    <div className="text-[#0f172a] font-medium">{editingTicket.equipe_destino_nome || "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[#94a3b8] mb-0.5">Assessor destino</div>
+                    <div className="text-[#0f172a] font-medium">{editingTicket.colaborador_destino_nome || "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[#94a3b8] mb-0.5">Produto</div>
+                    <div className="text-[#0f172a]">{produtoInterno ? maskProduct(produtoInterno) : "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[#94a3b8] mb-0.5">Tipo</div>
+                    <div className="text-[#0f172a]">{editingTicket.tipo_solicitacao || "—"}</div>
+                  </div>
+                </div>
+
+                {editingTicket.motivo_solicitacao && (
+                  <div>
+                    <div className="text-xs text-[#94a3b8] mb-0.5">Motivo</div>
+                    <div className="text-[#0f172a] whitespace-pre-wrap break-words">{editingTicket.motivo_solicitacao}</div>
+                  </div>
+                )}
+
+                {editingTicket.link && (
+                  <div className="pt-1">
+                    <a
+                      href={editingTicket.link}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-[#eff6ff] text-[#2F6FED] hover:bg-[#dbeafe] transition-colors"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Ver card na HubSpot
+                    </a>
+                  </div>
+                )}
+
+                {isJuridicoBlocked && (
+                  <div className="rounded-md bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-800" role="note">
+                    <strong>Bloqueio por regra Jurídica:</strong> o contato possui negócio no pipeline{" "}
+                    <em>Jurídico Auditoria de Ganho</em>. Encaminhe o caso ao time Jurídico.
+                  </div>
+                )}
+              </div>
+
+              {/* Observação do coordenador */}
+              <div>
+                <label className="block text-sm font-medium text-[#0f172a] mb-2">
+                  Observação do coordenador
+                </label>
+                <textarea
+                  value={editForm.observacao_sales_ops}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, observacao_sales_ops: e.target.value }))}
+                  rows={4}
+                  className="w-full px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm resize-none"
+                  placeholder="Motivo da validação, ajustes feitos, etc."
+                />
+              </div>
+            </div>
+          );
+        })()}
+      </EditModal>
     </div>
   );
 }
