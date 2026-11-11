@@ -324,8 +324,8 @@ const MOVIMENTACOES_STATUS_COLUMNS = [
 // Colunas visíveis no SalesOps (aba Movimentações).
 // "erro" removido — "suporte" permanece visível no lugar.
 const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
-  "suporte",
   "aviso",
+  "suporte",
   "coordenador",
   "bloqueado",
   "concluido",

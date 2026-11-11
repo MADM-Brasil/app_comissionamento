@@ -220,6 +220,16 @@ function Router() {
         </PeriodProvider>
       </Route>
 
+      {/* Funil */}
+      <Route path="/funil">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canAccessDashboard">
+            <Funil />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
+
+
       {/* Comercial */}
       <Route path="/inte_comerce">
         <PeriodProvider>
@@ -310,14 +320,7 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [appLoading]);
 
-  // 3. Bootstrap: carrega APENAS a lista de colaboradores.
-  //
-  // ⚠️ NÃO chamar `loadCollaboratorsAndMetrics()` ou `loadRawMetrics()`
-  // aqui. Essas funções aceitam `equipe`/`colaborador` como parâmetros,
-  // mas, ao serem chamadas sem filtro, populam `collaborators` e
-  // `rawMetrics` com dados GLOBAIS. Como cada página (Home, Funil, Comissões) dispara seu próprio fetch escopado
-  // em paralelo, a chamada global do App podia terminar DEPOIS e
-  // sobrescrever os dados escopados.
+
   const dataLoaded = useRef(false);
   useEffect(() => {
     if (!currentUser) return;
