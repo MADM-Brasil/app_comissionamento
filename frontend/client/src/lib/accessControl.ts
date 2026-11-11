@@ -342,6 +342,7 @@ export const ASSESSOR_PLUS_EMAILS: readonly string[] = [
   'igor.santos@madmbrasil.com.br',
   'tayane.jesus@madmbrasil.com.br',
   'bianca.ferreira@madmbrasil.com.br',
+
 ];
 const ASSESSOR_PLUS_EMAILS_SET = new Set(ASSESSOR_PLUS_EMAILS.map(normalize));
 

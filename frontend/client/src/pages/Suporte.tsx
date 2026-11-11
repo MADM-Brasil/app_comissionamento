@@ -1,5 +1,5 @@
 // client/src/pages/Suporte.tsx
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { Redirect } from "wouter";
 import DashboardLayout from "@/components/DashboardLayout";
 import {
@@ -32,7 +32,11 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { API_BASE } from "@/lib/api";
-import { getAccessLevel as resolveAccessLevel, LEVELS } from "@/lib/accessControl";
+import { 
+  getAccessLevel as resolveAccessLevel, 
+  getEffectiveAccessLevel,
+  LEVELS 
+} from "@/lib/accessControl";
 
 // ---------------------- safeJson ----------------------
 async function safeJson(res: Response): Promise<any> {
@@ -230,22 +234,17 @@ const normalizeKey = (str: string): string =>
 
 // ─────────────────────────────────────────────────────────────────────
 // Resolução de nível para a página de Suporte.
-//
-// Corrige o caso ASSESSOR_PLUS: caso o enum do frontend tenha
-// ASSESSOR_PLUS abaixo de SUPERVISAO (por divergência histórica com o
-// backend), promovemos o nível para SUPERVISAO — assim a checagem de
-// `canAccessPage` e a renderização das abas não regridem.
+// 
+// CORREÇÃO: Usa getEffectiveAccessLevel(user) para reconhecer promoções
+// como ASSESSOR_PLUS (baseadas em e-mail), evitando o loop infinito
+// de redirecionamento e permitindo o acesso correto.
 // ─────────────────────────────────────────────────────────────────────
-function getSupportAccessLevel(cargo?: string, status?: string): number {
-  const level = resolveAccessLevel(cargo, status);
-
-  // ASSESSOR_PLUS deve ser tratado no mínimo como SUPERVISAO nesta página.
-  if (level === LEVELS.ASSESSOR_PLUS) {
-    return Math.max(level, LEVELS.SUPERVISAO);
-  }
-
-  // Fallback: cargos que começam com "supervisor" mas não estão mapeados.
-  return level === LEVELS.NONE && normalize(cargo || "").startsWith("supervisor")
+function getSupportAccessLevel(user?: any): number {
+  if (!user) return LEVELS.NONE;
+  const level = getEffectiveAccessLevel(user);
+  
+  // Fallback de segurança para cargos iniciados com "supervisor"
+  return level === LEVELS.NONE && normalize(user.cargo || "").startsWith("supervisor")
     ? LEVELS.SUPERVISAO
     : level;
 }
@@ -277,7 +276,6 @@ const getStatusInfo = (status: string) => {
     no_pipeline: { label: "No Pipeline", icon: <CheckCircle className="w-3 h-3" />, className: "bg-green-50 text-green-700" },
     fora_pipeline: { label: "Fora do Pipeline", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
     bloqueado: { label: "Bloqueado", icon: <Ban className="w-3 h-3" />, className: "bg-red-100 text-red-800" },
-    // Status novo: bloqueio temporário por prazo mínimo, endereçado ao coordenador.
     coordenador: { label: "Coordenador", icon: <AlertCircle className="w-3 h-3" />, className: "bg-purple-50 text-purple-700" },
     ENVIADO: { label: "Enviado", icon: <Send className="w-3 h-3" />, className: "bg-blue-50 text-blue-700" },
     SUSPEITO: { label: "Suspeito", icon: <AlertTriangle className="w-3 h-3" />, className: "bg-yellow-50 text-yellow-700" },
@@ -439,17 +437,13 @@ function readUrlParams(): { aba: string | null; id: number | null } {
 // =====================================================================
 export default function Suporte() {
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  // CORREÇÃO: Passa o objeto accessUser completo para resolver o nível corretamente
+  const accessLevel = getSupportAccessLevel(accessUser);
 
   const isJuridico = accessLevel === LEVELS.JURIDICO;
-  const isAdmin = accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
+  const isAdmin = accessLevel >= LEVELS.ADMINISTRATIVO;
   const isCoordenador = accessLevel === LEVELS.COORDENADOR;
-  // Importante: comparamos por igualdade no nível resolvido do usuário, e
-  // adicionalmente por cargo — para cobrir o caso em que o enum do frontend
-  // difere do backend.
-  const isAssessorPlus =
-    accessLevel === LEVELS.ASSESSOR_PLUS ||
-    normalize(accessUser?.cargo || "").includes("assessor plus");
+  const isAssessorPlus = accessLevel === LEVELS.ASSESSOR_PLUS;
 
   const canSeeCoordenadorTab = isAdmin || isCoordenador || isAssessorPlus;
 
@@ -462,10 +456,8 @@ export default function Suporte() {
 
   const [focusTicketId, setFocusTicketId] = useState<number | null>(startsInCoordenador ? initialParams.id : null);
 
-  // ASSESSOR_PLUS também libera a página. Mantemos `>= SUPERVISAO` para
-  // preservar todos os níveis superiores.
-  const canAccessPage =
-    accessLevel >= LEVELS.SUPERVISAO || isJuridico || isAssessorPlus;
+  // O Nível 4 (ASSESSOR_PLUS) já está coberto pelo >= SUPERVISAO (3)
+  const canAccessPage = accessLevel >= LEVELS.SUPERVISAO || isJuridico;
 
   useEffect(() => {
     if (isJuridico && activeTab !== "busca") setActiveTab("busca");
@@ -520,7 +512,7 @@ export default function Suporte() {
 function MovimentacaoTab() {
   const { currentUser, setCurrentUser } = useAppStore();
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  const accessLevel = getSupportAccessLevel(accessUser);
   const isSupervisor = accessLevel === LEVELS.SUPERVISAO;
 
   const [firstName, setFirstName] = useState("");
@@ -548,6 +540,7 @@ function MovimentacaoTab() {
   const [loadingEscopo, setLoadingEscopo] = useState(true);
   const [escopoError, setEscopoError] = useState<string | null>(null);
 
+  // Efeito de sessão estabilizado para evitar loop infinito
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -556,7 +549,9 @@ function MovimentacaoTab() {
         if (!res.ok) return;
         const data = await safeJson(res);
         if (cancelled || !data?.success || !data.user) return;
-        setCurrentUser(data.user);
+        if (JSON.stringify(currentUser) !== JSON.stringify(data.user)) {
+          setCurrentUser(data.user);
+        }
       } catch (err) {
         console.warn("[MovimentacaoTab] Falha ao atualizar sessão:", err);
       }
@@ -564,7 +559,8 @@ function MovimentacaoTab() {
     return () => {
       cancelled = true;
     };
-  }, [setCurrentUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -577,7 +573,6 @@ function MovimentacaoTab() {
         if (cancelled) return;
 
         if (!res.ok || !data.success) {
-          // Mensagem mais amigável para o caso de permissão.
           const backendMsg = String(data?.error || "");
           const isPermission = /sem acesso|perfil/i.test(backendMsg) || res.status === 403;
           throw new Error(
@@ -663,7 +658,7 @@ function MovimentacaoTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [equipe, produtoConfig.allowChange, produtoConfig.default, produtoConfig.options.join("|")]);
 
-  const loadUserHistory = async () => {
+  const loadUserHistory = useCallback(async () => {
     if (!currentUser?.nome) return;
     try {
       const params = new URLSearchParams({ colaborador_origem_nome: currentUser.nome });
@@ -721,12 +716,11 @@ function MovimentacaoTab() {
     } finally {
       setLoadingHistory(false);
     }
-  };
+  }, [currentUser?.nome]);
 
   useEffect(() => {
     loadUserHistory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser?.nome]);
+  }, [loadUserHistory]);
 
   useEffect(() => {
     const hasPending = movements.some(
@@ -737,8 +731,7 @@ function MovimentacaoTab() {
       loadUserHistory();
     }, 10000);
     return () => clearInterval(intervalId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [movements]);
+  }, [movements, loadUserHistory]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1330,7 +1323,7 @@ interface BuscaClienteResultado {
 
 function BuscaClienteTab() {
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
+  const accessLevel = getSupportAccessLevel(accessUser);
   const isJuridico = accessLevel === LEVELS.JURIDICO;
 
   const [telefone, setTelefone] = useState("");
@@ -2038,7 +2031,7 @@ function SalesOpsTab() {
 }
 
 // =====================================================================
-// EditModal (reutilizável, com botões opcionais Concluir, Bloquear e Reprocessar)
+// EditModal
 // =====================================================================
 interface EditModalProps {
   isOpen: boolean;
@@ -2047,18 +2040,14 @@ interface EditModalProps {
   children: React.ReactNode;
   onSave: () => void;
   saving: boolean;
-  // Ações opcionais — usadas nas visões SalesOps / Coordenador.
   onConcluir?: () => void;
   concluindo?: boolean;
   concluirDisabled?: boolean;
   concluirTitle?: string;
-  // Ação de Bloquear (mantém o caso em revisão / em blocked queue).
   onBloquear?: () => void;
   bloqueando?: boolean;
   bloquearDisabled?: boolean;
   bloquearTitle?: string;
-  // Ação de Reprocessar (autorização do coordenador com bypass da regra
-  // temporal — usada na Visão Coordenador).
   onReprocessar?: () => void;
   reprocessando?: boolean;
   reprocessarDisabled?: boolean;
@@ -3120,21 +3109,12 @@ function ReportesSuporteTab() {
 }
 
 // =====================================================================
-// CoordenadorTab — VISÃO COORDENADOR
+// CoordenadorTab
 // =====================================================================
-// Lista de casos com status "coordenador" (bloqueio temporário por prazo
-// mínimo — pode ser autorizado pelo coordenador) e "bloqueado" (bloqueio
-// definitivo). O modal abre TODAS as informações da movimentação
-// (cliente editável, destino, produto, motivo, link do card) e oferece
-// três ações:
-//   • Salvar       — persiste cadastro + observação, sem mexer no status
-//   • Bloquear     — reenvia para status "bloqueado" com a observação
-//   • Reprocessar  — autoriza o worker a reexecutar ignorando a regra de
-//                    prazo mínimo (as demais regras continuam válidas)
 function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }) {
   const { currentUser: accessUser } = useAccessControl();
-  const accessLevel = getSupportAccessLevel(accessUser?.cargo, accessUser?.status);
-  const isAdmin = accessLevel === LEVELS.ADMINISTRATIVO || accessLevel === LEVELS.SUPER_ADMIN;
+  const accessLevel = getSupportAccessLevel(accessUser);
+  const isAdmin = accessLevel >= LEVELS.ADMINISTRATIVO;
   const unidadeId = (accessUser as any)?.unidade_id != null ? Number((accessUser as any).unidade_id) : null;
 
   const [tickets, setTickets] = useState<TicketMovimentacao[]>([]);
@@ -3169,7 +3149,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
     setLoading(true);
     setMessage(null);
     try {
-      // Busca os dois status administrativos em uma única chamada (CSV).
       const url = `${API_BASE}/suporte/tickets-movimentacao?status_mapeamento=coordenador,bloqueado`;
       const res = await fetch(url, { credentials: "include" });
       const data = await safeJson(res);
@@ -3311,7 +3290,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
           headers: getCsrfHeaders(),
           credentials: "include",
           body: JSON.stringify({
-            // envia as edições do modal para o worker trabalhar com dados corretos
             nome_cliente_informado: editForm.nome_cliente_informado,
             sobrenome_cliente_informado: editForm.sobrenome_cliente_informado,
             email_cliente_informado: editForm.email_cliente_informado,
@@ -3475,7 +3453,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
 
           return (
             <div className="space-y-4">
-              {/* Cabeçalho de status */}
               <div className="flex items-center justify-between">
                 <span className={cn("badge", infoStatus.className)}>
                   {infoStatus.icon} {infoStatus.label}
@@ -3486,7 +3463,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
                 </span>
               </div>
 
-              {/* Informações do cliente (editável) */}
               <div className="space-y-3 pb-4 border-b border-[#e2e8f0] text-sm">
                 <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
                   Informações do Cliente
@@ -3556,7 +3532,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
                 </div>
               </div>
 
-              {/* Destino / produto / motivo (read-only) */}
               <div className="space-y-2 text-sm pb-4 border-b border-[#e2e8f0]">
                 <div className="text-xs font-semibold text-[#475569] uppercase tracking-wide">
                   Dados da Movimentação
@@ -3609,7 +3584,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
                 )}
               </div>
 
-              {/* Observação do coordenador */}
               <div>
                 <label className="block text-sm font-medium text-[#0f172a] mb-2">
                   Observação do coordenador
