@@ -1071,6 +1071,8 @@ export default function Inte_comerce() {
   const modeDescription = viewMode === "safra"
 
   const comparisonSectionTitle = viewMode === "safra"
+     ? "Comparativo de Safra"
+     : "Comparativo de Produção";
 
   const comparisonSectionDescription = viewMode === "safra"
 
