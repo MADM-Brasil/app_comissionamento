@@ -321,8 +321,6 @@ const MOVIMENTACOES_STATUS_COLUMNS = [
   "concluido",
 ];
 
-// Colunas visíveis no SalesOps (aba Movimentações).
-// "erro" removido — "suporte" permanece visível no lugar.
 const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
   "aviso",
   "suporte",
@@ -1376,12 +1374,9 @@ function MovimentacaoTab() {
                   <th>Data/Hora</th>
                   <th>Cliente</th>
                   <th>Contato</th>
-                  <th>Equipe/Assessor</th>
-                  <th>Produto</th>
                   <th>Status</th>
                   <th>Obs. Comercial</th>
-                  <th>Resultado</th>
-                  {podeEditarDadosHistorico && <th className="w-16 text-center">Ações</th>}
+                  {podeEditarDadosHistorico && <th className="w-24 text-center">Corrigir</th>}
                 </tr>
               </thead>
               <tbody>
@@ -1390,46 +1385,51 @@ function MovimentacaoTab() {
                   const habilitadoEdicao = podeEditarItemHistorico(m);
                   return (
                     <tr key={m.id}>
-                      <td className="whitespace-nowrap">{new Date(m.timestamp).toLocaleString("pt-BR")}</td>
-                      <td>{m.cliente}</td>
-                      <td>
+                      <td className="whitespace-nowrap align-top">
+                        {new Date(m.timestamp).toLocaleString("pt-BR")}
+                      </td>
+                      <td className="align-top">{m.cliente}</td>
+                      <td className="align-top">
                         <div>{m.telefone}</div>
                         <div className="text-[#64748b]">{m.email}</div>
                         <small className="text-[#94a3b8]">{m.cpf}</small>
                       </td>
-                      <td>
-                        <div>{m.equipe}</div>
-                        <small>{m.assessor}</small>
-                      </td>
-                      <td className="text-[#475569]" title={m.produto || ""}>
-                        {m.produto ? maskProduct(m.produto) : "—"}
-                      </td>
-                      <td>
+                      <td className="align-top">
                         <span className={cn("badge", info.className)} title={m.hubspot?.mensagem || info.label}>
                           {info.icon} {info.label}
                         </span>
                       </td>
-                      <td className="max-w-[200px] whitespace-pre-wrap break-words" title={m.observacao_sales_ops || ""}>
-                        {m.observacao_sales_ops || "—"}
+                      <td className="max-w-md align-top" title={m.observacao_sales_ops || ""}>
+                        <div
+                          className={cn(
+                            "rounded-md px-3 py-2 text-sm whitespace-pre-wrap break-words",
+                            m.observacao_sales_ops
+                              ? "bg-amber-50 border border-amber-200 text-amber-900 font-medium"
+                              : "bg-gray-50 border border-dashed border-gray-300 text-gray-400 italic",
+                          )}
+                        >
+                          {m.observacao_sales_ops || "Sem observação"}
+                        </div>
                       </td>
-                      <td className="max-w-xs whitespace-pre-wrap break-words">{m.resultado}</td>
                       {podeEditarDadosHistorico && (
-                        <td className="text-center">
+                        <td className="text-center align-top">
                           {habilitadoEdicao ? (
                             <button
                               type="button"
                               onClick={() => openEditHistory(m)}
-                              className="p-1.5 rounded hover:bg-[#f1f5f9] text-[#2F6FED] hover:text-[#1d4ed8]"
-                              title="Editar dados do cliente"
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[#eff6ff] text-[#2F6FED] hover:bg-[#dbeafe] text-xs font-semibold transition-colors"
+                              title="Corrigir dados do cliente"
                             >
-                              <Edit2 className="w-4 h-4" />
+                              <Edit2 className="w-3.5 h-3.5" />
+                              Corrigir
                             </button>
                           ) : (
                             <span
-                              className="inline-flex items-center justify-center p-1.5 text-[#94a3b8]"
-                              title="Edição bloqueada para este status (concluído, bloqueado, suporte ou coordenador)"
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-gray-50 text-[#94a3b8] text-xs font-semibold cursor-not-allowed"
+                              title="Correção bloqueada para este status (concluído, bloqueado, suporte ou coordenador)"
                             >
-                              <Lock className="w-4 h-4" />
+                              <Lock className="w-3.5 h-3.5" />
+                              Bloqueado
                             </span>
                           )}
                         </td>
@@ -3626,7 +3626,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
   const [draggingTicketId, setDraggingTicketId] = useState<number | null>(null);
   const [dragOverColuna, setDragOverColuna] = useState<string | null>(null);
 
-  // ── Filtro de período (mesmo padrão da Visão SalesOps) ────────────
   const [filterDataInicio, setFilterDataInicio] = useState(getTodayString());
   const [filterDataFim, setFilterDataFim] = useState(getTodayString());
 
@@ -3879,7 +3878,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
     }
   };
 
-  // ── Filtro por período (mesmo comportamento de MovimentacoesSuporteTab) ──
   const filteredTickets = useMemo(
     () => tickets.filter((t) => isWithinDateRange(t.criado_em, filterDataInicio, filterDataFim)),
     [tickets, filterDataInicio, filterDataFim],

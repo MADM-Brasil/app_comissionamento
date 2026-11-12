@@ -22,8 +22,6 @@ const PRODUCT_VARIANTS = {
   'BPC/LOAS': ['BPC/LOAS','BPC / LOAS','BPC_LOAS'],
   'Isenção de IR Aposentadoria': ['Isenção de IR Aposentadoria','Isencao de IR Aposentadoria'],
 };
-// Placeholders usados nas tabelas e nos motivos. Constantes para evitar
-// duplicação entre backend e (futura) exportação CSV.
 const PLACEHOLDER_COLLAB = '(SEM ATRIBUICAO)';
 const PLACEHOLDER_TEAM = '(SEM EQUIPE)';
 
@@ -72,6 +70,9 @@ function syntheticId(row, prefix) {
   const explicit = pickColumn(row, ['assinatura_id', 'id', 'deal_id', 'hubspot_deal_id']);
   if (explicit != null) return `${prefix}_${explicit}`;
   return `${prefix}_${createHash('sha1').update(JSON.stringify(row)).digest('hex').slice(0, 16)}`;
+}
+function isSyntheticDealId(dealId) {
+  return dealId == null || String(dealId).startsWith('__view_');
 }
 
 function selectLatest(rows, predicate, valueKey) {
@@ -183,11 +184,6 @@ function buildAttributions(history, deal, collaborators, now) {
   return { episodes, groups, groupByTime, attributionsByDeal, attributionAt, stageChanges };
 }
 
-// ============================================================
-// Carregamento — branch por mode
-//   - producao: assinados/emitidos/ganhos/protocolados vêm das VIEWS
-//   - outros modes: comportamento original (core.assinaturas + view por deal_id)
-// ============================================================
 async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
   const useViews = mode === 'producao';
   const bounds = periodBounds(inicio, fim_exclusivo);
@@ -202,14 +198,12 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     await client.query("SELECT set_config('work_mem', $1, true)", [WORK_MEM]);
     const asOf = timestamp((await client.query('SELECT CURRENT_TIMESTAMP AS as_of')).rows[0].as_of);
 
-    // Filtro de produto do usuário (usado nas views)
     const productVariantsUpper = produto
       ? (PRODUCT_VARIANTS[produto] || [produto]).map((p) => p.trim().toUpperCase())
       : null;
     const productFilterClause = productVariantsUpper ? 'AND UPPER(TRIM(produto)) = ANY($3::text[])' : '';
     const productFilterValues = productVariantsUpper ? [productVariantsUpper] : [];
 
-    // IDs de produto (usado nas consultas a core.deals)
     const productIds = produto
       ? (await client.query(
           `SELECT produto_id::text FROM core.produtos
@@ -222,7 +216,6 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       return { asOf, events: [], deals: new Map(), episodesByDeal: new Map(), collaboratorNames: new Map() };
     }
 
-    // ── Candidatos / deal / histórico (funnel) — sempre ─────
     const candidates = await client.query({
       text: `
         SELECT DISTINCT matches.deal_id::text AS deal_id
@@ -294,7 +287,27 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       `SELECT colaborador_id::text, nome, nome_equipe, cargo, departamento FROM core.colaboradores`,
     );
 
-    // ── Branch por mode ────────────────────────────────────
+    const dealRows = dealResult.rows;
+    const dealMap = new Map(dealRows.map((deal) => [deal.deal_id, deal]));
+    const hubspotIds = [...new Set(dealRows.map((deal) => deal.hubspot_deal_id).filter(Boolean))];
+    const aliasDealResult = hubspotIds.length
+      ? await client.query({
+          text: `
+            SELECT d.deal_id::text, d.hubspot_deal_id FROM core.deals d
+            WHERE d.hubspot_deal_id = ANY($1::text[])
+              AND ($2::bigint[] IS NULL OR d.produto_id = ANY($2::bigint[]))
+              AND d.crm_origem = 'HUBSPOT' AND d.is_deleted IS NOT TRUE`,
+          values: [hubspotIds, productIds],
+          query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
+        })
+      : { rows: [] };
+    const aliasCounts = new Map();
+    const dealIdByHubspot = new Map();
+    for (const deal of aliasDealResult.rows) {
+      aliasCounts.set(deal.hubspot_deal_id, (aliasCounts.get(deal.hubspot_deal_id) || 0) + 1);
+      dealIdByHubspot.set(deal.hubspot_deal_id, deal.deal_id);
+    }
+
     let signatureResult = { rows: [] };
     let assinadosViewResult = { rows: [] };
     let emitidosViewResult = { rows: [] };
@@ -321,17 +334,33 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         values: [dataInicio, dataFimInclusive, ...productFilterValues],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
+
+      const legalQueryValues = [dataInicio, dataFimInclusive];
+      let productParamIndex = null;
+      if (productVariantsUpper) {
+        productParamIndex = legalQueryValues.length + 1;
+        legalQueryValues.push(productVariantsUpper);
+      }
+      const dealIdsParamIndex = legalQueryValues.length + 1;
+      legalQueryValues.push(dealIds);
+
+      const productFragment = productParamIndex != null
+        ? `AND UPPER(TRIM(produto)) = ANY($${productParamIndex}::text[])`
+        : '';
+
       legalOutcomeResult = await client.query({
         text: `
           SELECT deal_id::text AS deal_id, data_ganho, etapa,
                  responsavel_lead::text AS responsavel_lead_id
           FROM core.view_app_juridico_auditoria
-          WHERE data_ganho::date >= $1::date
-            AND data_ganho::date <= $2::date
-            AND etapa <> 'Venda perdida'
-            ${productFilterClause}
+          WHERE etapa <> 'Venda perdida'
+            AND data_ganho IS NOT NULL
+            AND (
+              (data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment})
+              OR deal_id::text = ANY($${dealIdsParamIndex}::text[])
+            )
         `,
-        values: [dataInicio, dataFimInclusive, ...productFilterValues],
+        values: legalQueryValues,
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
     } else {
@@ -345,13 +374,10 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
             AND tipo_emissao = 'ORIGINAL' AND data_cancelamento IS NULL
             AND UPPER(TRIM(COALESCE(status_assinatura, ''))) = 'ASSINADO'
             AND (deal_id = ANY($1::bigint[]) OR hubspot_deal_id = ANY($2::text[]))`,
-        values: [dealIds, [], productIds], // hubspotIds computado abaixo
+        values: [dealIds, [], productIds],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
-      // (hubspotIds precisam ser preenchidos — segunda passada abaixo)
-      const dealRowsForHubspot = dealResult.rows;
-      const hsIds = [...new Set(dealRowsForHubspot.map((d) => d.hubspot_deal_id).filter(Boolean))];
-      if (hsIds.length) {
+      if (hubspotIds.length) {
         signatureResult = await client.query({
           text: `
             SELECT assinatura_id::text, deal_id::text, hubspot_deal_id,
@@ -362,7 +388,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
               AND tipo_emissao = 'ORIGINAL' AND data_cancelamento IS NULL
               AND UPPER(TRIM(COALESCE(status_assinatura, ''))) = 'ASSINADO'
               AND (deal_id = ANY($1::bigint[]) OR hubspot_deal_id = ANY($2::text[]))`,
-          values: [dealIds, hsIds, productIds],
+          values: [dealIds, hubspotIds, productIds],
           query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
         });
       }
@@ -377,25 +403,66 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       });
     }
 
-    const dealRows = dealResult.rows;
-    const dealMap = new Map(dealRows.map((deal) => [deal.deal_id, deal]));
-    const hubspotIds = [...new Set(dealRows.map((deal) => deal.hubspot_deal_id).filter(Boolean))];
-    const aliasDealResult = hubspotIds.length
-      ? await client.query({
-          text: `
-            SELECT d.deal_id::text, d.hubspot_deal_id FROM core.deals d
-            WHERE d.hubspot_deal_id = ANY($1::text[])
-              AND ($2::bigint[] IS NULL OR d.produto_id = ANY($2::bigint[]))
-              AND d.crm_origem = 'HUBSPOT' AND d.is_deleted IS NOT TRUE`,
-          values: [hubspotIds, productIds],
-          query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
-        })
-      : { rows: [] };
-    const aliasCounts = new Map();
-    const dealIdByHubspot = new Map();
-    for (const deal of aliasDealResult.rows) {
-      aliasCounts.set(deal.hubspot_deal_id, (aliasCounts.get(deal.hubspot_deal_id) || 0) + 1);
-      dealIdByHubspot.set(deal.hubspot_deal_id, deal.deal_id);
+    const legalDealIdSet = new Set(legalOutcomeResult.rows.map((r) => String(r.deal_id)));
+
+    const viewDealValuesNeedingLookup = new Set();
+    for (const row of [...assinadosViewResult.rows, ...emitidosViewResult.rows, ...legalOutcomeResult.rows]) {
+      const dealIdVal = pickColumn(row, ['deal_id']);
+      if (dealIdVal != null && !dealMap.has(String(dealIdVal))) {
+        viewDealValuesNeedingLookup.add(String(dealIdVal));
+      }
+      const hsIdVal = pickColumn(row, ['hubspot_deal_id']);
+      if (hsIdVal != null && !dealMap.has(String(hsIdVal)) && !dealIdByHubspot.has(String(hsIdVal))) {
+        viewDealValuesNeedingLookup.add(String(hsIdVal));
+      }
+    }
+
+    const viewDealIdByHubspot = new Map();
+    if (viewDealValuesNeedingLookup.size > 0) {
+      const resolved = await client.query({
+        text: `
+          SELECT d.deal_id::text AS deal_id, d.hubspot_deal_id
+          FROM core.deals d
+          WHERE d.crm_origem = 'HUBSPOT'
+            AND (d.hubspot_deal_id = ANY($1::text[]) OR d.deal_id::text = ANY($1::text[]))
+        `,
+        values: [[...viewDealValuesNeedingLookup]],
+        query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
+      });
+      for (const r of resolved.rows) {
+        viewDealIdByHubspot.set(String(r.deal_id), String(r.deal_id));
+        if (r.hubspot_deal_id != null) {
+          viewDealIdByHubspot.set(String(r.hubspot_deal_id), String(r.deal_id));
+        }
+      }
+    }
+
+    const assinaturaIdsNeedingLookup = new Set();
+    for (const row of assinadosViewResult.rows) {
+      const dealIdVal = pickColumn(row, ['deal_id']);
+      const hsIdVal = pickColumn(row, ['hubspot_deal_id']);
+      const canResolveDirect =
+        (dealIdVal != null && (dealMap.has(String(dealIdVal)) || viewDealIdByHubspot.has(String(dealIdVal)) || legalDealIdSet.has(String(dealIdVal)))) ||
+        (hsIdVal != null && (dealMap.has(String(hsIdVal)) || dealIdByHubspot.has(String(hsIdVal)) || viewDealIdByHubspot.has(String(hsIdVal))));
+      if (!canResolveDirect) {
+        const assinaturaId = pickColumn(row, ['assinatura_id']);
+        if (assinaturaId != null) assinaturaIdsNeedingLookup.add(String(assinaturaId));
+      }
+    }
+    const dealIdByAssinatura = new Map();
+    if (assinaturaIdsNeedingLookup.size > 0) {
+      const resolved = await client.query({
+        text: `
+          SELECT assinatura_id::text, deal_id::text, hubspot_deal_id
+          FROM core.assinaturas
+          WHERE assinatura_id::text = ANY($1::text[])
+        `,
+        values: [[...assinaturaIdsNeedingLookup]],
+        query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
+      });
+      for (const r of resolved.rows) {
+        if (r.deal_id != null) dealIdByAssinatura.set(r.assinatura_id, String(r.deal_id));
+      }
     }
 
     const collaboratorMap = new Map(collaboratorResult.rows.map((r) => [r.colaborador_id, r]));
@@ -411,7 +478,6 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     const events = [];
     const deals = new Map();
 
-    // ── Eventos de funil (histórico) ───────────────────────
     for (const deal of dealRows) {
       deals.set(deal.deal_id, deal);
       const history = historyByDeal.get(deal.deal_id) || [];
@@ -419,21 +485,80 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       allEpisodes.set(deal.deal_id, attribution);
       allEpisodeGroups.set(deal.deal_id, attribution.episodes);
 
-      const creation = history
+      let entryAt = null;
+      for (const r of history) {
+        const t = timestamp(r.data_movimentacao);
+        if (!t || t > asOf) continue;
+        const isEntry =
+          (r.tipo_movimentacao === 'CRIACAO_DEAL' && String(r.pipeline_novo_id) === PIPELINE_COMERCIAL) ||
+          (r.tipo_movimentacao === 'MUDANCA_PIPELINE' &&
+            String(r.pipeline_novo_id) === PIPELINE_COMERCIAL &&
+            String(r.pipeline_anterior_id) !== PIPELINE_COMERCIAL);
+        if (isEntry && (entryAt === null || t < entryAt)) entryAt = t;
+      }
+      if (entryAt) {
+        events.push({
+          dealId: deal.deal_id,
+          occurredAt: entryAt,
+          dateKey: utcDate(entryAt),
+          collaboratorId: null,
+          team: null,
+          type: 'RECEBIDO_CORPORATIVO',
+        });
+      }
+
+      const creationRows = history
         .filter((r) => r.tipo_movimentacao === 'CRIACAO_DEAL')
-        .map((r) => timestamp(r.data_movimentacao))
-        .filter(Boolean)
-        .sort((a, b) => a - b)[0];
-      if (creation) {
-        const assigned = attribution.attributionAt(creation);
-        events.push({ dealId: deal.deal_id, occurredAt: creation, collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type: 'DEAL_CREATED' });
+        .sort((a, b) => {
+          const ta = timestamp(a.data_movimentacao)?.getTime() ?? 0;
+          const tb = timestamp(b.data_movimentacao)?.getTime() ?? 0;
+          return ta - tb;
+        });
+      const firstCreation = creationRows[0];
+      if (firstCreation) {
+        const creation = timestamp(firstCreation.data_movimentacao);
+        if (creation && creation <= asOf) {
+          const assigned = attribution.attributionAt(creation);
+          events.push({
+            dealId: deal.deal_id,
+            occurredAt: creation,
+            dateKey: utcDate(creation),
+            collaboratorId: assigned?.collaboratorId ?? null,
+            team: assigned?.team ?? null,
+            type: 'DEAL_CREATED',
+          });
+          if (String(firstCreation.etapa_nova_id) === '6650') {
+            events.push({
+              dealId: deal.deal_id,
+              occurredAt: creation,
+              dateKey: utcDate(creation),
+              collaboratorId: assigned?.collaboratorId ?? null,
+              team: assigned?.team ?? null,
+              type: 'EM_CONTATO',
+            });
+          }
+        }
       }
 
       for (const episode of attribution.episodes) {
         if (episode.cargo !== 'Assessor') continue;
-        events.push({ dealId: deal.deal_id, occurredAt: episode.receivedAt, collaboratorId: episode.collaboratorId, team: episode.team, type: 'RECEBIDO_ASSESSOR' });
+        events.push({
+          dealId: deal.deal_id,
+          occurredAt: episode.receivedAt,
+          dateKey: utcDate(episode.receivedAt),
+          collaboratorId: episode.collaboratorId,
+          team: episode.team,
+          type: 'RECEBIDO_ASSESSOR',
+        });
         if (episode.workedAt) {
-          events.push({ dealId: deal.deal_id, occurredAt: episode.workedAt, collaboratorId: episode.collaboratorId, team: episode.team, type: 'TRABALHADO_PROXY' });
+          events.push({
+            dealId: deal.deal_id,
+            occurredAt: episode.workedAt,
+            dateKey: utcDate(episode.workedAt),
+            collaboratorId: episode.collaboratorId,
+            team: episode.team,
+            type: 'TRABALHADO_PROXY',
+          });
         }
       }
 
@@ -444,55 +569,85 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         const pipelineAtEvent = group.pipelineSame ?? group.previousPipelineChange ?? PIPELINE_COMERCIAL;
         const type = STAGE_TYPES.get(String(row.etapa_nova_id));
         if (String(pipelineAtEvent) !== PIPELINE_COMERCIAL || !type) continue;
+        if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650' &&
+            eventAt.getTime() === timestamp(firstCreation.data_movimentacao).getTime()) {
+          continue;
+        }
         const assigned = attribution.attributionAt(eventAt);
-        events.push({ dealId: deal.deal_id, occurredAt: eventAt, collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type });
+        events.push({
+          dealId: deal.deal_id,
+          occurredAt: eventAt,
+          dateKey: utcDate(eventAt),
+          collaboratorId: assigned?.collaboratorId ?? null,
+          team: assigned?.team ?? null,
+          type,
+        });
       }
     }
 
-    // ── Eventos de assinatura/emissão ─────────────────────
     if (useViews) {
-      // Fonte: views canônicas. Uma linha = um evento. Timestamp = data::T12Z
-      // para que localDay (BRT) coincida com o ::date (UTC) aplicado na view.
-      //
-      // ⚠️ Consultores que não resolvem em core.colaboradores NÃO viram
-      //    um bucket por ID órfão: o evento entra como não atribuído
-      //    (collaboratorId = null). Sem isso, cada ID cru geraria uma
-      //    linha "(SEM ATRIBUICAO) | (SEM EQUIPE)" na tabela.
       const pushFromView = (row, dateField, eventType) => {
         const isoDate = utcDate(row[dateField]);
         if (!isoDate) return;
         const occurredAt = new Date(`${isoDate}T12:00:00Z`);
-        let dealId = pickColumn(row, ['deal_id']);
+
+        let dealId = null;
+        const rawDealId = pickColumn(row, ['deal_id']);
+        const rawHubspotId = pickColumn(row, ['hubspot_deal_id']);
+        for (const candidate of [rawDealId, rawHubspotId]) {
+          if (candidate == null) continue;
+          const key = String(candidate);
+          if (dealMap.has(key)) { dealId = key; break; }
+          if (dealIdByHubspot.has(key)) { dealId = dealIdByHubspot.get(key); break; }
+          if (viewDealIdByHubspot.has(key)) { dealId = viewDealIdByHubspot.get(key); break; }
+          if (legalDealIdSet.has(key)) { dealId = key; break; }
+        }
         if (dealId == null) {
-          const hubspot = pickColumn(row, ['hubspot_deal_id']);
-          if (hubspot != null && aliasCounts.get(String(hubspot)) === 1 && dealIdByHubspot.has(String(hubspot))) {
-            dealId = dealIdByHubspot.get(String(hubspot));
+          const assinaturaId = pickColumn(row, ['assinatura_id']);
+          if (assinaturaId != null && dealIdByAssinatura.has(String(assinaturaId))) {
+            dealId = dealIdByAssinatura.get(String(assinaturaId));
           }
         }
-        if (dealId != null) dealId = String(dealId);
-        if (!dealId) dealId = syntheticId(row, `__view_${eventType}`);
+        if (dealId == null) dealId = syntheticId(row, `__view_${eventType}`);
 
         const rawCollabId = pickColumn(row, [
-          'consultor_responsavel_assinatura_id', 'consultor_responsavel_id',
-          'responsavel_assinatura_id', 'responsavel_id',
-          'colaborador_id', 'assessor_id',
+          'consultor_primeira_assinatura_id',
+          'consultor_primeira_emissao_id',
+          'consultor_responsavel_assinatura_id',
+          'consultor_responsavel_id',
+          'responsavel_assinatura_id',
+          'responsavel_id',
+          'consultor_id',
+          'colaborador_id',
+          'assessor_id',
         ]);
         const consultant = rawCollabId != null ? collaboratorMap.get(String(rawCollabId)) : null;
+
+        let collaboratorId = consultant?.colaborador_id ?? null;
+        let team = consultant?.nome_equipe ?? (row.equipe ?? row.nome_equipe ?? null);
+        if (collaboratorId == null && dealId && !isSyntheticDealId(dealId)) {
+          const attribution = allEpisodes.get(dealId);
+          if (attribution) {
+            const assigned = attribution.attributionAt(occurredAt);
+            if (assigned) {
+              collaboratorId = assigned.collaboratorId ?? null;
+              if (team == null) team = assigned.team ?? null;
+            }
+          }
+        }
 
         events.push({
           dealId,
           occurredAt,
-          // Só usa o ID do colaborador se ele resolver em core.colaboradores.
-          // Caso contrário, trata como não atribuído.
-          collaboratorId: consultant?.colaborador_id ?? null,
-          team: consultant?.nome_equipe ?? (row.equipe ?? row.nome_equipe ?? null),
+          dateKey: isoDate,
+          collaboratorId,
+          team,
           type: eventType,
         });
       };
       for (const row of assinadosViewResult.rows) pushFromView(row, 'data_assinatura', 'ASSINADO_ORIGINAL');
       for (const row of emitidosViewResult.rows) pushFromView(row, 'data_emissao', 'EMITIDO_ORIGINAL');
     } else {
-      // Comportamento original: core.assinaturas com atribuição via histórico
       const signaturesByDeal = new Map();
       for (const signature of signatureResult.rows) {
         let dealId = signature.deal_id && dealMap.has(signature.deal_id) ? signature.deal_id : null;
@@ -521,28 +676,25 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
           const assigned = attribution.attributionAt(emission.at);
           const consultant = collaboratorMap.get(String(emission.signature.consultor_responsavel_assinatura_id ?? ''));
           const hasConsultant = !!consultant?.colaborador_id;
-          events.push({ dealId, occurredAt: emission.at, collaboratorId: hasConsultant ? consultant.colaborador_id : assigned?.collaboratorId ?? null, team: hasConsultant ? consultant.nome_equipe : assigned?.team ?? null, type: 'EMITIDO_ORIGINAL' });
+          events.push({ dealId, occurredAt: emission.at, dateKey: utcDate(emission.at), collaboratorId: hasConsultant ? consultant.colaborador_id : assigned?.collaboratorId ?? null, team: hasConsultant ? consultant.nome_equipe : assigned?.team ?? null, type: 'EMITIDO_ORIGINAL' });
         }
         for (const signed of validSignatures) {
           const consultant = collaboratorMap.get(String(signed.signature.consultor_responsavel_assinatura_id ?? ''));
           const assigned = attribution.attributionAt(signed.signedAt);
           const hasConsultant = !!consultant?.colaborador_id;
-          events.push({ dealId, occurredAt: signed.signedAt, collaboratorId: hasConsultant ? consultant.colaborador_id : assigned?.collaboratorId ?? null, team: hasConsultant ? consultant.nome_equipe : assigned?.team ?? null, type: 'ASSINADO_ORIGINAL' });
+          events.push({ dealId, occurredAt: signed.signedAt, dateKey: utcDate(signed.signedAt), collaboratorId: hasConsultant ? consultant.colaborador_id : assigned?.collaboratorId ?? null, team: hasConsultant ? consultant.nome_equipe : assigned?.team ?? null, type: 'ASSINADO_ORIGINAL' });
         }
       }
     }
 
-    // ── Ganho / Protocolado ───────────────────────────────
-    //
-    // ⚠️ Não usamos o `responsavel_lead_id` cru quando ele não resolve
-    //    em core.colaboradores — o evento fica sem atribuição e cai no
-    //    bucket único, em vez de gerar uma linha por ID órfão.
     for (const outcome of legalOutcomeResult.rows) {
       const occurredAt = timestamp(outcome.data_ganho);
       if (!occurredAt) continue;
-      const dealId = String(outcome.deal_id);
+      const dateKey = utcDate(outcome.data_ganho);
+      if (!dateKey) continue;
+      let dealId = String(outcome.deal_id);
+      if (viewDealIdByHubspot.has(dealId)) dealId = viewDealIdByHubspot.get(dealId);
 
-      // Attribution: view's responsavel_lead → history attributionAt
       let collabId = null;
       let team = null;
       if (outcome.responsavel_lead_id) {
@@ -558,10 +710,10 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         }
       }
 
-      events.push({ dealId, occurredAt, collaboratorId: collabId, team, type: 'GANHO' });
+      events.push({ dealId, occurredAt, dateKey, collaboratorId: collabId, team, type: 'GANHO' });
 
       if (String(outcome.etapa ?? '').trim() === 'Protocolado') {
-        events.push({ dealId, occurredAt, collaboratorId: collabId, team, type: 'PROTOCOLADO' });
+        events.push({ dealId, occurredAt, dateKey, collaboratorId: collabId, team, type: 'PROTOCOLADO' });
       }
     }
 
@@ -577,8 +729,6 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
 }
 
 function rawCacheKey(params) {
-  // mode entra na chave: safra e produção têm caches separados → os eventos
-  // da produção (views) nunca contaminam a safra (core.assinaturas).
   return createHash('sha256')
     .update(`${params.inicio}|${params.fim_exclusivo}|${params.produto || ''}|${params.mode || ''}`)
     .digest('hex');
@@ -592,8 +742,6 @@ async function getRawEvents(params) {
   );
 }
 
-// Escopo estrito — usado pelas métricas de FUNIL (recebidos, trabalhados,
-// em contato, coleta, contrato, desqualificados).
 function filterScope(assessor, params) {
   if (!assessor) return false;
   if (params.colaborador_ids_escopo != null && !params.colaborador_ids_escopo.map(String).includes(String(assessor.collaboratorId))) return false;
@@ -602,10 +750,6 @@ function filterScope(assessor, params) {
   return true;
 }
 
-// Escopo broad — assinados / emitidos / ganhos / protocolados.
-// Aplica APENAS os filtros explícitos do usuário (equipe, colaborador).
-// Não aplica `scoped_all_ids` / `activeIds` / `include_unassigned`:
-// as views /metrics/* não fazem esses filtros.
 function filterScopeBroad(event, params) {
   if (!event) return false;
   if (params.colaborador_id != null) {
@@ -628,50 +772,153 @@ function emptyResult() {
 }
 
 // ============================================================
-// Modo PRODUÇÃO — usa filterScopeBroad em signatureMetrics + ganhos/protocolados
+// Modo PRODUÇÃO — recebidos e assinados por colaborador corrigidos
 // ============================================================
 function buildProductionComparisonResults(raw, params) {
   const monthBounds = periodBounds(params.production_month_inicio, params.production_month_fim);
   const selectedDayBounds = params.selected_day && params.selected_day_end
     ? periodBounds(params.selected_day, params.selected_day_end) : null;
   const activeIds = new Set((params.colaborador_ids_ativos || []).map(String));
+  const noFilter = !params.equipe && params.colaborador_id == null;
+
   const metrics = {
-    recebidos: 'RECEBIDO_ASSESSOR', trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO',
+    recebidos: null, // tratado separadamente (CORPORATIVO vs ASSESSOR)
+    trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO',
     coleta: 'COLETA', contrato: 'CONTRATO', emitidos: 'EMITIDO_ORIGINAL', assinados: 'ASSINADO_ORIGINAL',
     ganhos: 'GANHO', protocolados: 'PROTOCOLADO', desqualificados: 'DESQUALIFICADO',
   };
-  const signatureMetrics = new Set(['emitidos','assinados']);
   const broadMetrics = new Set(['emitidos','assinados','ganhos','protocolados']);
   const metricKeys = Object.keys(metrics);
-  const metricByType = new Map(Object.entries(metrics).map(([k, t]) => [t, k]));
+  const metricByType = new Map(
+    Object.entries(metrics).filter(([, t]) => t != null).map(([k, t]) => [t, k])
+  );
 
   const monthDeals = new Map(metricKeys.map((k) => [k, new Set()]));
   const dayDeals = new Map(metricKeys.map((k) => [k, new Set()]));
-  const monthSigCounts = new Map(metricKeys.map((k) => [k, 0]));
-  const daySigCounts = new Map(metricKeys.map((k) => [k, 0]));
 
   const dailyByDay = new Map();
   const byCollaborator = new Map();
   const byTeam = new Map();
   const reasonCounts = new Map();
-  const firstMetricAtByDeal = new Map();
 
-  const bump = (map, key, delta = 1) => map.set(key, (map.get(key) || 0) + delta);
+  const getOrCreateCollab = (collaboratorId, team) => {
+    const key = `${collaboratorId}|${team}`;
+    let collab = byCollaborator.get(key);
+    if (!collab) {
+      collab = {
+        colaborador_id: collaboratorId,
+        colaborador: raw.collaboratorNames?.get(collaboratorId) || PLACEHOLDER_COLLAB,
+        equipe_atual: team,
+        metricDeals: new Map(metricKeys.map((k) => [k, new Set()])),
+        pct_olos_pendente: null, pct_hubspot_pendente: null,
+      };
+      byCollaborator.set(key, collab);
+    }
+    return collab;
+  };
+  const getOrCreateTeam = (team) => {
+    let teamRow = byTeam.get(team);
+    if (!teamRow) {
+      teamRow = {
+        equipe: team,
+        metricDeals: new Map(metricKeys.map((k) => [k, new Set()])),
+      };
+      byTeam.set(team, teamRow);
+    }
+    return teamRow;
+  };
+  const getOrCreateDay = (day) => {
+    let dayRow = dailyByDay.get(day);
+    if (!dayRow) {
+      dayRow = { dealIds: new Map(metricKeys.map((k) => [k, new Set()])) };
+      dailyByDay.set(day, dayRow);
+    }
+    return dayRow;
+  };
 
+  // ── signedAndGained (pct_assinados_ate_ganhos) ──
+  const signedDateByDeal = new Map();
+  const ganhoDateByDeal = new Map();
+  for (const event of raw.events) {
+    if (event.occurredAt > raw.asOf) continue;
+    if (event.type === 'ASSINADO_ORIGINAL') {
+      if (isSyntheticDealId(event.dealId)) continue;
+      if (event.occurredAt < monthBounds.start || event.occurredAt >= monthBounds.end) continue;
+      if (!filterScopeBroad(event, params) && !(event.collaboratorId == null && noFilter)) continue;
+      const signDate = event.dateKey || utcDate(event.occurredAt);
+      if (!signDate) continue;
+      const prev = signedDateByDeal.get(event.dealId);
+      if (!prev || signDate < prev) signedDateByDeal.set(event.dealId, signDate);
+    } else if (event.type === 'GANHO') {
+      const gainDate = event.dateKey || utcDate(event.occurredAt);
+      if (!gainDate) continue;
+      const prev = ganhoDateByDeal.get(event.dealId);
+      if (!prev || gainDate < prev) ganhoDateByDeal.set(event.dealId, gainDate);
+    }
+  }
+  let signedAndGained = 0;
+  for (const [dealId, signDate] of signedDateByDeal) {
+    const gainDate = ganhoDateByDeal.get(dealId);
+    if (gainDate && gainDate >= signDate) signedAndGained++;
+  }
+
+  // ── Loop principal de eventos ──
   for (const event of raw.events) {
     if (event.occurredAt < monthBounds.start || event.occurredAt >= monthBounds.end ||
         event.occurredAt > raw.asOf || !EVENT_TYPES.has(event.type)) continue;
 
+    const day = localDay(event.occurredAt);
+
+    // ── RECEBIDOS ──────────────────────────────────────────────
+    // Regra (K01B linhas 1 e 2):
+    //   • Total global sem filtro → deals distintos com RECEBIDO_CORPORATIVO
+    //   • Total global com filtro → (deal, dia) distintos com RECEBIDO_ASSESSOR
+    //   • Por colaborador/equipe → SEMPRE via RECEBIDO_ASSESSOR (independe de
+    //     noFilter, porque a tabela precisa mostrar o que cada um recebeu)
+    if (event.type === 'RECEBIDO_CORPORATIVO' || event.type === 'RECEBIDO_ASSESSOR') {
+      // Total global
+      if (event.type === 'RECEBIDO_CORPORATIVO') {
+        if (!noFilter) continue; // se há filtro, corporativo não é a base do total
+        monthDeals.get('recebidos').add(event.dealId);
+        const dayRow = getOrCreateDay(day);
+        dayRow.dealIds.get('recebidos').add(event.dealId);
+        if (selectedDayBounds && event.occurredAt >= selectedDayBounds.start && event.occurredAt < selectedDayBounds.end) {
+          dayDeals.get('recebidos').add(event.dealId);
+        }
+      } else {
+        // RECEBIDO_ASSESSOR — total global
+        if (!noFilter) {
+          if (!filterScopeBroad(event, params)) continue;
+          monthDeals.get('recebidos').add(`${event.dealId}|${day}`);
+          const dayRow = getOrCreateDay(day);
+          dayRow.dealIds.get('recebidos').add(event.dealId);
+          if (selectedDayBounds && event.occurredAt >= selectedDayBounds.start && event.occurredAt < selectedDayBounds.end) {
+            dayDeals.get('recebidos').add(event.dealId);
+          }
+        }
+        // Por colaborador/equipe — respeitando filtro e escopo, contando
+        // (deal, dia) distintos (K05B / K06B).
+        if (event.collaboratorId != null && filterScope(event, params)) {
+          const collaboratorId = String(event.collaboratorId);
+          const team = event.team || PLACEHOLDER_TEAM;
+          const dealDayKey = `${event.dealId}|${day}`;
+          const collab = getOrCreateCollab(collaboratorId, team);
+          collab.metricDeals.get('recebidos').add(dealDayKey);
+          const teamRow = getOrCreateTeam(team);
+          teamRow.metricDeals.get('recebidos').add(dealDayKey);
+        }
+      }
+      continue;
+    }
+
     const metric = metricByType.get(event.type);
     if (!metric) continue;
-    const isSignature = signatureMetrics.has(metric);
+    if (metric === 'assinados' && isSyntheticDealId(event.dealId)) continue;
+
     const isBroad = broadMetrics.has(metric);
     const collaboratorId = event.collaboratorId == null ? null : String(event.collaboratorId);
 
     if (collaboratorId == null) {
-      // Sem atribuição:
-      //   - filtro explícito (equipe/colaborador) descarta
-      //   - broad conta sempre; funil exige include_unassigned
       if (params.equipe != null || params.colaborador_id != null) continue;
       if (!isBroad && !params.include_unassigned) continue;
     } else if (isBroad) {
@@ -681,62 +928,20 @@ function buildProductionComparisonResults(raw, params) {
       if (!activeIds.has(collaboratorId)) continue;
     }
 
-    const day = localDay(event.occurredAt);
     const team = event.team || PLACEHOLDER_TEAM;
     const collaboratorKey = collaboratorId || PLACEHOLDER_COLLAB;
-    const collabKey = `${collaboratorKey}|${team}`;
+    const collab = getOrCreateCollab(collaboratorKey, team);
+    const teamRow = getOrCreateTeam(team);
+    const dayRow = getOrCreateDay(day);
 
-    let collab = byCollaborator.get(collabKey);
-    if (!collab) {
-      collab = {
-        colaborador_id: collaboratorKey,
-        colaborador: raw.collaboratorNames?.get(collaboratorKey) || PLACEHOLDER_COLLAB,
-        equipe_atual: team,
-        metricDeals: new Map(metricKeys.map((k) => [k, new Set()])),
-        metricCounts: new Map(metricKeys.map((k) => [k, 0])),
-        pct_olos_pendente: null, pct_hubspot_pendente: null,
-      };
-      byCollaborator.set(collabKey, collab);
+    // Toda métrica conta (deal distinto) — inclusive assinados/emitidos.
+    monthDeals.get(metric).add(event.dealId);
+    dayRow.dealIds.get(metric).add(event.dealId);
+    collab.metricDeals.get(metric).add(event.dealId);
+    teamRow.metricDeals.get(metric).add(event.dealId);
+    if (selectedDayBounds && event.occurredAt >= selectedDayBounds.start && event.occurredAt < selectedDayBounds.end) {
+      dayDeals.get(metric).add(event.dealId);
     }
-    let teamRow = byTeam.get(team);
-    if (!teamRow) {
-      teamRow = {
-        equipe: team,
-        metricDeals: new Map(metricKeys.map((k) => [k, new Set()])),
-        metricCounts: new Map(metricKeys.map((k) => [k, 0])),
-      };
-      byTeam.set(team, teamRow);
-    }
-    let dayRow = dailyByDay.get(day);
-    if (!dayRow) {
-      dayRow = {
-        dealIds: new Map(metricKeys.map((k) => [k, new Set()])),
-        sigCounts: new Map(metricKeys.map((k) => [k, 0])),
-      };
-      dailyByDay.set(day, dayRow);
-    }
-
-    if (isSignature) {
-      bump(monthSigCounts, metric);
-      bump(dayRow.sigCounts, metric);
-      bump(collab.metricCounts, metric);
-      bump(teamRow.metricCounts, metric);
-      if (selectedDayBounds && event.occurredAt >= selectedDayBounds.start && event.occurredAt < selectedDayBounds.end) {
-        bump(daySigCounts, metric);
-      }
-    } else {
-      monthDeals.get(metric).add(event.dealId);
-      dayRow.dealIds.get(metric).add(event.dealId);
-      collab.metricDeals.get(metric).add(event.dealId);
-      teamRow.metricDeals.get(metric).add(event.dealId);
-      if (selectedDayBounds && event.occurredAt >= selectedDayBounds.start && event.occurredAt < selectedDayBounds.end) {
-        dayDeals.get(metric).add(event.dealId);
-      }
-    }
-
-    const firstAt = firstMetricAtByDeal.get(event.dealId) || new Map();
-    if (!firstAt.has(metric) || event.occurredAt < firstAt.get(metric)) firstAt.set(metric, event.occurredAt);
-    firstMetricAtByDeal.set(event.dealId, firstAt);
 
     if (metric === 'desqualificados') {
       const reason = String(raw.deals.get(event.dealId)?.motivo_perda || '').trim() || '(SEM MOTIVO)';
@@ -744,17 +949,8 @@ function buildProductionComparisonResults(raw, params) {
     }
   }
 
-  const monthTotals = Object.fromEntries(metricKeys.map((k) => [
-    k, signatureMetrics.has(k) ? monthSigCounts.get(k) : monthDeals.get(k).size,
-  ]));
-  const dayTotals = Object.fromEntries(metricKeys.map((k) => [
-    k, signatureMetrics.has(k) ? daySigCounts.get(k) : dayDeals.get(k).size,
-  ]));
-
-  let signedAndGained = 0;
-  for (const dates of firstMetricAtByDeal.values()) {
-    if (dates.has('assinados') && dates.has('ganhos') && dates.get('ganhos') >= dates.get('assinados')) signedAndGained++;
-  }
+  const monthTotals = Object.fromEntries(metricKeys.map((k) => [k, monthDeals.get(k).size]));
+  const dayTotals = Object.fromEntries(metricKeys.map((k) => [k, dayDeals.get(k).size]));
 
   const result = emptyResult();
   result.overview = {
@@ -788,7 +984,7 @@ function buildProductionComparisonResults(raw, params) {
     const iso = day.toISOString().slice(0, 10);
     const row = dailyByDay.get(iso);
     const received = row?.dealIds.get('recebidos').size || 0;
-    const signed = row?.sigCounts.get('assinados') || 0;
+    const signed = row?.dealIds.get('assinados').size || 0;
     result.daily.push({
       dia: iso, recebidos: received, assinados_ate_corte: signed,
       taxa_safra_pct: received ? Number((100 * signed / received).toFixed(2)) : null,
@@ -804,15 +1000,12 @@ function buildProductionComparisonResults(raw, params) {
     trabalhados: row.metricDeals.get('trabalhados_proxy').size,
     em_contato: row.metricDeals.get('em_contato_crm').size,
     coleta: row.metricDeals.get('coleta').size,
-    assinados: row.metricCounts.get('assinados'),
+    assinados: row.metricDeals.get('assinados').size,
     ganhos: row.metricDeals.get('ganhos').size,
     protocolados: row.metricDeals.get('protocolados').size,
     pct_olos_pendente: row.pct_olos_pendente, pct_hubspot_pendente: row.pct_hubspot_pendente,
   });
 
-  // ⚠️ A tabela detalhada mostra APENAS entidades reais.
-  //    Eventos sem atribuição continuam contando em overview/funnel/daily/strategic,
-  //    mas não geram mais linhas "(SEM ATRIBUICAO) | (SEM EQUIPE)".
   result.collaborators = [...byCollaborator.values()]
     .map(toCollabRow)
     .filter((row) => row.colaborador !== PLACEHOLDER_COLLAB && row.colaborador_id !== PLACEHOLDER_COLLAB)
@@ -820,17 +1013,25 @@ function buildProductionComparisonResults(raw, params) {
 
   result.teams = [...byTeam.values()]
     .filter((row) => row.equipe !== PLACEHOLDER_TEAM)
-    .map((row) => ({
-      equipe: row.equipe,
-      recebimentos_assessor_deal_dia: row.metricDeals.get('recebidos').size,
-      deals_unicos_da_equipe: new Set(metricKeys.flatMap((k) => [...row.metricDeals.get(k)])).size,
-      trabalhados: row.metricDeals.get('trabalhados_proxy').size,
-      em_contato: row.metricDeals.get('em_contato_crm').size,
-      coleta: row.metricDeals.get('coleta').size,
-      assinados: row.metricCounts.get('assinados'),
-      ganhos: row.metricDeals.get('ganhos').size,
-      protocolados: row.metricDeals.get('protocolados').size,
-    }))
+    .map((row) => {
+      const uniqueDealIds = new Set();
+      for (const set of row.metricDeals.values()) {
+        for (const v of set) {
+          uniqueDealIds.add(typeof v === 'string' && v.includes('|') ? v.split('|')[0] : v);
+        }
+      }
+      return {
+        equipe: row.equipe,
+        recebimentos_assessor_deal_dia: row.metricDeals.get('recebidos').size,
+        deals_unicos_da_equipe: uniqueDealIds.size,
+        trabalhados: row.metricDeals.get('trabalhados_proxy').size,
+        em_contato: row.metricDeals.get('em_contato_crm').size,
+        coleta: row.metricDeals.get('coleta').size,
+        assinados: row.metricDeals.get('assinados').size,
+        ganhos: row.metricDeals.get('ganhos').size,
+        protocolados: row.metricDeals.get('protocolados').size,
+      };
+    })
     .sort((a, b) => b.assinados - a.assinados);
 
   result.productionComparison = {
@@ -848,7 +1049,7 @@ function buildProductionComparisonResults(raw, params) {
 }
 
 // ============================================================
-// Modo OPERACIONAL (inalterado)
+// Modo OPERACIONAL
 // ============================================================
 function filteredEvents(raw, params) {
   const { start, end } = periodBounds(params.inicio, params.fim_exclusivo);
@@ -1042,12 +1243,13 @@ function buildOperationalResults(raw, params) {
 }
 
 // ============================================================
-// Modo SAFRA (inalterado em relação ao arquivo que você enviou)
+// Modo SAFRA
 // ============================================================
 function buildComparisonResults(raw, params) {
   const cohortBounds = periodBounds(params.cohort_inicio, params.cohort_fim);
   const resultBounds = periodBounds(params.result_inicio, params.result_fim);
   const activeIds = new Set((params.colaborador_ids_ativos || []).map(String));
+
   const creationsByDeal = new Map();
   for (const event of raw.events) {
     if (event.type !== 'DEAL_CREATED' || event.occurredAt < cohortBounds.start ||
@@ -1069,12 +1271,39 @@ function buildComparisonResults(raw, params) {
       team: assessor?.team || PLACEHOLDER_TEAM,
     });
   }
+
+  const eventsByDealAllTime = new Map();
+  for (const e of raw.events) {
+    if (e.occurredAt > raw.asOf) continue;
+    const list = eventsByDealAllTime.get(e.dealId) || [];
+    list.push(e);
+    eventsByDealAllTime.set(e.dealId, list);
+  }
+
+  const DAILY_METRIC_BY_EVENT = {
+    ASSINADO_ORIGINAL: 'assinados',
+    GANHO: 'ganhos',
+    PROTOCOLADO: 'protocolados',
+    EMITIDO_ORIGINAL: 'emitidos',
+    DESQUALIFICADO: 'perdidos',
+  };
+  const milestoneByDeal = new Map();
+  for (const i of cohort) {
+    const evs = (eventsByDealAllTime.get(i.dealId) || []).filter((e) => e.occurredAt >= i.createdAt);
+    const reached = new Set();
+    for (const e of evs) {
+      const metric = DAILY_METRIC_BY_EVENT[e.type];
+      if (metric) reached.add(metric);
+    }
+    milestoneByDeal.set(i.dealId, reached);
+  }
+
   const cohortByDeal = new Map(cohort.map((i) => [i.dealId, i]));
+  // Safra: saídas podem ocorrer depois do fim do mês. Só limitamos em as_of.
   const eventsByDeal = new Map();
   for (const e of raw.events) {
     const item = cohortByDeal.get(e.dealId);
-    if (!item || e.occurredAt < resultBounds.start || e.occurredAt >= resultBounds.end ||
-        e.occurredAt < item.createdAt || e.occurredAt > raw.asOf) continue;
+    if (!item || e.occurredAt < item.createdAt || e.occurredAt > raw.asOf) continue;
     const list = eventsByDeal.get(e.dealId) || [];
     list.push(e);
     eventsByDeal.set(e.dealId, list);
@@ -1085,9 +1314,10 @@ function buildComparisonResults(raw, params) {
     assinados: 'ASSINADO_ORIGINAL', ganhos: 'GANHO', protocolados: 'PROTOCOLADO',
     desqualificados: 'DESQUALIFICADO',
   };
+
   const dealsByMetric = new Map(Object.keys(metricTypes).map((k) => [k, new Set()]));
   const firstMetricAtByDeal = new Map();
-  const signedByDay = new Map();
+
   for (const [dealId, events] of eventsByDeal) {
     const firstAt = new Map();
     for (const e of events) {
@@ -1095,10 +1325,6 @@ function buildComparisonResults(raw, params) {
       if (!metric) continue;
       dealsByMetric.get(metric).add(dealId);
       if (!firstAt.has(metric) || e.occurredAt < firstAt.get(metric)) firstAt.set(metric, e.occurredAt);
-      if (e.type === 'ASSINADO_ORIGINAL') {
-        const day = localDay(e.occurredAt);
-        signedByDay.set(day, (signedByDay.get(day) || new Set()).add(dealId));
-      }
     }
     firstMetricAtByDeal.set(dealId, firstAt);
   }
@@ -1106,40 +1332,40 @@ function buildComparisonResults(raw, params) {
 
   let safraComparison = null;
   if (params.mode === 'safra') {
-    const monthDealsByMetric = new Map(Object.keys(metricTypes).map((k) => [k, new Set()]));
-    for (const e of raw.events) {
-      const item = cohortByDeal.get(e.dealId);
-      if (!item || e.occurredAt < cohortBounds.start || e.occurredAt >= cohortBounds.end ||
-          e.occurredAt < item.createdAt || e.occurredAt > raw.asOf) continue;
-      const metric = Object.entries(metricTypes).find(([, t]) => t === e.type)?.[0];
-      if (metric) monthDealsByMetric.get(metric).add(e.dealId);
-    }
     let dayComparison = null;
     if (params.selected_day && params.selected_day_end) {
       const dayBounds = periodBounds(params.selected_day, params.selected_day_end);
-      const dayDealsByMetric = new Map(Object.keys(metricTypes).map((k) => [k, new Set()]));
-      for (const e of raw.events) {
-        const item = cohortByDeal.get(e.dealId);
-        if (!item || e.occurredAt < dayBounds.start || e.occurredAt >= dayBounds.end ||
-            e.occurredAt < item.createdAt || e.occurredAt > raw.asOf) continue;
-        const metric = Object.entries(metricTypes).find(([, t]) => t === e.type)?.[0];
-        if (metric) dayDealsByMetric.get(metric).add(e.dealId);
+      const dayCohort = cohort.filter(
+        (i) => i.createdAt >= dayBounds.start && i.createdAt < dayBounds.end,
+      );
+      let dayAssinados = 0, dayGanhos = 0, dayProtocolados = 0;
+      for (const i of dayCohort) {
+        const reached = milestoneByDeal.get(i.dealId);
+        if (reached?.has('assinados'))    dayAssinados++;
+        if (reached?.has('ganhos'))       dayGanhos++;
+        if (reached?.has('protocolados')) dayProtocolados++;
       }
-      const dayCreated = cohort.filter((i) => i.createdAt >= dayBounds.start && i.createdAt < dayBounds.end).length;
       dayComparison = {
-        recebidos: dayCreated,
-        assinados: dayDealsByMetric.get('assinados').size,
-        ganhos: dayDealsByMetric.get('ganhos').size,
-        protocolados: dayDealsByMetric.get('protocolados').size,
+        recebidos: dayCohort.length,
+        assinados: dayAssinados,
+        ganhos: dayGanhos,
+        protocolados: dayProtocolados,
       };
+    }
+    let monthAssinados = 0, monthGanhos = 0, monthProtocolados = 0;
+    for (const i of cohort) {
+      const reached = milestoneByDeal.get(i.dealId);
+      if (reached?.has('assinados'))    monthAssinados++;
+      if (reached?.has('ganhos'))       monthGanhos++;
+      if (reached?.has('protocolados')) monthProtocolados++;
     }
     safraComparison = {
       day: dayComparison,
       month: {
         recebidos: cohort.length,
-        assinados: monthDealsByMetric.get('assinados').size,
-        ganhos: monthDealsByMetric.get('ganhos').size,
-        protocolados: monthDealsByMetric.get('protocolados').size,
+        assinados: monthAssinados,
+        ganhos: monthGanhos,
+        protocolados: monthProtocolados,
       },
     };
   }
@@ -1160,27 +1386,45 @@ function buildComparisonResults(raw, params) {
     desqualificados_saida: counts.desqualificados,
     coleta_sem_contato_observado: cohort.filter((i) => dealsByMetric.get('coleta').has(i.dealId) && !dealsByMetric.get('em_contato_crm').has(i.dealId)).length,
   };
-  const dailyMap = new Map();
+
+  const dailyByCreationDay = new Map();
   for (const i of cohort) {
     const day = localDay(i.createdAt);
-    const row = dailyMap.get(day) || { dia: day, recebidos: 0, assinados_ate_corte: 0 };
-    row.recebidos++;
-    dailyMap.set(day, row);
+    const entry = dailyByCreationDay.get(day) || {
+      recebidos: 0,
+      assinados: 0, ganhos: 0, protocolados: 0, emitidos: 0, perdidos: 0,
+    };
+    entry.recebidos++;
+    const reached = milestoneByDeal.get(i.dealId);
+    if (reached?.has('assinados')) entry.assinados++;
+    if (reached?.has('ganhos')) entry.ganhos++;
+    if (reached?.has('protocolados')) entry.protocolados++;
+    if (reached?.has('emitidos')) entry.emitidos++;
+    if (reached?.has('perdidos')) entry.perdidos++;
+    dailyByCreationDay.set(day, entry);
   }
-  for (const [day, deals] of signedByDay) {
-    const row = dailyMap.get(day) || { dia: day, recebidos: 0, assinados_ate_corte: 0 };
-    row.assinados_ate_corte = deals.size;
-    dailyMap.set(day, row);
-  }
+
   const chartStart = cohortBounds.start < resultBounds.start ? cohortBounds.start : resultBounds.start;
   const chartEnd = cohortBounds.end > resultBounds.end ? cohortBounds.end : resultBounds.end;
   const daily = [];
   for (let d = new Date(chartStart); d < chartEnd; d.setUTCDate(d.getUTCDate() + 1)) {
     const iso = d.toISOString().slice(0, 10);
-    const row = dailyMap.get(iso);
-    daily.push({ dia: iso, recebidos: row?.recebidos || 0, assinados_ate_corte: row?.assinados_ate_corte || 0,
-      taxa_safra_pct: row?.recebidos ? Number((100 * row.assinados_ate_corte / row.recebidos).toFixed(2)) : null });
+    const entry = dailyByCreationDay.get(iso);
+    const recebidos = entry?.recebidos || 0;
+    const assinadosDia = entry?.assinados || 0;
+    daily.push({
+      dia: iso,
+      recebidos,
+      assinados_ate_corte: assinadosDia,
+      taxa_safra_pct: recebidos ? Number((100 * assinadosDia / recebidos).toFixed(2)) : null,
+      assinados: assinadosDia,
+      ganhos: entry?.ganhos || 0,
+      protocolados: entry?.protocolados || 0,
+      emitidos: entry?.emitidos || 0,
+      perdidos: entry?.perdidos || 0,
+    });
   }
+
   const reasonCounts = new Map();
   for (const dealId of dealsByMetric.get('desqualificados')) {
     const reason = String(raw.deals.get(dealId)?.motivo_perda || '').trim() || '(SEM MOTIVO)';
@@ -1254,9 +1498,6 @@ export async function getInteComerceRawAnalytics(params) {
   return buildResults(raw, params);
 }
 
-// ============================================================
-// Summary — mantido
-// ============================================================
 const PRODUCTION_METRICS = [
   { key: 'criados', eventType: 'DEAL_CREATED' },
   { key: 'trabalhados', eventType: 'TRABALHADO_PROXY' },
