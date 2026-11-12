@@ -332,34 +332,12 @@ const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
 const COORDENADOR_STATUS_COLUMNS = ["coordenador", "bloqueado", "concluido"];
 
 const EXCLUDED_TEAMS = [
-  "Coordenacao Closer",
-  "Departamento Backoffice",
-  "Diretoria",
-  "Departamento Marketing",
-  "Departamento Comercial",
-  "Equipe Erika",
-  "Equipe Leonardo",
-  "Equipe Leticia",
-  "Equipe Michael",
-  "Equipe Erica",
-  "Equipe Thales",
-  "Equipe Yuri",
-  "Equipe Rodolfo",
-  "Equipe Jennifer",
-  "Equipe Natalia",
-  "Equipe Maria Eduarda",
-  "Equipe Reciclagem",
-  "",
-  "Equipe",
-  "Equipe Camila",
-  "Sales Ops",
-  "Equipe Elizandra",
-  "Equipe Bruno Abreu",
-  "Equipe Lucas Magno",
-  "Equipe SP1",
-  "Equipe Marcia",
-  "Equipe Lucilene",
-  "backoffice",
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
+  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
+  'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice','Equipe Debora','Equipe Curitiba',
+  'Equipe Gabriela Toledo','Equipe SP01', 'Equipe Adriele','Equipe Elizandra', 'Equipe Debora', 'Equipe Toledo'
 ];
 
 const UNIDADES_TRAVADAS_EQUIPE = [2, 3, 4, 5];
