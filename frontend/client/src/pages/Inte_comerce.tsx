@@ -46,6 +46,31 @@ import {
 } from "@/lib/inteComerce";
 
 // ───────────────────────────────────────────────────────────
+// Equipes que NÃO devem aparecer na tabela de produção.
+// Os dados dessas equipes continuam somando normalmente nos
+// totais (overview, funil, estratégico, diário, motivos e
+// comparações) — apenas não são exibidos como linha.
+// A comparação é case-insensitive e ignora espaços em volta.
+// ───────────────────────────────────────────────────────────
+const EXCLUDED_TEAMS: string[] = [
+  'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
+  'Equipe Erika', 'Equipe Leonardo', 'Equipe Leticia', 'Equipe Michael','Equipe Erica',
+  'Equipe Thales', 'Equipe Yuri', 'Equipe Rodolfo','Equipe Jennifer','Equipe Natalia','Equipe Maria Eduarda',
+  'Equipe Reciclagem','','Equipe','Equipe Camila','Sales Ops','Equipe Elizandra','Equipe Bruno Abreu',
+  'Equipe Lucas Magno','Equipe SP1','Equipe Marcia','Equipe Lucilene','backoffice','Equipe Debora','Equipe Curitiba',
+  'Equipe Gabriela Toledo','Equipe SP01', 'Equipe Adriele','Equipe Elizandra', 'Equipe Debora', 'Equipe Toledo'
+];
+
+const EXCLUDED_TEAMS_UPPER = new Set(
+  EXCLUDED_TEAMS.map((t) => String(t).trim().toUpperCase()).filter(Boolean),
+);
+
+function isExcludedTeam(team: string | null | undefined): boolean {
+  if (!team) return false;
+  return EXCLUDED_TEAMS_UPPER.has(String(team).trim().toUpperCase());
+}
+
+// ───────────────────────────────────────────────────────────
 const formatInt = (n: number) => (n || 0).toLocaleString("pt-BR");
 const formatPct = (num: number, den: number) => {
   if (!den) return "—";
@@ -876,24 +901,30 @@ export default function Inte_comerce() {
     }));
   }, [dailySeries]);
 
+  // ── Tabela de produção: filtra apenas as equipes em EXCLUDED_TEAMS.
+  //    Os totais (overview/funnel/etc.) continuam contando essas equipes.
   const tableRows = useMemo<Row[]>(() => {
     if (grouping === "team") {
-      return teamTable.map((t) => ({
-        key: t.equipe, name: t.equipe, team: t.equipe,
-        received: t.recebimentos_assessor_deal_dia,
-        worked: t.trabalhados, contact: t.em_contato,
-        collection: t.coleta, signed: t.assinados,
-        gained: t.ganhos, protocolados: t.protocolados,
-      }));
+      return teamTable
+        .filter((t) => !isExcludedTeam(t.equipe))
+        .map((t) => ({
+          key: t.equipe, name: t.equipe, team: t.equipe,
+          received: t.recebimentos_assessor_deal_dia,
+          worked: t.trabalhados, contact: t.em_contato,
+          collection: t.coleta, signed: t.assinados,
+          gained: t.ganhos, protocolados: t.protocolados,
+        }));
     }
-    return collabTable.map((c) => ({
-      key: c.colaborador_id || c.colaborador,
-      name: c.colaborador, team: c.equipe_atual || "—",
-      received: c.recebimentos_deal_dia,
-      worked: c.trabalhados, contact: c.em_contato,
-      collection: c.coleta, signed: c.assinados,
-      gained: c.ganhos, protocolados: c.protocolados,
-    }));
+    return collabTable
+      .filter((c) => !isExcludedTeam(c.equipe_atual))
+      .map((c) => ({
+        key: c.colaborador_id || c.colaborador,
+        name: c.colaborador, team: c.equipe_atual || "—",
+        received: c.recebimentos_deal_dia,
+        worked: c.trabalhados, contact: c.em_contato,
+        collection: c.coleta, signed: c.assinados,
+        gained: c.ganhos, protocolados: c.protocolados,
+      }));
   }, [grouping, collabTable, teamTable]);
 
   const filteredTable = useMemo(() => {
@@ -1069,12 +1100,16 @@ export default function Inte_comerce() {
   const modeLabel = viewMode === "safra" ? "Safra" : "Produção";
 
   const modeDescription = viewMode === "safra"
+    ? "Safra: os negócios são agrupados pela data de criação; cada indicador reflete o avanço dessas coortes até o momento da consulta."
+    : "Produção: cada evento é contabilizado no mês em que ocorreu (recebimentos, contatos, assinaturas, ganhos e protocolos).";
 
   const comparisonSectionTitle = viewMode === "safra"
-     ? "Comparativo de Safra"
-     : "Comparativo de Produção";
+    ? "Comparativo de Safra"
+    : "Comparativo de Produção";
 
   const comparisonSectionDescription = viewMode === "safra"
+    ? "Compara o acumulado da coorte do mês selecionado com o mesmo acumulado do mês de referência."
+    : "Compara a produção do mês selecionado com o mês de referência — dia selecionado, total do mês e variação.";
 
   // ═══════════════════════════════════════════════════════════
   return (
