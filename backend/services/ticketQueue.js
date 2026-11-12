@@ -133,12 +133,23 @@ async function requesterUnitId(client, metadata) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// [CORRIGIDO]
+//   • `isProcessing = true` ANTES de `pool.connect()`
+//   • `pool.connect()` DENTRO do try
+//   • `if (client)` no finally ao dar release
+//   • Qualquer erro do connect vira log controlado, não crash
+// ═══════════════════════════════════════════════════════════════════
 async function processTicketQueue() {
   if (isProcessing) return;
+  isProcessing = true;                               // ← antes de qualquer await
 
-  const client = await pool.connect();
+  let client = null;
   let hasLock = false;
+
   try {
+    client = await pool.connect();                   // ← dentro do try
+
     const lockResult = await client.query(`SELECT pg_try_advisory_lock($1)`, [LOCK_KEY]);
     hasLock = lockResult.rows[0].pg_try_advisory_lock === true;
     if (!hasLock) {
@@ -146,7 +157,6 @@ async function processTicketQueue() {
       return;
     }
 
-    isProcessing = true;
     while (true) {
       const result = await client.query(
         `SELECT tml.*, ts.metadados
@@ -170,56 +180,72 @@ async function processTicketQueue() {
       } catch (err) {
         console.error(`Erro no ticket ${ticket.id_ticket_movimentacao}:`, err);
 
-        let previous = {};
+        // Best-effort: se a conexão morreu, os UPDATEs abaixo também falham.
+        // Envolvemos em try/catch próprio para não propagar para o loop.
         try {
-          const persisted = await client.query(
-            `SELECT observacao_sales_ops
-             FROM app_comissionamento.tickets_movimentacao_lead
-             WHERE id_ticket_movimentacao = $1`,
-            [ticket.id_ticket_movimentacao]
+          let previous = {};
+          try {
+            const persisted = await client.query(
+              `SELECT observacao_sales_ops
+                 FROM app_comissionamento.tickets_movimentacao_lead
+                WHERE id_ticket_movimentacao = $1`,
+              [ticket.id_ticket_movimentacao]
+            );
+            const raw = persisted.rows[0]?.observacao_sales_ops;
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) previous = parsed;
+          } catch { /* Mantém fallback vazio para observação legada. */ }
+
+          const obs = JSON.stringify({
+            ...previous,
+            erro: err.message,
+            timestamp: new Date().toISOString(),
+            ...(err.partialResult ? { resultadoParcial: err.partialResult } : {}),
+          });
+
+          await client.query(
+            `UPDATE app_comissionamento.tickets_movimentacao_lead
+             SET status_mapeamento = 'suporte',
+                 observacao_sales_ops = $1,
+                 atualizado_em = NOW()
+             WHERE id_ticket_movimentacao = $2`,
+            [obs, ticket.id_ticket_movimentacao]
           );
-          const raw = persisted.rows[0]?.observacao_sales_ops;
-          const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) previous = parsed;
-        } catch { /* Mantém fallback vazio para observação legada. */ }
-
-        const obs = JSON.stringify({
-          ...previous,
-          erro: err.message,
-          timestamp: new Date().toISOString(),
-          ...(err.partialResult ? { resultadoParcial: err.partialResult } : {}),
-        });
-
-        // ALTERADO: de 'erro' para 'suporte'
-        await client.query(
-          `UPDATE app_comissionamento.tickets_movimentacao_lead
-           SET status_mapeamento = 'suporte',
-               observacao_sales_ops = $1,
-               atualizado_em = NOW()
-           WHERE id_ticket_movimentacao = $2`,
-          [obs, ticket.id_ticket_movimentacao]
-        );
-        // ALTERADO: de 'ERRO' para 'Aguardando Suporte'
-        await client.query(
-          `UPDATE app_comissionamento.tickets_suporte
-           SET status = 'Aguardando Suporte', atualizado_em = NOW()
-           WHERE id_ticket = $1`,
-          [ticket.ticket_id]
-        );
+          await client.query(
+            `UPDATE app_comissionamento.tickets_suporte
+             SET status = 'Aguardando Suporte', atualizado_em = NOW()
+             WHERE id_ticket = $1`,
+            [ticket.ticket_id]
+          );
+        } catch (persistErr) {
+          console.error(
+            `[ticketQueue] Falha ao persistir erro do ticket ${ticket.id_ticket_movimentacao}:`,
+            persistErr?.message || persistErr
+          );
+        }
       }
     }
   } catch (err) {
-    console.error('Erro no processador de tickets:', err);
+    // Erros de infraestrutura (pool esgotado, timeout de connect, PG fora).
+    // NÃO propagar — apenas logar. O próximo ciclo do setInterval tenta de novo.
+    console.error('[ticketQueue] ciclo interrompido:', err?.message || err);
   } finally {
-    if (hasLock) {
+    if (client && hasLock) {
       try {
         await client.query(`SELECT pg_advisory_unlock($1)`, [LOCK_KEY]);
       } catch (unlockErr) {
-        console.error('Erro ao liberar advisory lock:', unlockErr);
+        console.error('[ticketQueue] erro ao liberar advisory lock:', unlockErr?.message || unlockErr);
+      }
+    }
+    if (client) {
+      try {
+        client.release();
+      } catch (releaseErr) {
+        // Conexão já morta — o pg-pool descarta sozinho.
+        console.warn('[ticketQueue] release falhou (conexão já encerrada):', releaseErr?.message || releaseErr);
       }
     }
     isProcessing = false;
-    client.release();
   }
 }
 
@@ -650,8 +676,7 @@ async function handleTicket(ticket, client) {
       processado: true,
       produto: observacaoAtual.produto || produto || null,
     });
-    
-    // ALTERADO: de 'erro' para 'suporte'
+
     await client.query(
       `UPDATE app_comissionamento.tickets_movimentacao_lead
        SET observacao_sales_ops = $1,
@@ -661,7 +686,6 @@ async function handleTicket(ticket, client) {
        WHERE id_ticket_movimentacao = $2`,
       [obsErro, ticket.id_ticket_movimentacao]
     );
-    // ALTERADO: de 'ERRO' para 'Aguardando Suporte'
     await client.query(
       `UPDATE app_comissionamento.tickets_suporte
        SET status = 'Aguardando Suporte', atualizado_em = NOW()
@@ -672,7 +696,19 @@ async function handleTicket(ticket, client) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// [CORRIGIDO] setInterval com .catch() — nenhuma rejeição escapa
+// ═══════════════════════════════════════════════════════════════════
 export function startTicketQueue(intervalMs = 5000) {
-  setInterval(() => processTicketQueue(), intervalMs);
+  const safeRun = () => {
+    processTicketQueue().catch((err) => {
+      console.error('[ticketQueue] falha não tratada no ciclo:', err?.stack || err?.message || err);
+    });
+  };
+
+  const timer = setInterval(safeRun, intervalMs);
+  if (typeof timer.unref === 'function') timer.unref();
+
   console.log('🔄 Fila de tickets de movimentação iniciada');
+  return timer;
 }

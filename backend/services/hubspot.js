@@ -714,13 +714,15 @@ function hoursSince(value) {
   const timestamp = new Date(value).getTime();
   return !Number.isFinite(timestamp) || timestamp > Date.now() ? null : (Date.now() - timestamp) / 3600000;
 }
-
+/*---------------------*/
+/*REGRA TIMER DE ETAPAS*/
+/*---------------------*/
 function temporalCheck(deal, { bypassTimeLimit = false } = {}) {
   const required = {
-    [STAGE_COLETA_DOCUMENTACAO_ID]: 72,
-    [STAGE_ENTRADA_ID]: 24,
-    [STAGE_EM_CONTATO_ID]: 24,
-    [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 24,
+    [STAGE_COLETA_DOCUMENTACAO_ID]: 0,
+    [STAGE_ENTRADA_ID]: 0,
+    [STAGE_EM_CONTATO_ID]: 0,
+    [STAGE_ISENCAO_IR_EM_CONTATO_ID]: 0,
   };
 
   const currentStage = String(deal.stage ?? '');

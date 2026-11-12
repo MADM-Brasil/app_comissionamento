@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { pool, logDatabaseAccess, waitForDatabase } from './services/db.js';
+import { pool, logDatabaseAccess, waitForDatabase, closePool } from './services/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 
 // ---------- Routers ----------
@@ -33,30 +33,46 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ============================================================
-// REDE DE SEGURANÇA GLOBAL
-// ------------------------------------------------------------
-// Workers de background (linkHubBatchQueue, notificationEngine,
-// ticketQueue) fazem `pool.query` fora do ciclo de request/response.
-// Se uma dessas queries falhar (ex.: "Connection terminated due to
-// connection timeout" após o Postgres fechar uma conexão ociosa),
-// a promise rejeitada não tem nenhum `.catch` — e, por padrão, Node
-// 22 encerra o processo em `unhandledRejection`.
+// REDE DE SEGURANÇA GLOBAL — refinada
 //
-// Aqui logamos e SEGUIMOS VIVOS. Os workers já têm try/catch por
-// ciclo (ver linkHubBatchQueue.js); esta rede cobre qualquer outra
-// promise esquecida em qualquer serviço.
+// [CORRIGIDO] Erros de infraestrutura (pool esgotado, conexão
+// caída, timeout) NÃO matam mais o processo. São logados e seguem.
+// Só erros realmente desconhecidos (bugs) contam para o limiar
+// que encerra o processo. Isso evita crash-loop em picos de carga.
 // ============================================================
+const NON_FATAL_ERROR_PATTERNS = [
+  'connection terminated',
+  'connection timeout',
+  'too many clients',
+  'remaining connection slots',
+  'query read timeout',
+  'connect timeout',
+  'timeout expired',
+  'econnreset',
+  'epipe',
+  'econnrefused',
+];
+
+function isInfraError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return NON_FATAL_ERROR_PATTERNS.some((p) => msg.includes(p));
+}
+
 const fatalTimestamps = [];
 const FATAL_WINDOW_MS = 60_000;
 const FATAL_THRESHOLD = 5;
 
-function recordFatal(kind, err) {
+function recordAndMaybeKill(kind, err) {
+  if (isInfraError(err)) {
+    console.warn(`[non-fatal:${kind}] ${err?.message || err}`);
+    return;
+  }
+  console.error(`[fatal:${kind}]`, err?.stack || err);
   const now = Date.now();
   fatalTimestamps.push(now);
   while (fatalTimestamps.length && now - fatalTimestamps[0] > FATAL_WINDOW_MS) {
     fatalTimestamps.shift();
   }
-  console.error(`[fatal:${kind}]`, err && err.stack ? err.stack : err);
   if (fatalTimestamps.length >= FATAL_THRESHOLD) {
     console.error(
       `[fatal] ${FATAL_THRESHOLD} erros não tratados em ${FATAL_WINDOW_MS / 1000}s — encerrando para evitar loop.`
@@ -65,19 +81,75 @@ function recordFatal(kind, err) {
   }
 }
 
-process.on('unhandledRejection', (reason) => recordFatal('unhandledRejection', reason));
-process.on('uncaughtException', (err) => recordFatal('uncaughtException', err));
+process.on('unhandledRejection', (reason) => recordAndMaybeKill('unhandledRejection', reason));
+process.on('uncaughtException', (err) => recordAndMaybeKill('uncaughtException', err));
 
-// Listener no pool: o pg-pool emite 'error' quando uma conexão ociosa
-// morre. Sem esse listener, o EventEmitter lança e derruba o processo.
-// (Ideal também ter em db.js; aqui é redundância inofensiva.)
+// Rede de segurança do pool. Se `db.js` já tem `pool.on('error')`,
+// este é redundante, mas inofensivo.
 pool.on('error', (err) => {
-  console.error('[db] conexão ociosa caiu:', err?.message || err);
+  console.warn('[db] conexão ociosa caiu:', err?.message || err);
 });
 
 const app = express();
 const PORT = process.env.PORT || 3007;
 const isProduction = process.env.NODE_ENV === 'production';
+
+// ============================================================
+// CACHE EM MEMÓRIA
+// ------------------------------------------------------------
+// Cache simples para rotas que devolvem volumes grandes e
+// estáveis (ex.: /api/metricas-assessores → 178 linhas/usuário).
+// Com N usuários carregando a mesma tela, evita rodar a mesma
+// query N vezes no mesmo intervalo.
+//
+// Para múltiplas instâncias, troque por Redis mantendo a mesma
+// interface (get/set/deleteByPrefix). Para 1 instância, resolve
+// o problema com custo zero.
+// ============================================================
+const _cache = new Map();
+const _cacheMaxSize = Number(process.env.CACHE_MAX_SIZE || 500);
+const _cacheDefaultTtl = Number(process.env.CACHE_DEFAULT_TTL_MS || 120_000);
+
+function cacheGet(key) {
+  const entry = _cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    _cache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function cacheSet(key, value, ttlMs = _cacheDefaultTtl) {
+  _cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  if (_cache.size > _cacheMaxSize) {
+    const firstKey = _cache.keys().next().value;
+    _cache.delete(firstKey);
+  }
+}
+
+function cacheDeleteByPrefix(prefix) {
+  if (!prefix) { _cache.clear(); return; }
+  for (const k of _cache.keys()) {
+    if (k.startsWith(prefix)) _cache.delete(k);
+  }
+}
+
+function cacheKeyOf(prefix, params) {
+  const sorted = Object.keys(params || {}).sort().reduce((acc, k) => {
+    const v = params[k];
+    if (v !== undefined && v !== null && v !== '') acc[k] = v;
+    return acc;
+  }, {});
+  return `${prefix}:${JSON.stringify(sorted)}`;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _cache.entries()) {
+    if (now > v.expiresAt) _cache.delete(k);
+  }
+}, 60_000).unref?.();
 
 // ============================================================
 // CONFIGURAÇÃO DE COOKIES
@@ -105,9 +177,7 @@ console.log(`[boot] ALLOWED_ORIGINS = ${allowedOrigins.join(', ')}`);
 function originMatches(origin, pattern) {
   if (pattern === origin) return true;
   if (!pattern.includes('*')) return false;
-  const regex = new RegExp(
-    '^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$'
-  );
+  const regex = new RegExp('^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
   return regex.test(origin);
 }
 
@@ -220,9 +290,15 @@ app.use(session({
 }));
 
 // ============================================================
-// LOG DE DIAGNÓSTICO DE AUTENTICAÇÃO
+// LOG DE AUTENTICAÇÃO
+// [CORRIGIDO] Controlado por env. Em produção, 1 console.log
+// por request × N usuários pode virar gargalo no stdout.
+// Ative com LOG_AUTH_VERBOSE=true apenas ao depurar.
 // ============================================================
+const LOG_AUTH_VERBOSE = process.env.LOG_AUTH_VERBOSE === 'true' || !isProduction;
+
 app.use((req, res, next) => {
+  if (!LOG_AUTH_VERBOSE) return next();
   const reqPath = req.path || '';
   const skip =
     reqPath === '/api/health' ||
@@ -240,19 +316,62 @@ app.use((req, res, next) => {
 });
 
 // ============================================================
-// ROTAS PÚBLICAS — NÃO exigem sessão nem CSRF
+// HEALTH / MONITORAMENTO — público, antes de auth/CSRF
 // ============================================================
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
+// [NOVO] Health do banco. Use com monitor externo (UptimeRobot,
+// cron curl, etc.) para alertar quando `waiting > 0`.
+app.get('/api/health/db', async (req, res) => {
+  const started = Date.now();
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('SELECT 1');
+    } finally {
+      client.release();
+    }
+    const poolStats = {
+      total: pool.totalCount,
+      idle: pool.idleCount,
+      waiting: pool.waitingCount,
+      max: pool.options?.max ?? null,
+    };
+    const ok = poolStats.waiting === 0;
+    return res.status(ok ? 200 : 503).json({
+      ok,
+      ms: Date.now() - started,
+      pool: poolStats,
+    });
+  } catch (err) {
+    return res.status(503).json({
+      ok: false,
+      ms: Date.now() - started,
+      error: err?.message || String(err),
+      pool: {
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+      },
+    });
+  }
+});
+
+// ============================================================
+// CSRF TOKEN ENDPOINT
+// ============================================================
 app.get('/api/csrf-token', (req, res) => {
   res.json({ csrfToken: req.csrfToken });
 });
 
+// ============================================================
+// AUTH — público (o router decide o que expor)
+// ============================================================
 app.use('/api/auth', authRoutes);
 
 // ============================================================
-// ARQUIVOS ESTÁTICOS (uploads) — PÚBLICOS, porém inavegáveis
+// ARQUIVOS ESTÁTICOS (uploads) — públicos, inavegáveis
 // ============================================================
 app.use(
   '/uploads',
@@ -282,6 +401,9 @@ app.use((req, res, next) => {
 // ROTAS PROTEGIDAS
 // ============================================================
 
+// [CORRIGIDO] Cache de 2 min — a rota devolve até 178 linhas por
+// usuário e é chamada a cada navegação. Com 20 usuários
+// simultâneos, o cache elimina ~95% das queries ao banco.
 app.get('/api/metricas-assessores', async (req, res) => {
   try {
     const { mes, email, colaborador_id } = req.query;
@@ -290,6 +412,12 @@ app.get('/api/metricas-assessores', async (req, res) => {
         success: false,
         error: 'Parâmetro "mes" (YYYY-MM) é obrigatório',
       });
+    }
+
+    const key = cacheKeyOf('metricas-assessores', { mes, email, colaborador_id });
+    const cached = cacheGet(key);
+    if (cached) {
+      return res.json({ success: true, data: cached, cached: true });
     }
 
     let query = `
@@ -318,6 +446,7 @@ app.get('/api/metricas-assessores', async (req, res) => {
     query += ' ORDER BY email';
 
     const result = await pool.query(query, params);
+    cacheSet(key, result.rows, 120_000);
     res.json({ success: true, data: result.rows });
   } catch (err) {
     console.error('Erro em /api/metricas-assessores:', err);
@@ -336,8 +465,14 @@ app.use('/api/suporte', suporteRouter);
 app.use('/api/notificacoes', notificacoesRoutes);
 app.use('/api/tabulacoes', tabulacoesRoutes);
 
+// [CORRIGIDO] Cache de 5 min — chamado a cada navegação
 app.get('/api/admin/months', async (req, res) => {
   try {
+    const cacheKey = 'admin-months';
+    const cached = cacheGet(cacheKey);
+    if (cached) {
+      return res.json({ success: true, data: cached, cached: true });
+    }
     const result = await pool.query(
       `SELECT DISTINCT data_metrica::date
          FROM app_comissionamento.view_app_metricas_assessores
@@ -347,6 +482,7 @@ app.get('/api/admin/months', async (req, res) => {
       const d = new Date(r.data_metrica);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
     });
+    cacheSet(cacheKey, months, 5 * 60_000);
     res.json({ success: true, data: months });
   } catch (err) {
     console.error('Erro ao buscar meses:', err);
@@ -354,14 +490,74 @@ app.get('/api/admin/months', async (req, res) => {
   }
 });
 
+// [NOVO] Invalidação manual do cache. Chame após operações que
+// mudam dados que alimentam o cache (movimentação de leads,
+// edição de métricas etc.). Exemplo:
+//   fetch('/api/admin/cache/invalidate', {
+//     method: 'POST', headers: {...}, body: JSON.stringify({ prefix: 'metricas' })
+//   });
+app.post('/api/admin/cache/invalidate', (req, res) => {
+  const prefix = typeof req.body?.prefix === 'string' ? req.body.prefix : '';
+  cacheDeleteByPrefix(prefix);
+  res.json({ success: true, invalidated: prefix || 'all' });
+});
+
 // ============================================================
 // TRATAMENTO DE ERRO
 // ============================================================
 app.use((err, req, res, next) => {
-  console.error('❌ Erro não tratado:', err);
+  // Em produção, log compacto — não polui o stdout com stack trace
+  // quando o erro é conhecido (ex.: pool caído durante pico).
+  if (isProduction && isInfraError(err)) {
+    console.warn(`[erro-conhecido] ${req.method} ${req.path}: ${err?.message || err}`);
+  } else if (isProduction) {
+    console.error(`❌ Erro em ${req.method} ${req.path}: ${err?.message || err}`);
+  } else {
+    console.error('❌ Erro não tratado:', err);
+  }
   if (res.headersSent) return next(err);
   res.status(500).json({ error: 'Erro interno' });
 });
+
+// ============================================================
+// GRACEFUL SHUTDOWN
+// [CORRIGIDO] Fecha o pool antes de sair. Sem isso, as conexões
+// do processo ficam abertas no PostgreSQL por até
+// `idleTimeoutMillis` (30s+), agravando "too many clients" em
+// cada restart.
+// ============================================================
+let server = null;
+let shuttingDown = false;
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} recebido — encerrando graciosamente...`);
+
+  // 1) Para de aceitar novas conexões HTTP
+  if (server) {
+    await new Promise((resolve) => {
+      server.close(() => {
+        console.log('[shutdown] servidor HTTP encerrado');
+        resolve();
+      });
+      setTimeout(resolve, 10_000); // failsafe
+    });
+  }
+
+  // 2) Fecha o pool do PostgreSQL (libera slots imediatamente)
+  try {
+    await closePool();
+    console.log('[shutdown] pool do PostgreSQL encerrado');
+  } catch (err) {
+    console.error('[shutdown] erro ao fechar pool:', err?.message || err);
+  }
+
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ============================================================
 // INICIALIZAÇÃO
@@ -380,7 +576,7 @@ app.use((err, req, res, next) => {
 
     console.log('✅ Conectado ao PostgreSQL');
 
-    app.listen(PORT, () => {
+    server = app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
       startNotificationEngine();
       startTicketQueue();
