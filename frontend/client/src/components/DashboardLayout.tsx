@@ -1,5 +1,5 @@
 // src/components/DashboardLayout.tsx
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
@@ -47,6 +47,7 @@ interface DashboardLayoutProps {
   title: string;
   subtitle?: string;
   showPeriodFilter?: boolean;
+  headerActions?: ReactNode;
   allowCoordinatorValueToggleForOtherCollaborator?: boolean;
 }
 
@@ -55,6 +56,7 @@ export default function DashboardLayout({
   title,
   subtitle,
   showPeriodFilter = true,
+  headerActions,
   allowCoordinatorValueToggleForOtherCollaborator = false,
 }: DashboardLayoutProps) {
   const [location] = useLocation();
@@ -84,54 +86,33 @@ export default function DashboardLayout({
 
   // ============================================================
   //  USUÁRIO DE ACESSO (enriquecido)
-  // ------------------------------------------------------------
-  //  O payload do /auth/login não traz `nome_equipe` nem
-  //  `unidade_id`. `resolveAccessUser` complementa esses campos
-  //  com os dados do colaborador em `collaborators` (match por
-  //  e-mail). Sem isso:
-  //    • canSeeHomeComissoes → false
-  //    • canAccessDashboard / canAccessComissoes → false
-  //    • navItems sem Home/Comissões
   // ============================================================
   const accessUser = useMemo(
     () => resolveAccessUser(currentUser, collaborators),
     [currentUser, collaborators],
   );
 
-  // [ALTERADO] Usa nível efetivo (considera whitelist ASSESSOR_PLUS).
-  // Antes: `useAccessControl().getAccessLevel()` — só enxergava cargo.
   const userLevel = useMemo(
     () => getEffectiveAccessLevel(accessUser),
     [accessUser],
   );
 
   const isSuperAdmin = userLevel === LEVELS.SUPER_ADMIN;
-
-  // Nível JURIDICO (Analista Jurídico / Analista).
   const isJuridicoUser = userLevel === LEVELS.JURIDICO;
-
-  // [NOVO] Nível ASSESSOR_PLUS — suporte-only com permissões de coordenador.
   const isAssessorPlusUser = userLevel === LEVELS.ASSESSOR_PLUS;
 
-  // Suporte é acessível por qualquer usuário >= SUPERVISAO,
-  // por JURIDICO (que só pode ver essa página) e por ASSESSOR_PLUS
-  // (que, por design do renumbering, é >= SUPERVISAO).
   const canSeeSuporte =
     userLevel >= LEVELS.SUPERVISAO || isJuridicoUser;
 
-  // Assessor restrito (Unidade 3 OU equipe liberada) → apenas Home e Comissões.
   const isAssessorRestritoUser = useMemo(
     () => isAssessorRestrito(accessUser),
     [accessUser],
   );
 
-  // Obtém o e-mail do colaborador selecionado (armazenado no dataStore)
   const selectedCollaboratorEmail = useAppStore(
     (state) => (state as any).selectedCollaboratorEmail ?? null
   );
 
-  // Determina se o colaborador filtrado é diferente do usuário logado,
-  // EXCETO se o usuário for SUPER_ADMIN.
   const isViewingOtherCollaborator = !isSuperAdmin &&
     !!selectedCollaboratorEmail &&
     !!currentUser?.email &&
@@ -142,7 +123,6 @@ export default function DashboardLayout({
   const shouldForceHideValues =
     isViewingOtherCollaborator && !canToggleValuesForOtherCollaborator;
 
-  // Força hideValues = true enquanto estiver visualizando outro colaborador
   useEffect(() => {
     if (shouldForceHideValues && !hideValues) {
       toggleHideValues();
@@ -151,13 +131,11 @@ export default function DashboardLayout({
 
   const markNotificationRead = useAppStore((state) => state.markNotificationRead);
 
-  // Usa accessUser (enriquecido) em vez do currentUser cru.
   const permissions = useMemo(
     () => getUserPermissions(accessUser),
     [accessUser],
   );
 
-  // Contagem de não lidas
   const unreadCount = useMemo(() => {
     if (!notifications) return 0;
     return notifications.filter((n: any) => {
@@ -275,13 +253,12 @@ export default function DashboardLayout({
       );
     }
 
-    // Assessor restrito (Unidade 3 ou equipe liberada) → apenas Home e Comissões.
     if (isAssessorRestritoUser) {
       return items.filter((item) => {
         if ("path" in item && item.path) {
           return RESTRICTED_ASSESSOR_ALLOWED_PATHS.includes(item.path);
         }
-        return false; // remove grupos inteiros (Dashboard)
+        return false;
       });
     }
 
@@ -320,12 +297,10 @@ export default function DashboardLayout({
     if (permissions.canAccessConfiguration)
       flat.push({ path: "/configuration", label: "Config.", icon: Settings });
 
-    // [ATUALIZADO] Suporte-only (JURIDICO e ASSESSOR_PLUS): apenas "Suporte".
     if (isJuridicoUser || isAssessorPlusUser) {
       return flat.filter((item) => item.path === "/suporte");
     }
 
-    // Assessor restrito (Unidade 3 ou equipe liberada) → apenas Home e Comissões.
     if (isAssessorRestritoUser) {
       return flat.filter((item) => RESTRICTED_ASSESSOR_ALLOWED_PATHS.includes(item.path));
     }
@@ -364,7 +339,6 @@ export default function DashboardLayout({
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // Fecha popout ao clicar fora
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (notificationRef.current && !notificationRef.current.contains(event.target as Node)) {
@@ -423,8 +397,7 @@ export default function DashboardLayout({
           sidebarOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
         )}
       >
-        {/* Logo — oculto para perfis "suporte-only" (JURIDICO e ASSESSOR_PLUS).
-            Mantém apenas o botão de fechar no mobile. */}
+        {/* Logo — oculto para perfis "suporte-only" (JURIDICO e ASSESSOR_PLUS). */}
         {!(isJuridicoUser || isAssessorPlusUser) ? (
           <div className="flex items-center gap-3 px-5 py-5 border-b border-[#e2e8f0]">
             <img src={logoBranca} alt="MADM Brasil" className="w-10 h-10 object-contain" />
@@ -442,8 +415,6 @@ export default function DashboardLayout({
             </button>
           </div>
         ) : (
-          // Perfis "suporte-only": sem logo/título/subtítulo. Mantém apenas o
-          // botão de fechar (mobile) para não quebrar a UX do menu lateral.
           <div className="flex items-center justify-end px-3 py-2 border-b border-[#e2e8f0] lg:hidden">
             <button
               type="button"
@@ -578,10 +549,18 @@ export default function DashboardLayout({
             <Menu className="w-5 h-5 text-[#334155]" />
           </button>
 
+          {/* Título + subtítulo */}
           <div className="flex-1 min-w-0">
             <h1 className="text-lg font-bold text-[#0f172a] leading-tight truncate">{title}</h1>
             {subtitle && <p className="text-sm text-[#64748b] truncate">{subtitle}</p>}
           </div>
+
+          {/* headerActions — ao lado do título, antes do período/olho/notificações */}
+          {headerActions && (
+            <div className="flex items-center gap-2 shrink-0">
+              {headerActions}
+            </div>
+          )}
 
           <div className="flex items-center gap-3">
             {shouldShowPeriodFilter && (

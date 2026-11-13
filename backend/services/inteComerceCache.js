@@ -51,7 +51,7 @@ export async function cached(key, fetcher, options = {}) {
   if (entry && age < staleMs) {
     if (!entry.refreshing) {
       entry.refreshing = true;
-      void load(key, fetcher).catch((error) => {
+      void load(key, fetcher).catch((error) => { 
         entry.refreshing = false;
         console.error(
           '[inte-comerce-cache] Atualização em segundo plano falhou:',
