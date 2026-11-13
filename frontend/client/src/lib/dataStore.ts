@@ -273,16 +273,59 @@ function getDateRangeFromPeriod(period: Period, customStart?: string, customEnd?
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
-// Normalização usada para casar nomes entre o back e o front (acentos/caixa).
+// ============================================================
+// normalizeNameKey
+// ------------------------------------------------------------
+// ⚠️ FIX (v2): além de trim/lowercase/NFD, agora colapsa
+// espaços internos com `.replace(/\s+/g, ' ')`.
+// Antes: "João  Silva" (espaço duplo no backend) ≠ "João Silva"
+// no cadastro → linha caía no filterMetricRowsByUnit.
+// Agora ambos normalizam para "joao silva".
+// ============================================================
 const normalizeNameKey = (str: string | undefined | null): string =>
-  String(str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  String(str || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
 
+// ============================================================
+// filterMetricRowsByUnit
+// ------------------------------------------------------------
+// ⚠️ FIX (v2): três correções que juntas resolvem a
+// divergência do Funil com filtro Osasco (187 → ~323 assinados):
+//
+//  1. Coerção `Number(c.unidadeId) === Number(unidadeId)` —
+//     antes `"1" === 1` retornava false e descartava a linha.
+//
+//  2. Nome único (matches.length === 1) não exige mais que
+//     `row.equipe` case com `c.equipeNome`. Só exige que o
+//     único colaborador com aquele nome esteja na unidade alvo.
+//     Motivo: `/assinados` devolve `equipe_responsavel_assinatura`
+//     enquanto `/ganhos`/`/perdidos` devolvem `nome_equipe` do
+//     cadastro — os rótulos divergem e a linha caía.
+//
+//  3. Homônimos com `row.equipe` presente:
+//     - se o time bate com algum homônimo da unidade → mantém;
+//     - senão, se TODOS os homônimos pertencem a UMA ÚNICA
+//       unidade → mantém (fallback por label drift);
+//     - senão (homônimo em >1 unidade, team não bate) → descarta
+//       (conservador).
+//
+//  4. Homônimos sem `row.equipe`:
+//     - se todos pertencem a UMA ÚNICA unidade → mantém;
+//     - senão → descarta.
+// ============================================================
 function filterMetricRowsByUnit<T extends { colaborador?: string; equipe?: string }>(
   rows: T[],
   unidadeId: number | undefined,
   collaborators: Collaborator[],
 ): T[] {
   if (unidadeId == null) return rows;
+  const targetUnit = Number(unidadeId);
+  if (!Number.isFinite(targetUnit)) return rows;
+
   const collaboratorsByName = new Map<string, Collaborator[]>();
   for (const collaborator of collaborators) {
     const key = normalizeNameKey(collaborator.name);
@@ -291,18 +334,111 @@ function filterMetricRowsByUnit<T extends { colaborador?: string; equipe?: strin
     collaboratorsByName.set(key, matches);
   }
 
+  const unitOf = (c: Collaborator): number | null => {
+    const raw = c.unidadeId ?? (c as any).unidade_id ?? null;
+    if (raw == null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+
   return rows.filter((row) => {
     const matches = collaboratorsByName.get(normalizeNameKey(row.colaborador)) ?? [];
+
+    // [A] Nome não encontrado em `core.colaboradores` — descarta.
+    //     (Aqui está a maior perda quando o responsável saiu do
+    //      cadastro; ver debugFilterMetricRowsByUnit abaixo.)
+    if (matches.length === 0) return false;
+
+    // [B] Nenhum homônimo na unidade alvo — descarta.
+    const unitMatches = matches.filter((c) => unitOf(c) === targetUnit);
+    if (unitMatches.length === 0) return false;
+
+    // [C] Nome único — basta estar na unidade alvo. (FIX: não
+    //     exige mais `row.equipe` casando com `c.equipeNome`.)
+    if (matches.length === 1) return true;
+
+    // [D] Homônimos + `row.equipe` presente:
+    //     tenta casar o time primeiro; se não, aceita se todos
+    //     os homônimos pertencem a uma única unidade (fallback
+    //     para label drift entre views).
     if (row.equipe) {
       const team = normalizeNameKey(row.equipe);
-      return matches.some(
-        (collaborator) =>
-          collaborator.unidadeId === unidadeId &&
-          normalizeNameKey(collaborator.equipeNome) === team,
-      );
+      if (unitMatches.some((c) => normalizeNameKey(c.equipeNome) === team)) return true;
+      const unitSet = new Set(matches.map(unitOf).filter((u): u is number => u != null));
+      if (unitSet.size === 1) return true;
+      return false;
     }
-    return matches.length === 1 && matches[0].unidadeId === unidadeId;
+
+    // [E] Homônimos sem `row.equipe`:
+    //     só mantém se todos pertencem a uma única unidade.
+    const unitSet = new Set(matches.map(unitOf).filter((u): u is number => u != null));
+    return unitSet.size === 1;
   });
+}
+
+// ============================================================
+// debugFilterMetricRowsByUnit
+// ------------------------------------------------------------
+//  Helper exportado para diagnóstico em console. Rode:
+//
+//    import { debugFilterMetricRowsByUnit, useAppStore } from '@/lib/dataStore';
+//    const { collaborators } = useAppStore.getState();
+//    const rows = await fetch('/api/metrics/assinados?...').then(r => r.json());
+//    console.table(debugFilterMetricRowsByUnit(rows.data, 1, collaborators));
+//
+//  Retorna quebra do total descartado por motivo, para decidir
+//  se a correção final é no frontend (label drift) ou no
+//  backend (nome não bate em `core.colaboradores`).
+// ============================================================
+export function debugFilterMetricRowsByUnit<T extends { colaborador?: string; equipe?: string; total?: number }>(
+  rows: T[],
+  unidadeId: number | undefined,
+  collaborators: Collaborator[],
+): {
+  totalRows: number;
+  totalValue: number;
+  keptValue: number;
+  droppedByName: number;
+  droppedByUnit: number;
+  droppedByTeam: number;
+  droppedAmbiguous: number;
+} {
+  const targetUnit = unidadeId == null ? null : Number(unidadeId);
+  const byName = new Map<string, Collaborator[]>();
+  for (const c of collaborators) {
+    const k = normalizeNameKey(c.name);
+    (byName.get(k) ?? byName.set(k, []).get(k)!).push(c);
+  }
+  const unitOf = (c: Collaborator): number | null => {
+    const raw = c.unidadeId ?? (c as any).unidade_id ?? null;
+    if (raw == null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  };
+  let keptValue = 0, droppedByName = 0, droppedByUnit = 0, droppedByTeam = 0, droppedAmbiguous = 0;
+  const totalValue = rows.reduce((s, r) => s + (Number(r.total) || 0), 0);
+
+  for (const row of rows) {
+    const v = Number(row.total) || 0;
+    if (targetUnit == null) { keptValue += v; continue; }
+    const matches = byName.get(normalizeNameKey(row.colaborador)) ?? [];
+    if (matches.length === 0) { droppedByName += v; continue; }
+    const unitMatches = matches.filter((c) => unitOf(c) === targetUnit);
+    if (unitMatches.length === 0) { droppedByUnit += v; continue; }
+    if (matches.length === 1) { keptValue += v; continue; }
+    if (row.equipe) {
+      const team = normalizeNameKey(row.equipe);
+      if (unitMatches.some((c) => normalizeNameKey(c.equipeNome) === team)) { keptValue += v; continue; }
+      const unitSet = new Set(matches.map(unitOf).filter((u): u is number => u != null));
+      if (unitSet.size === 1) { keptValue += v; continue; }
+      droppedByTeam += v; continue;
+    }
+    const unitSet = new Set(matches.map(unitOf).filter((u): u is number => u != null));
+    if (unitSet.size === 1) { keptValue += v; continue; }
+    droppedAmbiguous += v;
+  }
+
+  return { totalRows: rows.length, totalValue, keptValue, droppedByName, droppedByUnit, droppedByTeam, droppedAmbiguous };
 }
 
 // ============================================================
