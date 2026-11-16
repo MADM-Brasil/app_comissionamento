@@ -1,8 +1,15 @@
 // backend/services/bd/inteComerceRawAnalytics.js
-
 import { createHash } from 'node:crypto';
 import db from './db.js';
 import { cached } from './inteComerceCache.js';
+import { cacheFirst } from './cacheFirst.js';
+import {
+  loadEmitidos,
+  loadAssinados,
+  loadGanhos,
+  loadProtocolados,
+  metricCacheKey,
+} from './metricsLoaders.js';
 
 const STATEMENT_TIMEOUT_MS = 55_000;
 const WORK_MEM = process.env.DB_ANALYTICS_WORK_MEM || '64MB';
@@ -34,9 +41,6 @@ if (!Number.isSafeInteger(workMemBytes) || workMemBytes < 4 * 1024 ** 2 || workM
   throw new Error('DB_ANALYTICS_WORK_MEM deve estar entre 4MB e 256MB.');
 }
 
-// ============================================================
-// Configuração HubSpot — defaults reais
-// ============================================================
 const HS_PROPS_CONFIG = Object.freeze({
   assinaturaDate:        process.env.HUBSPOT_PROP_ASSINATURA_DATE         ?? 'data_da_assinatura',
   assinaturaDateType:    (process.env.HUBSPOT_PROP_ASSINATURA_DATE_TYPE || 'date').toLowerCase() === 'datetime'
@@ -87,9 +91,6 @@ function hubspotSignatureConfigured() {
   );
 }
 
-// ============================================================
-// Helpers
-// ============================================================
 function periodBounds(start, end) {
   return { start: new Date(`${start}T03:00:00.000Z`), end: new Date(`${end}T03:00:00.000Z`) };
 }
@@ -134,9 +135,6 @@ function normalizeTeamKey(s) {
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// ============================================================
-// Stages dinâmicos (banco)
-// ============================================================
 const DESQ_STAGE_IDS_FALLBACK = new Set(['6659']);
 let DESQ_STAGE_IDS_CACHE = null;
 let DESQ_STAGE_IDS_AT = 0;
@@ -189,9 +187,6 @@ function isCurrentlyEmContato(dealRow, emContatoStageIds) {
   return cur !== '' && emContatoStageIds.has(cur);
 }
 
-// ============================================================
-// HubSpot
-// ============================================================
 const HUBSPOT_API = 'https://api.hubapi.com';
 const HUBSPOT_SEARCH_URL = `${HUBSPOT_API}/crm/v3/objects/deals/search`;
 const HUBSPOT_PIPELINES_URL = `${HUBSPOT_API}/crm/v3/pipelines/deals`;
@@ -356,14 +351,14 @@ async function resolveHubSpotOwnerIds(params) {
   return [...ids];
 }
 
-async function hubspotSearchTotal(filters) {
+async function hubspotSearchTotalGroups(filterGroups) {
   const token = hubspotToken();
   return hubspotScheduled(async () => {
     for (let attempt = 0; attempt < 4; attempt++) {
       const resp = await fetch(HUBSPOT_SEARCH_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filterGroups: [{ filters }], limit: 1, properties: ['createdate'] }),
+        body: JSON.stringify({ filterGroups, limit: 1, properties: ['createdate'] }),
         signal: AbortSignal.timeout(20_000),
       });
       if (resp.status === 429 || resp.status >= 500) {
@@ -384,6 +379,10 @@ async function hubspotSearchTotal(filters) {
     }
     throw new Error('Consulta HubSpot não concluída');
   });
+}
+
+async function hubspotSearchTotal(filters) {
+  return hubspotSearchTotalGroups([{ filters }]);
 }
 
 function midnightSP(dateStr) {
@@ -450,6 +449,7 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     em_contato: null, desqualificados: null, assinados: null,
     ganhos: null, protocolados: null, protocoloAguardando: null,
     ganhos_metodo: null, protocolados_metodo: null,
+    desqualificados_metodo: null,
     erros: {}, duracao_ms: 0,
     consulted_at: new Date(startedAt).toISOString(),
     mode: mode || 'safra',
@@ -465,8 +465,7 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
         const stageId = [...stages.emContato][0];
         const entryProp = `hs_v2_date_entered_${stageId}`;
         result.em_contato = await hubspotSearchTotal([
-          ...productFilter,
-          ...ownerFilter,
+          ...productFilter, ...ownerFilter,
           ...buildDateFilter(entryProp, 'datetime', startMs, cutoff),
         ]);
       } else {
@@ -478,16 +477,32 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     } else { result.erros.em_contato = 'Nenhum stage "Em contato" encontrado'; }
   } catch (e) { result.erros.em_contato = e.message; }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DESQUALIFICADOS
+  // ───────────────────────────────────────────────────────────────────────────
+  // PRODUÇÃO: entrada em QUALQUER etapa de desq no período, respeitando
+  //           produto + escopo. NÃO exige etapa atual. NÃO exclui quem foi
+  //           para Venda perdida depois.
+  //
+  // SAFRA:    criação no período + etapa ATUAL de desq (dealstage IN desq).
+  //
+  // Se OR completo falhar (HTTP 400 em algum hs_v2_date_entered_<id>),
+  // `desqualificados` fica null e `erros.desqualificados` guarda a causa.
+  // NÃO publica parcial nem soma.
+  // ═══════════════════════════════════════════════════════════════════════════
   try {
     if (stages.desq.size > 0) {
       if (isProducao) {
-        const stageId = [...stages.desq][0];
-        const entryProp = `hs_v2_date_entered_${stageId}`;
-        result.desqualificados = await hubspotSearchTotal([
-          ...productFilter,
-          ...ownerFilter,
-          ...buildDateFilter(entryProp, 'datetime', startMs, cutoff),
-        ]);
+        const stageList = [...stages.desq];
+        const buildGroup = (stageId) => ({
+          filters: [
+            ...productFilter,
+            ...ownerFilter,
+            ...buildDateFilter(`hs_v2_date_entered_${stageId}`, 'datetime', startMs, cutoff),
+          ],
+        });
+        result.desqualificados = await hubspotSearchTotalGroups(stageList.map(buildGroup));
+        result.desqualificados_metodo = `or(${stageList.join(',')})`;
       } else {
         const filters = [
           ...creationFilter,
@@ -497,28 +512,17 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
           filters.push({ propertyName: 'dealstage', operator: 'NOT_IN', values: [...stages.vendaPerdida] });
         }
         result.desqualificados = await hubspotSearchTotal(filters);
+        result.desqualificados_metodo = 'etapa_atual(safra)';
       }
-    } else { result.erros.desqualificados = 'Nenhum stage "Desqualificado" encontrado'; }
-  } catch (e) { result.erros.desqualificados = e.message; }
+    } else {
+      result.erros.desqualificados = 'Nenhum stage "Desqualificado" encontrado';
+    }
+  } catch (e) {
+    result.desqualificados = null;
+    result.erros.desqualificados = e.message;
+  }
 
-  try {
-    if (HS_PROPS_CONFIG.ganhoDate) {
-      result.ganhos = await hubspotSearchTotal([
-        ...baseFilter,
-        ...buildDateFilter(HS_PROPS_CONFIG.ganhoDate, HS_PROPS_CONFIG.ganhoDateType, startMs, cutoff),
-      ]);
-      result.ganhos_metodo = isProducao ? 'data_do_ganho (produção)' : 'data_do_ganho (safra)';
-    } else if (stages.ganho.size > 0) {
-      result.ganhos = await hubspotSearchTotal([
-        ...baseFilter,
-        { propertyName: 'dealstage', operator: 'IN', values: [...stages.ganho] },
-      ]);
-      result.ganhos_metodo = 'etapa_atual';
-      result.erros.ganhos =
-        'HUBSPOT_PROP_GANHO_DATE não configurada — contando etapa atual, ' +
-        'não "Ganho no período". Definição difere da comparação por data.';
-    } else { result.erros.ganhos = 'Nenhum stage "Ganho/Venda ganha" encontrado'; }
-  } catch (e) { result.erros.ganhos = e.message; }
+  result.ganhos_metodo = 'canonical_metrics';
 
   try {
     if (HS_PROPS_CONFIG.ganhoDate && stages.protocolado.size > 0) {
@@ -552,24 +556,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     }
   } catch (e) { result.erros.protocoloAguardando = e.message; }
 
-  try {
-    if (!hubspotSignatureConfigured()) {
-      result.erros.assinados = 'Custom properties de assinatura não configuradas';
-    } else {
-      result.assinados = await hubspotSearchTotal([
-        ...baseFilter,
-        {
-          propertyName: HS_PROPS_CONFIG.assinaturaStatus,
-          operator: 'EQ',
-          value: HS_PROPS_CONFIG.assinaturaSignedValue,
-        },
-        ...buildDateFilter(
-          HS_PROPS_CONFIG.assinaturaDate, HS_PROPS_CONFIG.assinaturaDateType, startMs, cutoff,
-        ),
-      ]);
-    }
-  } catch (e) { result.erros.assinados = e.message; }
-
   result.duracao_ms = Date.now() - startedAt;
 
   console.log('[hubspot] resp', {
@@ -577,7 +563,8 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     criados: result.criados, assinados: result.assinados,
     ganhos: result.ganhos, ganhos_metodo: result.ganhos_metodo,
     protocolados: result.protocolados, protocolados_metodo: result.protocolados_metodo,
-    desqualificados: result.desqualificados, em_contato: result.em_contato,
+    desqualificados: result.desqualificados, desqualificados_metodo: result.desqualificados_metodo,
+    em_contato: result.em_contato,
     owner_filter: result.owner_filter,
     erros: result.erros, duracao_ms: result.duracao_ms,
   });
@@ -1101,7 +1088,24 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         const group = eventAt && attribution.groupByTime.get(eventAt.getTime());
         if (!group) continue;
         const pipelineAtEvent = group.pipelineSame ?? group.previousPipelineChange ?? PIPELINE_COMERCIAL;
-        const type = STAGE_TYPES.get(String(row.etapa_nova_id));
+        const etapaNovaId = String(row.etapa_nova_id ?? '');
+
+        // DESQUALIFICAÇÃO — QUALQUER pipeline, QUALQUER etapa em desqStageIds
+        if (desqStageIds.has(etapaNovaId)) {
+          const assigned = attribution.attributionAt(eventAt);
+          events.push({
+            dealId: deal.deal_id,
+            occurredAt: eventAt,
+            dateKey: utcDate(eventAt),
+            collaboratorId: assigned?.collaboratorId ?? null,
+            team: assigned?.team ?? null,
+            type: 'DESQUALIFICADO',
+          });
+          continue;
+        }
+
+        // Outros eventos: mantém restrição ao pipeline comercial + mapa fixo
+        const type = STAGE_TYPES.get(etapaNovaId);
         if (String(pipelineAtEvent) !== PIPELINE_COMERCIAL || !type) continue;
         if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650' &&
             eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
@@ -1225,32 +1229,9 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       events.push({ dealId, occurredAt, dateKey: utcDate(outcome.data_ganho), collaboratorId: collabId, team, type: 'PROTOCOLADO' });
     }
 
-    // ═════════════════════════════════════════════════════════════════════
-    // ⚠️ FIX CRÍTICO — venda perdida sendo contada como ganho
-    // ─────────────────────────────────────────────────────────────────────
-    // PROBLEMA:
-    //   `view_app_juridico_auditoria` expõe ganhos E perdas na mesma view.
-    //   A coluna `data_ganho` está preenchida para AMBOS (é a data de
-    //   fechamento do deal no jurídico). Sem filtro por etapa, toda linha
-    //   "Venda perdida" gerava um evento `GANHO`, inflando
-    //   overview.ganhos e quebrando pct_assinados_ate_ganhos
-    //   (valor > 100% era o sintoma visível).
-    //
-    // FIX:
-    //   Replica o filtro de `metrics.js` `/ganhos`:
-    //       WHERE l.etapa <> 'Venda perdida'
-    //   Aceita variações comuns de cadastro ('Perdida', 'Perdido').
-    //   Qualquer outra etapa com `data_ganho` preenchida continua
-    //   contando como GANHO — igual ao `/ganhos` de metrics.js.
-    // ═════════════════════════════════════════════════════════════════════
     for (const outcome of legalOutcomeResult.rows) {
       const etapaNorm = String(outcome.etapa ?? '').trim().toLowerCase();
-      if (
-        etapaNorm === 'venda perdida' ||
-        etapaNorm === 'perdida' ||
-        etapaNorm === 'perdido'
-      ) continue;
-
+      if (etapaNorm === 'venda perdida' || etapaNorm === 'perdida' || etapaNorm === 'perdido') continue;
       const occurredAt = timestamp(outcome.data_ganho);
       if (!occurredAt) continue;
       const dateKey = utcDate(outcome.data_ganho);
@@ -1752,12 +1733,19 @@ function buildComparisonResults(raw, params) {
   }
 
   {
-    const desqAtual = new Set();
-    for (const dealId of dealsByMetric.get('desqualificados')) {
-      if (isCurrentlyDisqualified(raw.deals.get(dealId), raw.desqStageIds)) desqAtual.add(dealId);
+  const desqAtual = new Set();
+
+  for (const item of cohort) {
+    if (isCurrentlyDisqualified(
+      raw.deals.get(item.dealId),
+      raw.desqStageIds,
+    )) {
+      desqAtual.add(item.dealId);
     }
-    dealsByMetric.set('desqualificados', desqAtual);
   }
+
+  dealsByMetric.set('desqualificados', desqAtual);
+}
 
   const emContatoHistoricoSet = dealsByMetric.get('em_contato_crm');
   const emContatoAtualSet = new Set();
@@ -1914,6 +1902,7 @@ function hubspotDiagnostics(hs) {
     metodo: {
       ganhos: hs.ganhos_metodo ?? null,
       protocolados: hs.protocolados_metodo ?? null,
+      desqualificados: hs.desqualificados_metodo ?? null,
     },
     erros: Object.keys(hs.erros || {}).length ? hs.erros : undefined,
   };
@@ -1930,9 +1919,12 @@ function mergeHubSpot(result, hs, params) {
   override('recebidos', hs.criados);
   override('em_contato_crm', hs.em_contato);
   override('desqualificados', hs.desqualificados);
-  override('assinados', hs.assinados);
-  override('ganhos', hs.ganhos);
-  override('protocolados', hs.protocolados);
+
+  // assinados, ganhos e protocolados NÃO são sobrescritos pelo HubSpot.
+  // Fonte deles é o applyCanonicalOverride (metricsLoaders via cacheFirst).
+  fonte.assinados = 'canonical_metrics';
+  fonte.ganhos = 'canonical_metrics';
+  fonte.protocolados = 'canonical_metrics';
   fonte.trabalhados_proxy = 'banco';
 
   result.strategic.recebidos  = result.overview.recebidos;
@@ -1947,12 +1939,10 @@ function mergeHubSpot(result, hs, params) {
   };
   result.strategic.pct_recebidos_ate_em_contato = sameSourcePct('em_contato_crm', 'recebidos');
   result.strategic.pct_recebidos_ate_assinados  = sameSourcePct('assinados', 'recebidos');
-  result.strategic.assinados_que_ganharam = null;
-  result.strategic.pct_assinados_ate_ganhos = null;
   result.strategic.rotulos = {
     pct_recebidos_ate_em_contato: 'atualmente_em_contato_sobre_criados — foto do momento, não conversão histórica',
     pct_recebidos_ate_assinados: 'assinados_no_periodo_sobre_criados — comparação por data',
-    pct_assinados_ate_ganhos: 'indisponivel',
+    pct_assinados_ate_ganhos: 'ganhos (canônico) / assinados (canônico) — conversão simples do período',
   };
 
   result.hubspotCards = buildHubspotCards(hs);
@@ -1999,6 +1989,122 @@ function hubspotOnlyResult(hs, motivoBanco) {
       ...hubspotDiagnostics(hs),
     },
   };
+}
+
+async function fetchCanonicalMetrics(params) {
+  const start = params.inicio;
+  const end = params.fim_exclusivo;
+  const equipe = params.equipe;
+  const produto = params.produto;
+  const mode = params.mode === 'safra' ? 'safra' : 'producao';
+
+  const ttl = { ttlMs: 180_000, staleMs: 900_000 };
+  const mkKey = (tipo) =>
+    metricCacheKey(tipo, { start, end, equipe, produto, granularity: undefined, mode });
+
+  const [emitidos, assinados, ganhos, protocolados] = await Promise.all([
+    cacheFirst(mkKey('emitidos'), () => loadEmitidos({ start, end, equipe, produto }), ttl),
+    cacheFirst(mkKey('assinados'), () => loadAssinados({ start, end, equipe, produto, mode }), ttl),
+    cacheFirst(mkKey('ganhos'), () => loadGanhos({ start, end, equipe, produto, mode }), ttl),
+    cacheFirst(mkKey('protocolados'), () => loadProtocolados({ start, end, equipe, produto, mode }), ttl),
+  ]);
+
+  return { emitidos, assinados, ganhos, protocolados };
+}
+
+function applyCanonicalOverride(result, canonical, raw) {
+  const sumTotal = (rows) => (rows || []).reduce((s, r) => s + (Number(r.total) || 0), 0);
+  const totalEmitidos = sumTotal(canonical.emitidos);
+  const totalAssinados = sumTotal(canonical.assinados);
+  const totalGanhos = sumTotal(canonical.ganhos);
+  const totalProtocolados = sumTotal(canonical.protocolados);
+
+  if (result.overview) {
+    result.overview.emitidos = totalEmitidos;
+    result.overview.assinados = totalAssinados;
+    result.overview.ganhos = totalGanhos;
+    result.overview.protocolados = totalProtocolados;
+  }
+  if (result.funnel) {
+    result.funnel.emitidos = totalEmitidos;
+    result.funnel.assinados = totalAssinados;
+    result.funnel.ganhos = totalGanhos;
+    result.funnel.protocolados = totalProtocolados;
+  }
+  if (result.strategic) {
+    result.strategic.assinados = totalAssinados;
+    if (result.strategic.recebidos > 0) {
+      result.strategic.pct_recebidos_ate_assinados = Number(
+        ((totalAssinados / result.strategic.recebidos) * 100).toFixed(2)
+      );
+    }
+
+    // pct_assinados_ate_ganhos = ganhos / assinados (conversão simples)
+    if (totalAssinados > 0 && typeof totalGanhos === 'number' && totalGanhos >= 0) {
+      result.strategic.pct_assinados_ate_ganhos = Number(((totalGanhos / totalAssinados) * 100).toFixed(2));
+      if (!result.strategic.rotulos) result.strategic.rotulos = {};
+      result.strategic.rotulos.pct_assinados_ate_ganhos =
+        'ganhos (canônico) / assinados (canônico) — conversão simples do período';
+    } else {
+      result.strategic.pct_assinados_ate_ganhos = null;
+    }
+  }
+
+  if (Array.isArray(result.collaborators) && raw.collaboratorNames instanceof Map) {
+    const buildMap = (rows) => {
+      const m = new Map();
+      for (const r of rows || []) {
+        const k = normalizeTeamKey(r.colaborador);
+        if (!k) continue;
+        m.set(k, (m.get(k) || 0) + (Number(r.total) || 0));
+      }
+      return m;
+    };
+    const assinadosByName = buildMap(canonical.assinados);
+    const ganhosByName = buildMap(canonical.ganhos);
+    const protocoladosByName = buildMap(canonical.protocolados);
+    const emitidosByName = buildMap(canonical.emitidos);
+
+    for (const c of result.collaborators) {
+      const nomeOriginal = raw.collaboratorNames.get(String(c.colaborador_id)) || c.colaborador;
+      const k = normalizeTeamKey(nomeOriginal);
+      if (assinadosByName.has(k)) c.assinados = assinadosByName.get(k);
+      if (ganhosByName.has(k)) c.ganhos = ganhosByName.get(k);
+      if (protocoladosByName.has(k)) c.protocolados = protocoladosByName.get(k);
+      if ('emitidos' in c && emitidosByName.has(k)) c.emitidos = emitidosByName.get(k);
+    }
+  }
+
+  if (Array.isArray(result.teams)) {
+    const sumByKey = (rows) => {
+      const m = new Map();
+      for (const r of rows || []) {
+        const k = normalizeTeamKey(r.equipe);
+        if (!k) continue;
+        m.set(k, (m.get(k) || 0) + (Number(r.total) || 0));
+      }
+      return m;
+    };
+    const assinadosByTeam = sumByKey(canonical.assinados);
+    const ganhosByTeam = sumByKey(canonical.ganhos);
+    const protocoladosByTeam = sumByKey(canonical.protocolados);
+    for (const t of result.teams) {
+      const k = normalizeTeamKey(t.equipe);
+      if (assinadosByTeam.has(k)) t.assinados = assinadosByTeam.get(k);
+      if (ganhosByTeam.has(k)) t.ganhos = ganhosByTeam.get(k);
+      if (protocoladosByTeam.has(k)) t.protocolados = protocoladosByTeam.get(k);
+    }
+  }
+
+  if (!result.meta) result.meta = {};
+  result.meta.emitidos_source = 'canonical_metrics';
+  result.meta.assinados_source = 'canonical_metrics';
+  result.meta.ganhos_source = 'canonical_metrics';
+  result.meta.protocolados_source = 'canonical_metrics';
+  result.meta.emitidos_total = totalEmitidos;
+  result.meta.assinados_total = totalAssinados;
+  result.meta.ganhos_total = totalGanhos;
+  result.meta.protocolados_total = totalProtocolados;
 }
 
 export async function getInteComerceRawAnalytics(params) {
@@ -2055,24 +2161,70 @@ export async function getInteComerceRawAnalytics(params) {
   else if (params.mode === 'operacional') result = buildOperationalResults(raw, params);
   else result = buildComparisonResults(raw, params);
 
+  // 1ª passada do canônico — antes do HubSpot
+  let canonical = null;
+  if (params.mode !== 'operacional') {
+    try {
+      canonical = await fetchCanonicalMetrics(params);
+      applyCanonicalOverride(result, canonical, raw);
+    } catch (err) {
+      console.error('[inte-comerce] falha ao carregar métricas canônicas:', err?.message || err);
+      if (!result.meta) result.meta = {};
+      result.meta.canonical_override_error = err?.message || String(err);
+    }
+  }
+
   if (skipHubSpot) result.hubspot = { ativo: false, motivo: canHs.motivo };
   else mergeHubSpot(result, await hubspotPromise, params);
+
+  // 2ª passada do canônico — DEPOIS do HubSpot (canônico SEMPRE vence)
+  if (canonical) {
+    applyCanonicalOverride(result, canonical, raw);
+    if (result.hubspot?.fonte) {
+      for (const k of ['emitidos', 'assinados', 'ganhos', 'protocolados']) {
+        result.hubspot.fonte[k] = 'canonical_metrics';
+      }
+    }
+    result.strategic.recebidos = result.overview.recebidos;
+    result.strategic.em_contato = result.overview.em_contato_crm;
+    result.strategic.assinados = result.overview.assinados;
+    if (result.strategic.recebidos > 0) {
+      result.strategic.pct_recebidos_ate_assinados = Number(
+        ((result.overview.assinados / result.strategic.recebidos) * 100).toFixed(2)
+      );
+    }
+    if (result.overview.assinados > 0) {
+      result.strategic.pct_assinados_ate_ganhos = Number(
+        ((result.overview.ganhos / result.overview.assinados) * 100).toFixed(2)
+      );
+    }
+    if (!result.meta) result.meta = {};
+    result.meta.canonical_wins_over_hubspot = true;
+  }
 
   return result;
 }
 
 const PRODUCTION_METRICS = [
-  { key: 'criados', eventType: 'DEAL_CREATED' }, { key: 'trabalhados', eventType: 'TRABALHADO_PROXY' },
-  { key: 'em_contato', eventType: 'EM_CONTATO' }, { key: 'coleta', eventType: 'COLETA' },
-  { key: 'contrato', eventType: 'CONTRATO' }, { key: 'emitidos', eventType: 'EMITIDO_ORIGINAL' },
-  { key: 'assinados', eventType: 'ASSINADO_ORIGINAL' }, { key: 'ganhos', eventType: 'GANHO' },
-  { key: 'protocolados', eventType: 'PROTOCOLADO' }, { key: 'desqualificados', eventType: 'DESQUALIFICADO' },
+  { key: 'criados', eventType: 'DEAL_CREATED' },
+  { key: 'trabalhados', eventType: 'TRABALHADO_PROXY' },
+  { key: 'em_contato', eventType: 'EM_CONTATO' },
+  { key: 'coleta', eventType: 'COLETA' },
+  { key: 'contrato', eventType: 'CONTRATO' },
+  { key: 'emitidos', eventType: 'EMITIDO_ORIGINAL' },
+  { key: 'assinados', eventType: 'ASSINADO_ORIGINAL' },
+  { key: 'ganhos', eventType: 'GANHO' },
+  { key: 'protocolados', eventType: 'PROTOCOLADO' },
+  { key: 'desqualificados', eventType: 'DESQUALIFICADO' },
 ];
+
 function inRange(v, s, e) { return v >= s && v < e; }
+
 function matchesProductionScope(e, params, activeIds) {
   if (e.collaboratorId == null || (activeIds && !activeIds.has(String(e.collaboratorId)))) return false;
   return filterScope(e, params);
 }
+
 function countEvents(events, start, end, params, creationByDeal = null) {
   const dealsByMetric = new Map(PRODUCTION_METRICS.map(({ key }) => [key, new Set()]));
   const activeIds = params.colaborador_ids_ativos == null ? null : new Set(params.colaborador_ids_ativos.map(String));
@@ -2121,18 +2273,23 @@ export async function getInteComercePeriodSummary(params) {
     return { monthTotals, dayTotals, selectedDay: params.selected_day || null, asOf: raw.asOf };
   }
 
-  const creationByDeal = new Map();
-  for (const e of events) {
-    if (e.type !== 'DEAL_CREATED') continue;
-    if (!creationByDeal.has(e.dealId) || e.occurredAt < creationByDeal.get(e.dealId)) creationByDeal.set(e.dealId, e.occurredAt);
-  }
+  // ═════════════════════════════════════════════════════════════════════════
+  // PRODUÇÃO — contagem de EVENTOS no período, SEM filtro de criação.
+  //
+  // `producao` e `producao-3-meses` passam `null` como `creationByDeal` →
+  // countEvents ignora o filtro de criação. A deduplicação por dealId (Set)
+  // continua. O ramo `safra` (acima) tem seu próprio `creationByDeal`.
+  // ═════════════════════════════════════════════════════════════════════════
   if (params.mode === 'producao-3-meses') {
     const months = [];
     for (let ms = new Date(start); ms < end; ms.setUTCMonth(ms.getUTCMonth() + 1)) {
       const me = new Date(Date.UTC(ms.getUTCFullYear(), ms.getUTCMonth() + 1, 1, 3));
-      months.push({ month: localDay(new Date(ms.getTime() + 3 * 60 * 60 * 1000)).slice(0, 7), totals: countEvents(events, ms, me, params, creationByDeal) });
+      months.push({
+        month: localDay(new Date(ms.getTime() + 3 * 60 * 60 * 1000)).slice(0, 7),
+        totals: countEvents(events, ms, me, params, null),
+      });
     }
     return { months, asOf: raw.asOf };
   }
-  return { monthTotals: countEvents(events, start, end, params, creationByDeal), asOf: raw.asOf };
+  return { monthTotals: countEvents(events, start, end, params, null), asOf: raw.asOf };
 }
