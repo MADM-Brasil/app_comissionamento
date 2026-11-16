@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { pool, logDatabaseAccess, waitForDatabase, closePool } from './services/db.js';
+import { pool, logDatabaseAccess, waitForDatabase, closePool } from './services/bd/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 
 // ---------- Routers ----------
@@ -28,6 +28,15 @@ import tabulacoesRoutes from './routes/tabulacoes.js';
 import { startNotificationEngine } from './services/notificationEngine.js';
 import { startTicketQueue } from './services/ticketQueue.js';
 import { startLinkHubBatchQueue } from './services/linkHubBatchQueue.js';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══ NOVO: Warmup / cache / singleflight ═══
+// ═══════════════════════════════════════════════════════════════════════════
+import { setupWarmups, stopPeriodRotation } from './services/bd/warmupSetup.js';
+import { stopAllWarmup, getWarmupStatus } from './services/bd/warmup.js';
+import { singleflightSize, singleflightStats } from './services/bd/singleflight.js';
+import { cacheStats } from './services/bd/cache.js';
+import { cacheFirstStats } from './services/bd/cacheFirst.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -358,6 +367,46 @@ app.get('/api/health/db', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══ NOVO: health do warmup / cache / singleflight ═══
+// Retorna 200 quando todos os jobs estão saudáveis (failing=0, degraded=0).
+// Retorna 503 quando algum job está travado ou falhando consecutivamente —
+// ideal para monitor externo alertar.
+//
+// Sem query string: retorna summary + jobs completos (útil em dev).
+// Com ?brief=1: retorna só o summary (útil em produção, evita payload grande).
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/health/warmup', (req, res) => {
+  try {
+    const brief = req.query.brief === '1';
+    const jobs = getWarmupStatus();
+    const summary = {
+      total: jobs.length,
+      healthy: jobs.filter((j) => j.health === 'healthy').length,
+      degraded: jobs.filter((j) => j.health === 'degraded').length,
+      failing: jobs.filter((j) => j.health === 'failing').length,
+      idle: jobs.filter((j) => j.health === 'idle').length,
+      running: jobs.filter((j) => j.health === 'running').length,
+    };
+    const ok = summary.failing === 0 && summary.degraded === 0;
+
+    const payload = {
+      success: ok,
+      summary,
+      inflight: singleflightSize(),
+      singleflight: singleflightStats(),
+      cache: cacheStats(),
+      cacheFirst: cacheFirstStats(),
+    };
+    if (!brief) payload.jobs = jobs;
+
+    return res.status(ok ? 200 : 503).json(payload);
+  } catch (err) {
+    console.error('[health/warmup] erro:', err);
+    return res.status(500).json({ success: false, error: err?.message || String(err) });
+  }
+});
+
 // ============================================================
 // CSRF TOKEN ENDPOINT
 // ============================================================
@@ -545,7 +594,21 @@ async function shutdown(signal) {
     });
   }
 
-  // 2) Fecha o pool do PostgreSQL (libera slots imediatamente)
+  // ═════════════════════════════════════════════════════════════════════════
+  // ═══ NOVO: para o warmup ANTES de fechar o pool ═══
+  // Jobs em voo ainda usam o pool — precisam terminar ou ser abortados
+  // antes de `closePool()`, senão o job falha com
+  // "Cannot use a pool after calling end".
+  // ═════════════════════════════════════════════════════════════════════════
+  try {
+    stopPeriodRotation();
+    await stopAllWarmup({ drainMs: 5_000 });
+    console.log('[shutdown] warmup scheduler encerrado');
+  } catch (err) {
+    console.error('[shutdown] erro ao parar warmup:', err?.message || err);
+  }
+
+  // 3) Fecha o pool do PostgreSQL (libera slots imediatamente)
   try {
     await closePool();
     console.log('[shutdown] pool do PostgreSQL encerrado');
@@ -578,6 +641,14 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
     server = app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
+
+      // ═══ NOVO: warmup ─── popula cache em background ───
+      // Chama DEPOIS do listen para não atrasar o boot.
+      // A primeira execução de cada job é agendada com 2s + jitter
+      // (definido em warmup.js), espalhando a carga inicial.
+      setupWarmups();
+      console.log('[boot] warmup scheduler iniciado');
+
       startNotificationEngine();
       startTicketQueue();
       startLinkHubBatchQueue();

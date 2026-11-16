@@ -1,12 +1,12 @@
 // main.js - Sistema MADM Comissionamento 
 
 import { Calculator } from './calculator.js';
-import { ExtractBD } from './services/extractBD.js';
+import { ExtractBD } from './services/bd/extractBD.js';
 import twoFactorService from './security/verif-2factory.js';
 import { accessControl } from './services/access-control.js';
 
 // ─── POOL E SESSION STORE (substituem o antigo PostgresService) ───
-import { pool } from './services/db.js';
+import { pool } from './services/bd/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
 
 import 'dotenv/config';

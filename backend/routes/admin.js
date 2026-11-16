@@ -1,6 +1,6 @@
 // backend/routes/admin.js
 import express from 'express';
-import db from '../services/db.js';
+import db from '../services/bd/db.js';
 import { body, validationResult } from 'express-validator';
 
 const router = express.Router();

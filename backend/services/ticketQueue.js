@@ -1,5 +1,5 @@
 // backend/services/ticketQueue.js
-import { pool } from './db.js';
+import { pool } from './bd/db.js';
 import {
   findContactAndValidate,
   createContact,

@@ -6,11 +6,11 @@
 // abaixo.
 
 import express from 'express';
-import { pool } from '../services/db.js';
+import { pool } from '../services/bd/db.js';
 import {
   getInteComerceRawAnalytics,
   getInteComercePeriodSummary,
-} from '../services/inteComerceRawAnalytics.js';
+} from '../services/bd/inteComerceRawAnalytics.js';
 
 const router = express.Router();
 

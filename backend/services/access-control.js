@@ -1,7 +1,7 @@
 // backend/services/access-control.js
 // Sistema de Controle de Acesso unificado (backend).
 
-import { pool } from './db.js';
+import { pool } from './bd/db.js';
 
 class AccessControl {
   constructor() {

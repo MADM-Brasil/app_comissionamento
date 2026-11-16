@@ -1,5 +1,5 @@
 // backend/services/notificationEngine.js
-import { pool } from './db.js';
+import { pool } from './bd/db.js';
 import { broadcastNotification } from '../routes/notificacoes.js';
 
 // Conjunto para evitar notificações duplicadas (chave = email|condicao|data)
