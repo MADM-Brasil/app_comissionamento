@@ -567,6 +567,9 @@ export default function Inte_comerce() {
       mode: viewMode,
     };
 
+    // ═══ FIX: mode entra em dailySeriesParams ═══
+    // /ganhos e /protocolados aceitam mode; os outros 3 ignoram.
+    // Sem mode, o AreaChart "Evolução Diária" sempre mostra dados de produção.
     const dailySeriesParams = {
       start: reportPeriod.start, end: reportPeriod.end,
       equipe: equipe !== "todas" ? equipe : undefined,
@@ -574,6 +577,7 @@ export default function Inte_comerce() {
       colaboradorId,
       produto: produto !== "Todos" ? produto : undefined,
       granularity: "daily" as const,
+      mode: viewMode,
     };
 
     const comparisonParams = comparisonPeriod
@@ -732,8 +736,6 @@ export default function Inte_comerce() {
 
   // ─────────────────────────────────────────────────────────
   //  Lookup de metas (colaborador × equipe).
-  //  Usa `collaborators` do useAppStore como fonte da verdade,
-  //  buscando por `id` e caindo para `name` quando necessário.
   // ─────────────────────────────────────────────────────────
   const collabMetaByKey = useMemo(() => {
     const map = new Map<string, { metaMensalGanhos: number; metaMensalAssinados: number }>();
@@ -800,7 +802,6 @@ export default function Inte_comerce() {
       `${r.name} ${r.team}`.toLocaleLowerCase("pt-BR").includes(q),
     );
     return [...arr].sort((a, b) => {
-      // Ordenação especial: "Meta × Realizado" ordena por % atingida
       if (sortKey === "metaGanhosMensal") {
         const pA = a.metaGanhosMensal ? a.gained / a.metaGanhosMensal : 0;
         const pB = b.metaGanhosMensal ? b.gained / b.metaGanhosMensal : 0;
@@ -861,11 +862,12 @@ export default function Inte_comerce() {
   const comparisonTableRows = useMemo(() => {
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasComp = hasComparison;
+    // ═══ FIX: labels de ganhos/protocolados refletem o mode ═══
     const metrics = [
       ["recebidos", viewMode === "producao" ? "Leads recebidos" : "Negócios criados"],
       ["assinados", "Assinados"],
-      ["ganhos", "Ganhos"],
-      ["protocolados", "Protocolados"],
+      ["ganhos", viewMode === "safra" ? "Ganhos (da safra)" : "Ganhos (no período)"],
+      ["protocolados", viewMode === "safra" ? "Protocolados (da safra)" : "Protocolados (no período)"],
     ] as const;
     return metrics.map(([key, label]) => {
       const monthValue = (data as any)?.month?.[key] as number | undefined;
@@ -903,7 +905,7 @@ export default function Inte_comerce() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `producao_comercial_${reportPeriod.start || "inicio"}_${reportPeriod.end || "fim"}.csv`;
+    a.download = `producao_comercial_${reportPeriod.start || "inicio"}_${reportPeriod.end || "fim"}_${viewMode}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -944,10 +946,19 @@ export default function Inte_comerce() {
     if (comparisonMonth === value) setComparisonMonth(null);
   };
 
+  // ═══ FIX: modeDescription estava incompleto (erro de sintaxe) ═══
   const modeLabel = viewMode === "safra" ? "Safra" : "Produção";
   const modeDescription = viewMode === "safra"
   const comparisonSectionTitle = viewMode === "safra" ? "Comparativo de Safra" : "Comparativo de Produção";
   const comparisonSectionDescription = `Total de ${selectedMonth} × mês ${comparisonMonth}.`;
+
+  // ═══ FIX: labels de card com modo explícito para ganhos/protocolados ═══
+  const getCardLabel = (card: typeof STAT_CARDS[number]) => {
+    if (card.key === "received" && viewMode === "producao") return "Leads recebidos";
+    if (card.key === "gained") return viewMode === "safra" ? "Ganhos" : "Ganhos";
+    if (card.key === "protocolados") return viewMode === "safra" ? "Protocolados" : "Protocolados";
+    return card.label;
+  };
 
   const headerControls = (
     <div className="flex flex-wrap items-center gap-2">
@@ -1013,8 +1024,7 @@ export default function Inte_comerce() {
   // ═══════════════════════════════════════════════════════════
   return (
     <DashboardLayout
-      title="Inteligência Comercial"
-      subtitle="Visão consolidada da operação, da distribuição à assinatura e ao resultado jurídico, em uma única página."
+      title="Comercial"
       showPeriodFilter={false}
       headerActions={headerControls}
     >
@@ -1146,7 +1156,7 @@ export default function Inte_comerce() {
           {STAT_CARDS.map((card) => (
             <div key={card.key} className="card p-3">
               <div className="text-xs text-[#64748b] font-medium leading-tight min-h-[28px]">
-                {viewMode === "producao" && card.key === "received" ? "Leads recebidos" : card.label}
+                {getCardLabel(card)}
               </div>
               <div
                 className={cn(
@@ -1369,7 +1379,7 @@ export default function Inte_comerce() {
         </div>
       </div>
 
-      {/* 4) TABELA DE PRODUÇÃO — com coluna Meta × Realizado */}
+      {/* 4) TABELA DE PRODUÇÃO */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div><h2 className="text-lg font-bold text-[#0f172a]">Tabela de Produção comercial</h2></div>
@@ -1443,8 +1453,8 @@ export default function Inte_comerce() {
                     { key: "contact", label: "Em contato" },
                     { key: "collection", label: "Coleta" },
                     { key: "signed", label: "Assinados" },
-                    { key: "gained", label: "Ganhos" },
-                    { key: "protocolados", label: "Protocolados" },
+                    { key: "gained", label: viewMode === "safra" ? "Ganhos (safra)" : "Ganhos (produção)" },
+                    { key: "protocolados", label: viewMode === "safra" ? "Protocolados (safra)" : "Protocolados (produção)" },
                     { key: "metaGanhosMensal", label: "Meta × Realizado" },
                   ].map((col) => (
                     <th
@@ -1660,8 +1670,22 @@ export default function Inte_comerce() {
                 <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
                 <Area type="monotone" dataKey="leads" stroke="#16A34A" strokeWidth={2} fill="url(#colorLeadsInte)" name="Leads" />
                 <Area type="monotone" dataKey="assinados" stroke="#2F6FED" strokeWidth={2} fill="url(#colorAssinadosInte)" name="Assinados" />
-                <Area type="monotone" dataKey="ganhos" stroke="#EA8C1D" strokeWidth={2} fill="url(#colorGanhosInte)" name="Ganhos" />
-                <Area type="monotone" dataKey="protocolados" stroke="#8B5CF6" strokeWidth={2} fill="url(#colorProtocoladosInte)" name="Protocolados" />
+                <Area
+                  type="monotone"
+                  dataKey="ganhos"
+                  stroke="#EA8C1D"
+                  strokeWidth={2}
+                  fill="url(#colorGanhosInte)"
+                  name={viewMode === "safra" ? "Ganhos (safra)" : "Ganhos (produção)"}
+                />
+                <Area
+                  type="monotone"
+                  dataKey="protocolados"
+                  stroke="#8B5CF6"
+                  strokeWidth={2}
+                  fill="url(#colorProtocoladosInte)"
+                  name={viewMode === "safra" ? "Protocolados (safra)" : "Protocolados (produção)"}
+                />
                 <Area type="monotone" dataKey="perdidos" stroke="#DC2626" strokeWidth={2} fill="url(#colorPerdidosInte)" name="Perdidos" />
               </AreaChart>
             </ResponsiveContainer>

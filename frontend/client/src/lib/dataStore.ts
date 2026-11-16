@@ -4,9 +4,9 @@ import { persist } from 'zustand/middleware';
 import { formatCurrency as formatCurrencyUtil, formatPercent as formatPercentUtil } from './utils';
 import {
   fetchEmitidos,
-  fetchAssinados, 
-  fetchProtocolados, 
-  fetchGanhos, 
+  fetchAssinados,
+  fetchProtocolados,
+  fetchGanhos,
   fetchPerdidos,
   fetchLeadsRecebidos,
   fetchWeeklyPerformance,
@@ -20,7 +20,7 @@ import {
 import { calculator } from './calculator';
 
 // ============================================================
-// TIPOS ATUALIZADOS – id agora é string (e-mail) 
+// TIPOS ATUALIZADOS – id agora é string (e-mail)
 // ============================================================
 export interface KpiItem { value: number; target: number; unit: string; label: string; }
 export interface KpiData { comissaoMes: KpiItem; vendasFechadas: KpiItem; protocolados: KpiItem; taxaConversao: KpiItem; }
@@ -65,9 +65,6 @@ export interface Collaborator {
   totalGols?: number;
   classificacaoOperacional: string;
   canal: string;
-  // Campos de unidade:
-  // unidadeId é o id bruto (1=Osasco, 2=Ribeirão Preto, 3=Curitiba, 4=HO).
-  // unidadeNome é o rótulo legível; null quando não há mapeamento (ex.: HO=4).
   unidadeId?: number | null;
   unidadeNome?: string | null;
 }
@@ -104,7 +101,6 @@ export interface User {
   role?: string;
   rank?: number;
   totalRanking?: number;
-  // Adicionado: preservado do backend para filtros de unidade no frontend.
   unidade_id?: number | null;
 }
 export interface RankingItem { position: number; name: string; emitidos: number; assinados: number; ganhos: number; avatar: string; trend: 'up' | 'down' | 'same'; isCurrentUser?: boolean; }
@@ -126,7 +122,6 @@ export interface TabelaComissaoItem {
   faixa_max: number;
   data_atualizacao: string;
 }
-// Interface para campanhas
 export interface Campaign {
   tipo: string;
   multiplicador: number;
@@ -164,13 +159,29 @@ export interface DemandaResumo {
   totalReprimida: number;
 }
 
-// Parâmetros comuns usados nos loaders de demanda
 export interface DemandaLoaderParams {
   equipeNome?: string;
   colaboradorNome?: string;
   colaboradorId?: string | number;
   produto?: string;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// ═══ PATCH 1: tipo compartilhado para loaders de métricas ═══
+// ------------------------------------------------------------
+// `mode` é safra/produção. Só tem efeito em /assinados, /ganhos
+// e /protocolados; nos demais endpoints o backend ignora.
+// Sem este tipo, `loadMetricsForPeriod({ ..., mode: 'producao' })`
+// dispara TS2353 porque `mode` não está no contrato da interface.
+// ═══════════════════════════════════════════════════════════════
+export type MetricsLoadParams = {
+  equipeNome?: string;
+  colaboradorNome?: string;
+  colaboradorId?: string | number;
+  produto?: string;
+  unidadeId?: number;
+  mode?: 'producao' | 'safra';
+};
 
 // ============================================================
 // FUNÇÕES AUXILIARES
@@ -179,19 +190,6 @@ function normalizeGroup(cargo: string | undefined): string {
   return (cargo || '').trim().toLowerCase();
 }
 
-// ============================================================
-// applyHierarchyTotals
-// ------------------------------------------------------------
-//  Soma os totais "para cima" na hierarquia:
-//    • Supervisor → soma dos colaboradores da própria equipe.
-//    • Coordenador → soma dos supervisores da PRÓPRIA UNIDADE
-//      (não mais de todos os supervisores do banco).
-//
-//  ⚠️ FIX: recebe `currentUser` para filtrar supervisores por
-//  `unidade_id`. Sem isso, a linha do coordenador na tabela
-//  `collaborators` era preenchida com a soma GLOBAL, o que
-//  causava "dados gerais" nas telas que leem a store.
-// ============================================================
 function applyHierarchyTotals(
   collaborators: Collaborator[],
   currentUser?: User | null
@@ -210,7 +208,6 @@ function applyHierarchyTotals(
     perdidos: list.reduce((s, c) => s + (c.perdidos || 0), 0),
   });
 
-  // Supervisor: soma apenas os membros da própria equipe (comportamento mantido).
   for (const sup of supervisors) {
     const team = updated.filter(
       c => c.equipeNome === sup.equipeNome && c.id !== sup.id && normalizeGroup(c.cargo) !== 'supervisor'
@@ -224,7 +221,6 @@ function applyHierarchyTotals(
   }
 
   if (supervisors.length > 0) {
-    // ⚠️ FIX: Coordenador soma apenas supervisores da PRÓPRIA UNIDADE.
     const normCargo = normalizeGroup(currentUser?.cargo || '');
     const isCoord = normCargo === 'coordenador';
     const unidadeRaw = (currentUser as any)?.unidade_id
@@ -273,15 +269,6 @@ function getDateRangeFromPeriod(period: Period, customStart?: string, customEnd?
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
-// ============================================================
-// normalizeNameKey
-// ------------------------------------------------------------
-// ⚠️ FIX (v2): além de trim/lowercase/NFD, agora colapsa
-// espaços internos com `.replace(/\s+/g, ' ')`.
-// Antes: "João  Silva" (espaço duplo no backend) ≠ "João Silva"
-// no cadastro → linha caía no filterMetricRowsByUnit.
-// Agora ambos normalizam para "joao silva".
-// ============================================================
 const normalizeNameKey = (str: string | undefined | null): string =>
   String(str || '')
     .trim()
@@ -290,33 +277,6 @@ const normalizeNameKey = (str: string | undefined | null): string =>
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/\s+/g, ' ');
 
-// ============================================================
-// filterMetricRowsByUnit
-// ------------------------------------------------------------
-// ⚠️ FIX (v2): três correções que juntas resolvem a
-// divergência do Funil com filtro Osasco (187 → ~323 assinados):
-//
-//  1. Coerção `Number(c.unidadeId) === Number(unidadeId)` —
-//     antes `"1" === 1` retornava false e descartava a linha.
-//
-//  2. Nome único (matches.length === 1) não exige mais que
-//     `row.equipe` case com `c.equipeNome`. Só exige que o
-//     único colaborador com aquele nome esteja na unidade alvo.
-//     Motivo: `/assinados` devolve `equipe_responsavel_assinatura`
-//     enquanto `/ganhos`/`/perdidos` devolvem `nome_equipe` do
-//     cadastro — os rótulos divergem e a linha caía.
-//
-//  3. Homônimos com `row.equipe` presente:
-//     - se o time bate com algum homônimo da unidade → mantém;
-//     - senão, se TODOS os homônimos pertencem a UMA ÚNICA
-//       unidade → mantém (fallback por label drift);
-//     - senão (homônimo em >1 unidade, team não bate) → descarta
-//       (conservador).
-//
-//  4. Homônimos sem `row.equipe`:
-//     - se todos pertencem a UMA ÚNICA unidade → mantém;
-//     - senão → descarta.
-// ============================================================
 function filterMetricRowsByUnit<T extends { colaborador?: string; equipe?: string }>(
   rows: T[],
   unidadeId: number | undefined,
@@ -343,24 +303,10 @@ function filterMetricRowsByUnit<T extends { colaborador?: string; equipe?: strin
 
   return rows.filter((row) => {
     const matches = collaboratorsByName.get(normalizeNameKey(row.colaborador)) ?? [];
-
-    // [A] Nome não encontrado em `core.colaboradores` — descarta.
-    //     (Aqui está a maior perda quando o responsável saiu do
-    //      cadastro; ver debugFilterMetricRowsByUnit abaixo.)
     if (matches.length === 0) return false;
-
-    // [B] Nenhum homônimo na unidade alvo — descarta.
     const unitMatches = matches.filter((c) => unitOf(c) === targetUnit);
     if (unitMatches.length === 0) return false;
-
-    // [C] Nome único — basta estar na unidade alvo. (FIX: não
-    //     exige mais `row.equipe` casando com `c.equipeNome`.)
     if (matches.length === 1) return true;
-
-    // [D] Homônimos + `row.equipe` presente:
-    //     tenta casar o time primeiro; se não, aceita se todos
-    //     os homônimos pertencem a uma única unidade (fallback
-    //     para label drift entre views).
     if (row.equipe) {
       const team = normalizeNameKey(row.equipe);
       if (unitMatches.some((c) => normalizeNameKey(c.equipeNome) === team)) return true;
@@ -368,28 +314,11 @@ function filterMetricRowsByUnit<T extends { colaborador?: string; equipe?: strin
       if (unitSet.size === 1) return true;
       return false;
     }
-
-    // [E] Homônimos sem `row.equipe`:
-    //     só mantém se todos pertencem a uma única unidade.
     const unitSet = new Set(matches.map(unitOf).filter((u): u is number => u != null));
     return unitSet.size === 1;
   });
 }
 
-// ============================================================
-// debugFilterMetricRowsByUnit
-// ------------------------------------------------------------
-//  Helper exportado para diagnóstico em console. Rode:
-//
-//    import { debugFilterMetricRowsByUnit, useAppStore } from '@/lib/dataStore';
-//    const { collaborators } = useAppStore.getState();
-//    const rows = await fetch('/api/metrics/assinados?...').then(r => r.json());
-//    console.table(debugFilterMetricRowsByUnit(rows.data, 1, collaborators));
-//
-//  Retorna quebra do total descartado por motivo, para decidir
-//  se a correção final é no frontend (label drift) ou no
-//  backend (nome não bate em `core.colaboradores`).
-// ============================================================
 export function debugFilterMetricRowsByUnit<T extends { colaborador?: string; equipe?: string; total?: number }>(
   rows: T[],
   unidadeId: number | undefined,
@@ -504,7 +433,6 @@ const initialRawMetrics: RawMetrics = { emitidos: 0, assinados: 0, protocolados:
 const initialTabelaComissoes: TabelaComissaoItem[] = [];
 const initialCampaigns: Campaign[] = [];
 
-// --- Demanda ---
 const initialDemandaAtual: DemandaItem[] = [];
 const initialDemandaReprimida: DemandaItem[] = [];
 const initialDemandaResumo: DemandaResumo = {
@@ -524,17 +452,15 @@ interface AppStore {
   globalConfig: GlobalConfig; dailyData: DailyData[]; equipeConfigs: EquipeConfig[];
   period: Period; customStartDate: string; customEndDate: string; currentStartDate: string; currentEndDate: string;
   rawMetrics: RawMetrics;
-  hideValues: boolean;  
+  hideValues: boolean;
   toggleHideValues: () => void;
   tabelaComissoes: TabelaComissaoItem[];
   loadTabelaComissoes: () => Promise<void>;
   campaigns: Campaign[];
   loadCampaigns: (mes?: string) => Promise<void>;
-  // Estado para o colaborador selecionado (e-mail) – usado para ocultar/bloquear no DashboardLayout
   selectedCollaboratorEmail: string | null;
   setSelectedCollaboratorEmail: (email: string | null) => void;
 
-  // --- Demanda atual / reprimida ---
   demandaAtual: DemandaItem[];
   demandaReprimida: DemandaItem[];
   demandaResumo: DemandaResumo;
@@ -576,14 +502,16 @@ interface AppStore {
   setPeriod: (period: Period) => void; setCustomDateRange: (start: string, end: string) => void; updateCurrentDates: () => void;
   loadCollaborators: () => Promise<void>; loadEquipeConfigs: () => Promise<void>;
   loadCollaboratorsAndMetrics: (equipeNome?: string, colaboradorNome?: string, colaboradorId?: string | number, produto?: string, unidadeId?: number) => Promise<void>;
-  loadMetricsForPeriod: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string; unidadeId?: number }) => Promise<void>;
+
+  // ═══ PATCH 2: assinaturas usam MetricsLoadParams (inclui `mode`) ═══
+  loadMetricsForPeriod: (params?: MetricsLoadParams) => Promise<void>;
   loadWeeklyPerformanceData: () => Promise<void>;
   loadLeadsByStage: (equipeNome?: string, colaboradorNome?: string, produto?: string) => Promise<{ colaborador: string; etapa_lead: string; total: number }[]>;
   updateKpiFromMetrics: () => void;
   updateCollaboratorWeights: (id: string, weights: Partial<Pick<Collaborator, 'pesoDiarioAssinados' | 'pesoDiarioGanhos' | 'pesoSemanalAssinados' | 'pesoSemanalGanhos' | 'pesoMensalAssinados' | 'pesoMensalGanhos' | 'bonusPorCiclo'>>) => void;
   recalculateHierarchyWeights: () => Promise<void>;
   getCollaboratorsWithHierarchy: () => Collaborator[];
-  loadRawMetrics: (params?: { equipeNome?: string; colaboradorNome?: string; colaboradorId?: string | number; produto?: string; unidadeId?: number }) => Promise<void>;
+  loadRawMetrics: (params?: MetricsLoadParams) => Promise<void>;
   updateKpiFromRawMetrics: () => void;
 }
 
@@ -630,7 +558,6 @@ export const useAppStore = create<AppStore>()(
       selectedCollaboratorEmail: null,
       setSelectedCollaboratorEmail: (email) => set({ selectedCollaboratorEmail: email }),
 
-      // --- Demanda ---
       demandaAtual: initialDemandaAtual,
       demandaReprimida: initialDemandaReprimida,
       demandaResumo: initialDemandaResumo,
@@ -638,7 +565,6 @@ export const useAppStore = create<AppStore>()(
       setDemandaReprimida: (data) => set({ demandaReprimida: data }),
       setDemandaResumo: (data) => set({ demandaResumo: data }),
 
-      // ========== PERÍODO ==========
       setPeriod: (period) => {
         if (period !== 'Custom') {
           const { start, end } = getDateRangeFromPeriod(period);
@@ -657,7 +583,6 @@ export const useAppStore = create<AppStore>()(
         set({ currentStartDate: start, currentEndDate: end });
       },
 
-      // ========== RESET ==========
       resetStore: () => set({
         currentUser: null,
         kpiData: initialKpiData,
@@ -698,7 +623,6 @@ export const useAppStore = create<AppStore>()(
         demandaResumo: initialDemandaResumo,
       }),
 
-      // ========== SETTERS BÁSICOS ==========
       setKpiData: (data) => set({ kpiData: data }),
       setBonusData: (data) => set({ bonusData: data }),
       setWeeklyPerformance: (data) => set({ weeklyPerformance: data }),
@@ -708,19 +632,12 @@ export const useAppStore = create<AppStore>()(
       setRanking: (data) => set({ ranking: data }),
       setDailyData: (data) => set({ dailyData: data }),
 
-      // ============================================================
-      // setCurrentUser — preserva equipe + unidade_id.
-      // Aceita tanto `nome_equipe` (padrão do backend) quanto `equipe`.
-      // ============================================================
       setCurrentUser: (user) => {
         if (!user) {
           set({ currentUser: null });
           return;
         }
-        const rawEquipe =
-          (user as any).nome_equipe ??
-          (user as any).equipe ??
-          '';
+        const rawEquipe = (user as any).nome_equipe ?? (user as any).equipe ?? '';
         const normalized: User = {
           id: user.id || user.email || '',
           e_mail: user.e_mail || '',
@@ -845,7 +762,6 @@ export const useAppStore = create<AppStore>()(
       setNotifications: (data) => set({ notifications: data }),
       setInsightCards: (data) => set({ insightCards: data }),
 
-      // ========== CARREGAMENTOS ==========
       loadTabelaComissoes: async () => {
         try {
           const res = await fetch(`${API_BASE}/tabela-comissoes`, { credentials: 'include' });
@@ -937,7 +853,6 @@ export const useAppStore = create<AppStore>()(
 
           console.log('✅ [loadCollaborators] Mapeados:', baseCollaborators.length);
 
-          // Tentar carregar métricas do mês atual para pesos e bônus
           const mesRef = get().currentStartDate?.substring(0, 7) || new Date().toISOString().slice(0, 7);
           try {
             const res = await fetch(`${API_BASE}/metricas-assessores?mes=${mesRef}`, { credentials: 'include' });
@@ -962,7 +877,7 @@ export const useAppStore = create<AppStore>()(
                     colab.pesoSemanalGanhos = metrics.peso_meta_ganho_semanal ?? colab.pesoSemanalGanhos;
                     colab.pesoMensalAssinados = metrics.peso_meta_assinados_mensal ?? colab.pesoMensalAssinados;
                     colab.pesoMensalGanhos = metrics.peso_meta_ganho_mensal ?? colab.pesoMensalGanhos;
-                    colab.metaGolsAssinados = metrics.meta_gols_assinados ?? colab.metaGolsAssinados;   
+                    colab.metaGolsAssinados = metrics.meta_gols_assinados ?? colab.metaGolsAssinados;
                     colab.metaGolsGanhos = metrics.meta_gols_ganhos ?? colab.metaGolsGanhos;
                   }
                 }
@@ -974,7 +889,6 @@ export const useAppStore = create<AppStore>()(
 
           set({ collaborators: baseCollaborators });
 
-          // Sincronizar Supervisores SR com o Calculator
           const srEmails = baseCollaborators
             .filter(c => c.isSupervisorSR)
             .map(c => c.email);
@@ -1002,17 +916,14 @@ export const useAppStore = create<AppStore>()(
         await get().loadWeeklyPerformanceData();
       },
 
-      // ============================================================
-      // loadMetricsForPeriod
+      // ═══════════════════════════════════════════════════════════════
+      // ═══ PATCH 3: loadMetricsForPeriod aceita mode ═══
       // ------------------------------------------------------------
-      //  • Chama fetchLeadsRecebidos com `granularity: 'daily'`.
-      //  • Extração defensiva: `total ?? leads_recebidos`.
-      //  • Chave da série: `periodo ?? data`.
-      //  • ⚠️ Passa `currentUser` para `applyHierarchyTotals`, para que a
-      //    linha do coordenador agregue apenas os supervisores da
-      //    própria unidade.
-      // ============================================================
-      loadMetricsForPeriod: async (params = {}) => {
+      // `mode` entra em apiParams → é repassado para fetch*.
+      // Usamos `apiParams: any` localmente até api.ts adicionar
+      // `mode?` nas assinaturas. Quando fizer, remover o `: any`.
+      // ═══════════════════════════════════════════════════════════════
+      loadMetricsForPeriod: async (params: MetricsLoadParams = {}) => {
         try {
           const { currentStartDate, currentEndDate, collaborators } = get();
           if (!currentStartDate || !currentEndDate) { get().updateCurrentDates(); }
@@ -1021,8 +932,16 @@ export const useAppStore = create<AppStore>()(
           if (!start || !end) return;
           if (collaborators.length === 0) await get().loadCollaborators();
 
-          const { equipeNome, colaboradorNome, colaboradorId, produto, unidadeId } = params;
-          const apiParams = { start, end, equipe: equipeNome, colaborador: colaboradorNome, colaboradorId, produto };
+          const { equipeNome, colaboradorNome, colaboradorId, produto, unidadeId, mode } = params;
+          const apiParams: any = {
+            start,
+            end,
+            equipe: equipeNome,
+            colaborador: colaboradorNome,
+            colaboradorId,
+            produto,
+            ...(mode ? { mode } : {}),
+          };
           let [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
             fetchEmitidos(apiParams),
             fetchAssinados(apiParams),
@@ -1068,7 +987,6 @@ export const useAppStore = create<AppStore>()(
             }
           });
 
-          // ⚠️ FIX: passa currentUser para escopar a hierarquia por unidade.
           const hierarchical = applyHierarchyTotals(updated, get().currentUser);
           set({ collaborators: hierarchical });
           get().updateKpiFromMetrics();
@@ -1083,7 +1001,6 @@ export const useAppStore = create<AppStore>()(
           };
           set({ rawMetrics });
 
-          // --- Série diária de leads (granularity='daily') ---
           let leadsData = await fetchLeadsRecebidos({ ...apiParams, granularity: 'daily' });
           if (unidadeId != null) {
             leadsData = filterMetricRowsByUnit(leadsData, unidadeId, get().collaborators);
@@ -1099,14 +1016,16 @@ export const useAppStore = create<AppStore>()(
             .map(([date, leads]) => ({ date, vendas: 0, leads }));
           if (dailyProd.length) set({ dailyProduction: dailyProd.sort((a, b) => a.date.localeCompare(b.date)) });
 
-          // Demanda atual / reprimida acompanham o filtro ativo (fuzzy no backend).
           get().loadDemandaCompleta({ equipeNome, colaboradorNome, colaboradorId, produto });
         } catch (err) {
           console.error('Erro ao carregar métricas:', err);
         }
       },
 
-      loadRawMetrics: async (params = {}) => {
+      // ═══════════════════════════════════════════════════════════════
+      // ═══ PATCH 4: loadRawMetrics aceita mode ═══
+      // ═══════════════════════════════════════════════════════════════
+      loadRawMetrics: async (params: MetricsLoadParams = {}) => {
         try {
           const { currentStartDate, currentEndDate } = get();
           if (!currentStartDate || !currentEndDate) {
@@ -1116,8 +1035,16 @@ export const useAppStore = create<AppStore>()(
           const end = get().currentEndDate;
           if (!start || !end) return;
 
-          const { equipeNome, colaboradorNome, colaboradorId, produto, unidadeId } = params;
-          const apiParams = { start, end, equipe: equipeNome, colaborador: colaboradorNome, colaboradorId, produto };
+          const { equipeNome, colaboradorNome, colaboradorId, produto, unidadeId, mode } = params;
+          const apiParams: any = {
+            start,
+            end,
+            equipe: equipeNome,
+            colaborador: colaboradorNome,
+            colaboradorId,
+            produto,
+            ...(mode ? { mode } : {}),
+          };
 
           let [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
             fetchEmitidos(apiParams),
@@ -1198,9 +1125,6 @@ export const useAppStore = create<AppStore>()(
         } catch { /* mock */ }
       },
 
-      // ============================================================
-      // loadLeadsByStage — envia `equipe` (não `equipeNome`).
-      // ============================================================
       loadLeadsByStage: async (equipeNome, colaboradorNome, produto) => {
         try {
           const { currentStartDate, currentEndDate } = get();
@@ -1216,9 +1140,6 @@ export const useAppStore = create<AppStore>()(
         } catch { return []; }
       },
 
-      // ============================================================
-      // DEMANDA ATUAL / REPRIMIDA — LOADERS
-      // ============================================================
       loadDemandaAtual: async (params = {}) => {
         try {
           const { equipeNome, colaboradorNome, colaboradorId, produto } = params;
@@ -1327,7 +1248,6 @@ export const useAppStore = create<AppStore>()(
         }
       },
 
-      // ⚠️ FIX: passa `currentUser` para escopar a hierarquia por unidade.
       getCollaboratorsWithHierarchy: () => {
         return applyHierarchyTotals(get().collaborators, get().currentUser);
       },
@@ -1339,8 +1259,7 @@ export const useAppStore = create<AppStore>()(
         globalConfig: state.globalConfig,
         period: state.period,
         customStartDate: state.customStartDate,
-        customEndDate: state.customEndDate, 
-        // Persistência opcional do resumo de demanda (comente se não quiser)
+        customEndDate: state.customEndDate,
         demandaResumo: state.demandaResumo,
       }),
     }

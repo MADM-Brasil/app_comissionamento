@@ -1,6 +1,6 @@
 // backend/routes/campanhas.js
 import express from 'express';
-import db from '../services/db.js';
+import db from '../services/bd/db.js';
 import { broadcastNotification } from './notificacoes.js';
 
 const router = express.Router();

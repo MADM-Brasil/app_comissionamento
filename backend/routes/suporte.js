@@ -32,7 +32,7 @@ import { createHash, randomUUID } from 'crypto';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { pool } from '../services/db.js';
+import { pool } from '../services/bd/db.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 import { broadcastNotification } from './notificacoes.js';
 import { HUBSPOT_PORTAL_ID_CONFIGURED, buscarClienteResumo } from '../services/hubspot.js';

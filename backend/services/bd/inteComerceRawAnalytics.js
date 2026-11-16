@@ -1,4 +1,4 @@
-// backend/services/inteComerceRawAnalytics.js
+// backend/services/bd/inteComerceRawAnalytics.js
 
 import { createHash } from 'node:crypto';
 import db from './db.js';
@@ -65,9 +65,7 @@ const HUBSPOT_PRODUCT_MAP = (() => {
   } catch { return {}; }
 })();
 
-// ⚠️ NOVO: propriedade de owner usada para filtrar escopo por unidade/equipe
 const HUBSPOT_OWNER_PROPERTY = process.env.HUBSPOT_PROP_OWNER || 'hubspot_owner_id';
-// ⚠️ NOVO: mapa manual (opcional) email → owner_id, sobrepõe /crm/v3/owners
 const HUBSPOT_OWNER_MAP = (() => {
   const raw = process.env.HUBSPOT_OWNER_MAP;
   if (!raw) return {};
@@ -256,7 +254,6 @@ async function getHubSpotStages() {
   return HS_STAGES;
 }
 
-// ⚠️ NOVO: cache dos owners HubSpot (email → id)
 let HS_OWNERS = null;
 let HS_OWNERS_AT = 0;
 const HS_OWNERS_TTL = 10 * 60_000;
@@ -290,13 +287,11 @@ async function getHubSpotOwners() {
   return HS_OWNERS;
 }
 
-// ⚠️ NOVO: emails dos colaboradores dentro do escopo (equipe/unidade/ids)
 async function fetchEmailsForScope(params) {
   const filters = [];
   const values = [];
   let idx = 1;
 
-  // Prioridade: colaborador_ids_escopo (já resolvido a partir de unidade/equipe pelo /suporte/escopo)
   if (Array.isArray(params.colaborador_ids_escopo)) {
     if (params.colaborador_ids_escopo.length === 0) return [];
     filters.push(`colaborador_id::text = ANY($${idx++}::text[])`);
@@ -320,8 +315,6 @@ async function fetchEmailsForScope(params) {
 
   const client = await db.pool.connect();
   try {
-    // Premissa: core.view_app_colaboradores tem colaborador_id, email, nome_equipe, unidade_id.
-    // Se o schema local diferir, ajuste o SELECT abaixo.
     const { rows } = await client.query(
       `SELECT DISTINCT LOWER(TRIM(email)) AS email
          FROM core.view_app_colaboradores
@@ -335,10 +328,6 @@ async function fetchEmailsForScope(params) {
   }
 }
 
-// ⚠️ NOVO: resolve owner IDs HubSpot para o escopo solicitado
-//   null  → sem escopo (conta inteira — exige pode_ver_conta_inteira=true)
-//   []    → escopo definido mas sem nenhum email/owner correspondente
-//   [ids] → filtra HubSpot por esses owners
 async function resolveHubSpotOwnerIds(params) {
   const hasExplicitScope =
     Array.isArray(params.colaborador_ids_escopo) ||
@@ -421,10 +410,6 @@ function buildDateFilter(prop, dateType, startMs, endMs) {
   ];
 }
 
-// ────────────────────────────────────────────────────────────
-// fetchHubSpotOverview — safra vs produção
-// Aceita `ownerIds` (null = conta inteira, [] = sem match, [ids] = filtro)
-// ────────────────────────────────────────────────────────────
 async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, ownerIds }) {
   if (!hubspotEnabled()) return { ok: false, motivo: 'HUBSPOT_ACCESS_TOKEN não configurado' };
 
@@ -448,7 +433,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     productFilter = [{ propertyName: HUBSPOT_PRODUCT_PROPERTY, operator: 'IN', values }];
   }
 
-  // ⚠️ NOVO: filtro por owner (aplicado em todas as buscas)
   const ownerFilter = (Array.isArray(ownerIds) && ownerIds.length > 0)
     ? [{ propertyName: HUBSPOT_OWNER_PROPERTY, operator: 'IN', values: ownerIds }]
     : [];
@@ -601,7 +585,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
   return result;
 }
 
-// ⚠️ NOVO: cache key inclui hash dos ownerIds para não reaproveitar entre escopos
 async function getHubSpotOverviewCached(params) {
   if (!hubspotEnabled()) return { ok: false, motivo: 'HUBSPOT_ACCESS_TOKEN não configurado' };
   const ownerSig = Array.isArray(params.ownerIds)
@@ -617,16 +600,8 @@ async function getHubSpotOverviewCached(params) {
   } catch (e) { return { ok: false, motivo: e?.message || String(e) }; }
 }
 
-// ============================================================
-// Gate — fail-closed
-// ============================================================
-// ⚠️ NOVO: aceita `ownerIds` já resolvidos. Bloqueia apenas quando:
-//  - não há escopo e o usuário não tem pode_ver_conta_inteira
-//  - escopo definido mas resolveHubSpotOwnerIds devolveu [] (sem match)
-//  - filtro de produto sem mapeamento
 function canUseHubSpotFor(params, ownerIds) {
   if (ownerIds === null) {
-    // Sem escopo → conta inteira, exige autorização explícita
     if (params.pode_ver_conta_inteira !== true) {
       return { ok: false, motivo: 'sem autorização explícita de conta inteira — HubSpot bloqueado' };
     }
@@ -642,9 +617,6 @@ function canUseHubSpotFor(params, ownerIds) {
   return { ok: true };
 }
 
-// ============================================================
-// Scope filters (inalterado)
-// ============================================================
 function filterScope(assessor, params) {
   if (!assessor) return false;
   if (params.colaborador_ids_escopo != null &&
@@ -667,9 +639,6 @@ function filterScopeBroad(event, params) {
   return true;
 }
 
-// ============================================================
-// buildInstantGroups / buildAttributions (inalterado)
-// ============================================================
 function selectLatest(rows, predicate, valueKey) {
   let selected = null;
   for (const row of rows) {
@@ -772,9 +741,6 @@ function buildAttributions(history, deal, collaborators, now) {
   return { episodes, groups, groupByTime, attributionsByDeal, attributionAt, stageChanges };
 }
 
-// ============================================================
-// loadRawEvents (inalterado, já com fix dos JOINs view_*)
-// ============================================================
 async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
   const useViews = mode === 'producao';
   const bounds = periodBounds(inicio, fim_exclusivo);
@@ -915,7 +881,6 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     let legalOutcomeResult = { rows: [] };
 
     if (useViews) {
-      // ⚠️ FIX (mantido): JOIN por consultor_id via subquery LIMIT 1 em core.colaboradores
       assinadosViewResult = await client.query({
         text: `
           SELECT v.*,
@@ -1260,7 +1225,32 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       events.push({ dealId, occurredAt, dateKey: utcDate(outcome.data_ganho), collaboratorId: collabId, team, type: 'PROTOCOLADO' });
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // ⚠️ FIX CRÍTICO — venda perdida sendo contada como ganho
+    // ─────────────────────────────────────────────────────────────────────
+    // PROBLEMA:
+    //   `view_app_juridico_auditoria` expõe ganhos E perdas na mesma view.
+    //   A coluna `data_ganho` está preenchida para AMBOS (é a data de
+    //   fechamento do deal no jurídico). Sem filtro por etapa, toda linha
+    //   "Venda perdida" gerava um evento `GANHO`, inflando
+    //   overview.ganhos e quebrando pct_assinados_ate_ganhos
+    //   (valor > 100% era o sintoma visível).
+    //
+    // FIX:
+    //   Replica o filtro de `metrics.js` `/ganhos`:
+    //       WHERE l.etapa <> 'Venda perdida'
+    //   Aceita variações comuns de cadastro ('Perdida', 'Perdido').
+    //   Qualquer outra etapa com `data_ganho` preenchida continua
+    //   contando como GANHO — igual ao `/ganhos` de metrics.js.
+    // ═════════════════════════════════════════════════════════════════════
     for (const outcome of legalOutcomeResult.rows) {
+      const etapaNorm = String(outcome.etapa ?? '').trim().toLowerCase();
+      if (
+        etapaNorm === 'venda perdida' ||
+        etapaNorm === 'perdida' ||
+        etapaNorm === 'perdido'
+      ) continue;
+
       const occurredAt = timestamp(outcome.data_ganho);
       if (!occurredAt) continue;
       const dateKey = utcDate(outcome.data_ganho);
@@ -1292,9 +1282,6 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
   } finally { client.release(releaseError); }
 }
 
-// ============================================================
-// Cache do rawEvents
-// ============================================================
 function rawCacheKey(params) {
   return createHash('sha256')
     .update(`${params.inicio}|${params.fim_exclusivo}|${params.produto || ''}|${params.mode || ''}|${(params.colaborador_ids_escopo || []).slice().sort().join(',')}`)
@@ -1314,9 +1301,6 @@ function emptyResult() {
   };
 }
 
-// ============================================================
-// Modo PRODUÇÃO — scope em exceções (inalterado)
-// ============================================================
 function buildProductionComparisonResults(raw, params) {
   const monthBounds = periodBounds(params.production_month_inicio, params.production_month_fim);
   const selectedDayBounds = params.selected_day && params.selected_day_end ? periodBounds(params.selected_day, params.selected_day_end) : null;
@@ -1527,9 +1511,6 @@ function buildProductionComparisonResults(raw, params) {
   return result;
 }
 
-// ============================================================
-// OPERACIONAL (inalterado)
-// ============================================================
 function filteredEvents(raw, params) {
   const { start, end } = periodBounds(params.inicio, params.fim_exclusivo);
   const activeIds = new Set((params.colaborador_ids_ativos || []).map(String));
@@ -1706,9 +1687,6 @@ function buildOperationalResults(raw, params) {
   return result;
 }
 
-// ============================================================
-// SAFRA (inalterado)
-// ============================================================
 function buildComparisonResults(raw, params) {
   const cohortBounds = periodBounds(params.cohort_inicio, params.cohort_fim);
   const resultBounds = periodBounds(params.result_inicio, params.result_fim);
@@ -1917,9 +1895,6 @@ function buildComparisonResults(raw, params) {
   return result;
 }
 
-// ============================================================
-// Merge HubSpot (inalterado — só expõe ownerFilter no aviso)
-// ============================================================
 function buildHubspotCards(hs) {
   return {
     criados: hs.criados ?? null, em_contato: hs.em_contato ?? null,
@@ -2026,9 +2001,6 @@ function hubspotOnlyResult(hs, motivoBanco) {
   };
 }
 
-// ============================================================
-// Entry point — resolve owner IDs antes de chamar HubSpot
-// ============================================================
 export async function getInteComerceRawAnalytics(params) {
   console.log('[inte-comerce] params', {
     pode_ver_conta_inteira: params.pode_ver_conta_inteira,
@@ -2044,10 +2016,6 @@ export async function getInteComerceRawAnalytics(params) {
 
   const skipHubSpot = params.mode === 'operacional';
 
-  // ⚠️ NOVO: resolve owner IDs HubSpot a partir do escopo (unidade/equipe/ids).
-  //   null  → sem escopo, HubSpot consulta conta inteira (exige pode_ver_conta_inteira)
-  //   []    → escopo definido mas sem email/owner HubSpot correspondente
-  //   [ids] → HubSpot filtra por esses owners
   let ownerIds = null;
   let ownerError = null;
   if (!skipHubSpot) {
@@ -2093,9 +2061,6 @@ export async function getInteComerceRawAnalytics(params) {
   return result;
 }
 
-// ============================================================
-// period-summary (inalterado)
-// ============================================================
 const PRODUCTION_METRICS = [
   { key: 'criados', eventType: 'DEAL_CREATED' }, { key: 'trabalhados', eventType: 'TRABALHADO_PROXY' },
   { key: 'em_contato', eventType: 'EM_CONTATO' }, { key: 'coleta', eventType: 'COLETA' },

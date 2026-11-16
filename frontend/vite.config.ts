@@ -17,7 +17,7 @@ const MAX_LOG_SIZE_BYTES = 1 * 1024 * 1024; // 1MB per log file
 const TRIM_TARGET_BYTES = Math.floor(MAX_LOG_SIZE_BYTES * 0.6); // Trim to 60% to avoid constant re-trimming
 
 type LogSource = "browserConsole" | "networkRequests" | "sessionReplay";
- 
+
 function ensureLogDir() {
   if (!fs.existsSync(LOG_DIR)) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
@@ -34,7 +34,6 @@ function trimLogFile(logPath: string, maxSize: number) {
     const keptLines: string[] = [];
     let keptBytes = 0;
 
-    // Keep newest lines (from end) that fit within 60% of maxSize
     const targetSize = TRIM_TARGET_BYTES;
     for (let i = lines.length - 1; i >= 0; i--) {
       const lineBytes = Buffer.byteLength(`${lines[i]}\n`, "utf-8");
@@ -55,25 +54,15 @@ function writeToLogFile(source: LogSource, entries: unknown[]) {
   ensureLogDir();
   const logPath = path.join(LOG_DIR, `${source}.log`);
 
-  // Format entries with timestamps
   const lines = entries.map((entry) => {
     const ts = new Date().toISOString();
     return `[${ts}] ${JSON.stringify(entry)}`;
   });
 
-  // Append to log file
   fs.appendFileSync(logPath, `${lines.join("\n")}\n`, "utf-8");
-
-  // Trim if exceeds max size
   trimLogFile(logPath, MAX_LOG_SIZE_BYTES);
 }
 
-/**
- * Vite plugin to collect browser debug logs
- * - POST /__manus__/logs: Browser sends logs, written directly to files
- * - Files: browserConsole.log, networkRequests.log, sessionReplay.log
- * - Auto-trimmed when exceeding 1MB (keeps newest entries)
- */
 function vitePluginManusDebugCollector(): Plugin {
   return {
     name: "manus-debug-collector",
@@ -98,14 +87,12 @@ function vitePluginManusDebugCollector(): Plugin {
     },
 
     configureServer(server: ViteDevServer) {
-      // POST /__manus__/logs: Browser sends logs (written directly to files)
       server.middlewares.use("/__manus__/logs", (req, res, next) => {
         if (req.method !== "POST") {
           return next();
         }
 
         const handlePayload = (payload: any) => {
-          // Write logs directly to files
           if (payload.consoleLogs?.length > 0) {
             writeToLogFile("browserConsole", payload.consoleLogs);
           }
@@ -150,7 +137,13 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
-const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
+const plugins = [
+  react(),
+  tailwindcss(),
+  jsxLocPlugin(),
+  vitePluginManusRuntime(),
+  vitePluginManusDebugCollector(),
+];
 
 export default defineConfig({
   plugins,
@@ -169,13 +162,63 @@ export default defineConfig({
   },
   server: {
     port: 3008,
-    
+
     // ===== PROXY – redireciona /api para o backend =====
     proxy: {
       "/api": {
         target: "http://localhost:3007",
         changeOrigin: true,
         secure: false,
+
+        // ═══ NOVO ═══
+        // Necessário para SSE (/api/notificacoes/stream) e WebSocket.
+        // Sem `ws: true`, o EventSource conecta mas nunca recebe `data:`.
+        ws: true,
+
+        // Timeout generoso — SSE mantém a conexão aberta indefinidamente.
+        // O default do http-proxy é 0 (infinito), mas explicitar deixa claro.
+        timeout: 0,
+        proxyTimeout: 0,
+
+        // ═══ NOVO ═══
+        // Suprime o spam de `ECONNREFUSED` durante o boot do backend.
+        // Nenhum outro erro é silenciado.
+        configure: (proxy) => {
+          proxy.on("error", (err, _req, res) => {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === "ECONNREFUSED") {
+              // Backend ainda subindo — silencioso.
+              if (res && "writeHead" in res && !res.headersSent) {
+                res.writeHead(503, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ success: false, error: "Backend indisponível" }));
+              }
+              return;
+            }
+            console.error("[vite-proxy]", err.message);
+          });
+
+          // ═══ NOVO ═══
+          // Desabilita o buffering do proxy APENAS para SSE.
+          // Sem isso, a resposta do backend fica presa no buffer do Vite
+          // e o browser nunca vê os eventos chegando.
+          proxy.on("proxyRes", (proxyRes, req) => {
+            const url = (req as any).url || "";
+            const isSSE =
+              url.includes("/notificacoes/stream") ||
+              url.includes("/stream") ||
+              (proxyRes.headers["content-type"] || "").includes("text/event-stream");
+
+            if (isSSE) {
+              // Garante headers corretos
+              proxyRes.headers["cache-control"] = "no-cache, no-transform";
+              proxyRes.headers["x-accel-buffering"] = "no";
+              proxyRes.headers["connection"] = "keep-alive";
+              // Remove content-length (SSE é chunked/streaming)
+              delete proxyRes.headers["content-length"];
+            }
+          });
+        },
+        // ═══════════
       },
     },
   },

@@ -3,7 +3,7 @@ import express from 'express';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import twoFactorService from '../services/twoFactorService.js';
-import { pool } from '../services/db.js';
+import { pool } from '../services/bd/db.js';
 import { accessControl } from '../services/access-control.js';
 
 const router = express.Router();
