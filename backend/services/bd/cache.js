@@ -1,32 +1,43 @@
 // backend/services/bd/cache.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Cache híbrido Redis + memória local (L1).
+// Cache híbrido Redis + L1 (memória local) COM CIRCUIT BREAKER.
 //
 // Interface pública:
 //   cacheGet(key)                  → value | null
 //   cacheSet(key, value, ttlMs)    → void
+//   cacheSetMany(entries)          → void   (pipeline, 1 round-trip p/ N sets)
 //   cacheGetMany(keys)             → { [key]: value }
 //   cacheDelete(key)               → void
 //   cacheDeleteByPrefix(prefix)    → void
-//   cacheKeyOf(prefix, params)     → string   (key determinística)
-//   cacheStats()                   → { ...contadores, hitRatio, ... }
-//   cacheClearLocal()              → void     (usado no shutdown)
+//   cacheKeyOf(prefix, params)     → string
+//   cacheStats()                   → { ...contadores, hitRatio, circuit }
+//   cacheClearLocal()              → void   (shutdown)
 //
-// Comportamento:
-//   • Redis up      → Redis é a fonte primária; L1 também é populado (fallback).
-//   • Redis down    → L1 responde; requests não travam (timeout de 800ms/op).
-//   • Redis cai     → L1 já tem cópia recente (populado no último cacheSet).
-//   • Valor corrompido no Redis → é descartado e L1 responde.
+// ─────────────────────────────────────────────────────────────────────────────
+// CIRCUIT BREAKER
+// ─────────────────────────────────────────────────────────────────────────────
+// O sintoma "Redis timeout após 800ms" quase sempre NÃO é Redis lento —
+// é o event loop do Node travado em JSON.stringify de payloads grandes.
+// O setTimeout(800ms) vence a corrida contra o `await redis.get()` que já
+// resolveu, mas cuja promise só é entregue quando o event loop respira.
 //
-// Compatível com cacheFirst.js (importa cacheGet, cacheSet).
+// Solução:
+//   • 3 timeouts consecutivos → circuit ABRE por 60s.
+//   • Operando aberto → skipa Redis, usa L1 direto (<1ms).
+//   • Após 60s → half-open: 1 operação de teste.
+//   • Sucesso → fecha. Falha → reabre por mais 60s.
+//
+// Efeito prático:
+//   Sem CB: cada request paga REDIS_OP_TIMEOUT_MS durante o pico
+//   Com CB: 3 requests pagam, o resto cai em L1 com <1ms
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { redis } from './redis.js';
 
 const DEFAULT_TTL_MS = 60_000;
 const LOCAL_MAX_SIZE = 500;
-const LOCAL_MAX_ENTRY_BYTES = 512 * 1024; // 512 KB por entrada
-const REDIS_OP_TIMEOUT_MS = 800;          // timeout por comando Redis
+const LOCAL_MAX_ENTRY_BYTES = 512 * 1024;
+const REDIS_OP_TIMEOUT_MS = Number(process.env.REDIS_OP_TIMEOUT_MS) || 800;
 
 // ─── L1: Map em memória com LRU ──────────────────────────────────────────────
 const localCache = new Map(); // key → { value, expiresAt, sizeBytes }
@@ -41,9 +52,58 @@ const stats = {
   setsLocal: 0,
   evictions: 0,
   parseErrors: 0,
+  circuitOpens: 0,
+  circuitSkips: 0,
 };
 
-// ─── Timeout para operações Redis ────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// CIRCUIT BREAKER
+// ═════════════════════════════════════════════════════════════════════════════
+const CB = {
+  failures: 0,
+  failureThreshold: 3,
+  openUntil: 0,
+  openDurationMs: 60_000,
+  lastOpenLog: 0,
+};
+
+function circuitOpen() {
+  const now = Date.now();
+  if (CB.failures < CB.failureThreshold) return false;
+  if (now < CB.openUntil) return true;
+  // Half-open: deixa 1 operação testar
+  CB.openUntil = 0;
+  return false;
+}
+
+function recordSuccess() {
+  if (CB.failures > 0) {
+    console.log(`[cache] circuit FECHADO — Redis voltou (${CB.failures} falhas resolvidas)`);
+  }
+  CB.failures = 0;
+  CB.openUntil = 0;
+}
+
+function recordFailure() {
+  CB.failures++;
+  stats.errorsRedis++;
+  if (CB.failures >= CB.failureThreshold && CB.openUntil === 0) {
+    CB.openUntil = Date.now() + CB.openDurationMs;
+    stats.circuitOpens++;
+    // Loga só 1x por janela (evita spam no console)
+    if (Date.now() - CB.lastOpenLog > 5000) {
+      console.warn(
+        `[cache] circuit ABERTO por ${CB.openDurationMs / 1000}s ` +
+        `(${CB.failures} timeouts consecutivos) — operando só em L1`
+      );
+      CB.lastOpenLog = Date.now();
+    }
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═════════════════════════════════════════════════════════════════════════════
 function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -51,17 +111,17 @@ function withTimeout(promise, ms, label) {
       () => reject(new Error(`[cache] ${label} timeout após ${ms}ms`)),
       ms
     );
+    if (timer.unref) timer.unref();
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// ─── Estimativa de tamanho em bytes ─────────────────────────────────────────
 function estimateBytes(str) {
-  // Aproximação conservadora: UTF-8, ~2 bytes/char na média.
+  // Aproximação UTF-8: ~2 bytes/char na média
   return str.length * 2;
 }
 
-// ─── LRU: move a key para o final (mais recente) ────────────────────────────
+// ─── LRU ────────────────────────────────────────────────────────────────────
 function lruTouch(key) {
   const entry = localCache.get(key);
   if (!entry) return;
@@ -69,7 +129,6 @@ function lruTouch(key) {
   localCache.set(key, entry);
 }
 
-// ─── LRU: evict do mais antigo quando estoura capacidade ────────────────────
 function lruEvictIfNeeded() {
   while (localCache.size > LOCAL_MAX_SIZE) {
     const oldestKey = localCache.keys().next().value;
@@ -79,33 +138,8 @@ function lruEvictIfNeeded() {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// GET
-// ═════════════════════════════════════════════════════════════════════════════
-export async function cacheGet(key) {
-  // 1. Redis primeiro
-  if (redis) {
-    try {
-      const raw = await withTimeout(redis.get(key), REDIS_OP_TIMEOUT_MS, 'get');
-      if (raw != null) {
-        try {
-          const parsed = JSON.parse(raw);
-          stats.hitsRedis++;
-          return parsed;
-        } catch (parseErr) {
-          stats.parseErrors++;
-          console.warn(`[cache] JSON inválido em "${key}":`, parseErr.message);
-          // Descarta a entrada corrompida
-          redis.del(key).catch(() => {});
-        }
-      }
-    } catch (err) {
-      stats.errorsRedis++;
-      console.warn('[cache] get falhou, tentando L1:', err.message);
-    }
-  }
-
-  // 2. L1
+// ─── helpers L1 ─────────────────────────────────────────────────────────────
+function localGet(key) {
   const entry = localCache.get(key);
   if (!entry) {
     stats.misses++;
@@ -121,12 +155,51 @@ export async function cacheGet(key) {
   return entry.value;
 }
 
+function localSet(key, value, expiresAt, sizeBytes) {
+  if (sizeBytes > LOCAL_MAX_ENTRY_BYTES) return;
+  localCache.set(key, { value, expiresAt, sizeBytes });
+  lruTouch(key);
+  lruEvictIfNeeded();
+  stats.setsLocal++;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
-// SET
+// GET
+// ═════════════════════════════════════════════════════════════════════════════
+export async function cacheGet(key) {
+  if (redis && !circuitOpen()) {
+    try {
+      const raw = await withTimeout(redis.get(key), REDIS_OP_TIMEOUT_MS, 'get');
+      recordSuccess();
+      if (raw != null) {
+        try {
+          const parsed = JSON.parse(raw);
+          stats.hitsRedis++;
+          return parsed;
+        } catch (parseErr) {
+          stats.parseErrors++;
+          console.warn(`[cache] JSON inválido em "${key}":`, parseErr.message);
+          redis.del(key).catch(() => {});
+        }
+      }
+    } catch (err) {
+      recordFailure();
+      // Loga só a PRIMEIRA falha do ciclo (evita spam)
+      if (CB.failures === 1) {
+        console.warn('[cache] get falhou, fallback L1:', err.message);
+      }
+    }
+  } else if (redis && circuitOpen()) {
+    stats.circuitSkips++;
+  }
+
+  return localGet(key);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SET (single key)
 // ═════════════════════════════════════════════════════════════════════════════
 export async function cacheSet(key, value, ttlMs = DEFAULT_TTL_MS) {
-  // Jitter de ±15% evita expiração simultânea após o warmup.
-  // TTL mínimo de 1s para não criar entradas praticamente inválidas.
   const jittered = Math.max(
     1_000,
     Math.round(ttlMs + (Math.random() * 0.3 - 0.15) * ttlMs)
@@ -136,56 +209,99 @@ export async function cacheSet(key, value, ttlMs = DEFAULT_TTL_MS) {
   try {
     serialized = JSON.stringify(value);
   } catch (err) {
-    console.warn(`[cache] não foi possível serializar "${key}":`, err.message);
+    console.warn(`[cache] não serializável "${key}":`, err.message);
     return;
   }
 
   const sizeBytes = estimateBytes(serialized);
 
-  // 1. Redis (sempre, quando disponível)
-  if (redis) {
+  if (redis && !circuitOpen()) {
     try {
       await withTimeout(
         redis.set(key, serialized, 'PX', jittered),
         REDIS_OP_TIMEOUT_MS,
         'set'
       );
+      recordSuccess();
       stats.setsRedis++;
     } catch (err) {
-      stats.errorsRedis++;
-      console.warn('[cache] set Redis falhou, mantendo só L1:', err.message);
+      recordFailure();
+      if (CB.failures === 1) {
+        console.warn('[cache] set Redis falhou, mantendo só L1:', err.message);
+      }
+    }
+  } else if (redis && circuitOpen()) {
+    stats.circuitSkips++;
+  }
+
+  localSet(key, value, Date.now() + jittered, sizeBytes);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SET EM LOTE (pipeline — 1 round-trip para N SETs)
+// ═════════════════════════════════════════════════════════════════════════════
+// Usado pelo cacheFirst para gravar { stale, fresh } de uma vez.
+// Sem isso, cada load gera 2 round-trips → 2 timeouts durante pico.
+// ═════════════════════════════════════════════════════════════════════════════
+export async function cacheSetMany(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return;
+
+  const prepared = [];
+  for (const { key, value, ttlMs = DEFAULT_TTL_MS } of entries) {
+    try {
+      const serialized = JSON.stringify(value);
+      const sizeBytes = estimateBytes(serialized);
+      const jittered = Math.max(
+        1_000,
+        Math.round(ttlMs + (Math.random() * 0.3 - 0.15) * ttlMs)
+      );
+      prepared.push({ key, serialized, jittered, value, sizeBytes });
+    } catch (err) {
+      console.warn(`[cache] setMany: não serializável "${key}":`, err.message);
     }
   }
 
-  // 2. L1 (SEMPRE) — garante fallback real se Redis cair depois.
-  //    Valores acima do limite ficam apenas no Redis.
-  if (sizeBytes <= LOCAL_MAX_ENTRY_BYTES) {
-    localCache.set(key, {
-      value,
-      expiresAt: Date.now() + jittered,
-      sizeBytes,
-    });
-    lruTouch(key);
-    lruEvictIfNeeded();
-    stats.setsLocal++;
+  if (prepared.length === 0) return;
+
+  if (redis && !circuitOpen()) {
+    try {
+      const pipeline = redis.pipeline();
+      for (const e of prepared) {
+        pipeline.set(e.key, e.serialized, 'PX', e.jittered);
+      }
+      await withTimeout(pipeline.exec(), REDIS_OP_TIMEOUT_MS, 'setMany');
+      recordSuccess();
+      stats.setsRedis += prepared.length;
+    } catch (err) {
+      recordFailure();
+      if (CB.failures === 1) {
+        console.warn('[cache] setMany Redis falhou, mantendo só L1:', err.message);
+      }
+    }
+  } else if (redis && circuitOpen()) {
+    stats.circuitSkips += prepared.length;
+  }
+
+  for (const e of prepared) {
+    localSet(e.key, e.value, Date.now() + e.jittered, e.sizeBytes);
   }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// GET em lote (usa MGET — 1 round-trip para N keys)
+// GET em lote (MGET — 1 round-trip para N GETs)
 // ═════════════════════════════════════════════════════════════════════════════
 export async function cacheGetMany(keys) {
   if (!Array.isArray(keys) || keys.length === 0) return {};
-
   const result = {};
 
-  if (redis) {
+  if (redis && !circuitOpen()) {
     try {
       const raws = await withTimeout(
         redis.mget(...keys),
         REDIS_OP_TIMEOUT_MS,
         'mget'
       );
+      recordSuccess();
       raws.forEach((raw, i) => {
         if (raw == null) return;
         try {
@@ -197,12 +313,12 @@ export async function cacheGetMany(keys) {
         }
       });
     } catch (err) {
-      stats.errorsRedis++;
-      console.warn('[cache] mget falhou:', err.message);
+      recordFailure();
     }
+  } else if (redis && circuitOpen()) {
+    stats.circuitSkips += keys.length;
   }
 
-  // Completa com L1 o que faltou
   for (const key of keys) {
     if (key in result) continue;
     const entry = localCache.get(key);
@@ -224,28 +340,28 @@ export async function cacheGetMany(keys) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// DELETE por key exata (Redis + L1)
+// DELETE por key exata
 // ═════════════════════════════════════════════════════════════════════════════
 export async function cacheDelete(key) {
-  if (redis) {
+  if (redis && !circuitOpen()) {
     try {
       await withTimeout(redis.del(key), REDIS_OP_TIMEOUT_MS, 'del');
+      recordSuccess();
     } catch (err) {
-      stats.errorsRedis++;
-      console.warn('[cache] delete falhou:', err.message);
+      recordFailure();
+      if (CB.failures === 1) {
+        console.warn('[cache] delete falhou:', err.message);
+      }
     }
   }
   localCache.delete(key);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// DELETE por prefixo (Redis + L1)
-// ─────────────────────────────────────────────────────────────────────────────
-// SCAN garante que não bloqueia o Redis (diferente de KEYS *).
-// Pode retornar a mesma key em iterações diferentes — DEL nisso é no-op.
+// DELETE por prefixo (SCAN — não bloqueia Redis)
 // ═════════════════════════════════════════════════════════════════════════════
 export async function cacheDeleteByPrefix(prefix) {
-  if (redis) {
+  if (redis && !circuitOpen()) {
     try {
       let cursor = '0';
       let deleted = 0;
@@ -261,16 +377,19 @@ export async function cacheDeleteByPrefix(prefix) {
           deleted += keys.length;
         }
       } while (cursor !== '0');
+      recordSuccess();
       if (deleted > 0) {
         console.log(`[cache] deleteByPrefix "${prefix}" → ${deleted} keys no Redis`);
       }
     } catch (err) {
-      stats.errorsRedis++;
-      console.warn('[cache] deleteByPrefix Redis falhou:', err.message);
+      recordFailure();
+      if (CB.failures === 1) {
+        console.warn('[cache] deleteByPrefix Redis falhou:', err.message);
+      }
     }
   }
 
-  // L1 sempre limpa — mesmo se Redis falhou, L1 pode ter cópia stale
+  // L1 limpa SEMPRE (mesmo se Redis falhou — L1 pode ter cópia stale)
   let localDeleted = 0;
   for (const k of [...localCache.keys()]) {
     if (k.startsWith(prefix)) {
@@ -298,7 +417,7 @@ export function cacheKeyOf(prefix, params) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Stats / observabilidade (usado por /health/warmup)
+// Stats (usado por /api/health/warmup)
 // ═════════════════════════════════════════════════════════════════════════════
 export function cacheStats() {
   const total = stats.hitsRedis + stats.hitsLocal + stats.misses;
@@ -317,6 +436,12 @@ export function cacheStats() {
     localMaxSize: LOCAL_MAX_SIZE,
     localBytes,
     hitRatio,
+    circuit: {
+      open: circuitOpen(),
+      failures: CB.failures,
+      opens: stats.circuitOpens,
+      skips: stats.circuitSkips,
+    },
     counters: { ...stats },
   };
 }

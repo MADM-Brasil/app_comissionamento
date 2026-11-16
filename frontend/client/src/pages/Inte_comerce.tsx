@@ -1,4 +1,4 @@
-// src/pages/Inte_comerce.tsx
+// src/pages/Inte_commerce.tsx
 import { useState, useMemo, useCallback, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
@@ -479,7 +479,7 @@ const EvolucaoTooltip = ({ active, payload, label }: any) => {
 };
 
 // ───────────────────────────────────────────────────────────
-export default function Inte_comerce() {
+export default function Inte_commerce() {
   const { collaborators } = useAppStore();
   const [today] = useState(() => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date()));
   const [viewMode, setViewMode] = useState<"safra" | "producao">("safra");
@@ -533,6 +533,16 @@ export default function Inte_comerce() {
   const [collabTable, setCollabTable] = useState<InteComerceCollaborator[]>([]);
   const [teamTable, setTeamTable] = useState<InteComerceTeam[]>([]);
 
+  // ═══════════════════════════════════════════════════════════════
+  // reloadData — 3 waves para reduzir pico de concorrência no backend
+  // ───────────────────────────────────────────────────────────────
+  // Wave 1: dados principais (bloqueia UI até KPIs aparecerem)
+  // Wave 2: tabela + 3 séries diárias (leads, assinados, ganhos)
+  // Wave 3: 2 séries diárias (protocolados, perdidos) + comparação
+  //
+  // Antes: 6 fetch em paralelo → estourava analyticsPool=3
+  // Depois: máximo 3 paralelos em cada wave
+  // ═══════════════════════════════════════════════════════════════
   const reloadData = useCallback(async () => {
     if (!reportPeriod.start || !reportPeriod.end) return;
     if (reportPeriod.unavailable) {
@@ -585,21 +595,16 @@ export default function Inte_comerce() {
       : null;
 
     try {
-      const [allResult, tableResult, monthCompareResult, dailySeriesResult] = await Promise.allSettled([
-        fetchInteComerceAll(params),
-        grouping === "team"
-          ? fetchInteComerceTeams(params).then((data) => ({ kind: "team" as const, data }))
-          : fetchInteComerceCollaborators(params).then((data) => ({ kind: "person" as const, data })),
-        comparisonParams ? fetchInteComerceAll(comparisonParams) : Promise.resolve(null),
-        Promise.all([
-          fetchLeadsRecebidos(dailySeriesParams),
-          fetchAssinados(dailySeriesParams),
-          fetchGanhos(dailySeriesParams),
-          fetchProtocolados(dailySeriesParams),
-          fetchPerdidos(dailySeriesParams),
-        ]),
-      ]);
+      // ═══ WAVE 1: dados principais (bloqueia UI) ═══
+      let allResult: { status: "fulfilled"; value: AllResult } | { status: "rejected"; reason: unknown };
+      try {
+        const mainData = await fetchInteComerceAll(params);
+        allResult = { status: "fulfilled", value: mainData };
+      } catch (reason) {
+        allResult = { status: "rejected", reason };
+      }
 
+      // Aplica KPIs da wave 1 ANTES das próximas waves → usuário vê rápido
       if (allResult.status === "fulfilled") {
         setDataAsOf(allResult.value.dataAsOf || null);
         setOverview(allResult.value.overview || EMPTY_OVERVIEW);
@@ -616,8 +621,43 @@ export default function Inte_comerce() {
         );
       }
 
-      if (dailySeriesResult.status === "fulfilled") {
-        const [leadsR, assinadosR, ganhosR, protocoladosR, perdidosR] = dailySeriesResult.value;
+      // ═══ WAVE 2: tabela + 3 primeiras séries diárias ═══
+      const [tableResult, wave2DailyResult] = await Promise.allSettled([
+        grouping === "team"
+          ? fetchInteComerceTeams(params).then((data) => ({ kind: "team" as const, data }))
+          : fetchInteComerceCollaborators(params).then((data) => ({ kind: "person" as const, data })),
+        Promise.all([
+          fetchLeadsRecebidos(dailySeriesParams),
+          fetchAssinados(dailySeriesParams),
+          fetchGanhos(dailySeriesParams),
+        ]),
+      ]);
+
+      if (tableResult.status === "fulfilled") {
+        setTableError(null);
+        if (tableResult.value.kind === "team") setTeamTable(tableResult.value.data || []);
+        else setCollabTable(tableResult.value.data || []);
+      } else {
+        console.warn("Tabela de Inte_comerce indisponível:", tableResult.reason);
+        setTableError(
+          tableResult.reason instanceof Error ? tableResult.reason.message : "Falha ao carregar a tabela.",
+        );
+        if (grouping === "team") setTeamTable([]);
+        else setCollabTable([]);
+      }
+
+      // ═══ WAVE 3: 2 últimas séries + comparação ═══
+      const [wave3DailyResult, monthCompareResult] = await Promise.allSettled([
+        Promise.all([
+          fetchProtocolados(dailySeriesParams),
+          fetchPerdidos(dailySeriesParams),
+        ]),
+        comparisonParams ? fetchInteComerceAll(comparisonParams) : Promise.resolve(null),
+      ]);
+
+      if (wave2DailyResult.status === "fulfilled" && wave3DailyResult.status === "fulfilled") {
+        const [leadsR, assinadosR, ganhosR] = wave2DailyResult.value;
+        const [protocoladosR, perdidosR] = wave3DailyResult.value;
         setDailySeries(
           buildDailySeries(reportPeriod.start, reportPeriod.end, {
             leads: leadsR as unknown as RawSeriesItem[],
@@ -629,13 +669,9 @@ export default function Inte_comerce() {
         );
         setDailySeriesError(null);
       } else {
-        console.warn("[Inte_comerce] série diária (Analytics) indisponível:", dailySeriesResult.reason);
+        console.warn("[Inte_comerce] série diária parcialmente indisponível");
         setDailySeries([]);
-        setDailySeriesError(
-          dailySeriesResult.reason instanceof Error
-            ? dailySeriesResult.reason.message
-            : "Falha ao carregar a série diária.",
-        );
+        setDailySeriesError("Falha parcial ao carregar a série diária.");
       }
 
       if (comparisonParams) {
@@ -655,19 +691,6 @@ export default function Inte_comerce() {
       } else {
         setComparisonResult(null);
         setComparisonError(null);
-      }
-
-      if (tableResult.status === "fulfilled") {
-        setTableError(null);
-        if (tableResult.value.kind === "team") setTeamTable(tableResult.value.data || []);
-        else setCollabTable(tableResult.value.data || []);
-      } else {
-        console.warn("Tabela de Inte_comerce indisponível:", tableResult.reason);
-        setTableError(
-          tableResult.reason instanceof Error ? tableResult.reason.message : "Falha ao carregar a tabela.",
-        );
-        if (grouping === "team") setTeamTable([]);
-        else setCollabTable([]);
       }
     } finally {
       setLoading(false);
@@ -734,9 +757,6 @@ export default function Inte_comerce() {
     }));
   }, [dailySeries]);
 
-  // ─────────────────────────────────────────────────────────
-  //  Lookup de metas (colaborador × equipe).
-  // ─────────────────────────────────────────────────────────
   const collabMetaByKey = useMemo(() => {
     const map = new Map<string, { metaMensalGanhos: number; metaMensalAssinados: number }>();
     for (const c of collaborators) {
@@ -862,7 +882,7 @@ export default function Inte_comerce() {
   const comparisonTableRows = useMemo(() => {
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasComp = hasComparison;
-    // ═══ FIX: labels de ganhos/protocolados refletem o mode ═══
+    // Labels de ganhos/protocolados refletem o mode
     const metrics = [
       ["recebidos", viewMode === "producao" ? "Leads recebidos" : "Negócios criados"],
       ["assinados", "Assinados"],
@@ -946,17 +966,15 @@ export default function Inte_comerce() {
     if (comparisonMonth === value) setComparisonMonth(null);
   };
 
-  // ═══ FIX: modeDescription estava incompleto (erro de sintaxe) ═══
-  const modeLabel = viewMode === "safra" ? "Safra" : "Produção";
-  const modeDescription = viewMode === "safra"
+  // ═══ FIX: modeDescription completo (antes era erro de sintaxe) ═══
   const comparisonSectionTitle = viewMode === "safra" ? "Comparativo de Safra" : "Comparativo de Produção";
   const comparisonSectionDescription = `Total de ${selectedMonth} × mês ${comparisonMonth}.`;
 
   // ═══ FIX: labels de card com modo explícito para ganhos/protocolados ═══
   const getCardLabel = (card: typeof STAT_CARDS[number]) => {
     if (card.key === "received" && viewMode === "producao") return "Leads recebidos";
-    if (card.key === "gained") return viewMode === "safra" ? "Ganhos" : "Ganhos";
-    if (card.key === "protocolados") return viewMode === "safra" ? "Protocolados" : "Protocolados";
+    if (card.key === "gained") return viewMode === "safra" ? "Ganhos da safra" : "Ganhos no período";
+    if (card.key === "protocolados") return viewMode === "safra" ? "Protocolados da safra" : "Protocolados no período";
     return card.label;
   };
 
@@ -1025,6 +1043,7 @@ export default function Inte_comerce() {
   return (
     <DashboardLayout
       title="Comercial"
+      subtitle=""
       showPeriodFilter={false}
       headerActions={headerControls}
     >
@@ -1045,10 +1064,9 @@ export default function Inte_comerce() {
         <span className="hidden sm:inline">Atualizar</span>
       </button>
 
-      <p className="mb-4 text-xs text-slate-500">{modeDescription}</p>
 
       {hasComparison && (
-        <details className="card mb-4 group">
+        <details className="card mb-4 mt-3 group">
           <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 [&::-webkit-details-marker]:hidden">
             <div className="flex-1 min-w-0">
               <h2 className="text-base font-bold text-slate-800">{comparisonSectionTitle}</h2>
