@@ -1,18 +1,42 @@
 // backend/services/bd/inteComerceRawAnalytics.js
+//
+// Exports: getInteComerceRawAnalytics, getInteComercePeriodSummary
+//
+// ✅ FIX 12: filtro de produto em desq — stages específicos de pipeline
+//            (Quinquenio/concomitante, Isenção de IR) só entram quando o
+//            produto filtrado bate. Stages genéricos entram sempre.
+// ✅ FIX 13: "sem filtro de produto" (undefined) = todos os produtos → aceita
+//            TODAS as etapas desq.
+// ✅ FIX 14: em_contato em produção usa hubspotSearchTotalGroups sobre
+//            TODAS as etapas "em contato".
+// ✅ FIX 15: hubspotDiagnostics expõe metodo.em_contato + desq_stages
+//            { all, used, excluded }.
+// ✅ FIX 16: buildDateFilter aceita HUBSPOT_DATE_FILTER_MODE
+//            (gte_lt | between | between_num | iso). Default: between.
+// ✅ FIX 17: hubspotSearchTotalGroups loga payload completo em HTTP 400.
+// ✅ FIX 18: *_metodo é setado ANTES do await (aparece no log mesmo se falhar).
+// ✅ FIX 19: HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER=true → produção usa
+//            dealstage IN (mesma de safra) — emergência.
+
 import { createHash } from 'node:crypto';
 import db from './db.js';
 import { cached } from './inteComerceCache.js';
-import { cacheFirst } from './cacheFirst.js';
 import {
-  loadEmitidos,
-  loadAssinados,
-  loadGanhos,
-  loadProtocolados,
+  loadAssinadosTotal,
+  loadGanhosTotal,
+  loadProtocoladosTotal,
+  loadEmitidosTotal,
   metricCacheKey,
 } from './metricsLoaders.js';
 
-const STATEMENT_TIMEOUT_MS = 55_000;
+const STATEMENT_TIMEOUT_MS = 45_000;
 const WORK_MEM = process.env.DB_ANALYTICS_WORK_MEM || '64MB';
+
+// ✅ FIX 16 — controle de formato do filtro datetime em produção
+const HUBSPOT_DATE_FILTER_MODE = (process.env.HUBSPOT_DATE_FILTER_MODE || 'between').toLowerCase();
+// ✅ FIX 19 — fallback de emergência (produção usa dealstage IN)
+const HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER = process.env.HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER === 'true';
+
 const EVENT_TYPES = new Set([
   'DEAL_CREATED','RECEBIDO_CORPORATIVO','RECEBIDO_ASSESSOR','TRABALHADO_PROXY',
   'EM_CONTATO','COLETA','CONTRATO','EMITIDO_ORIGINAL','ASSINADO_ORIGINAL',
@@ -33,6 +57,11 @@ const PRODUCT_VARIANTS = {
 const PLACEHOLDER_COLLAB = '(SEM ATRIBUICAO)';
 const PLACEHOLDER_TEAM = '(SEM EQUIPE)';
 
+const PRODUCTION_MODES = new Set(['producao', 'producao-3-meses']);
+
+const HUBSPOT_MAX_ATTEMPTS = 3;
+const HUBSPOT_ATTEMPT_TIMEOUT_MS = 15_000;
+
 const workMemMatch = /^(\d+)(kB|MB|GB)$/i.exec(WORK_MEM);
 const workMemBytes = workMemMatch
   ? Number(workMemMatch[1]) * ({ kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 })[workMemMatch[2].toLowerCase()]
@@ -43,16 +72,13 @@ if (!Number.isSafeInteger(workMemBytes) || workMemBytes < 4 * 1024 ** 2 || workM
 
 const HS_PROPS_CONFIG = Object.freeze({
   assinaturaDate:        process.env.HUBSPOT_PROP_ASSINATURA_DATE         ?? 'data_da_assinatura',
-  assinaturaDateType:    (process.env.HUBSPOT_PROP_ASSINATURA_DATE_TYPE || 'date').toLowerCase() === 'datetime'
-                           ? 'datetime' : 'date',
+  assinaturaDateType:    (process.env.HUBSPOT_PROP_ASSINATURA_DATE_TYPE || 'date').toLowerCase() === 'datetime' ? 'datetime' : 'date',
   assinaturaStatus:      process.env.HUBSPOT_PROP_ASSINATURA_STATUS       ?? 'status_do_contrato',
   assinaturaSignedValue: process.env.HUBSPOT_PROP_ASSINATURA_SIGNED_VALUE ?? 'assinado',
   protocoloDate:         process.env.HUBSPOT_PROP_PROTOCOLO_DATE          ?? 'data_do_protocolo',
-  protocoloDateType:     (process.env.HUBSPOT_PROP_PROTOCOLO_DATE_TYPE || 'date').toLowerCase() === 'datetime'
-                           ? 'datetime' : 'date',
+  protocoloDateType:     (process.env.HUBSPOT_PROP_PROTOCOLO_DATE_TYPE || 'date').toLowerCase() === 'datetime' ? 'datetime' : 'date',
   ganhoDate:             process.env.HUBSPOT_PROP_GANHO_DATE              ?? 'data_do_ganho',
-  ganhoDateType:         (process.env.HUBSPOT_PROP_GANHO_DATE_TYPE || 'date').toLowerCase() === 'datetime'
-                           ? 'datetime' : 'date',
+  ganhoDateType:         (process.env.HUBSPOT_PROP_GANHO_DATE_TYPE || 'date').toLowerCase() === 'datetime' ? 'datetime' : 'date',
 });
 
 const HUBSPOT_PRODUCT_PROPERTY = process.env.HUBSPOT_PROP_PRODUTO || null;
@@ -83,14 +109,50 @@ const HUBSPOT_OWNER_MAP = (() => {
   } catch { return {}; }
 })();
 
-function hubspotSignatureConfigured() {
-  return Boolean(
-    HS_PROPS_CONFIG.assinaturaDate &&
-    HS_PROPS_CONFIG.assinaturaStatus &&
-    HS_PROPS_CONFIG.assinaturaSignedValue,
-  );
+// ─── FIX 11: override manual de stages desq (env var) ────────────────────────
+const HUBSPOT_DESQ_STAGE_IDS = (() => {
+  const raw = process.env.HUBSPOT_DESQ_STAGE_IDS;
+  if (!raw) return null;
+  const ids = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+  return ids.length > 0 ? ids : null;
+})();
+
+// ─── FIX 12: mapeamento stage → produto específico ───────────────────────────
+const DESQ_STAGE_PRODUCT_MAP = (() => {
+  const raw = process.env.HUBSPOT_DESQ_STAGE_PRODUCT_MAP;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      const out = {};
+      for (const [k, v] of Object.entries(parsed || {})) {
+        if (v != null) out[String(k).trim()] = String(v);
+      }
+      return out;
+    } catch (e) {
+      console.warn('[hubspot] HUBSPOT_DESQ_STAGE_PRODUCT_MAP inválido:', e?.message);
+    }
+  }
+  return {
+    '1419898639': 'Quinquenio',
+    '1460263591': 'Isenção de IR Aposentadoria',
+  };
+})();
+
+// ✅ FIX 13: sem filtro de produto = todos os produtos → aceita TODAS as etapas
+function isDesqStageAllowedForProduct(stageId, produto) {
+  const requiredProduct = DESQ_STAGE_PRODUCT_MAP[String(stageId)];
+  if (!requiredProduct) return true;
+  if (!produto) return true;
+  return requiredProduct === produto;
 }
 
+function selectDesqStages(stages, produto) {
+  const all = [...stages.desq];
+  const filtered = all.filter((id) => isDesqStageAllowedForProduct(id, produto));
+  return { all, filtered };
+}
+
+// ─── Helpers gerais ──────────────────────────────────────────────────────────
 function periodBounds(start, end) {
   return { start: new Date(`${start}T03:00:00.000Z`), end: new Date(`${end}T03:00:00.000Z`) };
 }
@@ -100,16 +162,12 @@ function timestamp(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 function compareAssessorEvents(a, b) {
-  const t = a.receivedAt - b.receivedAt;
-  if (t) return t;
-  const i = Number(a.collaboratorId) - Number(b.collaboratorId);
-  if (i) return i;
+  const t = a.receivedAt - b.receivedAt; if (t) return t;
+  const i = Number(a.collaboratorId) - Number(b.collaboratorId); if (i) return i;
   return String(a.team ?? '').localeCompare(String(b.team ?? ''));
 }
 function localDay(value) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(value);
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(value);
   const d = Object.fromEntries(parts.map(({ type, value: v }) => [type, v]));
   return `${d.year}-${d.month}-${d.day}`;
 }
@@ -127,28 +185,24 @@ function syntheticId(row, prefix) {
   if (explicit != null) return `${prefix}_${explicit}`;
   return `${prefix}_${createHash('sha1').update(JSON.stringify(row)).digest('hex').slice(0, 16)}`;
 }
-function isSyntheticDealId(dealId) {
-  return dealId == null || String(dealId).startsWith('__view_');
-}
+function isSyntheticDealId(dealId) { return dealId == null || String(dealId).startsWith('__view_'); }
 function normalizeTeamKey(s) {
-  return String(s || '').trim().toLowerCase()
-    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+function normalizeLabel(s) {
+  return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
+// ─── Stage caches ────────────────────────────────────────────────────────────
 const DESQ_STAGE_IDS_FALLBACK = new Set(['6659']);
 let DESQ_STAGE_IDS_CACHE = null;
 let DESQ_STAGE_IDS_AT = 0;
 const DESQ_STAGE_IDS_TTL = 5 * 60_000;
-
 async function getDesqStageIds(client) {
   const now = Date.now();
   if (DESQ_STAGE_IDS_CACHE && now - DESQ_STAGE_IDS_AT < DESQ_STAGE_IDS_TTL) return DESQ_STAGE_IDS_CACHE;
   try {
-    const { rows } = await client.query(`
-      SELECT etapa_id::text AS id FROM ops.crm_etapas
-      WHERE crm = 'HUBSPOT'
-        AND (LOWER(TRIM(nome_etapa)) LIKE '%desqualific%' OR etapa_id::text = '6659')
-    `);
+    const { rows } = await client.query(`SELECT etapa_id::text AS id FROM ops.crm_etapas WHERE crm = 'HUBSPOT' AND (LOWER(TRIM(nome_etapa)) LIKE '%desqualific%' OR etapa_id::text = '6659')`);
     const ids = new Set(rows.map((r) => r.id));
     DESQ_STAGE_IDS_CACHE = ids.size > 0 ? ids : DESQ_STAGE_IDS_FALLBACK;
   } catch { DESQ_STAGE_IDS_CACHE = DESQ_STAGE_IDS_FALLBACK; }
@@ -160,15 +214,11 @@ const EM_CONTATO_FALLBACK = new Set(['6650']);
 let EM_CONTATO_IDS_CACHE = null;
 let EM_CONTATO_IDS_AT = 0;
 const EM_CONTATO_IDS_TTL = 5 * 60_000;
-
 async function getEmContatoStageIds(client) {
   const now = Date.now();
   if (EM_CONTATO_IDS_CACHE && now - EM_CONTATO_IDS_AT < EM_CONTATO_IDS_TTL) return EM_CONTATO_IDS_CACHE;
   try {
-    const { rows } = await client.query(`
-      SELECT etapa_id::text AS id FROM ops.crm_etapas
-      WHERE crm = 'HUBSPOT' AND LOWER(TRIM(nome_etapa)) LIKE 'em contato%'
-    `);
+    const { rows } = await client.query(`SELECT etapa_id::text AS id FROM ops.crm_etapas WHERE crm = 'HUBSPOT' AND LOWER(TRIM(nome_etapa)) LIKE 'em contato%'`);
     const ids = new Set(rows.map((r) => r.id));
     EM_CONTATO_IDS_CACHE = ids.size > 0 ? ids : EM_CONTATO_FALLBACK;
   } catch { EM_CONTATO_IDS_CACHE = EM_CONTATO_FALLBACK; }
@@ -187,6 +237,7 @@ function isCurrentlyEmContato(dealRow, emContatoStageIds) {
   return cur !== '' && emContatoStageIds.has(cur);
 }
 
+// ─── HubSpot API ─────────────────────────────────────────────────────────────
 const HUBSPOT_API = 'https://api.hubapi.com';
 const HUBSPOT_SEARCH_URL = `${HUBSPOT_API}/crm/v3/objects/deals/search`;
 const HUBSPOT_PIPELINES_URL = `${HUBSPOT_API}/crm/v3/pipelines/deals`;
@@ -198,17 +249,12 @@ function hubspotToken() {
   if (!t) { const err = new Error('HUBSPOT_ACCESS_TOKEN não configurado'); err.hubspotDisabled = true; throw err; }
   return t;
 }
-
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 let hubspotQueue = Promise.resolve();
 function hubspotScheduled(fn) {
   const next = hubspotQueue.then(async () => { try { return await fn(); } finally { await sleepMs(300); } });
   hubspotQueue = next.catch(() => {});
   return next;
-}
-
-function normalizeLabel(s) {
-  return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
 const HUBSPOT_STAGE_LABELS = Object.freeze({
@@ -219,150 +265,127 @@ const HUBSPOT_STAGE_LABELS = Object.freeze({
   protocolado:         ['protocolado'],
   protocoloAguardando: ['aguardando protocolo', 'ag protocolo', 'ag. protocolo', 'em protocolo'],
 });
-
 function matchStageKey(label) {
   const l = normalizeLabel(label);
   for (const [key, list] of Object.entries(HUBSPOT_STAGE_LABELS)) if (list.includes(l)) return key;
   if (l.startsWith('em contato')) return 'emContato';
+  if (l.startsWith('desqualific')) return 'desq';
   return null;
 }
 
-let HS_STAGES = null;
-let HS_STAGES_AT = 0;
-const HS_STAGES_TTL = 10 * 60_000;
-
+let HS_STAGES = null; let HS_STAGES_AT = 0; const HS_STAGES_TTL = 10 * 60_000;
 async function getHubSpotStages() {
   if (HS_STAGES && Date.now() - HS_STAGES_AT < HS_STAGES_TTL) return HS_STAGES;
   const token = hubspotToken();
-  const resp = await fetch(HUBSPOT_PIPELINES_URL, {
-    headers: { Authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(15_000),
-  });
+  const resp = await fetch(HUBSPOT_PIPELINES_URL, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
   if (!resp.ok) throw new Error(`HubSpot pipelines HTTP ${resp.status}`);
   const body = await resp.json();
   const pipelines = Array.isArray(body.results) ? body.results : [];
   const sets = { emContato: new Set(), desq: new Set(), vendaPerdida: new Set(), ganho: new Set(), protocolado: new Set(), protocoloAguardando: new Set() };
+
+  const desqDetails = [];
   for (const p of pipelines) for (const s of p.stages || []) {
-    const key = matchStageKey(s.label); if (key) sets[key].add(String(s.id));
+    const key = matchStageKey(s.label);
+    if (key === 'desq') {
+      desqDetails.push({
+        pipelineId: String(p.id),
+        pipelineLabel: p.label,
+        stageId: String(s.id),
+        stageLabel: s.label,
+      });
+    }
+    if (key) sets[key].add(String(s.id));
   }
+
+  console.log('[hubspot] desq stages matched:',
+    desqDetails.map((d) => `${d.pipelineLabel}/${d.stageLabel}(${d.stageId})`).join(' | ') || '(NENHUM)');
+
+  if (HUBSPOT_DESQ_STAGE_IDS) {
+    console.log('[hubspot] desq override ativo (HUBSPOT_DESQ_STAGE_IDS):', HUBSPOT_DESQ_STAGE_IDS);
+    sets.desq = new Set(HUBSPOT_DESQ_STAGE_IDS);
+  }
+
   HS_STAGES = sets; HS_STAGES_AT = Date.now();
   return HS_STAGES;
 }
 
-let HS_OWNERS = null;
-let HS_OWNERS_AT = 0;
-const HS_OWNERS_TTL = 10 * 60_000;
-
+let HS_OWNERS = null; let HS_OWNERS_AT = 0; const HS_OWNERS_TTL = 10 * 60_000;
 async function getHubSpotOwners() {
   if (HS_OWNERS && Date.now() - HS_OWNERS_AT < HS_OWNERS_TTL) return HS_OWNERS;
   const token = hubspotToken();
-  const all = [];
-  let after = null;
-  let safety = 0;
+  const all = []; let after = null; let safety = 0;
   do {
     if (++safety > 50) throw new Error('Paginação de owners HubSpot excedeu o limite de 50 páginas');
     const url = new URL(HUBSPOT_OWNERS_URL);
     url.searchParams.set('limit', '100');
     if (after) url.searchParams.set('after', after);
-    const resp = await fetch(url.toString(), {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(15_000),
-    });
+    const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15_000) });
     if (!resp.ok) throw new Error(`HubSpot owners HTTP ${resp.status}`);
     const body = await resp.json();
-    for (const o of body.results || []) {
-      all.push({ id: String(o.id), email: String(o.email || '').trim().toLowerCase() });
-    }
+    for (const o of body.results || []) all.push({ id: String(o.id), email: String(o.email || '').trim().toLowerCase() });
     after = body.paging?.next?.after ?? null;
   } while (after);
   const byEmail = new Map();
   for (const o of all) if (o.email) byEmail.set(o.email, o.id);
-  HS_OWNERS = { all, byEmail };
-  HS_OWNERS_AT = Date.now();
+  HS_OWNERS = { all, byEmail }; HS_OWNERS_AT = Date.now();
   return HS_OWNERS;
 }
 
 async function fetchEmailsForScope(params) {
-  const filters = [];
-  const values = [];
-  let idx = 1;
-
+  const filters = []; const values = []; let idx = 1;
   if (Array.isArray(params.colaborador_ids_escopo)) {
     if (params.colaborador_ids_escopo.length === 0) return [];
     filters.push(`colaborador_id::text = ANY($${idx++}::text[])`);
     values.push(params.colaborador_ids_escopo.map(String));
   } else {
-    if (params.colaborador_id != null) {
-      filters.push(`colaborador_id::text = $${idx++}`);
-      values.push(String(params.colaborador_id));
-    }
-    if (params.equipe && String(params.equipe).trim().toLowerCase() !== 'todas') {
-      filters.push(`LOWER(TRIM(nome_equipe)) = LOWER(TRIM($${idx++}))`);
-      values.push(String(params.equipe));
-    }
-    if (params.unidade_id != null) {
-      filters.push(`unidade_id = $${idx++}`);
-      values.push(Number(params.unidade_id));
-    }
+    if (params.colaborador_id != null) { filters.push(`colaborador_id::text = $${idx++}`); values.push(String(params.colaborador_id)); }
+    if (params.equipe && String(params.equipe).trim().toLowerCase() !== 'todas') { filters.push(`LOWER(TRIM(nome_equipe)) = LOWER(TRIM($${idx++}))`); values.push(String(params.equipe)); }
+    if (params.unidade_id != null) { filters.push(`unidade_id = $${idx++}`); values.push(Number(params.unidade_id)); }
   }
-
   if (filters.length === 0) return [];
-
   const client = await db.pool.connect();
   try {
     const { rows } = await client.query(
-      `SELECT DISTINCT LOWER(TRIM(email)) AS email
-         FROM core.view_app_colaboradores
-        WHERE ${filters.join(' AND ')}
-          AND email IS NOT NULL AND TRIM(email) <> ''`,
-      values
+      `SELECT DISTINCT LOWER(TRIM(email)) AS email FROM core.view_app_colaboradores WHERE ${filters.join(' AND ')} AND email IS NOT NULL AND TRIM(email) <> ''`,
+      values,
     );
     return rows.map((r) => r.email).filter(Boolean);
-  } finally {
-    client.release();
-  }
+  } finally { client.release(); }
 }
 
 async function resolveHubSpotOwnerIds(params) {
   const hasExplicitScope =
-    Array.isArray(params.colaborador_ids_escopo) ||
-    params.colaborador_id != null ||
-    (params.equipe && String(params.equipe).trim().toLowerCase() !== 'todas') ||
-    params.unidade_id != null;
-
+    Array.isArray(params.colaborador_ids_escopo) || params.colaborador_id != null ||
+    (params.equipe && String(params.equipe).trim().toLowerCase() !== 'todas') || params.unidade_id != null;
   if (!hasExplicitScope) return null;
-
   const emails = await fetchEmailsForScope(params);
   if (emails.length === 0) return [];
-
   const { byEmail } = await getHubSpotOwners();
-  const ids = new Set();
-  let missing = 0;
+  const ids = new Set(); let missing = 0;
   for (const email of emails) {
     const key = String(email).trim().toLowerCase();
     if (HUBSPOT_OWNER_MAP[key]) { ids.add(HUBSPOT_OWNER_MAP[key]); continue; }
     const ownerId = byEmail.get(key);
-    if (ownerId) ids.add(ownerId);
-    else missing++;
+    if (ownerId) ids.add(ownerId); else missing++;
   }
-  if (missing > 0) {
-    console.log('[hubspot-owners] colaboradores sem owner mapeado:', missing, '/', emails.length);
-  }
+  if (missing > 0) console.log('[hubspot-owners] colaboradores sem owner mapeado:', missing, '/', emails.length);
   return [...ids];
 }
 
+// ✅ FIX 17: loga payload completo em HTTP 400
 async function hubspotSearchTotalGroups(filterGroups) {
   const token = hubspotToken();
   return hubspotScheduled(async () => {
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < HUBSPOT_MAX_ATTEMPTS; attempt++) {
+      const requestBody = { filterGroups, limit: 1, properties: ['createdate'] };
       const resp = await fetch(HUBSPOT_SEARCH_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filterGroups, limit: 1, properties: ['createdate'] }),
-        signal: AbortSignal.timeout(20_000),
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(HUBSPOT_ATTEMPT_TIMEOUT_MS),
       });
       if (resp.status === 429 || resp.status >= 500) {
-        if (attempt === 3) throw new Error(`HubSpot ${resp.status} após 4 tentativas`);
+        if (attempt === HUBSPOT_MAX_ATTEMPTS - 1) throw new Error(`HubSpot ${resp.status} após ${HUBSPOT_MAX_ATTEMPTS} tentativas`);
         const retryHeader = resp.headers.get('retry-after');
         const retrySec = retryHeader == null ? NaN : Number(retryHeader);
         const delay = Number.isFinite(retrySec) && retrySec > 0 ? retrySec * 1000 : 1000 * 2 ** attempt;
@@ -370,7 +393,13 @@ async function hubspotSearchTotalGroups(filterGroups) {
       }
       if (!resp.ok) {
         const text = await resp.text().catch(() => '');
-        throw new Error(`HubSpot HTTP ${resp.status}: ${text.slice(0, 200)}`);
+        console.error('[hubspot] HTTP error — payload enviado', {
+          status: resp.status,
+          filterGroupsCount: filterGroups.length,
+          requestBody: JSON.stringify(requestBody),
+          responseBody: text.slice(0, 1000),
+        });
+        throw new Error(`HubSpot HTTP ${resp.status}: ${text.slice(0, 500)}`);
       }
       const data = await resp.json();
       if (!Number.isSafeInteger(data.total) || data.total < 0) throw new Error('HubSpot retornou total inválido');
@@ -380,26 +409,35 @@ async function hubspotSearchTotalGroups(filterGroups) {
     throw new Error('Consulta HubSpot não concluída');
   });
 }
-
-async function hubspotSearchTotal(filters) {
-  return hubspotSearchTotalGroups([{ filters }]);
-}
+async function hubspotSearchTotal(filters) { return hubspotSearchTotalGroups([{ filters }]); }
 
 function midnightSP(dateStr) {
-  if (typeof dateStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-    const err = new Error(`Data inválida (YYYY-MM-DD): ${dateStr}`); err.status = 400; throw err;
-  }
+  if (typeof dateStr !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) { const err = new Error(`Data inválida (YYYY-MM-DD): ${dateStr}`); err.status = 400; throw err; }
   const ms = Date.parse(`${dateStr}T00:00:00-03:00`);
   if (!Number.isFinite(ms)) { const err = new Error(`Data inválida: ${dateStr}`); err.status = 400; throw err; }
   return ms;
 }
 
+// ✅ FIX 16: suporta múltiplos formatos via HUBSPOT_DATE_FILTER_MODE
 function buildDateFilter(prop, dateType, startMs, endMs) {
   if (dateType === 'datetime') {
-    return [
-      { propertyName: prop, operator: 'GTE', value: String(startMs) },
-      { propertyName: prop, operator: 'LT',  value: String(endMs) },
-    ];
+    switch (HUBSPOT_DATE_FILTER_MODE) {
+      case 'between':
+        return [{ propertyName: prop, operator: 'BETWEEN', value: String(startMs), highValue: String(endMs - 1) }];
+      case 'between_num':
+        return [{ propertyName: prop, operator: 'BETWEEN', value: Number(startMs), highValue: Number(endMs - 1) }];
+      case 'iso':
+        return [
+          { propertyName: prop, operator: 'GTE', value: new Date(startMs).toISOString() },
+          { propertyName: prop, operator: 'LTE', value: new Date(endMs - 1).toISOString() },
+        ];
+      case 'gte_lt':
+      default:
+        return [
+          { propertyName: prop, operator: 'GTE', value: String(startMs) },
+          { propertyName: prop, operator: 'LT',  value: String(endMs) },
+        ];
+    }
   }
   const startDate = localDay(new Date(startMs));
   const endDate   = localDay(new Date(endMs - 1));
@@ -409,113 +447,126 @@ function buildDateFilter(prop, dateType, startMs, endMs) {
   ];
 }
 
+// ─── fetchHubSpotOverview ────────────────────────────────────────────────────
 async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, ownerIds }) {
   if (!hubspotEnabled()) return { ok: false, motivo: 'HUBSPOT_ACCESS_TOKEN não configurado' };
-
   const startMs = midnightSP(inicio);
   const endMs   = midnightSP(fim_exclusivo);
   if (startMs >= endMs) return { ok: false, motivo: 'end deve ser posterior a start' };
 
   const startedAt = Date.now();
-  const cutoff = Math.min(endMs, startedAt);
-  if (startMs >= cutoff) return { ok: false, motivo: 'Período inicia depois do momento atual' };
+  if (startMs >= Date.now()) return { ok: false, motivo: 'Período inicia depois do momento atual' };
+
+  console.log('[hubspot] query range', {
+    inicio, fim_exclusivo, mode, produto,
+    startISO: new Date(startMs).toISOString(),
+    endISO:   new Date(endMs).toISOString(),
+    dateFilterMode: HUBSPOT_DATE_FILTER_MODE,
+    disableProductionDateFilter: HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER,
+  });
 
   const stages = await getHubSpotStages();
-  const isProducao = mode === 'producao';
+  const isProducao = PRODUCTION_MODES.has(mode);
 
   let productFilter = [];
   if (produto) {
     const values = HUBSPOT_PRODUCT_MAP[produto];
-    if (!HUBSPOT_PRODUCT_PROPERTY || !values || !values.length) {
-      return { ok: false, motivo: `filtro de produto "${produto}" sem mapeamento HubSpot configurado` };
-    }
+    if (!HUBSPOT_PRODUCT_PROPERTY || !values || !values.length) return { ok: false, motivo: `filtro de produto "${produto}" sem mapeamento HubSpot configurado` };
     productFilter = [{ propertyName: HUBSPOT_PRODUCT_PROPERTY, operator: 'IN', values }];
   }
-
-  const ownerFilter = (Array.isArray(ownerIds) && ownerIds.length > 0)
-    ? [{ propertyName: HUBSPOT_OWNER_PROPERTY, operator: 'IN', values: ownerIds }]
-    : [];
+  const ownerFilter = (Array.isArray(ownerIds) && ownerIds.length > 0) ? [{ propertyName: HUBSPOT_OWNER_PROPERTY, operator: 'IN', values: ownerIds }] : [];
 
   const creationFilter = [
     { propertyName: 'createdate', operator: 'GTE', value: String(startMs) },
-    { propertyName: 'createdate', operator: 'LT',  value: String(cutoff) },
-    ...productFilter,
-    ...ownerFilter,
+    { propertyName: 'createdate', operator: 'LT',  value: String(endMs) },
+    ...productFilter, ...ownerFilter,
   ];
   const baseFilter = isProducao ? [...productFilter, ...ownerFilter] : creationFilter;
 
   const result = {
-    ok: true, criados: 0,
-    em_contato: null, desqualificados: null, assinados: null,
+    ok: true, criados: 0, em_contato: null, desqualificados: null, assinados: null,
     ganhos: null, protocolados: null, protocoloAguardando: null,
-    ganhos_metodo: null, protocolados_metodo: null,
-    desqualificados_metodo: null,
-    erros: {}, duracao_ms: 0,
-    consulted_at: new Date(startedAt).toISOString(),
-    mode: mode || 'safra',
-    owner_filter: Array.isArray(ownerIds) ? ownerIds.length : null,
+    ganhos_metodo: null, protocolados_metodo: null, desqualificados_metodo: null,
+    em_contato_metodo: null,
+    erros: {}, duracao_ms: 0, consulted_at: new Date(startedAt).toISOString(),
+    mode: mode || 'safra', owner_filter: Array.isArray(ownerIds) ? ownerIds.length : null,
+    desq_stages_all: null, desq_stages_used: null, desq_stages_excluded: null,
   };
 
   try { result.criados = await hubspotSearchTotal(creationFilter); }
   catch (e) { return { ok: false, motivo: `HubSpot criados: ${e.message}` }; }
 
+  // ✅ FIX 18: em_contato_metodo definido ANTES do await
   try {
     if (stages.emContato.size > 0) {
-      if (isProducao) {
-        const stageId = [...stages.emContato][0];
-        const entryProp = `hs_v2_date_entered_${stageId}`;
-        result.em_contato = await hubspotSearchTotal([
-          ...productFilter, ...ownerFilter,
-          ...buildDateFilter(entryProp, 'datetime', startMs, cutoff),
-        ]);
-      } else {
-        result.em_contato = await hubspotSearchTotal([
-          ...creationFilter,
-          { propertyName: 'dealstage', operator: 'IN', values: [...stages.emContato] },
-        ]);
-      }
-    } else { result.erros.em_contato = 'Nenhum stage "Em contato" encontrado'; }
-  } catch (e) { result.erros.em_contato = e.message; }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // DESQUALIFICADOS
-  // ───────────────────────────────────────────────────────────────────────────
-  // PRODUÇÃO: entrada em QUALQUER etapa de desq no período, respeitando
-  //           produto + escopo. NÃO exige etapa atual. NÃO exclui quem foi
-  //           para Venda perdida depois.
-  //
-  // SAFRA:    criação no período + etapa ATUAL de desq (dealstage IN desq).
-  //
-  // Se OR completo falhar (HTTP 400 em algum hs_v2_date_entered_<id>),
-  // `desqualificados` fica null e `erros.desqualificados` guarda a causa.
-  // NÃO publica parcial nem soma.
-  // ═══════════════════════════════════════════════════════════════════════════
-  try {
-    if (stages.desq.size > 0) {
-      if (isProducao) {
-        const stageList = [...stages.desq];
+      const stageList = [...stages.emContato];
+      const useDateFilter = isProducao && !HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER;
+      if (useDateFilter) {
+        result.em_contato_metodo = `or(date_entered)(${stageList.join(',')}) [mode=${HUBSPOT_DATE_FILTER_MODE}]`;
+        console.log('[hubspot] em_contato build', {
+          branch: 'date_entered', dateFilterMode: HUBSPOT_DATE_FILTER_MODE, stageList,
+        });
         const buildGroup = (stageId) => ({
           filters: [
-            ...productFilter,
-            ...ownerFilter,
-            ...buildDateFilter(`hs_v2_date_entered_${stageId}`, 'datetime', startMs, cutoff),
+            ...productFilter, ...ownerFilter,
+            ...buildDateFilter(`hs_v2_date_entered_${stageId}`, 'datetime', startMs, endMs),
           ],
         });
-        result.desqualificados = await hubspotSearchTotalGroups(stageList.map(buildGroup));
-        result.desqualificados_metodo = `or(${stageList.join(',')})`;
+        result.em_contato = await hubspotSearchTotalGroups(stageList.map(buildGroup));
       } else {
-        const filters = [
+        result.em_contato_metodo = `created in period + dealstage IN (${stageList.join(',')})`;
+        result.em_contato = await hubspotSearchTotal([
           ...creationFilter,
-          { propertyName: 'dealstage', operator: 'IN', values: [...stages.desq] },
-        ];
-        if (stages.vendaPerdida.size > 0) {
-          filters.push({ propertyName: 'dealstage', operator: 'NOT_IN', values: [...stages.vendaPerdida] });
-        }
-        result.desqualificados = await hubspotSearchTotal(filters);
-        result.desqualificados_metodo = 'etapa_atual(safra)';
+          { propertyName: 'dealstage', operator: 'IN', values: stageList },
+        ]);
       }
     } else {
-      result.erros.desqualificados = 'Nenhum stage "Desqualificado" encontrado';
+      result.erros.em_contato = 'Nenhum stage "Em contato" encontrado';
+    }
+  } catch (e) {
+    result.em_contato = null;
+    result.erros.em_contato = e.message;
+  }
+
+  // FIX 12/13
+  const { all: allDesqStages, filtered: desqStages } = selectDesqStages(stages, produto);
+  const excludedDesqStages = allDesqStages.filter((id) => !desqStages.includes(id));
+  result.desq_stages_all = allDesqStages;
+  result.desq_stages_used = desqStages;
+  result.desq_stages_excluded = excludedDesqStages;
+
+  console.log('[hubspot] desq stages', {
+    produto: produto ?? '(todos)',
+    all: allDesqStages,
+    used: desqStages,
+    excluded: excludedDesqStages,
+    dateFilterMode: HUBSPOT_DATE_FILTER_MODE,
+    disableProductionDateFilter: HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER,
+  });
+
+  // ✅ FIX 18: desqualificados_metodo definido ANTES do await
+  try {
+    if (desqStages.length > 0) {
+      const useDateFilter = isProducao && !HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER;
+      if (useDateFilter) {
+        result.desqualificados_metodo = `or(date_entered)(${desqStages.join(',')}) [mode=${HUBSPOT_DATE_FILTER_MODE}]`;
+        console.log('[hubspot] desq build', {
+          branch: 'date_entered', dateFilterMode: HUBSPOT_DATE_FILTER_MODE, desqStages,
+        });
+        const buildGroup = (stageId) => ({
+          filters: [
+            ...productFilter, ...ownerFilter,
+            ...buildDateFilter(`hs_v2_date_entered_${stageId}`, 'datetime', startMs, endMs),
+          ],
+        });
+        result.desqualificados = await hubspotSearchTotalGroups(desqStages.map(buildGroup));
+      } else {
+        result.desqualificados_metodo = `etapa_atual(${desqStages.join(',')})`;
+        const filters = [...creationFilter, { propertyName: 'dealstage', operator: 'IN', values: desqStages }];
+        result.desqualificados = await hubspotSearchTotal(filters);
+      }
+    } else {
+      result.erros.desqualificados = `Nenhum stage desq aplicável ao produto "${produto ?? '(todos)'}" (todos excluídos pelo mapa de produto)`;
     }
   } catch (e) {
     result.desqualificados = null;
@@ -526,102 +577,69 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
 
   try {
     if (HS_PROPS_CONFIG.ganhoDate && stages.protocolado.size > 0) {
-      result.protocolados = await hubspotSearchTotal([
-        ...baseFilter,
-        ...buildDateFilter(HS_PROPS_CONFIG.ganhoDate, HS_PROPS_CONFIG.ganhoDateType, startMs, cutoff),
-        { propertyName: 'dealstage', operator: 'IN', values: [...stages.protocolado] },
-      ]);
-      result.protocolados_metodo = isProducao
-        ? 'data_do_ganho + etapa_protocolado (produção)'
-        : 'data_do_ganho + etapa_protocolado (safra)';
+      result.protocolados = await hubspotSearchTotal([...baseFilter, ...buildDateFilter(HS_PROPS_CONFIG.ganhoDate, HS_PROPS_CONFIG.ganhoDateType, startMs, endMs), { propertyName: 'dealstage', operator: 'IN', values: [...stages.protocolado] }]);
+      result.protocolados_metodo = isProducao ? 'data_do_ganho + etapa_protocolado (produção)' : 'data_do_ganho + etapa_protocolado (safra)';
     } else if (stages.protocolado.size > 0) {
-      result.protocolados = await hubspotSearchTotal([
-        ...baseFilter,
-        { propertyName: 'dealstage', operator: 'IN', values: [...stages.protocolado] },
-      ]);
+      result.protocolados = await hubspotSearchTotal([...baseFilter, { propertyName: 'dealstage', operator: 'IN', values: [...stages.protocolado] }]);
       result.protocolados_metodo = 'etapa_atual';
-      result.erros.protocolados =
-        'data_do_ganho indisponível — contando etapa atual, não "Protocolado no período".';
-    } else {
-      result.erros.protocolados = 'Nenhum stage "Protocolado" encontrado';
-    }
+      result.erros.protocolados = 'data_do_ganho indisponível — contando etapa atual, não "Protocolado no período".';
+    } else { result.erros.protocolados = 'Nenhum stage "Protocolado" encontrado'; }
   } catch (e) { result.erros.protocolados = e.message; }
 
   try {
     if (stages.protocoloAguardando.size > 0) {
-      result.protocoloAguardando = await hubspotSearchTotal([
-        ...creationFilter,
-        { propertyName: 'dealstage', operator: 'IN', values: [...stages.protocoloAguardando] },
-      ]);
+      result.protocoloAguardando = await hubspotSearchTotal([...creationFilter, { propertyName: 'dealstage', operator: 'IN', values: [...stages.protocoloAguardando] }]);
     }
   } catch (e) { result.erros.protocoloAguardando = e.message; }
 
   result.duracao_ms = Date.now() - startedAt;
-
   console.log('[hubspot] resp', {
-    ok: result.ok, mode: result.mode,
-    criados: result.criados, assinados: result.assinados,
+    ok: result.ok, mode: result.mode, criados: result.criados, assinados: result.assinados,
     ganhos: result.ganhos, ganhos_metodo: result.ganhos_metodo,
     protocolados: result.protocolados, protocolados_metodo: result.protocolados_metodo,
     desqualificados: result.desqualificados, desqualificados_metodo: result.desqualificados_metodo,
-    em_contato: result.em_contato,
+    em_contato: result.em_contato, em_contato_metodo: result.em_contato_metodo,
     owner_filter: result.owner_filter,
+    desq_stages_used: result.desq_stages_used,
+    desq_stages_excluded: result.desq_stages_excluded,
     erros: result.erros, duracao_ms: result.duracao_ms,
   });
-
   return result;
 }
 
 async function getHubSpotOverviewCached(params) {
   if (!hubspotEnabled()) return { ok: false, motivo: 'HUBSPOT_ACCESS_TOKEN não configurado' };
-  const ownerSig = Array.isArray(params.ownerIds)
-    ? createHash('sha1').update(params.ownerIds.slice().sort().join(',')).digest('hex').slice(0, 12)
-    : 'all';
+  const ownerSig = Array.isArray(params.ownerIds) ? createHash('sha1').update(params.ownerIds.slice().sort().join(',')).digest('hex').slice(0, 12) : 'all';
   const key = `hubspot-overview:${params.inicio}|${params.fim_exclusivo}|${params.produto || ''}|${params.mode || ''}|${ownerSig}`;
   try {
-    return await cached(
-      key,
-      () => fetchHubSpotOverview(params),
-      { ttlMs: 5 * 60_000, staleMs: 60_000, forceRefresh: params.refresh === true },
-    );
+    return await cached(key, () => fetchHubSpotOverview(params), { ttlMs: 5 * 60_000, staleMs: 60_000, forceRefresh: params.refresh === true });
   } catch (e) { return { ok: false, motivo: e?.message || String(e) }; }
 }
 
 function canUseHubSpotFor(params, ownerIds) {
   if (ownerIds === null) {
-    if (params.pode_ver_conta_inteira !== true) {
-      return { ok: false, motivo: 'sem autorização explícita de conta inteira — HubSpot bloqueado' };
-    }
+    if (params.pode_ver_conta_inteira !== true) return { ok: false, motivo: 'sem autorização explícita de conta inteira — HubSpot bloqueado' };
   } else if (Array.isArray(ownerIds) && ownerIds.length === 0) {
     return { ok: false, motivo: 'escopo selecionado não mapeia para nenhum hubspot_owner_id' };
   }
   if (params.produto) {
     const values = HUBSPOT_PRODUCT_MAP[params.produto];
-    if (!HUBSPOT_PRODUCT_PROPERTY || !values || !values.length) {
-      return { ok: false, motivo: `filtro de produto "${params.produto}" sem mapeamento HubSpot` };
-    }
+    if (!HUBSPOT_PRODUCT_PROPERTY || !values || !values.length) return { ok: false, motivo: `filtro de produto "${params.produto}" sem mapeamento HubSpot` };
   }
   return { ok: true };
 }
 
 function filterScope(assessor, params) {
   if (!assessor) return false;
-  if (params.colaborador_ids_escopo != null &&
-      !params.colaborador_ids_escopo.map(String).includes(String(assessor.collaboratorId))) return false;
+  if (params.colaborador_ids_escopo != null && !params.colaborador_ids_escopo.map(String).includes(String(assessor.collaboratorId))) return false;
   if (params.colaborador_id != null && String(assessor.collaboratorId) !== String(params.colaborador_id)) return false;
   if (params.equipe && normalizeTeamKey(assessor.team) !== normalizeTeamKey(params.equipe)) return false;
   return true;
 }
 function filterScopeBroad(event, params) {
   if (!event) return false;
-  if (params.colaborador_ids_escopo != null) {
-    if (event.collaboratorId == null) return false;
-    if (!params.colaborador_ids_escopo.map(String).includes(String(event.collaboratorId))) return false;
-  }
-  if (params.colaborador_id != null) {
-    if (event.collaboratorId == null) return false;
-    if (String(event.collaboratorId) !== String(params.colaborador_id)) return false;
-  }
+  if (params.colaborador_ids_escopo != null) { if (event.collaboratorId == null) return false; if (!params.colaborador_ids_escopo.map(String).includes(String(event.collaboratorId))) return false; }
+  if (params.colaborador_id != null) { if (event.collaboratorId == null) return false; if (String(event.collaboratorId) !== String(params.colaborador_id)) return false; }
   if (params.equipe && normalizeTeamKey(event.team) !== normalizeTeamKey(params.equipe)) return false;
   return true;
 }
@@ -638,13 +656,9 @@ function selectLatest(rows, predicate, valueKey) {
 function buildInstantGroups(history) {
   const groups = []; let current;
   for (const row of history) {
-    const time = timestamp(row.data_movimentacao);
-    if (!time) continue;
+    const time = timestamp(row.data_movimentacao); if (!time) continue;
     const key = time.getTime();
-    if (!current || current.key !== key) {
-      current = { key, time, rows: [], etapaSame: null, etapaAny: null, pipelineSame: null, pipelineAny: null, ownerSame: null, ownerAny: null };
-      groups.push(current);
-    }
+    if (!current || current.key !== key) { current = { key, time, rows: [], etapaSame: null, etapaAny: null, pipelineSame: null, pipelineAny: null, ownerSame: null, ownerAny: null }; groups.push(current); }
     current.rows.push(row);
   }
   let previousStage = null, previousPipeline = null, previousPipelineChange = null, previousOwner = null;
@@ -655,8 +669,7 @@ function buildInstantGroups(history) {
     group.pipelineAny = selectLatest(group.rows, () => true, 'pipeline_novo_id');
     group.ownerSame = selectLatest(group.rows, (r) => r.tipo_movimentacao === 'MUDANCA_RESPONSAVEL', 'responsavel_novo_id');
     group.ownerAny = selectLatest(group.rows, (r) => ['CRIACAO_DEAL','MUDANCA_RESPONSAVEL'].includes(r.tipo_movimentacao), 'responsavel_novo_id');
-    group.previousStage = previousStage; group.previousPipeline = previousPipeline;
-    group.previousPipelineChange = previousPipelineChange; group.previousOwner = previousOwner;
+    group.previousStage = previousStage; group.previousPipeline = previousPipeline; group.previousPipelineChange = previousPipelineChange; group.previousOwner = previousOwner;
     if (group.etapaAny != null) previousStage = group.etapaAny;
     if (group.pipelineAny != null) previousPipeline = group.pipelineAny;
     if (group.pipelineSame != null) previousPipelineChange = group.pipelineSame;
@@ -714,22 +727,24 @@ function buildAttributions(history, deal, collaborators, now) {
   const attributionsByDeal = new Map();
   for (const episode of episodes) {
     const list = attributionsByDeal.get(episode.dealId) || [];
-    list.push(episode); attributionsByDeal.set(episode.dealId, list);
+    list.push(episode);
+    attributionsByDeal.set(episode.dealId, list);
   }
   function attributionAt(eventAt) {
     let selected = null;
     for (const episode of episodes) {
       if (episode.cargo !== 'Assessor' || eventAt < episode.receivedAt || eventAt >= episode.endAt) continue;
-      if (!selected || episode.receivedAt > selected.receivedAt ||
-          (episode.receivedAt.getTime() === selected.receivedAt.getTime() && Number(episode.episodioId) > Number(selected.episodioId))) selected = episode;
+      if (!selected || episode.receivedAt > selected.receivedAt || (episode.receivedAt.getTime() === selected.receivedAt.getTime() && Number(episode.episodioId) > Number(selected.episodioId))) selected = episode;
     }
     return selected;
   }
   return { episodes, groups, groupByTime, attributionsByDeal, attributionAt, stageChanges };
 }
 
+// ─── Continuação (2/3) de backend/services/bd/inteComerceRawAnalytics.js ────
+
 async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
-  const useViews = mode === 'producao';
+  const useViews = PRODUCTION_MODES.has(mode);
   const bounds = periodBounds(inicio, fim_exclusivo);
   const dataInicio = inicio;
   const dataFimInclusive = new Date(Date.parse(`${fim_exclusivo}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
@@ -750,10 +765,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     const productFilterValues = productVariantsUpper ? [productVariantsUpper] : [];
 
     const productIds = produto
-      ? (await client.query(
-          `SELECT produto_id::text FROM core.produtos WHERE LOWER(TRIM(nome_produto)) = ANY($1::text[])`,
-          [(PRODUCT_VARIANTS[produto] || [produto]).map((n) => n.trim().toLowerCase())],
-        )).rows.map((r) => r.produto_id)
+      ? (await client.query(`SELECT produto_id::text FROM core.produtos WHERE LOWER(TRIM(nome_produto)) = ANY($1::text[])`, [(PRODUCT_VARIANTS[produto] || [produto]).map((n) => n.trim().toLowerCase())])).rows.map((r) => r.produto_id)
       : null;
     if (produto && !productIds.length) {
       await client.query('COMMIT');
@@ -765,8 +777,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         SELECT DISTINCT matches.deal_id::text AS deal_id
         FROM (
           SELECT h.deal_id FROM core.historico_movimentacoes h
-          WHERE h.crm_origem = 'HUBSPOT'
-            AND h.data_movimentacao >= $1 AND h.data_movimentacao < $2
+          WHERE h.crm_origem = 'HUBSPOT' AND h.data_movimentacao >= $1 AND h.data_movimentacao < $2
             AND h.tipo_movimentacao IN ('CRIACAO_DEAL','MUDANCA_RESPONSAVEL','MUDANCA_PIPELINE','MUDANCA_ETAPA')
           UNION
           SELECT d.deal_id FROM core.deals d
@@ -781,9 +792,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
           UNION
           SELECT COALESCE(s.deal_id, matched.deal_id)
           FROM core.assinaturas s
-          LEFT JOIN core.deals matched
-            ON matched.hubspot_deal_id = s.hubspot_deal_id
-           AND matched.crm_origem = 'HUBSPOT' AND matched.is_deleted IS NOT TRUE
+          LEFT JOIN core.deals matched ON matched.hubspot_deal_id = s.hubspot_deal_id AND matched.crm_origem = 'HUBSPOT' AND matched.is_deleted IS NOT TRUE
           WHERE ($3::bigint[] IS NULL OR s.produto_id = ANY($3::bigint[]))
             AND s.tipo_emissao = 'ORIGINAL' AND s.data_cancelamento IS NULL
             AND ((s.data_emissao >= $1 AND s.data_emissao < $2) OR (s.data_assinatura >= $1 AND s.data_assinatura < $2))
@@ -831,26 +840,19 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
                responsavel_anterior_id::text, responsavel_novo_id::text,
                pipeline_anterior_id::text, pipeline_novo_id::text
         FROM core.historico_movimentacoes
-        WHERE deal_id = ANY($1::bigint[]) AND crm_origem = 'HUBSPOT'
-          AND data_movimentacao <= CURRENT_TIMESTAMP
+        WHERE deal_id = ANY($1::bigint[]) AND crm_origem = 'HUBSPOT' AND data_movimentacao <= CURRENT_TIMESTAMP
         ORDER BY deal_id, data_movimentacao, movimentacao_id`,
       values: [dealIds],
       query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
     });
-    const collaboratorResult = await client.query(
-      `SELECT colaborador_id::text, nome, nome_equipe, cargo, departamento FROM core.colaboradores`,
-    );
+    const collaboratorResult = await client.query(`SELECT colaborador_id::text, nome, nome_equipe, cargo, departamento FROM core.colaboradores`);
 
     const dealRows = dealResult.rows;
     const dealMap = new Map(dealRows.map((deal) => [deal.deal_id, deal]));
     const hubspotIds = [...new Set(dealRows.map((deal) => deal.hubspot_deal_id).filter(Boolean))];
     const aliasDealResult = hubspotIds.length
       ? await client.query({
-          text: `
-            SELECT d.deal_id::text, d.hubspot_deal_id FROM core.deals d
-            WHERE d.hubspot_deal_id = ANY($1::text[])
-              AND ($2::bigint[] IS NULL OR d.produto_id = ANY($2::bigint[]))
-              AND d.crm_origem = 'HUBSPOT' AND d.is_deleted IS NOT TRUE`,
+          text: `SELECT d.deal_id::text, d.hubspot_deal_id FROM core.deals d WHERE d.hubspot_deal_id = ANY($1::text[]) AND ($2::bigint[] IS NULL OR d.produto_id = ANY($2::bigint[])) AND d.crm_origem = 'HUBSPOT' AND d.is_deleted IS NOT TRUE`,
           values: [hubspotIds, productIds],
           query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
         })
@@ -862,57 +864,31 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       dealIdByHubspot.set(deal.hubspot_deal_id, deal.deal_id);
     }
 
-    let signatureResult = { rows: [] };
-    let assinadosViewResult = { rows: [] };
-    let emitidosViewResult = { rows: [] };
-    let legalOutcomeResult = { rows: [] };
+    let signatureResult = { rows: [] }; let assinadosViewResult = { rows: [] }; let emitidosViewResult = { rows: [] }; let legalOutcomeResult = { rows: [] };
 
     if (useViews) {
       assinadosViewResult = await client.query({
         text: `
-          SELECT v.*,
-                 a.assinatura_id::text                        AS assinatura_id,
-                 a.deal_id::text                              AS deal_id,
-                 a.hubspot_deal_id,
-                 a.consultor_responsavel_assinatura_id::text  AS consultor_responsavel_assinatura_id
+          SELECT v.*, a.assinatura_id::text AS assinatura_id, a.deal_id::text AS deal_id, a.hubspot_deal_id, a.consultor_responsavel_assinatura_id::text AS consultor_responsavel_assinatura_id
           FROM core.view_assinados v
           LEFT JOIN core.assinaturas a
             ON a.data_assinatura = v.data_assinatura
-           AND a.consultor_responsavel_assinatura_id = (
-             SELECT c.colaborador_id
-             FROM core.colaboradores c
-             WHERE LOWER(TRIM(c.nome)) = LOWER(TRIM(v.consultor_responsavel_assinatura))
-             LIMIT 1
-           )
-           AND a.tipo_emissao = 'ORIGINAL'
-           AND a.data_cancelamento IS NULL
-          WHERE v.data_assinatura::date >= $1::date
-            AND v.data_assinatura::date <= $2::date
+           AND a.consultor_responsavel_assinatura_id = (SELECT c.colaborador_id FROM core.colaboradores c WHERE LOWER(TRIM(c.nome)) = LOWER(TRIM(v.consultor_responsavel_assinatura)) LIMIT 1)
+           AND a.tipo_emissao = 'ORIGINAL' AND a.data_cancelamento IS NULL
+          WHERE v.data_assinatura::date >= $1::date AND v.data_assinatura::date <= $2::date
             ${productFilterClause.replace(/\bproduto\b/g, 'v.produto')}`,
         values: [dataInicio, dataFimInclusive, ...productFilterValues],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
-
       emitidosViewResult = await client.query({
         text: `
-          SELECT v.*,
-                 a.assinatura_id::text                        AS assinatura_id,
-                 a.deal_id::text                              AS deal_id,
-                 a.hubspot_deal_id,
-                 a.consultor_responsavel_emissao_id::text     AS consultor_responsavel_emissao_id
+          SELECT v.*, a.assinatura_id::text AS assinatura_id, a.deal_id::text AS deal_id, a.hubspot_deal_id, a.consultor_responsavel_emissao_id::text AS consultor_responsavel_emissao_id
           FROM core.view_emitidos v
           LEFT JOIN core.assinaturas a
             ON a.data_emissao = v.data_emissao
-           AND a.consultor_responsavel_emissao_id = (
-             SELECT c.colaborador_id
-             FROM core.colaboradores c
-             WHERE LOWER(TRIM(c.nome)) = LOWER(TRIM(v.consultor_responsavel_emissao))
-             LIMIT 1
-           )
-           AND a.tipo_emissao = 'ORIGINAL'
-           AND a.data_cancelamento IS NULL
-          WHERE v.data_emissao::date >= $1::date
-            AND v.data_emissao::date <= $2::date
+           AND a.consultor_responsavel_emissao_id = (SELECT c.colaborador_id FROM core.colaboradores c WHERE LOWER(TRIM(c.nome)) = LOWER(TRIM(v.consultor_responsavel_emissao)) LIMIT 1)
+           AND a.tipo_emissao = 'ORIGINAL' AND a.data_cancelamento IS NULL
+          WHERE v.data_emissao::date >= $1::date AND v.data_emissao::date <= $2::date
             ${productFilterClause.replace(/\bproduto\b/g, 'v.produto')}`,
         values: [dataInicio, dataFimInclusive, ...productFilterValues],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
@@ -920,32 +896,24 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
 
       const legalQueryValues = [dataInicio, dataFimInclusive];
       let productParamIndex = null;
-      if (productVariantsUpper) {
-        productParamIndex = legalQueryValues.length + 1;
-        legalQueryValues.push(productVariantsUpper);
-      }
+      if (productVariantsUpper) { productParamIndex = legalQueryValues.length + 1; legalQueryValues.push(productVariantsUpper); }
       const dealIdsParamIndex = legalQueryValues.length + 1;
       legalQueryValues.push(dealIds);
-      const productFragment = productParamIndex != null
-        ? `AND UPPER(TRIM(produto)) = ANY($${productParamIndex}::text[])` : '';
+      const productFragment = productParamIndex != null ? `AND UPPER(TRIM(produto)) = ANY($${productParamIndex}::text[])` : '';
 
       legalOutcomeResult = await client.query({
         text: `
           SELECT deal_id::text AS deal_id, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id
           FROM core.view_app_juridico_auditoria
           WHERE data_ganho IS NOT NULL
-            AND (
-              (data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment})
-              OR deal_id::text = ANY($${dealIdsParamIndex}::text[])
-            )`,
+            AND ((data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment}) OR deal_id::text = ANY($${dealIdsParamIndex}::text[]))`,
         values: legalQueryValues,
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
     } else {
       signatureResult = await client.query({
         text: `
-          SELECT assinatura_id::text, deal_id::text, hubspot_deal_id,
-                 data_emissao, data_assinatura, consultor_responsavel_assinatura_id::text, status_assinatura
+          SELECT assinatura_id::text, deal_id::text, hubspot_deal_id, data_emissao, data_assinatura, consultor_responsavel_assinatura_id::text, status_assinatura
           FROM core.assinaturas
           WHERE ($3::bigint[] IS NULL OR produto_id = ANY($3::bigint[]))
             AND tipo_emissao = 'ORIGINAL' AND data_cancelamento IS NULL
@@ -957,8 +925,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       if (hubspotIds.length) {
         signatureResult = await client.query({
           text: `
-            SELECT assinatura_id::text, deal_id::text, hubspot_deal_id,
-                   data_emissao, data_assinatura, consultor_responsavel_assinatura_id::text, status_assinatura
+            SELECT assinatura_id::text, deal_id::text, hubspot_deal_id, data_emissao, data_assinatura, consultor_responsavel_assinatura_id::text, status_assinatura
             FROM core.assinaturas
             WHERE ($3::bigint[] IS NULL OR produto_id = ANY($3::bigint[]))
               AND tipo_emissao = 'ORIGINAL' AND data_cancelamento IS NULL
@@ -969,10 +936,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         });
       }
       legalOutcomeResult = await client.query({
-        text: `
-          SELECT deal_id::text, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id
-          FROM core.view_app_juridico_auditoria
-          WHERE deal_id = ANY($1::bigint[]) AND data_ganho IS NOT NULL`,
+        text: `SELECT deal_id::text, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id FROM core.view_app_juridico_auditoria WHERE deal_id = ANY($1::bigint[]) AND data_ganho IS NOT NULL`,
         values: [dealIds],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
@@ -987,14 +951,10 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       const hsIdVal = pickColumn(row, ['hubspot_deal_id']);
       if (hsIdVal != null && !dealMap.has(String(hsIdVal)) && !dealIdByHubspot.has(String(hsIdVal))) viewDealValuesNeedingLookup.add(String(hsIdVal));
     }
-
     const viewDealIdByHubspot = new Map();
     if (viewDealValuesNeedingLookup.size > 0) {
       const resolved = await client.query({
-        text: `
-          SELECT d.deal_id::text AS deal_id, d.hubspot_deal_id FROM core.deals d
-          WHERE d.crm_origem = 'HUBSPOT'
-            AND (d.hubspot_deal_id = ANY($1::text[]) OR d.deal_id::text = ANY($1::text[]))`,
+        text: `SELECT d.deal_id::text AS deal_id, d.hubspot_deal_id FROM core.deals d WHERE d.crm_origem = 'HUBSPOT' AND (d.hubspot_deal_id = ANY($1::text[]) OR d.deal_id::text = ANY($1::text[]))`,
         values: [[...viewDealValuesNeedingLookup]],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
@@ -1019,8 +979,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     const dealIdByAssinatura = new Map();
     if (assinaturaIdsNeedingLookup.size > 0) {
       const resolved = await client.query({
-        text: `SELECT assinatura_id::text, deal_id::text, hubspot_deal_id
-               FROM core.assinaturas WHERE assinatura_id::text = ANY($1::text[])`,
+        text: `SELECT assinatura_id::text, deal_id::text, hubspot_deal_id FROM core.assinaturas WHERE assinatura_id::text = ANY($1::text[])`,
         values: [[...assinaturaIdsNeedingLookup]],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
@@ -1029,13 +988,9 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
 
     const collaboratorMap = new Map(collaboratorResult.rows.map((r) => [r.colaborador_id, r]));
     const historyByDeal = new Map();
-    for (const row of historyResult.rows) {
-      const list = historyByDeal.get(row.deal_id) || [];
-      list.push(row); historyByDeal.set(row.deal_id, list);
-    }
+    for (const row of historyResult.rows) { const list = historyByDeal.get(row.deal_id) || []; list.push(row); historyByDeal.set(row.deal_id, list); }
 
-    const allEpisodes = new Map();
-    const allEpisodeGroups = new Map();
+    const allEpisodes = new Map(); const allEpisodeGroups = new Map();
     const events = []; const deals = new Map();
 
     for (const deal of dealRows) {
@@ -1047,8 +1002,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
 
       let entryAt = null;
       for (const r of history) {
-        const t = timestamp(r.data_movimentacao);
-        if (!t || t > asOf) continue;
+        const t = timestamp(r.data_movimentacao); if (!t || t > asOf) continue;
         const isEntry =
           (r.tipo_movimentacao === 'CRIACAO_DEAL' && String(r.pipeline_novo_id) === PIPELINE_COMERCIAL) ||
           (r.tipo_movimentacao === 'MUDANCA_PIPELINE' && String(r.pipeline_novo_id) === PIPELINE_COMERCIAL && String(r.pipeline_anterior_id) !== PIPELINE_COMERCIAL);
@@ -1056,18 +1010,14 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       }
       if (entryAt) events.push({ dealId: deal.deal_id, occurredAt: entryAt, dateKey: utcDate(entryAt), collaboratorId: null, team: null, type: 'RECEBIDO_CORPORATIVO' });
 
-      const creationRows = history.filter((r) => r.tipo_movimentacao === 'CRIACAO_DEAL')
-        .sort((a, b) => (timestamp(a.data_movimentacao)?.getTime() ?? 0) - (timestamp(b.data_movimentacao)?.getTime() ?? 0));
+      const creationRows = history.filter((r) => r.tipo_movimentacao === 'CRIACAO_DEAL').sort((a, b) => (timestamp(a.data_movimentacao)?.getTime() ?? 0) - (timestamp(b.data_movimentacao)?.getTime() ?? 0));
       const firstCreation = creationRows[0];
 
       let createdAt = null;
       if (deal.created_at) createdAt = timestamp(deal.created_at);
       if (!createdAt && firstCreation) createdAt = timestamp(firstCreation.data_movimentacao);
       if (!createdAt && deal.data_distribuicao_comercial) createdAt = timestamp(deal.data_distribuicao_comercial);
-      if (!createdAt && history.length) {
-        const firstAny = history.map((r) => timestamp(r.data_movimentacao)).filter(Boolean).sort((a, b) => a - b)[0];
-        if (firstAny) createdAt = firstAny;
-      }
+      if (!createdAt && history.length) { const firstAny = history.map((r) => timestamp(r.data_movimentacao)).filter(Boolean).sort((a, b) => a - b)[0]; if (firstAny) createdAt = firstAny; }
 
       if (createdAt && createdAt <= asOf) {
         const assigned = attribution.attributionAt(createdAt);
@@ -1090,25 +1040,14 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         const pipelineAtEvent = group.pipelineSame ?? group.previousPipelineChange ?? PIPELINE_COMERCIAL;
         const etapaNovaId = String(row.etapa_nova_id ?? '');
 
-        // DESQUALIFICAÇÃO — QUALQUER pipeline, QUALQUER etapa em desqStageIds
         if (desqStageIds.has(etapaNovaId)) {
           const assigned = attribution.attributionAt(eventAt);
-          events.push({
-            dealId: deal.deal_id,
-            occurredAt: eventAt,
-            dateKey: utcDate(eventAt),
-            collaboratorId: assigned?.collaboratorId ?? null,
-            team: assigned?.team ?? null,
-            type: 'DESQUALIFICADO',
-          });
+          events.push({ dealId: deal.deal_id, occurredAt: eventAt, dateKey: utcDate(eventAt), collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type: 'DESQUALIFICADO' });
           continue;
         }
-
-        // Outros eventos: mantém restrição ao pipeline comercial + mapa fixo
         const type = STAGE_TYPES.get(etapaNovaId);
         if (String(pipelineAtEvent) !== PIPELINE_COMERCIAL || !type) continue;
-        if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650' &&
-            eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
+        if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650' && eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
         const assigned = attribution.attributionAt(eventAt);
         events.push({ dealId: deal.deal_id, occurredAt: eventAt, dateKey: utcDate(eventAt), collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type });
       }
@@ -1116,37 +1055,34 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
 
     if (useViews) {
       const pushFromView = (row, dateField, eventType) => {
-        const isoDate = utcDate(row[dateField]);
-        if (!isoDate) return;
+        const isoDate = utcDate(row[dateField]); if (!isoDate) return;
         const occurredAt = new Date(`${isoDate}T12:00:00Z`);
+
         let dealId = null;
         const rawDealId = pickColumn(row, ['deal_id']);
         const rawHubspotId = pickColumn(row, ['hubspot_deal_id']);
+
         for (const candidate of [rawDealId, rawHubspotId]) {
           if (candidate == null) continue;
           const key = String(candidate);
-          if (dealMap.has(key)) { dealId = key; break; }
-          if (dealIdByHubspot.has(key)) { dealId = dealIdByHubspot.get(key); break; }
+          if (dealMap.has(key))             { dealId = key; break; }
+          if (dealIdByHubspot.has(key))     { dealId = dealIdByHubspot.get(key); break; }
           if (viewDealIdByHubspot.has(key)) { dealId = viewDealIdByHubspot.get(key); break; }
-          if (legalDealIdSet.has(key)) { dealId = key; break; }
+          if (legalDealIdSet.has(key))      { dealId = key; break; }
         }
+
         if (dealId == null) {
           const assinaturaId = pickColumn(row, ['assinatura_id']);
-          if (assinaturaId != null && dealIdByAssinatura.has(String(assinaturaId))) dealId = dealIdByAssinatura.get(String(assinaturaId));
+          if (assinaturaId != null && dealIdByAssinatura.has(String(assinaturaId))) {
+            dealId = dealIdByAssinatura.get(String(assinaturaId));
+          }
         }
+
+        if (dealId == null && rawDealId != null)      dealId = String(rawDealId);
+        if (dealId == null && rawHubspotId != null)   dealId = String(rawHubspotId);
         if (dealId == null) dealId = syntheticId(row, `__view_${eventType}`);
-        const rawCollabId = pickColumn(row, [
-          'consultor_responsavel_assinatura_id',
-          'consultor_responsavel_emissao_id',
-          'consultor_primeira_assinatura_id',
-          'consultor_primeira_emissao_id',
-          'consultor_responsavel_id',
-          'responsavel_assinatura_id',
-          'responsavel_id',
-          'consultor_id',
-          'colaborador_id',
-          'assessor_id',
-        ]);
+
+        const rawCollabId = pickColumn(row, ['consultor_responsavel_assinatura_id','consultor_responsavel_emissao_id','consultor_primeira_assinatura_id','consultor_primeira_emissao_id','consultor_responsavel_id','responsavel_assinatura_id','responsavel_id','consultor_id','colaborador_id','assessor_id']);
         const consultant = rawCollabId != null ? collaboratorMap.get(String(rawCollabId)) : null;
         let collaboratorId = consultant?.colaborador_id ?? null;
         let team = consultant?.nome_equipe ?? (row.equipe ?? row.nome_equipe ?? null);
@@ -1154,7 +1090,10 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
           const attribution = allEpisodes.get(dealId);
           if (attribution) {
             const assigned = attribution.attributionAt(occurredAt);
-            if (assigned) { collaboratorId = assigned.collaboratorId ?? null; if (team == null) team = assigned.team ?? null; }
+            if (assigned) {
+              collaboratorId = assigned.collaboratorId ?? null;
+              if (team == null) team = assigned.team ?? null;
+            }
           }
         }
         events.push({ dealId, occurredAt, dateKey: isoDate, collaboratorId, team, type: eventType });
@@ -1167,22 +1106,15 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         let dealId = signature.deal_id && dealMap.has(signature.deal_id) ? signature.deal_id : null;
         if (!dealId && signature.hubspot_deal_id) {
           if (dealIdByHubspot.has(signature.hubspot_deal_id)) dealId = dealIdByHubspot.get(signature.hubspot_deal_id);
-          else {
-            const matching = dealRows.find((d) => d.hubspot_deal_id === signature.hubspot_deal_id);
-            if (matching && aliasCounts.get(signature.hubspot_deal_id) === 1) dealId = matching.deal_id;
-          }
+          else { const matching = dealRows.find((d) => d.hubspot_deal_id === signature.hubspot_deal_id); if (matching && aliasCounts.get(signature.hubspot_deal_id) === 1) dealId = matching.deal_id; }
         }
         if (!dealId) continue;
-        const list = signaturesByDeal.get(dealId) || [];
-        list.push(signature); signaturesByDeal.set(dealId, list);
+        const list = signaturesByDeal.get(dealId) || []; list.push(signature); signaturesByDeal.set(dealId, list);
       }
       for (const [dealId, signatures] of signaturesByDeal) {
-        const attribution = allEpisodes.get(dealId);
-        if (!attribution) continue;
-        const emissions = signatures.map((s) => ({ signature: s, at: timestamp(s.data_emissao) }))
-          .filter((i) => i.at).sort((a, b) => a.at - b.at || Number(a.signature.assinatura_id) - Number(b.signature.assinatura_id));
-        const validSignatures = signatures.map((s) => ({ signature: s, emissionAt: timestamp(s.data_emissao), signedAt: timestamp(s.data_assinatura) }))
-          .filter(({ signedAt }) => signedAt).sort((a, b) => a.signedAt - b.signedAt || Number(a.signature.assinatura_id) - Number(b.signature.assinatura_id));
+        const attribution = allEpisodes.get(dealId); if (!attribution) continue;
+        const emissions = signatures.map((s) => ({ signature: s, at: timestamp(s.data_emissao) })).filter((i) => i.at).sort((a, b) => a.at - b.at || Number(a.signature.assinatura_id) - Number(b.signature.assinatura_id));
+        const validSignatures = signatures.map((s) => ({ signature: s, emissionAt: timestamp(s.data_emissao), signedAt: timestamp(s.data_assinatura) })).filter(({ signedAt }) => signedAt).sort((a, b) => a.signedAt - b.signedAt || Number(a.signature.assinatura_id) - Number(b.signature.assinatura_id));
         for (const emission of emissions) {
           const assigned = attribution.attributionAt(emission.at);
           const consultant = collaboratorMap.get(String(emission.signature.consultor_responsavel_assinatura_id ?? ''));
@@ -1201,56 +1133,33 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     const protocolEmittedForDeal = new Set();
     for (const deal of dealRows) {
       if (!deal.data_protocolo) continue;
-      const protocolAt = timestamp(deal.data_protocolo);
-      if (!protocolAt || protocolAt > asOf) continue;
+      const protocolAt = timestamp(deal.data_protocolo); if (!protocolAt || protocolAt > asOf) continue;
       let collabId = null, team = null;
       const attribution = allEpisodes.get(deal.deal_id);
-      if (attribution) {
-        const assigned = attribution.attributionAt(protocolAt);
-        collabId = assigned?.collaboratorId ?? null;
-        team = assigned?.team ?? null;
-      }
+      if (attribution) { const assigned = attribution.attributionAt(protocolAt); collabId = assigned?.collaboratorId ?? null; team = assigned?.team ?? null; }
       events.push({ dealId: deal.deal_id, occurredAt: protocolAt, dateKey: utcDate(protocolAt), collaboratorId: collabId, team, type: 'PROTOCOLADO' });
       protocolEmittedForDeal.add(deal.deal_id);
     }
-
     for (const outcome of legalOutcomeResult.rows) {
       if (String(outcome.etapa ?? '').trim() !== 'Protocolado') continue;
       let dealId = String(outcome.deal_id);
       if (viewDealIdByHubspot.has(dealId)) dealId = viewDealIdByHubspot.get(dealId);
       if (protocolEmittedForDeal.has(dealId)) continue;
-      const occurredAt = timestamp(outcome.data_ganho);
-      if (!occurredAt) continue;
+      const occurredAt = timestamp(outcome.data_ganho); if (!occurredAt) continue;
       let collabId = null, team = null;
-      if (outcome.responsavel_lead_id) {
-        const c = collaboratorMap.get(String(outcome.responsavel_lead_id));
-        if (c) { collabId = c.colaborador_id; team = c.nome_equipe; }
-      }
+      if (outcome.responsavel_lead_id) { const c = collaboratorMap.get(String(outcome.responsavel_lead_id)); if (c) { collabId = c.colaborador_id; team = c.nome_equipe; } }
       events.push({ dealId, occurredAt, dateKey: utcDate(outcome.data_ganho), collaboratorId: collabId, team, type: 'PROTOCOLADO' });
     }
-
     for (const outcome of legalOutcomeResult.rows) {
       const etapaNorm = String(outcome.etapa ?? '').trim().toLowerCase();
       if (etapaNorm === 'venda perdida' || etapaNorm === 'perdida' || etapaNorm === 'perdido') continue;
-      const occurredAt = timestamp(outcome.data_ganho);
-      if (!occurredAt) continue;
-      const dateKey = utcDate(outcome.data_ganho);
-      if (!dateKey) continue;
+      const occurredAt = timestamp(outcome.data_ganho); if (!occurredAt) continue;
+      const dateKey = utcDate(outcome.data_ganho); if (!dateKey) continue;
       let dealId = String(outcome.deal_id);
       if (viewDealIdByHubspot.has(dealId)) dealId = viewDealIdByHubspot.get(dealId);
       let collabId = null, team = null;
-      if (outcome.responsavel_lead_id) {
-        const c = collaboratorMap.get(String(outcome.responsavel_lead_id));
-        if (c) { collabId = c.colaborador_id; team = c.nome_equipe; }
-      }
-      if (!collabId) {
-        const attribution = allEpisodes.get(dealId);
-        if (attribution) {
-          const assigned = attribution.attributionAt(occurredAt);
-          collabId = assigned?.collaboratorId ?? null;
-          team = assigned?.team ?? null;
-        }
-      }
+      if (outcome.responsavel_lead_id) { const c = collaboratorMap.get(String(outcome.responsavel_lead_id)); if (c) { collabId = c.colaborador_id; team = c.nome_equipe; } }
+      if (!collabId) { const attribution = allEpisodes.get(dealId); if (attribution) { const assigned = attribution.attributionAt(occurredAt); collabId = assigned?.collaboratorId ?? null; team = assigned?.team ?? null; } }
       events.push({ dealId, occurredAt, dateKey, collaboratorId: collabId, team, type: 'GANHO' });
     }
 
@@ -1264,9 +1173,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
 }
 
 function rawCacheKey(params) {
-  return createHash('sha256')
-    .update(`${params.inicio}|${params.fim_exclusivo}|${params.produto || ''}|${params.mode || ''}|${(params.colaborador_ids_escopo || []).slice().sort().join(',')}`)
-    .digest('hex');
+  return createHash('sha256').update(`${params.inicio}|${params.fim_exclusivo}|${params.produto || ''}|${params.mode || ''}|${(params.colaborador_ids_escopo || []).slice().sort().join(',')}`).digest('hex');
 }
 async function getRawEvents(params) {
   return cached(`inte-comerce-raw:${rawCacheKey(params)}`, () => loadRawEvents(params), { forceRefresh: params.refresh === true });
@@ -1279,6 +1186,8 @@ function emptyResult() {
     funnel: { recebidos:0, trabalhados:0, em_contato:0, coleta:0, contrato:0, emitidos:0, assinados:0, ganhos:0, protocolados:0, desqualificados_saida:0, coleta_sem_contato_observado:0 },
     daily: [], reasons: [], collaborators: [], teams: [],
     hubspot: null, hubspotCards: null,
+    productionComparison: null,
+    safraComparison: null,
   };
 }
 
@@ -1289,11 +1198,7 @@ function buildProductionComparisonResults(raw, params) {
   const noFilter = !params.equipe && params.colaborador_id == null;
   const scopedRestriction = params.colaborador_ids_escopo != null;
 
-  const metrics = {
-    recebidos: null, trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO',
-    coleta: 'COLETA', contrato: 'CONTRATO', emitidos: 'EMITIDO_ORIGINAL', assinados: 'ASSINADO_ORIGINAL',
-    ganhos: 'GANHO', protocolados: 'PROTOCOLADO', desqualificados: 'DESQUALIFICADO',
-  };
+  const metrics = { recebidos: null, trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO', coleta: 'COLETA', contrato: 'CONTRATO', emitidos: 'EMITIDO_ORIGINAL', assinados: 'ASSINADO_ORIGINAL', ganhos: 'GANHO', protocolados: 'PROTOCOLADO', desqualificados: 'DESQUALIFICADO' };
   const broadMetrics = new Set(['emitidos','assinados','ganhos','protocolados']);
   const metricKeys = Object.keys(metrics);
   const metricByType = new Map(Object.entries(metrics).filter(([, t]) => t != null).map(([k, t]) => [t, k]));
@@ -1332,25 +1237,17 @@ function buildProductionComparisonResults(raw, params) {
     if (event.occurredAt > raw.asOf) continue;
     const acceptUnassigned = event.collaboratorId == null && noFilter && !scopedRestriction;
     if (event.type === 'ASSINADO_ORIGINAL') {
-      if (isSyntheticDealId(event.dealId)) continue;
       if (event.occurredAt < monthBounds.start || event.occurredAt >= monthBounds.end) continue;
       if (!filterScopeBroad(event, params) && !acceptUnassigned) continue;
-      const signDate = event.dateKey || utcDate(event.occurredAt);
-      if (!signDate) continue;
-      const prev = signedDateByDeal.get(event.dealId);
-      if (!prev || signDate < prev) signedDateByDeal.set(event.dealId, signDate);
+      const signDate = event.dateKey || utcDate(event.occurredAt); if (!signDate) continue;
+      const prev = signedDateByDeal.get(event.dealId); if (!prev || signDate < prev) signedDateByDeal.set(event.dealId, signDate);
     } else if (event.type === 'GANHO') {
-      const gainDate = event.dateKey || utcDate(event.occurredAt);
-      if (!gainDate) continue;
-      const prev = ganhoDateByDeal.get(event.dealId);
-      if (!prev || gainDate < prev) ganhoDateByDeal.set(event.dealId, gainDate);
+      const gainDate = event.dateKey || utcDate(event.occurredAt); if (!gainDate) continue;
+      const prev = ganhoDateByDeal.get(event.dealId); if (!prev || gainDate < prev) ganhoDateByDeal.set(event.dealId, gainDate);
     }
   }
   let signedAndGained = 0;
-  for (const [dealId, signDate] of signedDateByDeal) {
-    const gainDate = ganhoDateByDeal.get(dealId);
-    if (gainDate && gainDate >= signDate) signedAndGained++;
-  }
+  for (const [dealId, signDate] of signedDateByDeal) { const gainDate = ganhoDateByDeal.get(dealId); if (gainDate && gainDate >= signDate) signedAndGained++; }
 
   for (const event of raw.events) {
     if (event.occurredAt < monthBounds.start || event.occurredAt >= monthBounds.end || event.occurredAt > raw.asOf || !EVENT_TYPES.has(event.type)) continue;
@@ -1358,8 +1255,7 @@ function buildProductionComparisonResults(raw, params) {
 
     if (event.type === 'RECEBIDO_CORPORATIVO' || event.type === 'RECEBIDO_ASSESSOR') {
       if (event.type === 'RECEBIDO_CORPORATIVO') {
-        if (!noFilter) continue;
-        if (scopedRestriction) continue;
+        if (!noFilter || scopedRestriction) continue;
         monthDeals.get('recebidos').add(event.dealId);
         const dayRow = getOrCreateDay(day);
         dayRow.dealIds.get('recebidos').add(event.dealId);
@@ -1386,7 +1282,6 @@ function buildProductionComparisonResults(raw, params) {
 
     const metric = metricByType.get(event.type);
     if (!metric) continue;
-    if (metric === 'assinados' && isSyntheticDealId(event.dealId)) continue;
 
     const isBroad = broadMetrics.has(metric);
     const collaboratorId = event.collaboratorId == null ? null : String(event.collaboratorId);
@@ -1426,17 +1321,8 @@ function buildProductionComparisonResults(raw, params) {
   const dayTotals = Object.fromEntries(metricKeys.map((k) => [k, dayDeals.get(k).size]));
 
   const result = emptyResult();
-  result.overview = {
-    recebidos: monthTotals.recebidos, trabalhados_proxy: monthTotals.trabalhados_proxy,
-    em_contato_crm: monthTotals.em_contato_crm, assinados: monthTotals.assinados,
-    ganhos: monthTotals.ganhos, protocolados: monthTotals.protocolados, desqualificados: monthTotals.desqualificados,
-  };
-  result.funnel = {
-    recebidos: monthTotals.recebidos, trabalhados: monthTotals.trabalhados_proxy,
-    em_contato: monthTotals.em_contato_crm, coleta: monthTotals.coleta, contrato: monthTotals.contrato,
-    emitidos: monthTotals.emitidos, assinados: monthTotals.assinados, ganhos: monthTotals.ganhos,
-    protocolados: monthTotals.protocolados, desqualificados_saida: monthTotals.desqualificados, coleta_sem_contato_observado: 0,
-  };
+  result.overview = { recebidos: monthTotals.recebidos, trabalhados_proxy: monthTotals.trabalhados_proxy, em_contato_crm: monthTotals.em_contato_crm, assinados: monthTotals.assinados, ganhos: monthTotals.ganhos, protocolados: monthTotals.protocolados, desqualificados: monthTotals.desqualificados };
+  result.funnel = { recebidos: monthTotals.recebidos, trabalhados: monthTotals.trabalhados_proxy, em_contato: monthTotals.em_contato_crm, coleta: monthTotals.coleta, contrato: monthTotals.contrato, emitidos: monthTotals.emitidos, assinados: monthTotals.assinados, ganhos: monthTotals.ganhos, protocolados: monthTotals.protocolados, desqualificados_saida: monthTotals.desqualificados, coleta_sem_contato_observado: 0 };
   result.strategic = {
     recebidos: monthTotals.recebidos, em_contato: monthTotals.em_contato_crm,
     assinados: monthTotals.assinados, assinados_que_ganharam: signedAndGained,
@@ -1455,8 +1341,7 @@ function buildProductionComparisonResults(raw, params) {
     result.daily.push({ dia: iso, recebidos: received, assinados_ate_corte: signed, taxa_safra_pct: received ? Number((100 * signed / received).toFixed(2)) : null });
   }
 
-  result.reasons = [...reasonCounts].map(([motivo, n]) => ({ motivo, deals_desqualificados: n }))
-    .sort((a, b) => b.deals_desqualificados - a.deals_desqualificados || a.motivo.localeCompare(b.motivo));
+  result.reasons = [...reasonCounts].map(([motivo, n]) => ({ motivo, deals_desqualificados: n })).sort((a, b) => b.deals_desqualificados - a.deals_desqualificados || a.motivo.localeCompare(b.motivo));
 
   const toCollabRow = (row) => ({
     colaborador_id: row.colaborador_id, colaborador: row.colaborador, equipe_atual: row.equipe_atual,
@@ -1467,22 +1352,19 @@ function buildProductionComparisonResults(raw, params) {
     pct_olos_pendente: row.pct_olos_pendente, pct_hubspot_pendente: row.pct_hubspot_pendente,
   });
 
-  result.collaborators = [...byCollaborator.values()].map(toCollabRow)
-    .filter((row) => row.colaborador !== PLACEHOLDER_COLLAB && row.colaborador_id !== PLACEHOLDER_COLLAB)
-    .sort((a, b) => b.assinados - a.assinados || b.recebimentos_deal_dia - a.recebimentos_deal_dia);
+  result.collaborators = [...byCollaborator.values()].map(toCollabRow).filter((row) => row.colaborador !== PLACEHOLDER_COLLAB && row.colaborador_id !== PLACEHOLDER_COLLAB).sort((a, b) => b.assinados - a.assinados || b.recebimentos_deal_dia - a.recebimentos_deal_dia);
 
-  result.teams = [...byTeam.values()].filter((row) => row.equipe !== PLACEHOLDER_TEAM)
-    .map((row) => {
-      const uniqueDealIds = new Set();
-      for (const set of row.metricDeals.values()) for (const v of set) uniqueDealIds.add(typeof v === 'string' && v.includes('|') ? v.split('|')[0] : v);
-      return {
-        equipe: row.equipe, recebimentos_assessor_deal_dia: row.metricDeals.get('recebidos').size,
-        deals_unicos_da_equipe: uniqueDealIds.size, trabalhados: row.metricDeals.get('trabalhados_proxy').size,
-        em_contato: row.metricDeals.get('em_contato_crm').size, coleta: row.metricDeals.get('coleta').size,
-        assinados: row.metricDeals.get('assinados').size, ganhos: row.metricDeals.get('ganhos').size,
-        protocolados: row.metricDeals.get('protocolados').size,
-      };
-    }).sort((a, b) => b.assinados - a.assinados);
+  result.teams = [...byTeam.values()].filter((row) => row.equipe !== PLACEHOLDER_TEAM).map((row) => {
+    const uniqueDealIds = new Set();
+    for (const set of row.metricDeals.values()) for (const v of set) uniqueDealIds.add(typeof v === 'string' && v.includes('|') ? v.split('|')[0] : v);
+    return {
+      equipe: row.equipe, recebimentos_assessor_deal_dia: row.metricDeals.get('recebidos').size,
+      deals_unicos_da_equipe: uniqueDealIds.size, trabalhados: row.metricDeals.get('trabalhados_proxy').size,
+      em_contato: row.metricDeals.get('em_contato_crm').size, coleta: row.metricDeals.get('coleta').size,
+      assinados: row.metricDeals.get('assinados').size, ganhos: row.metricDeals.get('ganhos').size,
+      protocolados: row.metricDeals.get('protocolados').size,
+    };
+  }).sort((a, b) => b.assinados - a.assinados);
 
   result.productionComparison = {
     day: selectedDayBounds ? { recebidos: dayTotals.recebidos, assinados: dayTotals.assinados, ganhos: dayTotals.ganhos, protocolados: dayTotals.protocolados } : null,
@@ -1492,6 +1374,8 @@ function buildProductionComparisonResults(raw, params) {
   return result;
 }
 
+// ─── Continuação (3/3) de backend/services/bd/inteComerceRawAnalytics.js ────
+
 function filteredEvents(raw, params) {
   const { start, end } = periodBounds(params.inicio, params.fim_exclusivo);
   const activeIds = new Set((params.colaborador_ids_ativos || []).map(String));
@@ -1500,11 +1384,9 @@ function filteredEvents(raw, params) {
     (event.collaboratorId == null || activeIds.has(String(event.collaboratorId))) &&
     EVENT_TYPES.has(event.type));
   for (const [dealId, episodes] of raw.episodesByDeal || []) {
-    const firstReceipt = episodes.filter((e) => e.receivedAt >= start && e.receivedAt < end)
-      .sort((a, b) => a.receivedAt - b.receivedAt || Number(a.episodioId) - Number(b.episodioId))[0];
+    const firstReceipt = episodes.filter((e) => e.receivedAt >= start && e.receivedAt < end).sort((a, b) => a.receivedAt - b.receivedAt || Number(a.episodioId) - Number(b.episodioId))[0];
     if (!firstReceipt) continue;
-    const firstAssessor = episodes.filter((e) => e.cargo === 'Assessor' && e.receivedAt >= firstReceipt.receivedAt && e.collaboratorId !== null && activeIds.has(String(e.collaboratorId)))
-      .sort(compareAssessorEvents)[0];
+    const firstAssessor = episodes.filter((e) => e.cargo === 'Assessor' && e.receivedAt >= firstReceipt.receivedAt && e.collaboratorId !== null && activeIds.has(String(e.collaboratorId))).sort(compareAssessorEvents)[0];
     if (firstAssessor) events.push({ dealId, occurredAt: firstReceipt.receivedAt, collaboratorId: firstAssessor.collaboratorId, team: firstAssessor.team, type: 'RECEBIDO_CORPORATIVO' });
   }
   return events;
@@ -1515,18 +1397,12 @@ function buildOperationalResults(raw, params) {
   const eventsByDeal = new Map();
   for (const e of events) { const list = eventsByDeal.get(e.dealId) || []; list.push(e); eventsByDeal.set(e.dealId, list); }
   const corporateReceipts = new Map();
-  for (const e of events) {
-    if (e.type !== 'RECEBIDO_CORPORATIVO') continue;
-    const c = corporateReceipts.get(e.dealId);
-    if (!c || e.occurredAt < c.occurredAt) corporateReceipts.set(e.dealId, e);
-  }
+  for (const e of events) { if (e.type !== 'RECEBIDO_CORPORATIVO') continue; const c = corporateReceipts.get(e.dealId); if (!c || e.occurredAt < c.occurredAt) corporateReceipts.set(e.dealId, e); }
   const firstAssessorByDeal = new Map();
   for (const e of events) {
     if (e.type !== 'RECEBIDO_ASSESSOR') continue;
     const c = firstAssessorByDeal.get(e.dealId);
-    if (!c || compareAssessorEvents(
-      { receivedAt: e.occurredAt, collaboratorId: e.collaboratorId, team: e.team },
-      { receivedAt: c.occurredAt, collaboratorId: c.collaboratorId, team: c.team }) < 0) firstAssessorByDeal.set(e.dealId, e);
+    if (!c || compareAssessorEvents({ receivedAt: e.occurredAt, collaboratorId: e.collaboratorId, team: e.team }, { receivedAt: c.occurredAt, collaboratorId: c.collaboratorId, team: c.team }) < 0) firstAssessorByDeal.set(e.dealId, e);
   }
   const cohort = [];
   for (const [dealId, receipt] of corporateReceipts) {
@@ -1580,8 +1456,7 @@ function buildOperationalResults(raw, params) {
   for (let d = new Date(bounds.start); d < bounds.end; d.setUTCDate(d.getUTCDate() + 1)) {
     const iso = d.toISOString().slice(0, 10);
     const row = dailyMap.get(iso);
-    daily.push({ dia: iso, recebidos: row?.recebidos || 0, assinados_ate_corte: row?.assinados_ate_corte || 0,
-      taxa_safra_pct: row?.recebidos ? Number((100 * row.assinados_ate_corte / row.recebidos).toFixed(2)) : null });
+    daily.push({ dia: iso, recebidos: row?.recebidos || 0, assinados_ate_corte: row?.assinados_ate_corte || 0, taxa_safra_pct: row?.recebidos ? Number((100 * row.assinados_ate_corte / row.recebidos).toFixed(2)) : null });
   }
   const reasonCounts = new Map();
   for (const i of cohort) {
@@ -1589,8 +1464,7 @@ function buildOperationalResults(raw, params) {
     const reason = String(raw.deals.get(i.dealId)?.motivo_perda || '').trim() || '(SEM MOTIVO)';
     reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
   }
-  const reasons = [...reasonCounts].map(([motivo, n]) => ({ motivo, deals_desqualificados: n }))
-    .sort((a, b) => b.deals_desqualificados - a.deals_desqualificados || a.motivo.localeCompare(b.motivo));
+  const reasons = [...reasonCounts].map(([motivo, n]) => ({ motivo, deals_desqualificados: n })).sort((a, b) => b.deals_desqualificados - a.deals_desqualificados || a.motivo.localeCompare(b.motivo));
   const receivedAssessors = new Map();
   for (const e of events) {
     if (e.type !== 'RECEBIDO_ASSESSOR' || e.occurredAt >= bounds.end) continue;
@@ -1623,11 +1497,7 @@ function buildOperationalResults(raw, params) {
     if (has('GANHO')) row.ganhos++;
     if (has('PROTOCOLADO')) row.protocoladoDeals.add(receipt.dealId);
     byCollaborator.set(collabKey, row);
-    const teamRow = byTeam.get(team) || {
-      equipe: team, recebimentos_assessor_deal_dia: 0, deals_unicos_da_equipe: new Set(),
-      trabalhados: new Set(), em_contato: new Set(), coleta: new Set(),
-      assinados: new Set(), ganhos: new Set(), protocolados: new Set(),
-    };
+    const teamRow = byTeam.get(team) || { equipe: team, recebimentos_assessor_deal_dia: 0, deals_unicos_da_equipe: new Set(), trabalhados: new Set(), em_contato: new Set(), coleta: new Set(), assinados: new Set(), ganhos: new Set(), protocolados: new Set() };
     teamRow.recebimentos_assessor_deal_dia++;
     teamRow.deals_unicos_da_equipe.add(receipt.dealId);
     if (has('TRABALHADO_PROXY')) teamRow.trabalhados.add(receipt.dealId);
@@ -1693,11 +1563,7 @@ function buildComparisonResults(raw, params) {
   }
 
   const eventsByDealAllTime = new Map();
-  for (const e of raw.events) {
-    if (e.occurredAt > raw.asOf) continue;
-    const list = eventsByDealAllTime.get(e.dealId) || [];
-    list.push(e); eventsByDealAllTime.set(e.dealId, list);
-  }
+  for (const e of raw.events) { if (e.occurredAt > raw.asOf) continue; const list = eventsByDealAllTime.get(e.dealId) || []; list.push(e); eventsByDealAllTime.set(e.dealId, list); }
 
   const DAILY_METRIC_BY_EVENT = { ASSINADO_ORIGINAL: 'assinados', GANHO: 'ganhos', PROTOCOLADO: 'protocolados', EMITIDO_ORIGINAL: 'emitidos', DESQUALIFICADO: 'perdidos' };
   const milestoneByDeal = new Map();
@@ -1720,7 +1586,6 @@ function buildComparisonResults(raw, params) {
 
   const dealsByMetric = new Map(Object.keys(metricTypes).map((k) => [k, new Set()]));
   const firstMetricAtByDeal = new Map();
-
   for (const [dealId, events] of eventsByDeal) {
     const firstAt = new Map();
     for (const e of events) {
@@ -1731,21 +1596,13 @@ function buildComparisonResults(raw, params) {
     }
     firstMetricAtByDeal.set(dealId, firstAt);
   }
-
   {
-  const desqAtual = new Set();
-
-  for (const item of cohort) {
-    if (isCurrentlyDisqualified(
-      raw.deals.get(item.dealId),
-      raw.desqStageIds,
-    )) {
-      desqAtual.add(item.dealId);
+    const desqAtual = new Set();
+    for (const item of cohort) {
+      if (isCurrentlyDisqualified(raw.deals.get(item.dealId), raw.desqStageIds)) desqAtual.add(item.dealId);
     }
+    dealsByMetric.set('desqualificados', desqAtual);
   }
-
-  dealsByMetric.set('desqualificados', desqAtual);
-}
 
   const emContatoHistoricoSet = dealsByMetric.get('em_contato_crm');
   const emContatoAtualSet = new Set();
@@ -1782,12 +1639,7 @@ function buildComparisonResults(raw, params) {
     return firstAt?.has('assinados') && firstAt.has('ganhos') && firstAt.get('ganhos') >= firstAt.get('assinados');
   }).length;
 
-  const counts = {
-    recebidos: cohort.length, trabalhados_proxy: metricCount('trabalhados_proxy'),
-    em_contato_crm: emContatoAtualSet.size, assinados: metricCount('assinados'),
-    ganhos: metricCount('ganhos'), protocolados: metricCount('protocolados'),
-    desqualificados: metricCount('desqualificados'),
-  };
+  const counts = { recebidos: cohort.length, trabalhados_proxy: metricCount('trabalhados_proxy'), em_contato_crm: emContatoAtualSet.size, assinados: metricCount('assinados'), ganhos: metricCount('ganhos'), protocolados: metricCount('protocolados'), desqualificados: metricCount('desqualificados') };
   const funnel = {
     recebidos: cohort.length, trabalhados: counts.trabalhados_proxy, em_contato: emContatoHistoricoSet.size,
     coleta: metricCount('coleta'), contrato: metricCount('contrato'), emitidos: metricCount('emitidos'),
@@ -1831,8 +1683,7 @@ function buildComparisonResults(raw, params) {
     const reason = String(raw.deals.get(dealId)?.motivo_perda || '').trim() || '(SEM MOTIVO)';
     reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
   }
-  const reasons = [...reasonCounts].map(([motivo, n]) => ({ motivo, deals_desqualificados: n }))
-    .sort((a, b) => b.deals_desqualificados - a.deals_desqualificados || a.motivo.localeCompare(b.motivo));
+  const reasons = [...reasonCounts].map(([motivo, n]) => ({ motivo, deals_desqualificados: n })).sort((a, b) => b.deals_desqualificados - a.deals_desqualificados || a.motivo.localeCompare(b.motivo));
 
   const byCollaborator = new Map();
   const byTeam = new Map();
@@ -1895,37 +1746,50 @@ function buildHubspotCards(hs) {
 function hubspotDiagnostics(hs) {
   const age_ms = hs.consulted_at ? Math.max(0, Date.now() - Date.parse(hs.consulted_at)) : null;
   return {
-    consulted_at: hs.consulted_at ?? null,
-    age_ms,
-    mode: hs.mode ?? null,
-    owner_filter: hs.owner_filter ?? null,
+    consulted_at: hs.consulted_at ?? null, age_ms,
+    mode: hs.mode ?? null, owner_filter: hs.owner_filter ?? null,
     metodo: {
       ganhos: hs.ganhos_metodo ?? null,
       protocolados: hs.protocolados_metodo ?? null,
       desqualificados: hs.desqualificados_metodo ?? null,
+      em_contato: hs.em_contato_metodo ?? null,
+    },
+    desq_stages: {
+      all: hs.desq_stages_all ?? null,
+      used: hs.desq_stages_used ?? null,
+      excluded: hs.desq_stages_excluded ?? null,
     },
     erros: Object.keys(hs.erros || {}).length ? hs.erros : undefined,
   };
 }
 
-function mergeHubSpot(result, hs, params) {
-  if (!hs.ok) { result.hubspot = { ativo: false, motivo: hs.motivo || 'HubSpot indisponível' }; return; }
+async function mergeHubSpot(result, hs, params) {
+  if (!hs.ok) {
+    result.hubspot = {
+      ativo: false,
+      fonte: {},
+      produto_aplicado: params.produto ?? null,
+      motivo: hs.motivo || 'HubSpot indisponível',
+    };
+    return;
+  }
 
   const fonte = {};
-  const override = (key, val) => {
-    if (typeof val === 'number') { result.overview[key] = val; fonte[key] = 'hubspot'; }
-    else fonte[key] = 'banco';
+  const setFromHs = (key, val) => {
+    if (typeof val === 'number' && Number.isFinite(val)) {
+      result.overview[key] = val;
+      fonte[key] = 'hubspot';
+    } else {
+      fonte[key] = 'banco';
+    }
   };
-  override('recebidos', hs.criados);
-  override('em_contato_crm', hs.em_contato);
-  override('desqualificados', hs.desqualificados);
-
-  // assinados, ganhos e protocolados NÃO são sobrescritos pelo HubSpot.
-  // Fonte deles é o applyCanonicalOverride (metricsLoaders via cacheFirst).
-  fonte.assinados = 'canonical_metrics';
-  fonte.ganhos = 'canonical_metrics';
-  fonte.protocolados = 'canonical_metrics';
-  fonte.trabalhados_proxy = 'banco';
+  setFromHs('recebidos',       hs.criados);
+  setFromHs('em_contato_crm',  hs.em_contato);
+  setFromHs('desqualificados', hs.desqualificados);
+  fonte.assinados          = 'canonical_metrics';
+  fonte.ganhos             = 'canonical_metrics';
+  fonte.protocolados       = 'canonical_metrics';
+  fonte.trabalhados_proxy  = 'banco';
 
   result.strategic.recebidos  = result.overview.recebidos;
   result.strategic.em_contato = result.overview.em_contato_crm;
@@ -1937,359 +1801,150 @@ function mergeHubSpot(result, hs, params) {
     if (typeof n !== 'number' || typeof d !== 'number' || d <= 0) return null;
     return Number((100 * n / d).toFixed(2));
   };
-  result.strategic.pct_recebidos_ate_em_contato = sameSourcePct('em_contato_crm', 'recebidos');
-  result.strategic.pct_recebidos_ate_assinados  = sameSourcePct('assinados', 'recebidos');
-  result.strategic.rotulos = {
-    pct_recebidos_ate_em_contato: 'atualmente_em_contato_sobre_criados — foto do momento, não conversão histórica',
-    pct_recebidos_ate_assinados: 'assinados_no_periodo_sobre_criados — comparação por data',
-    pct_assinados_ate_ganhos: 'ganhos (canônico) / assinados (canônico) — conversão simples do período',
+  const pctR2A = sameSourcePct('assinados', 'recebidos');
+  if (pctR2A != null) result.strategic.pct_recebidos_ate_assinados = pctR2A;
+  const pctR2EC = sameSourcePct('em_contato_crm', 'recebidos');
+  if (pctR2EC != null) result.strategic.pct_recebidos_ate_em_contato = pctR2EC;
+
+  const loaderBase = {
+    start: params.inicio,
+    end: params.fim_exclusivo,
+    equipe: params.equipe,
+    produto: params.produto,
   };
+
+  const applyCanonical = async (label, loaderFn, targetObj, targetKey, extra = {}) => {
+    let val = null;
+    try {
+      val = await cached(
+        metricCacheKey(label, { ...params, ...extra }),
+        () => loaderFn({ ...loaderBase, ...extra }),
+        { forceRefresh: params.refresh === true }
+      );
+    } catch (e) {
+      console.error(`[inte-comerce] ${label}: loader falhou (${e?.message || e})`);
+    }
+    if (typeof val === 'number' && Number.isFinite(val)) {
+      targetObj[targetKey] = val;
+      return 'canonical_metrics';
+    }
+    console.error(
+      `[BACKEND ERROR] [inte-comerce] ${label}: load retornou ${typeof val}, ` +
+      `mantendo builder=${targetObj[targetKey]}`
+    );
+    return 'banco';
+  };
+
+  fonte.assinados    = await applyCanonical('assinados',    loadAssinadosTotal,    result.overview, 'assinados');
+  fonte.ganhos       = await applyCanonical('ganhos',       loadGanhosTotal,       result.overview, 'ganhos',       { mode: params.mode });
+  fonte.protocolados = await applyCanonical('protocolados', loadProtocoladosTotal, result.overview, 'protocolados', { mode: params.mode });
+  fonte.emitidos     = await applyCanonical('emitidos',     loadEmitidosTotal,     result.funnel,   'emitidos');
+
+  result.strategic.recebidos  = result.overview.recebidos;
+  result.strategic.em_contato = result.overview.em_contato_crm;
+  result.strategic.assinados  = result.overview.assinados;
+
+  if (result.overview.recebidos > 0) {
+    result.strategic.pct_recebidos_ate_assinados  =
+      Number((100 * result.overview.assinados      / result.overview.recebidos).toFixed(2));
+    result.strategic.pct_recebidos_ate_em_contato =
+      Number((100 * result.overview.em_contato_crm / result.overview.recebidos).toFixed(2));
+  }
+
+  const erroKeys = Object.keys(hs.erros || {});
+  const motivo = erroKeys.length === 0
+    ? null
+    : `parcial: ${erroKeys.join(', ')} caíram para banco`;
 
   result.hubspotCards = buildHubspotCards(hs);
   result.hubspot = {
     ativo: true,
-    duracao_ms: hs.duracao_ms,
     fonte,
     produto_aplicado: params.produto ?? null,
+    motivo,
     ...hubspotDiagnostics(hs),
-    aviso:
-      'overview recebe HubSpot onde disponível. strategic.assinados_que_ganharam ' +
-      'e strategic.pct_assinados_ate_ganhos ficam INDISPONÍVEIS (null) quando a HubSpot toca em overview.assinados. ' +
-      'funnel permanece do banco. Consulte hubspotCards para os valores limpos da HubSpot.',
   };
-}
-
-function hubspotOnlyResult(hs, motivoBanco) {
-  const fonte = {};
-  const overview = {
-    recebidos: hs.criados ?? null, trabalhados_proxy: null,
-    em_contato_crm: hs.em_contato ?? null, assinados: hs.assinados ?? null,
-    ganhos: hs.ganhos ?? null, protocolados: hs.protocolados ?? null,
-    desqualificados: hs.desqualificados ?? null,
-  };
-  for (const k of Object.keys(overview)) fonte[k] = overview[k] != null ? 'hubspot' : 'indisponivel';
-  return {
-    overview,
-    strategic: {
-      recebidos: overview.recebidos, em_contato: overview.em_contato_crm, assinados: overview.assinados,
-      assinados_que_ganharam: null, pct_recebidos_ate_assinados: null, pct_recebidos_ate_em_contato: null, pct_assinados_ate_ganhos: null,
-      variacao_safra_sem_maturidade_equivalente: null,
-      rotulos: { pct_recebidos_ate_em_contato: 'indisponivel', pct_recebidos_ate_assinados: 'indisponivel', pct_assinados_ate_ganhos: 'indisponivel' },
-    },
-    funnel: {
-      recebidos: overview.recebidos, trabalhados: null, em_contato: overview.em_contato_crm,
-      coleta: null, contrato: null, emitidos: null,
-      assinados: overview.assinados, ganhos: overview.ganhos, protocolados: overview.protocolados,
-      desqualificados_saida: overview.desqualificados, coleta_sem_contato_observado: null,
-    },
-    daily: [], reasons: [], collaborators: [], teams: [],
-    hubspotCards: buildHubspotCards(hs),
-    hubspot: {
-      ativo: true, fonte, banco_indisponivel: motivoBanco,
-      ...hubspotDiagnostics(hs),
-    },
-  };
-}
-
-async function fetchCanonicalMetrics(params) {
-  const start = params.inicio;
-  const end = params.fim_exclusivo;
-  const equipe = params.equipe;
-  const produto = params.produto;
-  const mode = params.mode === 'safra' ? 'safra' : 'producao';
-
-  const ttl = { ttlMs: 180_000, staleMs: 900_000 };
-  const mkKey = (tipo) =>
-    metricCacheKey(tipo, { start, end, equipe, produto, granularity: undefined, mode });
-
-  const [emitidos, assinados, ganhos, protocolados] = await Promise.all([
-    cacheFirst(mkKey('emitidos'), () => loadEmitidos({ start, end, equipe, produto }), ttl),
-    cacheFirst(mkKey('assinados'), () => loadAssinados({ start, end, equipe, produto, mode }), ttl),
-    cacheFirst(mkKey('ganhos'), () => loadGanhos({ start, end, equipe, produto, mode }), ttl),
-    cacheFirst(mkKey('protocolados'), () => loadProtocolados({ start, end, equipe, produto, mode }), ttl),
-  ]);
-
-  return { emitidos, assinados, ganhos, protocolados };
-}
-
-function applyCanonicalOverride(result, canonical, raw) {
-  const sumTotal = (rows) => (rows || []).reduce((s, r) => s + (Number(r.total) || 0), 0);
-  const totalEmitidos = sumTotal(canonical.emitidos);
-  const totalAssinados = sumTotal(canonical.assinados);
-  const totalGanhos = sumTotal(canonical.ganhos);
-  const totalProtocolados = sumTotal(canonical.protocolados);
-
-  if (result.overview) {
-    result.overview.emitidos = totalEmitidos;
-    result.overview.assinados = totalAssinados;
-    result.overview.ganhos = totalGanhos;
-    result.overview.protocolados = totalProtocolados;
-  }
-  if (result.funnel) {
-    result.funnel.emitidos = totalEmitidos;
-    result.funnel.assinados = totalAssinados;
-    result.funnel.ganhos = totalGanhos;
-    result.funnel.protocolados = totalProtocolados;
-  }
-  if (result.strategic) {
-    result.strategic.assinados = totalAssinados;
-    if (result.strategic.recebidos > 0) {
-      result.strategic.pct_recebidos_ate_assinados = Number(
-        ((totalAssinados / result.strategic.recebidos) * 100).toFixed(2)
-      );
-    }
-
-    // pct_assinados_ate_ganhos = ganhos / assinados (conversão simples)
-    if (totalAssinados > 0 && typeof totalGanhos === 'number' && totalGanhos >= 0) {
-      result.strategic.pct_assinados_ate_ganhos = Number(((totalGanhos / totalAssinados) * 100).toFixed(2));
-      if (!result.strategic.rotulos) result.strategic.rotulos = {};
-      result.strategic.rotulos.pct_assinados_ate_ganhos =
-        'ganhos (canônico) / assinados (canônico) — conversão simples do período';
-    } else {
-      result.strategic.pct_assinados_ate_ganhos = null;
-    }
-  }
-
-  if (Array.isArray(result.collaborators) && raw.collaboratorNames instanceof Map) {
-    const buildMap = (rows) => {
-      const m = new Map();
-      for (const r of rows || []) {
-        const k = normalizeTeamKey(r.colaborador);
-        if (!k) continue;
-        m.set(k, (m.get(k) || 0) + (Number(r.total) || 0));
-      }
-      return m;
-    };
-    const assinadosByName = buildMap(canonical.assinados);
-    const ganhosByName = buildMap(canonical.ganhos);
-    const protocoladosByName = buildMap(canonical.protocolados);
-    const emitidosByName = buildMap(canonical.emitidos);
-
-    for (const c of result.collaborators) {
-      const nomeOriginal = raw.collaboratorNames.get(String(c.colaborador_id)) || c.colaborador;
-      const k = normalizeTeamKey(nomeOriginal);
-      if (assinadosByName.has(k)) c.assinados = assinadosByName.get(k);
-      if (ganhosByName.has(k)) c.ganhos = ganhosByName.get(k);
-      if (protocoladosByName.has(k)) c.protocolados = protocoladosByName.get(k);
-      if ('emitidos' in c && emitidosByName.has(k)) c.emitidos = emitidosByName.get(k);
-    }
-  }
-
-  if (Array.isArray(result.teams)) {
-    const sumByKey = (rows) => {
-      const m = new Map();
-      for (const r of rows || []) {
-        const k = normalizeTeamKey(r.equipe);
-        if (!k) continue;
-        m.set(k, (m.get(k) || 0) + (Number(r.total) || 0));
-      }
-      return m;
-    };
-    const assinadosByTeam = sumByKey(canonical.assinados);
-    const ganhosByTeam = sumByKey(canonical.ganhos);
-    const protocoladosByTeam = sumByKey(canonical.protocolados);
-    for (const t of result.teams) {
-      const k = normalizeTeamKey(t.equipe);
-      if (assinadosByTeam.has(k)) t.assinados = assinadosByTeam.get(k);
-      if (ganhosByTeam.has(k)) t.ganhos = ganhosByTeam.get(k);
-      if (protocoladosByTeam.has(k)) t.protocolados = protocoladosByTeam.get(k);
-    }
-  }
-
-  if (!result.meta) result.meta = {};
-  result.meta.emitidos_source = 'canonical_metrics';
-  result.meta.assinados_source = 'canonical_metrics';
-  result.meta.ganhos_source = 'canonical_metrics';
-  result.meta.protocolados_source = 'canonical_metrics';
-  result.meta.emitidos_total = totalEmitidos;
-  result.meta.assinados_total = totalAssinados;
-  result.meta.ganhos_total = totalGanhos;
-  result.meta.protocolados_total = totalProtocolados;
 }
 
 export async function getInteComerceRawAnalytics(params) {
-  console.log('[inte-comerce] params', {
-    pode_ver_conta_inteira: params.pode_ver_conta_inteira,
-    colaborador_ids_escopo_len: params.colaborador_ids_escopo?.length ?? null,
-    colaborador_ids_ativos_len: params.colaborador_ids_ativos?.length ?? null,
-    equipe: params.equipe ?? null,
-    colaborador_id: params.colaborador_id ?? null,
-    unidade_id: params.unidade_id ?? null,
-    produto: params.produto ?? null,
-    mode: params.mode,
-    refresh: params.refresh,
-  });
-
-  const skipHubSpot = params.mode === 'operacional';
-
-  let ownerIds = null;
-  let ownerError = null;
-  if (!skipHubSpot) {
-    try {
-      ownerIds = await resolveHubSpotOwnerIds(params);
-    } catch (e) {
-      ownerError = e?.message || String(e);
-      console.error('[inte-comerce] falha ao resolver hubspot_owner_id:', ownerError);
-    }
-  }
-
-  const canHs = skipHubSpot
-    ? { ok: false, motivo: 'modo operacional' }
-    : ownerError
-      ? { ok: false, motivo: `resolução de owners HubSpot falhou: ${ownerError}` }
-      : canUseHubSpotFor(params, ownerIds);
-
-  const hubspotPromise = canHs.ok
-    ? getHubSpotOverviewCached({
-        inicio: params.inicio, fim_exclusivo: params.fim_exclusivo,
-        produto: params.produto ?? null, refresh: params.refresh,
-        mode: params.mode,
-        ownerIds,
-      }).catch((e) => ({ ok: false, motivo: e?.message || String(e) }))
-    : Promise.resolve({ ok: false, motivo: canHs.motivo });
-
-  let raw;
-  try { raw = await getRawEvents(params); }
-  catch (dbErr) {
-    const hs = await hubspotPromise;
-    if (hs.ok) return hubspotOnlyResult(hs, dbErr?.message || String(dbErr));
-    throw dbErr;
-  }
+  const raw = await getRawEvents(params);
 
   let result;
-  if (params.mode === 'producao') result = buildProductionComparisonResults(raw, params);
-  else if (params.mode === 'operacional') result = buildOperationalResults(raw, params);
-  else result = buildComparisonResults(raw, params);
-
-  // 1ª passada do canônico — antes do HubSpot
-  let canonical = null;
-  if (params.mode !== 'operacional') {
-    try {
-      canonical = await fetchCanonicalMetrics(params);
-      applyCanonicalOverride(result, canonical, raw);
-    } catch (err) {
-      console.error('[inte-comerce] falha ao carregar métricas canônicas:', err?.message || err);
-      if (!result.meta) result.meta = {};
-      result.meta.canonical_override_error = err?.message || String(err);
-    }
+  if (PRODUCTION_MODES.has(params.mode)) {
+    result = buildProductionComparisonResults(raw, params);
+  } else if (params.mode === 'safra') {
+    result = buildComparisonResults(raw, params);
+  } else {
+    result = buildOperationalResults(raw, params);
   }
 
-  if (skipHubSpot) result.hubspot = { ativo: false, motivo: canHs.motivo };
-  else mergeHubSpot(result, await hubspotPromise, params);
-
-  // 2ª passada do canônico — DEPOIS do HubSpot (canônico SEMPRE vence)
-  if (canonical) {
-    applyCanonicalOverride(result, canonical, raw);
-    if (result.hubspot?.fonte) {
-      for (const k of ['emitidos', 'assinados', 'ganhos', 'protocolados']) {
-        result.hubspot.fonte[k] = 'canonical_metrics';
-      }
+  if (hubspotEnabled()) {
+    const ownerIds = await resolveHubSpotOwnerIds(params);
+    const gate = canUseHubSpotFor(params, ownerIds);
+    if (gate.ok) {
+      const hs = await getHubSpotOverviewCached({
+        inicio: params.inicio,
+        fim_exclusivo: params.fim_exclusivo,
+        produto: params.produto,
+        mode: params.mode,
+        ownerIds,
+        refresh: params.refresh,
+      });
+      await mergeHubSpot(result, hs, params);
+    } else {
+      result.hubspot = {
+        ativo: false,
+        fonte: {},
+        produto_aplicado: params.produto ?? null,
+        motivo: gate.motivo,
+      };
     }
-    result.strategic.recebidos = result.overview.recebidos;
-    result.strategic.em_contato = result.overview.em_contato_crm;
-    result.strategic.assinados = result.overview.assinados;
-    if (result.strategic.recebidos > 0) {
-      result.strategic.pct_recebidos_ate_assinados = Number(
-        ((result.overview.assinados / result.strategic.recebidos) * 100).toFixed(2)
-      );
-    }
-    if (result.overview.assinados > 0) {
-      result.strategic.pct_assinados_ate_ganhos = Number(
-        ((result.overview.ganhos / result.overview.assinados) * 100).toFixed(2)
-      );
-    }
-    if (!result.meta) result.meta = {};
-    result.meta.canonical_wins_over_hubspot = true;
+  } else {
+    result.hubspot = {
+      ativo: false,
+      fonte: {},
+      produto_aplicado: params.produto ?? null,
+      motivo: 'HUBSPOT_ACCESS_TOKEN não configurado',
+    };
   }
 
   return result;
 }
 
-const PRODUCTION_METRICS = [
-  { key: 'criados', eventType: 'DEAL_CREATED' },
-  { key: 'trabalhados', eventType: 'TRABALHADO_PROXY' },
-  { key: 'em_contato', eventType: 'EM_CONTATO' },
-  { key: 'coleta', eventType: 'COLETA' },
-  { key: 'contrato', eventType: 'CONTRATO' },
-  { key: 'emitidos', eventType: 'EMITIDO_ORIGINAL' },
-  { key: 'assinados', eventType: 'ASSINADO_ORIGINAL' },
-  { key: 'ganhos', eventType: 'GANHO' },
-  { key: 'protocolados', eventType: 'PROTOCOLADO' },
-  { key: 'desqualificados', eventType: 'DESQUALIFICADO' },
-];
-
-function inRange(v, s, e) { return v >= s && v < e; }
-
-function matchesProductionScope(e, params, activeIds) {
-  if (e.collaboratorId == null || (activeIds && !activeIds.has(String(e.collaboratorId)))) return false;
-  return filterScope(e, params);
-}
-
-function countEvents(events, start, end, params, creationByDeal = null) {
-  const dealsByMetric = new Map(PRODUCTION_METRICS.map(({ key }) => [key, new Set()]));
-  const activeIds = params.colaborador_ids_ativos == null ? null : new Set(params.colaborador_ids_ativos.map(String));
-  const metricByEventType = new Map(PRODUCTION_METRICS.map((m) => [m.eventType, m]));
-  for (const e of events) {
-    if (!inRange(e.occurredAt, start, end)) continue;
-    if (!matchesProductionScope(e, params, activeIds)) continue;
-    if (creationByDeal) {
-      const createdAt = creationByDeal.get(e.dealId);
-      if (!createdAt || createdAt < start || createdAt >= end || e.occurredAt < createdAt) continue;
-    }
-    const metric = metricByEventType.get(e.type);
-    if (metric) dealsByMetric.get(metric.key).add(e.dealId);
-  }
-  return Object.fromEntries([...dealsByMetric].map(([k, d]) => [k, d.size]));
-}
-
 export async function getInteComercePeriodSummary(params) {
   const raw = await getRawEvents(params);
-  const { start, end } = periodBounds(params.inicio, params.fim_exclusivo);
-  const events = raw.events.filter((e) => e.occurredAt <= raw.asOf && EVENT_TYPES.has(e.type));
 
-  if (params.mode === 'safra') {
-    const creationByDeal = new Map();
-    for (const e of events) {
-      if (e.type !== 'DEAL_CREATED') continue;
-      const cur = creationByDeal.get(e.dealId);
-      if (!cur || e.occurredAt < cur) creationByDeal.set(e.dealId, e.occurredAt);
-    }
-    const dayTotals = params.selected_day && params.selected_day_end
-      ? countEvents(events, periodBounds(params.selected_day, params.selected_day_end).start, periodBounds(params.selected_day, params.selected_day_end).end, params, creationByDeal)
-      : null;
-    const monthTotals = countEvents(events, start, end, params, creationByDeal);
-
-    const desqSet = new Set();
-    for (const dealId of creationByDeal.keys()) {
-      const created = creationByDeal.get(dealId);
-      if (!created || created < start || created >= end) continue;
-      const assessor = (raw.episodesByDeal?.get(dealId) || []).filter((e) => e.cargo === 'Assessor' && e.receivedAt >= created).sort(compareAssessorEvents)[0];
-      if (assessor && !filterScope(assessor, params)) continue;
-      if (!assessor && (params.equipe || params.colaborador_id != null || !params.include_unassigned)) continue;
-      if (!isCurrentlyDisqualified(raw.deals.get(dealId), raw.desqStageIds)) continue;
-      desqSet.add(dealId);
-    }
-    monthTotals.desqualificados = desqSet.size;
-    return { monthTotals, dayTotals, selectedDay: params.selected_day || null, asOf: raw.asOf };
+  let full;
+  if (PRODUCTION_MODES.has(params.mode)) {
+    full = buildProductionComparisonResults(raw, params);
+  } else if (params.mode === 'safra') {
+    full = buildComparisonResults(raw, params);
+  } else {
+    full = buildOperationalResults(raw, params);
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // PRODUÇÃO — contagem de EVENTOS no período, SEM filtro de criação.
-  //
-  // `producao` e `producao-3-meses` passam `null` como `creationByDeal` →
-  // countEvents ignora o filtro de criação. A deduplicação por dealId (Set)
-  // continua. O ramo `safra` (acima) tem seu próprio `creationByDeal`.
-  // ═════════════════════════════════════════════════════════════════════════
-  if (params.mode === 'producao-3-meses') {
-    const months = [];
-    for (let ms = new Date(start); ms < end; ms.setUTCMonth(ms.getUTCMonth() + 1)) {
-      const me = new Date(Date.UTC(ms.getUTCFullYear(), ms.getUTCMonth() + 1, 1, 3));
-      months.push({
-        month: localDay(new Date(ms.getTime() + 3 * 60 * 60 * 1000)).slice(0, 7),
-        totals: countEvents(events, ms, me, params, null),
-      });
-    }
-    return { months, asOf: raw.asOf };
-  }
-  return { monthTotals: countEvents(events, start, end, params, null), asOf: raw.asOf };
+  const month = full.productionComparison?.month
+    ? {
+        recebidos:    full.productionComparison.month.recebidos    ?? 0,
+        assinados:    full.productionComparison.month.assinados    ?? 0,
+        ganhos:       full.productionComparison.month.ganhos       ?? 0,
+        protocolados: full.productionComparison.month.protocolados ?? 0,
+      }
+    : {
+        recebidos:    full.overview.recebidos    ?? 0,
+        assinados:    full.overview.assinados    ?? 0,
+        ganhos:       full.overview.ganhos       ?? 0,
+        protocolados: full.overview.protocolados ?? 0,
+      };
+
+  const day = full.productionComparison?.day
+    ? {
+        recebidos:    full.productionComparison.day.recebidos    ?? 0,
+        assinados:    full.productionComparison.day.assinados    ?? 0,
+        ganhos:       full.productionComparison.day.ganhos       ?? 0,
+        protocolados: full.productionComparison.day.protocolados ?? 0,
+      }
+    : null;
+
+  return { asOf: full.asOf, month, day };
 }

@@ -26,7 +26,6 @@ interface FilterBarProps {
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
 
-// Normalização agressiva — mesma usada em Suporte.tsx / Equipe.tsx.
 const normalizeKey = (str: string): string =>
   String(str || '')
     .trim()
@@ -50,9 +49,6 @@ const isExcludedTeam = (teamName: string): boolean => {
   return EXCLUDED_TEAMS.some((t) => normalize(t) === n);
 };
 
-// =====================================================================
-// PRODUTO — espelha backend/config/teamProducts.js
-// =====================================================================
 const PRODUCT = Object.freeze({
   QUINQUENIO:       'quinquenio',
   AUXILIO_ACIDENTE: 'auxilio_acidente',
@@ -90,16 +86,12 @@ interface ProdutoConfig {
 
 const FALLBACK_PRODUTO_DEFAULT = PRODUCT.AUXILIO_ACIDENTE;
 
-// Fallback local — espelha o que está em backend/config/teamProducts.js.
-// Mantém o funcionamento mesmo quando o usuário não pode acessar
-// /suporte/escopo (ex.: Assessor).
 const FALLBACK_PRODUTOS_POR_EQUIPE: Record<string, ProdutoConfig> = {
   [normalizeKey('Equipe Tatiane')]: {
     default: PRODUCT.QUINQUENIO,
     options: [PRODUCT.QUINQUENIO, PRODUCT.CONCOMITANTE],
     allowChange: true,
   },
-
   [normalizeKey('Equipe Leticia Mathias')]: {
     default: PRODUCT.ISENCAO_IR,
     options: [PRODUCT.ISENCAO_IR],
@@ -113,7 +105,6 @@ function findProdutoConfig(
 ): ProdutoConfig | null {
   if (!equipe) return null;
   const key = normalizeKey(equipe);
-
   if (mapa) {
     for (const [k, v] of Object.entries(mapa)) {
       if (normalizeKey(k) === key) {
@@ -125,16 +116,12 @@ function findProdutoConfig(
       }
     }
   }
-
   const hit = FALLBACK_PRODUTOS_POR_EQUIPE[key];
   return hit ? { ...hit, options: [...hit.options] } : null;
 }
 
-// Opções gerais exibidas quando NENHUMA equipe específica está selecionada.
-// Os valores são os rótulos visíveis (compatível com o filtro do Visao_geral).
 const GENERAL_PRODUCT_OPTIONS = ["Todos", "Auxilio Acidente", "Quinquenio", "Concomitante", "Fator K", "BPC/LOAS", "Isenção de IR Aposentadoria"];
 
-// Equipes reservadas — mesma regra da página de Suporte.
 const EQUIPES_TRAVADAS_DESTINO = ['equipe tatiane','equipe leticia mathias'];
 
 function isEquipeTravadaDestino(nome: string): boolean {
@@ -207,10 +194,8 @@ export default function FilterBar({
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
   const isCoordenador = userLevel === LEVELS.COORDENADOR;
 
-  // Quem pode chamar /suporte/escopo (backend exige supervisor+).
   const canFetchEscopo = userLevel >= LEVELS.SUPERVISAO;
 
-  // Unidade do usuário (aceita unidade_id ou unidadeId).
   const userUnidadeRaw = (currentUser as any)?.unidade_id
     ?? (currentUser as any)?.unidadeId
     ?? null;
@@ -221,9 +206,6 @@ export default function FilterBar({
     : initialStored.unidadeId ?? "todas";
   const [selectedUnit, setSelectedUnit] = useState<number | "todas">(initialUnit);
 
-  // ============================================================
-  // EQUIPE DO USUÁRIO
-  // ============================================================
   const userTeam = useMemo(() => {
     if (!currentUser) return '';
     const direct = (currentUser.equipe || (currentUser as any).equipeNome || (currentUser as any).nome_equipe || '').trim();
@@ -235,19 +217,11 @@ export default function FilterBar({
     return '';
   }, [currentUser, collaborators]);
 
-  // Regra da Equipe Tatiane — supervisor unidade 1 fora dela não vê a Tatiane.
   const deveOcultarEquipesReservadas = isSupervisor
     && userUnidade === 1
     && !!userTeam
     && !isEquipeTravadaDestino(userTeam);
 
-  // ============================================================
-  // ESCOPO (whitelist do Coordenador + produtos para todos que podem ver)
-  // ------------------------------------------------------------
-  // O backend devolve, para supervisor+:
-  //   - equipes e assessores da própria unidade (usado pelo Coordenador)
-  //   - produtos.porEquipe (usado aqui e no Suporte)
-  // ============================================================
   const [escopoData, setEscopoData] = useState<{
     equipes: Set<string>;
     colaboradores: Set<string>;
@@ -298,21 +272,11 @@ export default function FilterBar({
     return () => { mounted = false; };
   }, [canFetchEscopo, currentUser]);
 
-  // ============================================================
-  // CONFIGURAÇÃO DE PRODUTO DA EQUIPE SELECIONADA
-  // ------------------------------------------------------------
-  // - Equipe específica com config: usa allowChange/options/default.
-  // - Sem equipe específica ("todas") ou sem config: null → cai nas
-  //   opções gerais.
-  // ============================================================
   const produtoConfigEquipeAtual = useMemo(
     () => findProdutoConfig(escopoData?.produtosPorEquipe, selectedEquipe),
     [escopoData, selectedEquipe]
   );
 
-  // ============================================================
-  // SINCRONIZA E-MAIL DO COLABORADOR SELECIONADO NA STORE
-  // ============================================================
   useEffect(() => {
     if (!isReady) return;
     if (selectedColaborador !== "todos") {
@@ -343,9 +307,6 @@ export default function FilterBar({
     return () => clearTimeout(timeout);
   }, [isReady]);
 
-  // ============================================================
-  // CARREGA EQUIPES (FALLBACK)
-  // ============================================================
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -374,9 +335,6 @@ export default function FilterBar({
     return () => { mounted = false; };
   }, [equipeConfigs.length, setEquipeConfigs]);
 
-  // ============================================================
-  // CARREGA COLABORADORES (FALLBACK)
-  // ============================================================
   useEffect(() => {
     let mounted = true;
     const load = async () => {
@@ -409,9 +367,10 @@ export default function FilterBar({
     return () => { mounted = false; };
   }, [collaborators.length, setCollaborators]);
 
-  // ============================================================
-  // APLICA RESTRIÇÕES DE ACESSO (UMA ÚNICA VEZ)
-  // ============================================================
+  // ─── useEffect de restrições ────────────────────────────────────────────
+  // Aplica restrições uma vez. Para admin/superior, NÃO reseta selectedProduto
+  // (já vem inicializado com initialStored.produto). Mantém log para
+  // diagnosticar se algo está resetando.
   useEffect(() => {
     if (!isReady) return;
     if (hasAppliedRestrictions) return;
@@ -421,7 +380,7 @@ export default function FilterBar({
       return;
     }
 
-    console.log('🔒 FilterBar: aplicando restrições de acesso para', currentUser.cargo);
+    console.log('🔒 FilterBar: aplicando restrições de acesso para', currentUser.cargo, '— selectedProduto atual:', selectedProduto);
 
     if (isAssessor) {
       if (userTeam) setSelectedEquipe(userTeam);
@@ -430,17 +389,14 @@ export default function FilterBar({
       if (userTeam) setSelectedEquipe(userTeam);
       setSelectedColaborador("todos");
     } else {
+      // Admin/superior: preserva selectedProduto (não reseta)
       setSelectedEquipe(initialStored.equipe);
       setSelectedColaborador(initialStored.colaborador);
-      setSelectedProduto(initialStored.produto);
       setSearchTerm(initialStored.searchTerm);
     }
     setHasAppliedRestrictions(true);
-  }, [isReady, currentUser, isAssessor, isSupervisor, hasAppliedRestrictions, userTeam, initialStored]);
+  }, [isReady, currentUser, isAssessor, isSupervisor, hasAppliedRestrictions, userTeam, initialStored, selectedProduto]);
 
-  // ============================================================
-  // SINCRONIZAÇÃO FORÇADA: assessor/supervisor sempre na sua equipe
-  // ============================================================
   useEffect(() => {
     if (!currentUser) return;
     if (!isAssessor && !isSupervisor) return;
@@ -478,9 +434,6 @@ export default function FilterBar({
     setSelectedCollaboratorEmail,
   ]);
 
-  // ============================================================
-  // COORDENADOR: revalida os valores persistidos contra o escopo
-  // ============================================================
   useEffect(() => {
     if (!isCoordenador || !escopoData) return;
 
@@ -501,14 +454,7 @@ export default function FilterBar({
     }
   }, [isCoordenador, escopoData, selectedEquipe, selectedColaborador, collaborators, setSelectedCollaboratorEmail]);
 
-  // ============================================================
-  // SINCRONIA EQUIPE ⇄ PRODUTO (mesma lógica do Suporte)
-  // ------------------------------------------------------------
-  //   - Equipe com allowChange=false → força default mascarado.
-  //   - Equipe com allowChange=true  → se o valor atual não está nas
-  //     opções, cai no default mascarado.
-  //   - Sem equipe selecionada → sem override.
-  // ============================================================
+  // Sync equipe ⇄ produto: só roda quando equipe é específica.
   useEffect(() => {
     if (!isReady || !hasAppliedRestrictions) return;
     if (!selectedEquipe || selectedEquipe === 'todas') return;
@@ -531,9 +477,6 @@ export default function FilterBar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEquipe, escopoData, isReady, hasAppliedRestrictions]);
 
-  // ============================================================
-  // LISTA DE EQUIPES DISPONÍVEIS
-  // ============================================================
   const equipesDisponiveis = useMemo(() => {
     let nomes = equipeConfigs.map((eq) => eq.nome).filter((nome) => !isExcludedTeam(nome));
 
@@ -577,9 +520,6 @@ export default function FilterBar({
     deveOcultarEquipesReservadas,
   ]);
 
-  // ============================================================
-  // COLABORADORES FILTRADOS (para o dropdown)
-  // ============================================================
   const filteredColaboradores = useMemo(() => {
     if (!isReady || !collaborators.length) return [];
     let filtered = [...collaborators];
@@ -652,14 +592,17 @@ export default function FilterBar({
     return [selected, ...filteredColaboradores];
   }, [filteredColaboradores, selectedColaborador, collaborators, showUnitFilter, selectedUnit]);
 
-  // ============================================================
-  // NOTIFICA O PAI
-  // ============================================================
+  // ─── onFilterChangeRef para evitar stale closure ────────────────────────
   const onFilterChangeRef = useRef(onFilterChange);
   useEffect(() => {
     onFilterChangeRef.current = onFilterChange;
   }, [onFilterChange]);
 
+  // ─── notifyParent ───────────────────────────────────────────────────────
+  // Só depende de `isReady`. Removemos `hasAppliedRestrictions` porque ele é
+  // sempre `true` após o mount e, se por qualquer motivo ficar `false`, os
+  // handlers de filtro (que chamam notifyParent) seriam silenciosamente
+  // ignorados — o que explica o backend recebendo `produto: undefined`.
   const notifyParent = (
     equipe: string,
     colaborador: string,
@@ -667,7 +610,10 @@ export default function FilterBar({
     _search?: string,
     unidadeId: number | "todas" = selectedUnit,
   ) => {
-    if (!isReady || !hasAppliedRestrictions) return;
+    if (!isReady) {
+      console.warn("[FilterBar] notifyParent BLOQUEADO (isReady=false)", { equipe, colaborador, produto });
+      return;
+    }
 
     let finalEquipe = equipe;
     let finalColaborador = colaborador;
@@ -685,6 +631,15 @@ export default function FilterBar({
         ? collaborators.find((c) => c.name === finalColaborador)?.id
         : undefined;
 
+    console.log("[FilterBar] notifyParent:", {
+      equipe: finalEquipe,
+      colaborador: finalColaborador,
+      produto,                       // ← o valor que vai para o pai
+      unidadeId: unidadeId === "todas" ? undefined : unidadeId,
+      hasAppliedRestrictions,
+      isReady,
+    });
+
     onFilterChangeRef.current({
       equipe: finalEquipe,
       colaborador: finalColaborador,
@@ -694,9 +649,6 @@ export default function FilterBar({
     });
   };
 
-  // ============================================================
-  // PERSISTÊNCIA
-  // ============================================================
   useEffect(() => {
     const state: StoredFilters = {
       equipe: selectedEquipe,
@@ -708,12 +660,13 @@ export default function FilterBar({
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [selectedEquipe, selectedColaborador, selectedProduto, searchTerm, selectedUnit]);
 
-  // ============================================================
-  // NOTIFICA O PAI APÓS READY + RESTRIÇÕES
-  // ============================================================
+  // ─── Notificação inicial ────────────────────────────────────────────────
+  // Removida a dependência de `hasAppliedRestrictions` (só `isReady`), e
+  // adicionada assinatura que inclui os 4 campos que o pai precisa.
+  // O `lastNotifiedFilters` evita re-notificações redundantes.
   const lastNotifiedFilters = useRef<string | null>(null);
   useEffect(() => {
-    if (!isReady || !hasAppliedRestrictions) return;
+    if (!isReady) return;
     const signature = JSON.stringify([
       selectedEquipe,
       selectedColaborador,
@@ -722,16 +675,32 @@ export default function FilterBar({
     ]);
     if (lastNotifiedFilters.current === signature) return;
     lastNotifiedFilters.current = signature;
+    console.log("[FilterBar] useEffect inicial → notifyParent", {
+      selectedEquipe, selectedColaborador, selectedProduto, selectedUnit,
+    });
     notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
-  }, [isReady, hasAppliedRestrictions, selectedEquipe, selectedColaborador, selectedProduto, selectedUnit, searchTerm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, selectedEquipe, selectedColaborador, selectedProduto, selectedUnit]);
 
-  // ============================================================
-  // HANDLERS
-  // ============================================================
+  // ─── Notificação quando SÓ o produto muda ───────────────────────────────
+  // Garante que, mesmo que outro useEffect atrase a sincronização,
+  // o produto chegue ao pai. Não redunda com o useEffect acima porque
+  // este tem uma dependência mais estreita.
+  const lastNotifiedProduto = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isReady) return;
+    if (lastNotifiedProduto.current === selectedProduto) return;
+    lastNotifiedProduto.current = selectedProduto;
+    console.log("[FilterBar] useEffect produto → notifyParent", {
+      selectedProduto,
+    });
+    notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isReady, selectedProduto]);
+
   const handleEquipeChange = (novaEquipe: string) => {
     setSelectedEquipe(novaEquipe);
 
-    // ---- Sync do produto com a nova equipe (mesma lógica do Suporte) ----
     const newConfig = findProdutoConfig(escopoData?.produtosPorEquipe, novaEquipe);
     let produtoFinal = selectedProduto;
 
@@ -745,8 +714,6 @@ export default function FilterBar({
         }
       }
     } else if (novaEquipe === 'todas') {
-      // Se voltou para "todas" e o valor atual não está nas opções gerais,
-      // reseta para "Todos".
       if (!GENERAL_PRODUCT_OPTIONS.includes(selectedProduto)) {
         produtoFinal = 'Todos';
       }
@@ -756,7 +723,6 @@ export default function FilterBar({
       setSelectedProduto(produtoFinal);
     }
 
-    // ---- Reset do colaborador se ele não pertence à nova equipe ----
     let nextColaborador = selectedColaborador;
     if (selectedColaborador !== "todos" && novaEquipe !== "todas") {
       const stillInTeam = collaborators.some(
@@ -769,6 +735,7 @@ export default function FilterBar({
       }
     }
 
+    console.log("[FilterBar] handleEquipeChange → notifyParent", { novaEquipe, nextColaborador, produtoFinal });
     notifyParent(novaEquipe, nextColaborador, produtoFinal);
   };
 
@@ -778,6 +745,7 @@ export default function FilterBar({
     setSelectedEquipe("todas");
     setSelectedColaborador("todos");
     if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+    console.log("[FilterBar] handleUnitChange → notifyParent", { unidadeId, produto: selectedProduto });
     notifyParent("todas", "todos", selectedProduto, undefined, unidadeId);
   };
 
@@ -795,17 +763,24 @@ export default function FilterBar({
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
     }
 
+    console.log("[FilterBar] handleColaboradorChange → notifyParent", { novoColaborador, produto: selectedProduto });
     notifyParent(selectedEquipe, novoColaborador, selectedProduto);
   };
 
   const handleProdutoChange = (novoProduto: string) => {
+    console.log("[FilterBar] handleProdutoChange:", {
+      novoProduto,
+      equipe: selectedEquipe,
+      colaborador: selectedColaborador,
+      produtoAnterior: selectedProduto,
+    });
     setSelectedProduto(novoProduto);
     notifyParent(selectedEquipe, selectedColaborador, novoProduto);
   };
 
   const handleSearchChange = (novoTermo: string) => {
     setSearchTerm(novoTermo);
-    if (!isReady || !hasAppliedRestrictions) return;
+    if (!isReady) return;
 
     let finalEquipe = selectedEquipe;
     let finalColaborador = selectedColaborador;
@@ -820,6 +795,7 @@ export default function FilterBar({
         ? collaborators.find((c) => c.name === finalColaborador)?.id
         : undefined;
 
+    console.log("[FilterBar] handleSearchChange → notifyParent", { produto: selectedProduto });
     onFilterChangeRef.current({
       equipe: finalEquipe,
       colaborador: finalColaborador,
@@ -903,12 +879,6 @@ export default function FilterBar({
     isAssessor ||
     (!!produtoConfigEquipeAtual && !produtoConfigEquipeAtual.allowChange);
 
-  // ============================================================
-  // RENDER: LOADING
-  // ------------------------------------------------------------
-  // Bloqueia enquanto o escopo do Supervisor/Coordenador estiver
-  // carregando (evita mostrar filtros errados por um frame).
-  // ============================================================
   if (
     !isReady ||
     loadingEquipes ||
@@ -925,9 +895,6 @@ export default function FilterBar({
     );
   }
 
-  // ============================================================
-  // RENDER: ERRO
-  // ============================================================
   if (colabError) {
     return (
       <div className={cn("bg-white rounded-xl border border-red-200 shadow-sm p-4", className)}>
@@ -947,9 +914,6 @@ export default function FilterBar({
     );
   }
 
-  // ============================================================
-  // RENDER PRINCIPAL
-  // ============================================================
   return (
     <div className={cn("bg-white rounded-xl border border-gray-100 shadow-sm p-4", className)}>
       <div className="flex flex-col gap-4">
@@ -1007,7 +971,6 @@ export default function FilterBar({
             </div>
           )}
 
-          {/* Select Equipe */}
           <div className="flex-1">
             <label htmlFor="filterEquipe" className="block text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
               <Briefcase className="w-3 h-3" /> Equipe
@@ -1032,7 +995,6 @@ export default function FilterBar({
             </select>
           </div>
 
-          {/* Select Colaborador */}
           {showColaboradorFilter && (
             <div className="flex-1">
               <label htmlFor="filterColaborador" className="block text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
@@ -1067,14 +1029,12 @@ export default function FilterBar({
             </div>
           )}
 
-          {/* Select Produto — segue a mesma regra do Suporte */}
           {showProdutoFilter && <div className="flex-1">
             <label htmlFor="filterProduto" className="block text-[10px] font-medium text-gray-500 mb-1 flex items-center gap-1">
               <Package className="w-3 h-3" /> Produto
             </label>
 
             {produtoConfigEquipeAtual && !produtoConfigEquipeAtual.allowChange ? (
-              // Equipe trava o produto no próprio default → readOnly (como no Suporte).
               <input
                 id="filterProduto"
                 type="text"
@@ -1085,7 +1045,6 @@ export default function FilterBar({
                 title="O produto é definido automaticamente pela equipe selecionada."
               />
             ) : produtoConfigEquipeAtual && produtoConfigEquipeAtual.allowChange ? (
-              // Equipe permite alternar → select apenas com as opções permitidas.
               <select
                 id="filterProduto"
                 value={selectedProduto}
@@ -1100,7 +1059,6 @@ export default function FilterBar({
                 })}
               </select>
             ) : (
-              // Sem equipe específica (ou equipe sem config) → opções gerais.
               <select
                 id="filterProduto"
                 value={selectedProduto}
@@ -1120,7 +1078,6 @@ export default function FilterBar({
             )}
           </div>}
 
-          {/* Botão Limpar */}
           {hasActiveFilters && (
             <div className="flex items-end">
               <button
@@ -1135,7 +1092,6 @@ export default function FilterBar({
           )}
         </div>
 
-        {/* Botão e indicador de atualização */}
         {onRefresh && (
           <div className="flex items-center justify-end gap-2 mb-2">
             {refreshing && (

@@ -19,6 +19,14 @@
 //   • data_ganho  é timestamptz → precisa AT TIME ZONE 'UTC'
 //   • created_at  é timestamp (já em SP) → ::date direto, sem conversão
 //   (mesma regra de data_distribuicao_comercial em leads-recebidos)
+//
+// ⚠️ WRAPPERS ESCALARES (load*Total)
+// ─────────────────────────────────────────────────────────────────────────────
+// Os loaders "cru" devolvem Array<{ colaborador, equipe, total, periodo? }>.
+// Consumidores que só precisam do agregado do período (ex.:
+// inteComerceRawAnalytics.mergeHubSpot) devem usar os wrappers
+// `loadAssinadosTotal`, `loadEmitidosTotal`, `loadGanhosTotal`,
+// `loadProtocoladosTotal` — que somam `total` e devolvem `number` (ou null).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import db, { analyticsQuery } from './db.js';
@@ -149,6 +157,25 @@ function warnIfLarge(rows, label) {
     // ignora
   }
   return rows;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// HELPERS ESCALARES — soma `total` de um Array<{ total }>
+// Usados pelos wrappers load*Total para consumidores que só precisam do
+// agregado do período (ex.: inteComerceRawAnalytics.mergeHubSpot).
+// ═════════════════════════════════════════════════════════════════════════════
+
+function sumTotal(rows) {
+  if (Array.isArray(rows)) {
+    let acc = 0;
+    for (const r of rows) {
+      const n = Number(r?.total);
+      if (Number.isFinite(n)) acc += n;
+    }
+    return acc;
+  }
+  if (typeof rows === 'number' && Number.isFinite(rows)) return rows;
+  return null;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -285,6 +312,12 @@ export async function loadEmitidos({ start, end, equipe, produto, granularity })
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
+// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
+export async function loadEmitidosTotal(params = {}) {
+  const rows = await loadEmitidos({ ...params, granularity: null });
+  return sumTotal(rows);
+}
+
 // ─── ASSINADOS ───────────────────────────────────────────────────────────────
 export async function loadAssinados({ start, end, equipe, produto, granularity }) {
   const gran = mapGranularity(granularity);
@@ -321,6 +354,12 @@ export async function loadAssinados({ start, end, equipe, produto, granularity }
   const label = `assinados:${gran || 'agg'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
+}
+
+// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
+export async function loadAssinadosTotal(params = {}) {
+  const rows = await loadAssinados({ ...params, granularity: null });
+  return sumTotal(rows);
 }
 
 // ─── PROTOCOLADOS (com mode safra/produção) ──────────────────────────────────
@@ -372,6 +411,12 @@ export async function loadProtocolados({ start, end, equipe, produto, granularit
   const label = `protocolados:${gran || 'agg'}:${periodFilter.isSafra ? 'safra' : 'prod'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
+}
+
+// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
+export async function loadProtocoladosTotal(params = {}) {
+  const rows = await loadProtocolados({ ...params, granularity: null });
+  return sumTotal(rows);
 }
 
 // ─── GANHOS (com mode safra/produção) ────────────────────────────────────────
@@ -435,6 +480,12 @@ export async function loadGanhos({ start, end, equipe, produto, granularity, dem
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
+// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
+export async function loadGanhosTotal(params = {}) {
+  const rows = await loadGanhos({ ...params, granularity: null });
+  return sumTotal(rows);
+}
+
 // ─── PERDIDOS ────────────────────────────────────────────────────────────────
 export async function loadPerdidos({ start, end, equipe, produto, granularity }) {
   const gran = mapGranularity(granularity);
@@ -473,6 +524,12 @@ export async function loadPerdidos({ start, end, equipe, produto, granularity })
   const label = `perdidos:${gran || 'agg'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
+}
+
+// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
+export async function loadPerdidosTotal(params = {}) {
+  const rows = await loadPerdidos({ ...params, granularity: null });
+  return sumTotal(rows);
 }
 
 // ─── LEADS RECEBIDOS — série temporal ────────────────────────────────────────

@@ -25,6 +25,13 @@
 // "bloqueado" (definitivo), o coordenador pode autorizar o reprocessamento
 // com bypass da regra de data via POST /:id/reprocessar-coordenador.
 //
+// ─── Recuperação de tickets travados em "processando" ─────────────
+// Tickets em "processando" cujo `atualizado_em` está além de
+// STALE_PROCESSANDO_MS são considerados órfãos (worker crashou/parou
+// sem liberar o lock). Ambos /reprocessar e /reprocessar-coordenador
+// detectam esse estado e permitem o reenfileiramento, evitando que um
+// único ticket prenda a fila inteira.
+//
 // Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
 
 import express from 'express';
@@ -65,9 +72,26 @@ const SUPPORT_STATUSES = new Set(Object.values(STATUS_MAP));
 // "concluido" (não deve voltar atrás sem revisão manual do HubSpot).
 // "coordenador" NÃO entra aqui — é responsabilidade exclusiva do coordenador
 // (via /reprocessar-coordenador), que injeta o bypass de regra temporal.
+// "processando" órfão (worker morreu) é tratado por ehProcessandoOrfao() em
+// ambos os endpoints de reprocessamento.
 const STATUS_REPROCESSAVEIS = new Set([
   'erro', 'bloqueado', 'aviso', 'suporte', 'fora_pipeline',
 ]);
+
+// Tempo (ms) após o qual um ticket em "processando" é considerado órfão.
+// Ajustar aqui caso o worker processe legítimamente em janelas maiores.
+const STALE_PROCESSANDO_MS = 5 * 60 * 1000;
+
+// Verifica se um ticket em "processando" está órfão (worker travado/crashado
+// sem liberar o lock). Sem isso, um único ticket preso em "processando"
+// bloqueia /reprocessar e /reprocessar-coordenador indefinidamente.
+function ehProcessandoOrfao(statusAtual, atualizadoEm) {
+  if (statusAtual !== 'processando') return false;
+  if (!atualizadoEm) return true;
+  const ts = new Date(atualizadoEm).getTime();
+  if (!Number.isFinite(ts)) return true;
+  return (Date.now() - ts) > STALE_PROCESSANDO_MS;
+}
 
 // ── [NOVO] Regras de bloqueio de edição de DADOS por perfil ─────────
 // Supervisor só edita dados quando o caso NÃO está em status finais.
@@ -840,6 +864,9 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
               'suporte comissionamento', NOW(), NOW(), $3) RETURNING id_ticket`,
     [PLACEHOLDER_UUID, `Movimentação de lead solicitada por ${actor.nome || actor.email}`, JSON.stringify(metadata)]);
 
+    // CORREÇÃO: inclui _worker desde a criação. Sem isso, um worker CRM
+    // que crashar no meio do processamento deixa o ticket em "processando"
+    // sem qualquer metadata para o /reprocessar detectar o órfão.
     const movement = await client.query(`
       INSERT INTO app_comissionamento.tickets_movimentacao_lead
       (ticket_id, lead_id, crm_origem, crm_lead_id, nome_cliente_informado, sobrenome_cliente_informado,
@@ -849,7 +876,17 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
       RETURNING id_ticket_movimentacao`,
     [base.rows[0].id_ticket, leadId, crmLeadId, firstName, lastName, customerEmail, phone, cpf || null,
       origin, destination.name, reason,
-      JSON.stringify({ observacao: observation, idempotency_key: key, produto })]);
+      JSON.stringify({
+        observacao: observation,
+        idempotency_key: key,
+        produto,
+        _worker: {
+          processando_desde: null,
+          tentativas: 0,
+          erro_lease: null,
+          ultima_falha_em: null,
+        },
+      })]);
 
     return { id: movement.rows[0].id_ticket_movimentacao, repeated: false };
   });
@@ -1571,9 +1608,24 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
   res.json({ success: true, message: 'Ticket de suporte atualizado com sucesso.' });
 }));
 
-// ---------------------- Reprocessamento (SalesOps) ----------------------
+// ============================================================
+// POST /tickets-movimentacao/:id/reprocessar
+//
+// Permissões: COORDENADOR+ / ASSESSOR_PLUS / ADMIN.
+// Antes só ADMIN — ampliado para destravar casos sem depender do admin.
+//
+// Recupera tickets em "processando" órfão (worker travado > 5 min).
+// ============================================================
 router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
-  requireAdmin(req);
+  const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
+  const isCoordinatorOrAbove =
+    actorLevel >= accessControl.LEVELS.COORDENADOR ||
+    actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
+
+  if (!isCoordinatorOrAbove) {
+    throw fail(403, 'Sem permissão para reprocessar.');
+  }
+
   const id = recordId(req.params.id);
   const force = req.body?.force === true;
   const observacaoOperador = text(req.body?.observacao, 'Observação', { max: 2000 });
@@ -1581,7 +1633,7 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
   const result = await transaction(async client => {
     const current = await client.query(
       `SELECT id_ticket_movimentacao, ticket_id, crm_origem, status_mapeamento,
-              observacao_sales_ops
+              observacao_sales_ops, atualizado_em
          FROM app_comissionamento.tickets_movimentacao_lead
         WHERE id_ticket_movimentacao = $1
         FOR UPDATE`,
@@ -1591,11 +1643,22 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
     const movement = current.rows[0];
 
     const statusAtual = String(movement.status_mapeamento || '').trim().toLowerCase();
-    if (!STATUS_REPROCESSAVEIS.has(statusAtual)) {
+    const stale = ehProcessandoOrfao(statusAtual, movement.atualizado_em);
+    const permitido = STATUS_REPROCESSAVEIS.has(statusAtual) || stale;
+
+    if (!permitido) {
+      if (statusAtual === 'processando') {
+        throw fail(
+          409,
+          `Ticket ainda em processamento ativo (última atualização em ${movement.atualizado_em}). ` +
+          `Aguarde ${Math.ceil(STALE_PROCESSANDO_MS / 60000)} minutos para reprocessar caso o worker tenha travado.`
+        );
+      }
       throw fail(
         409,
         `Ticket em status "${movement.status_mapeamento}" não pode ser reprocessado. ` +
-        `Status elegíveis: ${[...STATUS_REPROCESSAVEIS].join(', ')}.`
+        `Status elegíveis: ${[...STATUS_REPROCESSAVEIS].join(', ')} ` +
+        `(ou "processando" órfão há mais de ${Math.ceil(STALE_PROCESSANDO_MS / 60000)} min).`
       );
     }
 
@@ -1627,19 +1690,20 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
           statusAnterior: movement.status_mapeamento,
           houveEscritaParcial,
           force,
+          staleProcessando: stale,
           ...(observacaoOperador ? { observacao: observacaoOperador } : {}),
         },
       ],
     };
 
-    if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT) {
-      novoMetadata._worker = {
-        processando_desde: null,
-        tentativas: 0,
-        erro_lease: null,
-        ultima_falha_em: null,
-      };
-    }
+    // CORREÇÃO: aplica o reset de _worker para QUALQUER crm_origem.
+    // Antes só Link Hub, mas o CRM agora também carrega _worker.
+    novoMetadata._worker = {
+      processando_desde: null,
+      tentativas: 0,
+      erro_lease: null,
+      ultima_falha_em: null,
+    };
 
     await client.query(
       `UPDATE app_comissionamento.tickets_movimentacao_lead
@@ -1666,6 +1730,7 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
       statusAnterior: movement.status_mapeamento,
       houveEscritaParcial,
       force,
+      staleProcessando: stale,
     };
   });
 
@@ -1677,20 +1742,27 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
     status_anterior: result.statusAnterior,
     houve_escrita_parcial: result.houveEscritaParcial,
     force_aplicado: result.force,
-    message: result.houveEscritaParcial && result.force
-      ? 'Ticket reenfileirado com override. O worker irá reprocessar; revise o resultado no HubSpot.'
-      : 'Ticket reenfileirado. O worker irá reprocessar em até 5s.',
+    stale_processando_recuperado: result.staleProcessando,
+    message: result.staleProcessando
+      ? 'Ticket em "processando" órfão foi recuperado e reenfileirado. O worker irá reprocessar em até 5s.'
+      : result.houveEscritaParcial && result.force
+        ? 'Ticket reenfileirado com override. O worker irá reprocessar; revise o resultado no HubSpot.'
+        : 'Ticket reenfileirado. O worker irá reprocessar em até 5s.',
   });
 }));
 
 // ============================================================
 // POST /tickets-movimentacao/:id/reprocessar-coordenador
 //
-// Permite COORDENADOR+ (incluindo ASSESSOR_PLUS) reprocessar.
+// Permite COORDENADOR+ (incluindo ASSESSOR_PLUS) reprocessar casos
+// em status "coordenador" (que exige bypass de regra temporal) ou
+// recuperar tickets em "processando" órfão.
 // ============================================================
 router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(async (req, res) => {
   const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
-  const isCoordinatorOrAbove = actorLevel >= accessControl.LEVELS.COORDENADOR || actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
+  const isCoordinatorOrAbove =
+    actorLevel >= accessControl.LEVELS.COORDENADOR ||
+    actorLevel === accessControl.LEVELS.ASSESSOR_PLUS;
 
   if (!isCoordinatorOrAbove) {
     throw fail(403, 'Sem permissão para reprocessar.');
@@ -1698,26 +1770,12 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
 
   const actor = req.supportActor;
   const id = recordId(req.params.id);
-  const observacaoOperador = text(req.body?.observacao, 'Observação', { max: 10000 });
-
-  const clientUpdates = [];
-  const clientFields = [
-    ['nome_cliente_informado',      v => text(v, 'Nome', { max: 500 }) || null],
-    ['sobrenome_cliente_informado', v => text(v, 'Sobrenome', { max: 500 }) || null],
-    ['email_cliente_informado',     v => email(v, 'E-mail do cliente') || null],
-    ['telefone_cliente_informado',  v => text(v, 'Telefone', { max: 50 }) || null],
-    ['cpf_cliente_informado',       v => text(v, 'CPF', { max: 30 }) || null],
-    ['origem_cliente_informada',    v => nullable(v, 'Origem')],
-  ];
-  for (const [field, parser] of clientFields) {
-    if (req.body?.[field] === undefined) continue;
-    clientUpdates.push({ field, value: parser(req.body[field]) });
-  }
+  const observacaoOperador = text(req.body?.observacao, 'Observação', { max: 2000 });
 
   const result = await transaction(async client => {
     const current = await client.query(
       `SELECT id_ticket_movimentacao, ticket_id, crm_origem, status_mapeamento,
-              observacao_sales_ops
+              observacao_sales_ops, atualizado_em
          FROM app_comissionamento.tickets_movimentacao_lead
         WHERE id_ticket_movimentacao = $1
         FOR UPDATE`,
@@ -1727,53 +1785,69 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
     const movement = current.rows[0];
 
     const statusAtual = String(movement.status_mapeamento || '').trim().toLowerCase();
-    if (!['coordenador', 'bloqueado'].includes(statusAtual)) {
+    const stale = ehProcessandoOrfao(statusAtual, movement.atualizado_em);
+    const isCoordenadorStatus = statusAtual === 'coordenador';
+    const isRegular = STATUS_REPROCESSAVEIS.has(statusAtual);
+    const permitido = isCoordenadorStatus || isRegular || stale;
+
+    if (!permitido) {
+      if (statusAtual === 'processando') {
+        throw fail(
+          409,
+          `Ticket ainda em processamento ativo (última atualização em ${movement.atualizado_em}). ` +
+          `Aguarde ${Math.ceil(STALE_PROCESSANDO_MS / 60000)} minutos para reprocessar caso o worker tenha travado.`
+        );
+      }
       throw fail(
         409,
         `Ticket em status "${movement.status_mapeamento}" não pode ser reprocessado pelo coordenador. ` +
-        `Status elegíveis: coordenador, bloqueado.`
+        `Status elegíveis: "coordenador", ${[...STATUS_REPROCESSAVEIS].join(', ')} ` +
+        `(ou "processando" órfão há mais de ${Math.ceil(STALE_PROCESSANDO_MS / 60000)} min).`
       );
     }
 
     const metadata = parseJsonObject(movement.observacao_sales_ops);
+    const houveEscritaParcial = Boolean(
+      metadata?.hubspot?.resultadoParcial || metadata?.resultadoParcial ||
+      metadata?.requiresReconciliation || metadata?.hubspot?.requiresReconciliation
+    );
 
     const novoMetadata = {
       ...metadata,
       processado: false,
-      validacaoCoordenador: {
-        acao: 'autorizar',
-        bypassTemporalRestriction: true,
-        usuario: actor.email,
-        nome: actor.nome || actor.email,
-        em: new Date().toISOString(),
-        ...(observacaoOperador ? { observacao: observacaoOperador } : {}),
-      },
+      reprocessamentos: [
+        ...(Array.isArray(metadata.reprocessamentos) ? metadata.reprocessamentos : []),
+        {
+          em: new Date().toISOString(),
+          operador: actor.email,
+          statusAnterior: movement.status_mapeamento,
+          houveEscritaParcial,
+          viaCoordenador: true,
+          bypassTemporal: isCoordenadorStatus,
+          staleProcessando: stale,
+          ...(observacaoOperador ? { observacao: observacaoOperador } : {}),
+        },
+      ],
     };
 
-    if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT) {
-      novoMetadata._worker = {
-        processando_desde: null,
-        tentativas: 0,
-        erro_lease: null,
-        ultima_falha_em: null,
+    // Bypass de regra temporal só faz sentido quando o worker pausou por
+    // prazo mínimo (status "coordenador"). O worker lê esta flag para
+    // liberar a execução.
+    if (isCoordenadorStatus) {
+      novoMetadata.bypass_regra_temporal = {
+        autorizado_por: actor.email,
+        em: new Date().toISOString(),
+        ...(observacaoOperador ? { observacao: observacaoOperador } : {}),
       };
     }
 
-    if (clientUpdates.length) {
-      const params = [];
-      const sets = [];
-      for (const { field, value } of clientUpdates) {
-        params.push(value);
-        sets.push(`${field} = $${params.length}`);
-      }
-      params.push(id);
-      await client.query(
-        `UPDATE app_comissionamento.tickets_movimentacao_lead
-            SET ${sets.join(', ')}, atualizado_em = NOW()
-          WHERE id_ticket_movimentacao = $${params.length}`,
-        params
-      );
-    }
+    // Reset do lease do worker (aplica a CRM e Link Hub).
+    novoMetadata._worker = {
+      processando_desde: null,
+      tentativas: 0,
+      erro_lease: null,
+      ultima_falha_em: null,
+    };
 
     await client.query(
       `UPDATE app_comissionamento.tickets_movimentacao_lead
@@ -1799,6 +1873,10 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
       ticketId: movement.ticket_id,
       crmOrigem: movement.crm_origem,
       statusAnterior: movement.status_mapeamento,
+      houveEscritaParcial,
+      viaCoordenador: true,
+      bypassTemporal: isCoordenadorStatus,
+      staleProcessando: stale,
     };
   });
 
@@ -1808,24 +1886,16 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
     ticket_id: result.ticketId,
     crm_origem: result.crmOrigem,
     status_anterior: result.statusAnterior,
-    message:
-      'Caso autorizado pelo coordenador e reenfileirado. ' +
-      'A regra de prazo mínimo será ignorada; as demais continuam sendo aplicadas.',
+    houve_escrita_parcial: result.houveEscritaParcial,
+    via_coordenador: true,
+    bypass_temporal_aplicado: result.bypassTemporal,
+    stale_processando_recuperado: result.staleProcessando,
+    message: result.staleProcessando
+      ? 'Ticket em "processando" órfão foi recuperado e reenfileirado. O worker irá reprocessar em até 5s.'
+      : result.bypassTemporal
+        ? 'Ticket reenfileirado com bypass de regra temporal. O worker irá reprocessar em até 5s.'
+        : 'Ticket reenfileirado. O worker irá reprocessar em até 5s.',
   });
 }));
-
-router.use((error, req, res, next) => {
-  Promise.resolve().then(async () => {
-    if (!req.supportUploadsPersisted) await cleanupUploads(req);
-    if (res.headersSent) return next(error);
-    const multerError = error instanceof multer.MulterError;
-    const candidate = Number(error.status);
-    const status = multerError ? 400 : (Number.isInteger(candidate) && candidate >= 400 && candidate <= 599 ? candidate : 500);
-    if (status >= 500) console.error('Erro na rota de suporte:', error.message);
-    return res.status(status).json({ success: false,
-      error: multerError ? 'Upload inválido. Limite: 5 arquivos, até 10 MB por arquivo.'
-        : status < 500 ? error.message : status === 503 ? error.message : 'Erro interno do servidor.' });
-  }).catch(next);
-});
 
 export default router;
