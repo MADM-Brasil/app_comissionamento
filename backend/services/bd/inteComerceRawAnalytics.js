@@ -14,9 +14,14 @@
 // ✅ FIX 16: buildDateFilter aceita HUBSPOT_DATE_FILTER_MODE
 //            (gte_lt | between | between_num | iso). Default: between.
 // ✅ FIX 17: hubspotSearchTotalGroups loga payload completo em HTTP 400.
-// ✅ FIX 18: *_metodo é setado ANTES do await (aparece no log mesmo se falhar).
+// ✅ FIX 18: *_metodo é setado ANTES do await.
 // ✅ FIX 19: HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER=true → produção usa
 //            dealstage IN (mesma de safra) — emergência.
+// ✅ FIX 20: pct_assinados_ate_ganhos em produção usa:
+//              numerador = deals GANHOS no período com assinatura ATÉ a data
+//                          do ganho (busca em TODO o histórico, não só no mês)
+//              denominador = ganhos no período
+//            Corrige o "0%" causado por filtrar assinaturas ao mês corrente.
 
 import { createHash } from 'node:crypto';
 import db from './db.js';
@@ -32,9 +37,7 @@ import {
 const STATEMENT_TIMEOUT_MS = 45_000;
 const WORK_MEM = process.env.DB_ANALYTICS_WORK_MEM || '64MB';
 
-// ✅ FIX 16 — controle de formato do filtro datetime em produção
 const HUBSPOT_DATE_FILTER_MODE = (process.env.HUBSPOT_DATE_FILTER_MODE || 'between').toLowerCase();
-// ✅ FIX 19 — fallback de emergência (produção usa dealstage IN)
 const HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER = process.env.HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER === 'true';
 
 const EVENT_TYPES = new Set([
@@ -109,7 +112,6 @@ const HUBSPOT_OWNER_MAP = (() => {
   } catch { return {}; }
 })();
 
-// ─── FIX 11: override manual de stages desq (env var) ────────────────────────
 const HUBSPOT_DESQ_STAGE_IDS = (() => {
   const raw = process.env.HUBSPOT_DESQ_STAGE_IDS;
   if (!raw) return null;
@@ -117,7 +119,6 @@ const HUBSPOT_DESQ_STAGE_IDS = (() => {
   return ids.length > 0 ? ids : null;
 })();
 
-// ─── FIX 12: mapeamento stage → produto específico ───────────────────────────
 const DESQ_STAGE_PRODUCT_MAP = (() => {
   const raw = process.env.HUBSPOT_DESQ_STAGE_PRODUCT_MAP;
   if (raw) {
@@ -138,7 +139,6 @@ const DESQ_STAGE_PRODUCT_MAP = (() => {
   };
 })();
 
-// ✅ FIX 13: sem filtro de produto = todos os produtos → aceita TODAS as etapas
 function isDesqStageAllowedForProduct(stageId, produto) {
   const requiredProduct = DESQ_STAGE_PRODUCT_MAP[String(stageId)];
   if (!requiredProduct) return true;
@@ -152,7 +152,6 @@ function selectDesqStages(stages, produto) {
   return { all, filtered };
 }
 
-// ─── Helpers gerais ──────────────────────────────────────────────────────────
 function periodBounds(start, end) {
   return { start: new Date(`${start}T03:00:00.000Z`), end: new Date(`${end}T03:00:00.000Z`) };
 }
@@ -193,7 +192,6 @@ function normalizeLabel(s) {
   return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// ─── Stage caches ────────────────────────────────────────────────────────────
 const DESQ_STAGE_IDS_FALLBACK = new Set(['6659']);
 let DESQ_STAGE_IDS_CACHE = null;
 let DESQ_STAGE_IDS_AT = 0;
@@ -237,7 +235,6 @@ function isCurrentlyEmContato(dealRow, emContatoStageIds) {
   return cur !== '' && emContatoStageIds.has(cur);
 }
 
-// ─── HubSpot API ─────────────────────────────────────────────────────────────
 const HUBSPOT_API = 'https://api.hubapi.com';
 const HUBSPOT_SEARCH_URL = `${HUBSPOT_API}/crm/v3/objects/deals/search`;
 const HUBSPOT_PIPELINES_URL = `${HUBSPOT_API}/crm/v3/pipelines/deals`;
@@ -372,7 +369,6 @@ async function resolveHubSpotOwnerIds(params) {
   return [...ids];
 }
 
-// ✅ FIX 17: loga payload completo em HTTP 400
 async function hubspotSearchTotalGroups(filterGroups) {
   const token = hubspotToken();
   return hubspotScheduled(async () => {
@@ -418,7 +414,6 @@ function midnightSP(dateStr) {
   return ms;
 }
 
-// ✅ FIX 16: suporta múltiplos formatos via HUBSPOT_DATE_FILTER_MODE
 function buildDateFilter(prop, dateType, startMs, endMs) {
   if (dateType === 'datetime') {
     switch (HUBSPOT_DATE_FILTER_MODE) {
@@ -447,7 +442,6 @@ function buildDateFilter(prop, dateType, startMs, endMs) {
   ];
 }
 
-// ─── fetchHubSpotOverview ────────────────────────────────────────────────────
 async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, ownerIds }) {
   if (!hubspotEnabled()) return { ok: false, motivo: 'HUBSPOT_ACCESS_TOKEN não configurado' };
   const startMs = midnightSP(inicio);
@@ -496,7 +490,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
   try { result.criados = await hubspotSearchTotal(creationFilter); }
   catch (e) { return { ok: false, motivo: `HubSpot criados: ${e.message}` }; }
 
-  // ✅ FIX 18: em_contato_metodo definido ANTES do await
   try {
     if (stages.emContato.size > 0) {
       const stageList = [...stages.emContato];
@@ -528,7 +521,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     result.erros.em_contato = e.message;
   }
 
-  // FIX 12/13
   const { all: allDesqStages, filtered: desqStages } = selectDesqStages(stages, produto);
   const excludedDesqStages = allDesqStages.filter((id) => !desqStages.includes(id));
   result.desq_stages_all = allDesqStages;
@@ -544,7 +536,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     disableProductionDateFilter: HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER,
   });
 
-  // ✅ FIX 18: desqualificados_metodo definido ANTES do await
   try {
     if (desqStages.length > 0) {
       const useDateFilter = isProducao && !HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER;
@@ -1231,23 +1222,47 @@ function buildProductionComparisonResults(raw, params) {
     return dayRow;
   };
 
+  // ✅ FIX 20: conversão assinados → ganhos em PRODUÇÃO
+  //
+  // Definição: "dos deals GANHOS no período, quantos foram assinados ANTES do
+  // ganho (em qualquer momento — não só no mês)".
+  //
+  // Antes: filtrava assinaturas ao mês corrente → deals assinados em outubro e
+  // ganhos em novembro ficavam de fora do numerador → pct = 0%.
+  //
+  // Agora:
+  //   1) signedDateByDeal = 1ª assinatura histórica por deal (qualquer data ≤ asOf)
+  //   2) ganhoDateByDeal  = 1º ganho por deal DENTRO do período
+  //   3) signedAndGained  = deals com ganho no período E assinatura ≤ data do ganho
+  //   4) denominador de pct_assinados_ate_ganhos = monthTotals.ganhos
+  //      (numerador ⊆ denominador → pct nunca passa de 100%)
+
   const signedDateByDeal = new Map();
+  for (const event of raw.events) {
+    if (event.type !== 'ASSINADO_ORIGINAL') continue;
+    if (event.occurredAt > raw.asOf) continue;
+    const signDate = event.dateKey || utcDate(event.occurredAt);
+    if (!signDate) continue;
+    const prev = signedDateByDeal.get(event.dealId);
+    if (!prev || signDate < prev) signedDateByDeal.set(event.dealId, signDate);
+  }
+
   const ganhoDateByDeal = new Map();
   for (const event of raw.events) {
+    if (event.type !== 'GANHO') continue;
     if (event.occurredAt > raw.asOf) continue;
-    const acceptUnassigned = event.collaboratorId == null && noFilter && !scopedRestriction;
-    if (event.type === 'ASSINADO_ORIGINAL') {
-      if (event.occurredAt < monthBounds.start || event.occurredAt >= monthBounds.end) continue;
-      if (!filterScopeBroad(event, params) && !acceptUnassigned) continue;
-      const signDate = event.dateKey || utcDate(event.occurredAt); if (!signDate) continue;
-      const prev = signedDateByDeal.get(event.dealId); if (!prev || signDate < prev) signedDateByDeal.set(event.dealId, signDate);
-    } else if (event.type === 'GANHO') {
-      const gainDate = event.dateKey || utcDate(event.occurredAt); if (!gainDate) continue;
-      const prev = ganhoDateByDeal.get(event.dealId); if (!prev || gainDate < prev) ganhoDateByDeal.set(event.dealId, gainDate);
-    }
+    if (event.occurredAt < monthBounds.start || event.occurredAt >= monthBounds.end) continue;
+    const gainDate = event.dateKey || utcDate(event.occurredAt);
+    if (!gainDate) continue;
+    const prev = ganhoDateByDeal.get(event.dealId);
+    if (!prev || gainDate < prev) ganhoDateByDeal.set(event.dealId, gainDate);
   }
+
   let signedAndGained = 0;
-  for (const [dealId, signDate] of signedDateByDeal) { const gainDate = ganhoDateByDeal.get(dealId); if (gainDate && gainDate >= signDate) signedAndGained++; }
+  for (const [dealId, gainDate] of ganhoDateByDeal) {
+    const signDate = signedDateByDeal.get(dealId);
+    if (signDate && signDate <= gainDate) signedAndGained++;
+  }
 
   for (const event of raw.events) {
     if (event.occurredAt < monthBounds.start || event.occurredAt >= monthBounds.end || event.occurredAt > raw.asOf || !EVENT_TYPES.has(event.type)) continue;
@@ -1328,7 +1343,8 @@ function buildProductionComparisonResults(raw, params) {
     assinados: monthTotals.assinados, assinados_que_ganharam: signedAndGained,
     pct_recebidos_ate_assinados: monthTotals.recebidos ? Number((100 * monthTotals.assinados / monthTotals.recebidos).toFixed(2)) : null,
     pct_recebidos_ate_em_contato: monthTotals.recebidos ? Number((100 * monthTotals.em_contato_crm / monthTotals.recebidos).toFixed(2)) : null,
-    pct_assinados_ate_ganhos: monthTotals.assinados ? Number((100 * signedAndGained / monthTotals.assinados).toFixed(2)) : null,
+    // ✅ FIX 20: denominador = ganhos (numerador ⊆ denominador)
+    pct_assinados_ate_ganhos: monthTotals.ganhos ? Number((100 * signedAndGained / monthTotals.ganhos).toFixed(2)) : null,
     variacao_safra_sem_maturidade_equivalente: null,
   };
 
@@ -1373,8 +1389,6 @@ function buildProductionComparisonResults(raw, params) {
   result.asOf = raw.asOf;
   return result;
 }
-
-// ─── Continuação (3/3) de backend/services/bd/inteComerceRawAnalytics.js ────
 
 function filteredEvents(raw, params) {
   const { start, end } = periodBounds(params.inicio, params.fim_exclusivo);
@@ -1734,6 +1748,8 @@ function buildComparisonResults(raw, params) {
   return result;
 }
 
+// ─── Continuação (3/3) de backend/services/bd/inteComerceRawAnalytics.js ────
+
 function buildHubspotCards(hs) {
   return {
     criados: hs.criados ?? null, em_contato: hs.em_contato ?? null,
@@ -1840,6 +1856,7 @@ async function mergeHubSpot(result, hs, params) {
   fonte.protocolados = await applyCanonical('protocolados', loadProtocoladosTotal, result.overview, 'protocolados', { mode: params.mode });
   fonte.emitidos     = await applyCanonical('emitidos',     loadEmitidosTotal,     result.funnel,   'emitidos');
 
+  // ✅ Recalcula estratégicos após canonical_metrics (pode ter alterado assinados/ganhos)
   result.strategic.recebidos  = result.overview.recebidos;
   result.strategic.em_contato = result.overview.em_contato_crm;
   result.strategic.assinados  = result.overview.assinados;

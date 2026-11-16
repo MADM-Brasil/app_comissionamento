@@ -2,35 +2,58 @@
 // Fluxo unificado: movimentações normais (CRM) e por Link Hub (HUBSPOT_LINK)
 // compartilham a mesma tabela app_comissionamento.tickets_movimentacao_lead.
 // Nenhuma tabela adicional é necessária.
-// Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
 //
-// ─── Produto e roteamento de pipeline ───────────────────────────────
-// Esta camada é responsável APENAS por resolver e persistir o produto:
-//   - O produto é resolvido por equipe via resolveTeamProduct, respeitando
-//     `allowChange` do mapa de equipes.
-//   - O valor resolvido é gravado em DOIS lugares:
-//       * tickets_suporte.metadados.produto
-//       * tickets_movimentacao_lead.observacao_sales_ops.produto
-//   - Os workers (ticketQueue.js / linkHubBatchQueue.js) leem o produto
-//     dessas fontes e delegam ao hubspot.js, que decide o pipeline/etapa:
-//       * Auxílio e demais produtos comuns → Closer / Em Contato.
-//       * Quinquênio/Quinqueino/Concomitante(s) → Quinquênio / Em contato.
-//       * Isenção de IR Aposentadoria → Isenção de IR / Em Contato.
-//   - Esta camada NÃO decide pipeline. Não adiciona, remove ou infere
-//     produto fora do resolveTeamProduct.
+// ─── FILA DE PROCESSAMENTO ──────────────────────────────────────────
+// Fluxo canônico (worker executa `ticketQueue.js` / `linkHubBatchQueue.js`):
 //
-// ─── Status "coordenador" ──────────────────────────────────────────
-// Status emitido pelo ticketQueue quando o hubspot.js sinaliza bloqueio
-// temporário por prazo mínimo (`requiresCoordinator: true`). Diferente de
-// "bloqueado" (definitivo), o coordenador pode autorizar o reprocessamento
-// com bypass da regra de data via POST /:id/reprocessar-coordenador.
+//   POST /ticket-movimentacao        → status 'pendente'  (na fila)
+//   PATCH /tickets-movimentacao/:id  → status 'pendente'  (se reprocessar_apos_edicao=true)
+//   POST /movimentacoes-linkhub/lotes → status 'pendente'
+//                    ↓
+//   worker: SELECT ... WHERE status_mapeamento='pendente'
+//           FOR UPDATE SKIP LOCKED  (permite N workers concorrentes)
+//                    ↓
+//           status 'processando'  + _worker.processando_desde=NOW()
+//                    ↓
+//           chamada HubSpot (fora da transação)
+//                    ↓
+//           status 'concluido' | 'erro' | 'suporte' | 'aviso' | ...
+//           _worker.processando_desde = NULL
 //
-// ─── Recuperação de tickets travados em "processando" ─────────────
-// Tickets em "processando" cujo `atualizado_em` está além de
-// STALE_PROCESSANDO_MS são considerados órfãos (worker crashou/parou
-// sem liberar o lock). Ambos /reprocessar e /reprocessar-coordenador
-// detectam esse estado e permitem o reenfileiramento, evitando que um
-// único ticket prenda a fila inteira.
+// Casos SEM responsável (`colaborador_destino_nome` vazio) NÃO entram em
+// 'pendente' — worker não tem para quem mover. São mantidos em 'suporte'
+// até que um Coordenador/Supervisor atribua destino via PATCH. O PATCH
+// com `reprocessar_apos_edicao: true` enfileira no mesmo commit.
+//
+// ─── CONCORRÊNCIA ───────────────────────────────────────────────────
+//   • PATCH /reprocessar usam SELECT ... FOR UPDATE — serializa múltiplos
+//     operadores no mesmo ticket (last-write-wins, sem corrupção).
+//   • PATCH rejeita alteração de destino/status quando o worker está
+//     com lease ativo (_worker.processando_desde < STALE_PROCESSANDO_MS).
+//   • `expected_updated_at` opcional (optimistic locking) avisa o usuário
+//     quando outro operador já alterou o caso.
+//   • Worker DEVE usar FOR UPDATE SKIP LOCKED — caso contrário dois
+//     workers pegam o mesmo ticket.
+//
+// ─── PRODUTO E ROTEAMENTO DE PIPELINE ───────────────────────────────
+//   - Produto resolvido por equipe via resolveTeamProduct.
+//   - Gravado em tickets_suporte.metadados.produto E em
+//     tickets_movimentacao_lead.observacao_sales_ops.produto.
+//   - Worker lê dessas fontes e delega ao hubspot.js para decidir
+//     pipeline/etapa. Esta camada NÃO decide pipeline.
+//
+// ─── STATUS "coordenador" ───────────────────────────────────────────
+//   Emitido pelo worker quando hubspot.js sinaliza bloqueio por prazo
+//   mínimo (requiresCoordinator: true). Coordenador autoriza o
+//   reprocessamento com bypass via POST /:id/reprocessar-coordenador,
+//   que grava `bypass_regra_temporal` no metadata.
+//
+// ─── RECUPERAÇÃO DE "processando" ÓRFÃO ─────────────────────────────
+//   Tickets em 'processando' com atualizado_em / _worker.processando_desde
+//   além de STALE_PROCESSANDO_MS são tratados como órfãos (worker morreu
+//   sem liberar o lock). /reprocessar e /reprocessar-coordenador detectam
+//   esse estado e reenfileiram — sem isso, um único ticket preso trava
+//   a fila inteira.
 //
 // Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
 
@@ -79,7 +102,7 @@ const STATUS_REPROCESSAVEIS = new Set([
 ]);
 
 // Tempo (ms) após o qual um ticket em "processando" é considerado órfão.
-// Ajustar aqui caso o worker processe legítimamente em janelas maiores.
+// Ajustar aqui caso o worker processe legitimamente em janelas maiores.
 const STALE_PROCESSANDO_MS = 5 * 60 * 1000;
 
 // Verifica se um ticket em "processando" está órfão (worker travado/crashado
@@ -93,7 +116,24 @@ function ehProcessandoOrfao(statusAtual, atualizadoEm) {
   return (Date.now() - ts) > STALE_PROCESSANDO_MS;
 }
 
-// ── [NOVO] Regras de bloqueio de edição de DADOS por perfil ─────────
+// Verifica se o ticket está com lease ativo (worker pegou e ainda não
+// liberou). Usa _worker.processando_desde como fonte primária; cai para
+// atualizado_em se o metadata for legado/sem _worker.
+function isActivelyProcessing(movement) {
+  if (!movement || movement.status_mapeamento !== 'processando') return false;
+  let since = null;
+  try {
+    const meta = parseJsonObject(movement.observacao_sales_ops);
+    since = meta?._worker?.processando_desde || null;
+  } catch { /* metadata inválido */ }
+  if (!since) since = movement.atualizado_em;
+  if (!since) return true; // sem referência → assume ativo
+  const ts = new Date(since).getTime();
+  if (!Number.isFinite(ts)) return true;
+  return (Date.now() - ts) <= STALE_PROCESSANDO_MS;
+}
+
+// ── Regras de bloqueio de edição de DADOS por perfil ─────────
 // Supervisor só edita dados quando o caso NÃO está em status finais.
 // Assessor_Plus (reportes) só edita dados em reportes ainda "abertos".
 const STATUS_MOVIMENTACAO_BLOQUEIA_EDICAO_SUPERVISOR = new Set([
@@ -258,7 +298,6 @@ router.use(asyncRoute(async (req, res, next) => {
   const actor = await getActiveSupportUser(requesterEmail);
   if (!actor) throw fail(403, 'Perfil sem acesso à página de Suporte.');
 
-  // CORREÇÃO: Usar getEffectiveAccessLevel para reconhecer promoções (ASSESSOR_PLUS)
   const level = accessControl.getEffectiveAccessLevel(actor);
 
   const isJuridico = level === accessControl.LEVELS.JURIDICO;
@@ -271,7 +310,7 @@ router.use(asyncRoute(async (req, res, next) => {
 
   req.supportActor = { ...actor, email: email(actor.email, 'E-mail do usuário', true) };
   req.supportIsJuridico = isJuridico;
-  req.supportLevel = level; // Armazena para uso nos handlers
+  req.supportLevel = level;
   next();
 }));
 
@@ -366,9 +405,6 @@ function historyScope(req) {
   const wantsAdministrative = /\b(coordenador|bloqueado)\b/.test(statusQueryRaw);
 
   // ── ADMIN ────────────────────────────────────────────────────────
-  // CORREÇÃO: admin consultando status administrativos precisa ver todos
-  // os casos, sem filtro por e-mail (a "Visão Coordenador" fica inútil
-  // se o admin só enxergar os próprios tickets).
   if (isAdmin) {
     if (wantsAdministrative) {
       return { email: requestedEmail || null, name: requestedName || null };
@@ -743,6 +779,9 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
       solicitante_nome: actor.nome || actor.email,
     })]);
 
+    // Caso entra em 'suporte' (não em 'pendente') porque não tem destino.
+    // Atribuir responsável via PATCH com reprocessar_apos_edicao=true
+    // move para 'pendente' e o worker pega em ≤5s.
     const movement = await client.query(`
       INSERT INTO app_comissionamento.tickets_movimentacao_lead
       (ticket_id, crm_origem, nome_cliente_informado, telefone_cliente_informado, cpf_cliente_informado, email_cliente_informado,
@@ -752,7 +791,11 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
       RETURNING id_ticket_movimentacao`,
     [base.rows[0].id_ticket, telefone || null, cpf || null, emailInformado || null,
       actor.nome || actor.email, actor.nome_equipe || null, motivo,
-      JSON.stringify({ observacao: motivo })]);
+      JSON.stringify({
+        observacao: motivo,
+        motivo_original: 'Busca Cliente',
+        _worker: { processando_desde: null, tentativas: 0, erro_lease: null, ultima_falha_em: null },
+      })]);
 
     return { id: movement.rows[0].id_ticket_movimentacao };
   });
@@ -760,7 +803,7 @@ router.post('/buscar-cliente/enviar-suporte', asyncRoute(async (req, res) => {
   res.status(201).json({
     success: true,
     id: result.id,
-    message: 'Caso enviado para a esteira Suporte.',
+    message: 'Caso enviado para a esteira Suporte. Atribua um responsável para movimentá-lo.',
   });
 }));
 
@@ -864,9 +907,7 @@ router.post('/ticket-movimentacao', requireNonJuridico, asyncRoute(async (req, r
               'suporte comissionamento', NOW(), NOW(), $3) RETURNING id_ticket`,
     [PLACEHOLDER_UUID, `Movimentação de lead solicitada por ${actor.nome || actor.email}`, JSON.stringify(metadata)]);
 
-    // CORREÇÃO: inclui _worker desde a criação. Sem isso, um worker CRM
-    // que crashar no meio do processamento deixa o ticket em "processando"
-    // sem qualquer metadata para o /reprocessar detectar o órfão.
+    // _worker desde a criação — permite detecção de órfão e recuperação.
     const movement = await client.query(`
       INSERT INTO app_comissionamento.tickets_movimentacao_lead
       (ticket_id, lead_id, crm_origem, crm_lead_id, nome_cliente_informado, sobrenome_cliente_informado,
@@ -1037,6 +1078,12 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
          idempotency_key: key,
          request_hash: requestHash,
          produto,
+         _worker: {
+           processando_desde: null,
+           tentativas: 0,
+           erro_lease: null,
+           ultima_falha_em: null,
+         },
        })]);
 
       itens.push({
@@ -1070,9 +1117,6 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
   const statusParam = text(req.query.status_mapeamento, 'Status', { max: 200 }) || null;
   let statusList = null;
   if (statusParam) {
-    // Normalização defensiva: aceita variações de caixa/espaço vindas do
-    // frontend ou de integrações e valida contra as chaves canônicas do
-    // STATUS_MAP (sempre em minúsculas).
     statusList = statusParam
       .split(',')
       .map(s => s.trim().toLowerCase())
@@ -1256,17 +1300,33 @@ router.post('/ticket-suporte', requireNonJuridico, upload.array('arquivos', 5), 
 }));
 
 // ============================================================
-// PATCH /tickets-movimentacao/:id — Edição manual
+// PATCH /tickets-movimentacao/:id — Edição manual / Alterar responsável
 //
 // Permissões:
-//   • ADMIN          → dados + status + observação
-//   • COORDENADOR+ / ASSESSOR_PLUS → dados + status (restrito a
-//     bloqueado/concluido) + observação
-//   • SUPERVISOR     → SOMENTE dados do cliente, e apenas quando o
-//                      status atual NÃO estiver em
-//                      {concluido, bloqueado, suporte, coordenador}.
-//                      Tentativas de enviar status_mapeamento ou
-//                      observacao_sales_ops → 403.
+//   • ADMIN                        → dados + status + observação + destino
+//   • COORDENADOR+ / ASSESSOR_PLUS → dados + status (bloqueado/concluido)
+//                                    + observação + destino
+//   • SUPERVISOR                   → dados do cliente + destino APENAS.
+//                                    Em status {concluido, bloqueado,
+//                                    coordenador} nada é editável.
+//                                    Em "suporte" apenas destino.
+//
+// Alterar destino (`colaborador_destino_nome`, `colaborador_destino_email`,
+// `equipe_destino_nome`) espelha em tickets_suporte.metadados
+// (`destino_colaborador`, `destino_equipe`, `colaborador_destino_email`)
+// e deriva `produto` da equipe quando ausente — é o que torna casos
+// vindos da Busca Cliente (status "suporte", sem destino, sem produto)
+// movíveis.
+//
+// `reprocessar_apos_edicao: true` reenfileira no MESMO commit:
+//   - status_mapeamento → 'pendente'
+//   - _worker resetado (processando_desde=null, tentativas=0, erro_lease=null)
+//   - worker pega via FOR UPDATE SKIP LOCKED em ≤5s
+//
+// Concorrência:
+//   - `expected_updated_at` (opcional) → 409 se outro operador alterou antes.
+//   - Worker ativo (processando fresco) → 409 para alterações de destino/
+//     status/reprocessar_apos_edicao; dados do cliente e observação passam.
 // ============================================================
 router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
   const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
@@ -1282,7 +1342,10 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
 
   const hasStatus = req.body.status_mapeamento !== undefined;
   const hasObservation = req.body.observacao_sales_ops !== undefined;
+  const reprocessarAposEdicao = req.body.reprocessar_apos_edicao === true;
+  const expectedUpdatedAt = text(req.body.expected_updated_at, 'expected_updated_at', { max: 64 }) || null;
 
+  // ── Campos de cliente ─────────────────────────────────────────────
   const clientFieldNames = [
     'nome_cliente_informado',
     'sobrenome_cliente_informado',
@@ -1311,15 +1374,50 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
     clientUpdates.push({ field, value });
   }
 
-  if (!hasStatus && !hasObservation && clientUpdates.length === 0) {
+  // ── Campos de destino (Alterar responsável) ─────────────────────
+  const hasDestino = (
+    req.body.colaborador_destino_nome !== undefined ||
+    req.body.colaborador_destino_email !== undefined ||
+    req.body.equipe_destino_nome !== undefined
+  );
+
+  let newDestination = null;
+  let produtoResolvido = null;
+  if (hasDestino) {
+    const nome = text(req.body.colaborador_destino_nome, 'Assessor destino', { required: true });
+    const equipe = text(req.body.equipe_destino_nome, 'Equipe destino', { required: true });
+    const emailDestino = email(req.body.colaborador_destino_email, 'E-mail destino', true);
+
+    const access = await validateHubSpotMovementAccess({
+      requesterEmail: req.supportActor.email,
+      destinationName: nome,
+      destinationEmail: emailDestino,
+      destinationTeam: equipe,
+      enforceDestinationSameTeam: isSupervisor,
+    });
+    if (access.error) throw fail(access.status || 403, access.error);
+    if (!access.destination) throw fail(500, 'A validação do destino não retornou o colaborador.');
+
+    newDestination = {
+      nome: text(access.destination.nome, 'Nome do destino validado', { required: true }),
+      email: email(access.destination.email, 'E-mail do destino validado', true),
+      equipe: text(access.destination.nome_equipe || equipe, 'Equipe do destino validado', { required: true }),
+    };
+    produtoResolvido = resolveTeamProduct(
+      newDestination.equipe,
+      req.body.produto // respeita override explícito, se vier
+    );
+  }
+
+  if (!hasStatus && !hasObservation && clientUpdates.length === 0 && !hasDestino) {
     throw fail(400, 'Nenhum campo para atualizar.');
   }
 
-  // Supervisor: apenas dados do cliente.
+  // Supervisor: status e observação continuam proibidos.
   if (isSupervisor && (hasStatus || hasObservation)) {
     throw fail(
       403,
-      'Supervisores só podem editar os dados do cliente. ' +
+      'Supervisores só podem editar os dados do cliente e o responsável. ' +
       'Alteração de status e observação é restrita a Coordenador/Admin.'
     );
   }
@@ -1344,8 +1442,10 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
     : null;
 
   const payload = await transaction(async client => {
+    // FOR UPDATE serializa múltiplos operadores no mesmo ticket.
     const current = await client.query(
-      `SELECT id_ticket_movimentacao, ticket_id, crm_origem, status_mapeamento, observacao_sales_ops
+      `SELECT id_ticket_movimentacao, ticket_id, crm_origem, status_mapeamento,
+              observacao_sales_ops, colaborador_destino_nome, atualizado_em
          FROM app_comissionamento.tickets_movimentacao_lead
         WHERE id_ticket_movimentacao = $1
         FOR UPDATE`,
@@ -1354,15 +1454,63 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
     if (!current.rowCount) throw fail(404, 'Ticket de movimentação não encontrado.');
     const movement = current.rows[0];
 
-    // Supervisor: bloqueia edição em status finais / administrativos.
+    // Optimistic locking (opcional): se cliente enviou expected_updated_at,
+    // valida antes de prosseguir.
+    if (expectedUpdatedAt && movement.atualizado_em) {
+      const isoAtual = new Date(movement.atualizado_em).toISOString();
+      if (expectedUpdatedAt !== isoAtual) {
+        throw fail(
+          409,
+          'Este ticket foi modificado por outro operador enquanto você editava. ' +
+          'Recarregue os dados e tente novamente.'
+        );
+      }
+    }
+
     const statusAtual = String(movement.status_mapeamento || '').trim().toLowerCase();
-    if (isSupervisor && STATUS_MOVIMENTACAO_BLOQUEIA_EDICAO_SUPERVISOR.has(statusAtual)) {
+    const ativamenteProcessando = isActivelyProcessing({
+      status_mapeamento: statusAtual,
+      observacao_sales_ops: movement.observacao_sales_ops,
+      atualizado_em: movement.atualizado_em,
+    });
+
+    // Worker ativo: bloqueia alterações que conflitam com a execução.
+    if (ativamenteProcessando && (hasDestino || hasStatus || reprocessarAposEdicao)) {
       throw fail(
-        403,
-        'Este caso não pode ser editado por supervisores no status atual ' +
-        `("${movement.status_mapeamento}"). ` +
-        'Edição permitida apenas em: pendente, processando, erro, aviso, fora_pipeline, no_pipeline.'
+        409,
+        'Este ticket está em processamento ativo no HubSpot. ' +
+        'Alteração de responsável, status ou reenfileiramento não é permitida enquanto o worker atua. ' +
+        'Tente novamente em alguns instantes.'
       );
+    }
+
+    // Supervisor: bloqueia status {concluido, bloqueado, coordenador}.
+    // Em "suporte" permite APENAS alterar destino — é o caso dos tickets
+    // vindos da Busca Cliente, que nunca tiveram responsável.
+    if (isSupervisor) {
+      if (STATUS_MOVIMENTACAO_BLOQUEIA_EDICAO_SUPERVISOR.has(statusAtual)) {
+        if (statusAtual === 'suporte') {
+          const apenasDestino = hasDestino
+            && clientUpdates.length === 0
+            && !hasStatus && !hasObservation
+            && !reprocessarAposEdicao;
+          if (!apenasDestino) {
+            throw fail(
+              403,
+              'Supervisores só podem alterar o responsável em casos com status "suporte". ' +
+              'Edição de dados do cliente, status ou observação é restrita a Coordenador/Admin. ' +
+              'Para enfileirar o caso após atribuir o responsável, peça a um Coordenador/Admin.'
+            );
+          }
+        } else {
+          throw fail(
+            403,
+            `Este caso não pode ser editado por supervisores no status atual ` +
+            `("${movement.status_mapeamento}"). ` +
+            `Edição permitida apenas em: pendente, processando, erro, aviso, fora_pipeline, no_pipeline.`
+          );
+        }
+      }
     }
 
     if (movement.crm_origem === HUBSPOT_LINK_MOVEMENT && hasStatus && status !== 'concluido') {
@@ -1373,12 +1521,26 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
       );
     }
 
+    // ── Metadata: preserva chaves existentes, atualiza seções ─────
     const previous = movement.observacao_sales_ops;
     const metadata = parseJsonObject(previous);
     if (typeof previous === 'string' && previous.trim() && !Object.keys(metadata).length) {
       metadata.observacao_anterior = previous;
     }
     if (hasObservation) metadata.observacao = observation;
+
+    if (hasDestino) {
+      metadata.ultima_alteracao_destino = {
+        usuario: req.supportActor.email,
+        anterior: movement.colaborador_destino_nome || null,
+        novo: newDestination.nome,
+        equipe_anterior: metadata.destino_equipe || null,
+        equipe_nova: newDestination.equipe,
+        em: new Date().toISOString(),
+      };
+      if (produtoResolvido) metadata.produto = produtoResolvido;
+    }
+
     if (hasStatus) {
       metadata.ultima_alteracao_manual = {
         usuario: req.supportActor.email,
@@ -1400,18 +1562,65 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
       }
     }
 
+    // ── Decisão de status final ──────────────────────────────────
+    // `reprocessar_apos_edicao` reenfileira se o status permite recuperação
+    // e o caso NÃO está em 'processando' ativo (já bloqueado acima).
+    let statusFinal = status;
+    let willResetWorker = false;
+
+    if (!hasStatus && reprocessarAposEdicao && hasDestino) {
+      const statusRecuperavel = ['suporte', 'erro', 'aviso', 'fora_pipeline', 'pendente'].includes(statusAtual);
+      if (statusRecuperavel) {
+        if (statusAtual !== 'pendente') {
+          statusFinal = 'pendente';
+          willResetWorker = true;
+        } else {
+          // Já está em 'pendente' — só garante _worker limpo.
+          willResetWorker = true;
+        }
+      } else if (statusAtual === 'processando') {
+        throw fail(
+          409,
+          'Ticket em processamento ativo não pode ser reenfileirado. ' +
+          'Aguarde a conclusão ou use /reprocessar após o lease expirar.'
+        );
+      } else {
+        throw fail(
+          409,
+          `Ticket em status "${movement.status_mapeamento}" não pode ser reenfileirado automaticamente. ` +
+          `Use /reprocessar (Coordenador+) se necessário.`
+        );
+      }
+    }
+
+    if (willResetWorker) {
+      metadata._worker = {
+        processando_desde: null,
+        tentativas: 0,
+        erro_lease: null,
+        ultima_falha_em: null,
+      };
+      metadata.processado = false;
+    }
+
+    // ── UPDATE tickets_movimentacao_lead ────────────────────────
     const params = [];
     const sets = [];
 
-    if (hasStatus) {
-      params.push(status);
+    if (statusFinal) {
+      params.push(statusFinal);
       sets.push(`status_mapeamento = $${params.length}`);
-      sets.push(`analisado_em = NOW()`);
+      sets.push(`analisado_em = ${statusFinal === 'pendente' ? 'NULL' : 'NOW()'}`);
     }
 
-    if (hasObservation || hasStatus) {
+    if (hasObservation || hasStatus || hasDestino || willResetWorker) {
       params.push(JSON.stringify(metadata));
       sets.push(`observacao_sales_ops = $${params.length}`);
+    }
+
+    if (hasDestino) {
+      params.push(newDestination.nome);
+      sets.push(`colaborador_destino_nome = $${params.length}`);
     }
 
     for (const { field, value } of clientUpdates) {
@@ -1429,6 +1638,26 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
       params
     );
 
+    // ── Espelha destino e produto no metadata do ticket base ────
+    if (hasDestino || produtoResolvido) {
+      const mirror = {};
+      if (hasDestino) {
+        mirror.destino_colaborador = newDestination.nome;
+        mirror.destino_equipe = newDestination.equipe;
+        mirror.colaborador_destino_email = newDestination.email;
+      }
+      if (produtoResolvido) mirror.produto = produtoResolvido;
+
+      await client.query(
+        `UPDATE app_comissionamento.tickets_suporte
+            SET metadados = COALESCE(metadados, '{}'::jsonb) || $2::jsonb,
+                atualizado_em = NOW()
+          WHERE id_ticket = $1`,
+        [movement.ticket_id, JSON.stringify(mirror)]
+      );
+    }
+
+    // ── UPDATE tickets_suporte (status) ─────────────────────────
     const support = await client.query(
       `UPDATE app_comissionamento.tickets_suporte
           SET status = CASE WHEN $2::boolean THEN $3 ELSE status END,
@@ -1438,7 +1667,12 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
               atualizado_em = NOW()
         WHERE id_ticket = $1
         RETURNING titulo, metadados->>'solicitante_email' AS solicitante_email`,
-      [movement.ticket_id, hasStatus, hasStatus ? STATUS_MAP[status] : null, status === 'concluido']
+      [
+        movement.ticket_id,
+        Boolean(statusFinal),
+        statusFinal ? STATUS_MAP[statusFinal] : null,
+        statusFinal === 'concluido',
+      ]
     );
     if (!support.rowCount) throw fail(409, 'Ticket base ausente; atualização cancelada.');
 
@@ -1448,16 +1682,25 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
       destinatario: support.rows[0].solicitante_email,
       mensagem:
         `Sua solicitação "${support.rows[0].titulo}" foi atualizada.\n` +
-        `Status: ${hasStatus ? STATUS_MAP[status] : 'inalterado'}.\n` +
+        `Status: ${statusFinal ? STATUS_MAP[statusFinal] : 'inalterado'}.\n` +
+        `Responsável: ${hasDestino ? newDestination.nome : 'inalterado'}.\n` +
         `Observação: ${hasObservation ? observation : 'inalterada'}`,
       data: new Date().toISOString(),
+      enfileirado: statusFinal === 'pendente',
     };
   });
 
   notify(payload);
   res.json({
     success: true,
-    message: 'Ticket atualizado. Alteração manual de status não comprova execução no HubSpot.',
+    enfileirado: payload.enfileirado,
+    message:
+      'Ticket atualizado.'
+      + (hasDestino ? ' Responsável e metadados sincronizados.' : '')
+      + (payload.enfileirado
+          ? ' Reenfileirado — o worker irá processar em até 5s.'
+          : '')
+      + ' Alteração manual de status não comprova execução no HubSpot.',
   });
 }));
 
@@ -1466,11 +1709,8 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
 //
 // Permissões:
 //   • ADMIN / COORDENADOR → status + observação + dados
-//     (titulo, assunto, descricao)
-//   • ASSESSOR_PLUS       → dados (titulo/assunto/descricao) APENAS.
-//                            Não altera status nem observação.
-//   • SUPERVISOR          → dados (titulo/assunto/descricao) APENAS.
-//                            Não altera status nem observação.
+//   • ASSESSOR_PLUS       → dados APENAS
+//   • SUPERVISOR          → dados APENAS
 //
 // Bloqueio para Supervisor/Assessor_Plus:
 //   Casos com status CONCLUÍDO, BLOQUEADO ou CANCELADO não podem ser editados.
@@ -1498,7 +1738,6 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
     throw fail(400, 'Nenhum campo para atualizar.');
   }
 
-  // Supervisor / Assessor_Plus: apenas dados do reporte (título, assunto, descrição).
   const apenasDados = isSupervisor || isAssessorPlus;
   if (apenasDados && (hasStatus || hasObservation)) {
     throw fail(
@@ -1536,7 +1775,6 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
 
     const ticketAtual = current.rows[0];
 
-    // Bloqueio para Supervisor/Assessor_Plus: status CONCLUÍDO, BLOQUEADO, CANCELADO.
     if (apenasDados) {
       const statusNorm = normalizeAccessValue(ticketAtual.status);
       if (STATUS_REPORTE_BLOQUEIA_EDICAO_DADOS.has(statusNorm)) {
@@ -1547,7 +1785,6 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
       }
     }
 
-    // Atualiza colunas simples (titulo/descricao).
     const sets = [];
     const params = [];
 
@@ -1565,7 +1802,6 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
       sets.push(`concluido_em = CASE WHEN $${params.length} = 'Concluído' THEN NOW() ELSE NULL END`);
     }
 
-    // Metadados: assunto e observacao_sales_ops, preservando demais chaves.
     const metadadosAtual = parseJsonObject(ticketAtual.metadados);
     const metadadosNovos = { ...metadadosAtual };
     if (hasAssunto) metadadosNovos.assunto = assunto;
@@ -1612,9 +1848,10 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
 // POST /tickets-movimentacao/:id/reprocessar
 //
 // Permissões: COORDENADOR+ / ASSESSOR_PLUS / ADMIN.
-// Antes só ADMIN — ampliado para destravar casos sem depender do admin.
+// (Antes só ADMIN — ampliado para destravar sem depender do admin.)
 //
-// Recupera tickets em "processando" órfão (worker travado > 5 min).
+// Recupera tickets em "processando" órfão (worker travado > 5 min) e
+// reenfileira status recuperáveis. Recusa se worker está ativo.
 // ============================================================
 router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res) => {
   const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
@@ -1696,8 +1933,7 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
       ],
     };
 
-    // CORREÇÃO: aplica o reset de _worker para QUALQUER crm_origem.
-    // Antes só Link Hub, mas o CRM agora também carrega _worker.
+    // Reset de _worker para AMBOS os fluxos (CRM e Link Hub).
     novoMetadata._worker = {
       processando_desde: null,
       tentativas: 0,
@@ -1754,9 +1990,10 @@ router.post('/tickets-movimentacao/:id/reprocessar', asyncRoute(async (req, res)
 // ============================================================
 // POST /tickets-movimentacao/:id/reprocessar-coordenador
 //
-// Permite COORDENADOR+ (incluindo ASSESSOR_PLUS) reprocessar casos
-// em status "coordenador" (que exige bypass de regra temporal) ou
-// recuperar tickets em "processando" órfão.
+// Permite COORDENADOR+ (incluindo ASSESSOR_PLUS) reprocessar:
+//   • status "coordenador" → injeta bypass_regra_temporal
+//   • status recuperáveis  → reenfileira normal
+//   • "processando" órfão  → recupera
 // ============================================================
 router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(async (req, res) => {
   const actorLevel = req.supportLevel || accessControl.getEffectiveAccessLevel(req.supportActor);
@@ -1830,9 +2067,9 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
       ],
     };
 
-    // Bypass de regra temporal só faz sentido quando o worker pausou por
-    // prazo mínimo (status "coordenador"). O worker lê esta flag para
-    // liberar a execução.
+    // Bypass de regra temporal: só faz sentido quando o worker pausou
+    // por prazo mínimo (status "coordenador"). O worker lê esta flag
+    // para liberar a execução.
     if (isCoordenadorStatus) {
       novoMetadata.bypass_regra_temporal = {
         autorizado_por: actor.email,
@@ -1841,7 +2078,7 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
       };
     }
 
-    // Reset do lease do worker (aplica a CRM e Link Hub).
+    // Reset de _worker para AMBOS os fluxos.
     novoMetadata._worker = {
       processando_desde: null,
       tentativas: 0,
@@ -1874,7 +2111,6 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
       crmOrigem: movement.crm_origem,
       statusAnterior: movement.status_mapeamento,
       houveEscritaParcial,
-      viaCoordenador: true,
       bypassTemporal: isCoordenadorStatus,
       staleProcessando: stale,
     };

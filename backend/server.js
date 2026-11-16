@@ -24,13 +24,36 @@ import campanhasRoutes from './routes/campanhas.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 import tabulacoesRoutes from './routes/tabulacoes.js';
 
-// ---------- Serviços de background ----------
+// ---------- Serviço de background ----------
 import { startNotificationEngine } from './services/notificationEngine.js';
-import { startTicketQueue } from './services/ticketQueue.js';
-import { startLinkHubBatchQueue } from './services/linkHubBatchQueue.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ═══ NOVO: Warmup / cache / singleflight ═══
+// ═══ CORRIGIDO: workers NÃO são mais importados estaticamente ═══
+// ═══════════════════════════════════════════════════════════════════════════
+// Antes:
+//   import { startTicketQueue } from './services/ticketQueue.js';
+//   import { startLinkHubBatchQueue } from './services/linkHubBatchQueue.js';
+//
+// Motivo da remoção: qualquer erro de parse ESM (export inexistente,
+// syntax error, dependência faltando) em um worker mata o processo
+// ANTES do app.listen rodar, com `código 1` — e o `app.listen` nunca
+// chega a executar. Foi exatamente o que aconteceu quando o
+// ticketQueue.js referenciou uma função que não existia em hubspot.js.
+//
+// Agora:
+//   • Workers são carregados via `import()` dinâmico DEPOIS do listen.
+//   • `try/catch` individual por worker — backend sobe mesmo se falharem.
+//   • `/api/health/worker` expõe o estado de cada worker.
+//   • `WORKER_ENABLED=false` permite rodar backend sozinho (recomendado
+//     em produção: worker em processo separado para isolar falhas).
+//   • `stopWorker()` no shutdown garante que o worker termina seus
+//     processamentos em voo ANTES do pool fechar — sem isso, tickets em
+//     `processando` falham com "Cannot use a pool after calling end"
+//     e ficam travados até o reset de órfão do próximo boot.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══ Warmup / cache / singleflight ═══
 // ═══════════════════════════════════════════════════════════════════════════
 import { setupWarmups, stopPeriodRotation } from './services/bd/warmupSetup.js';
 import { stopAllWarmup, getWarmupStatus } from './services/bd/warmup.js';
@@ -42,12 +65,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ============================================================
-// REDE DE SEGURANÇA GLOBAL — refinada
+// WORKER — estado gerenciado (import dinâmico)
+// ============================================================
+// `workerModule` guarda o namespace do worker após carregar (para
+// `stop()` no shutdown e `status()` no health). `workerLoadPromise`
+// serve para o shutdown aguardar um carregamento em andamento sem
+// race condition.
+let workerModule = null;
+let workerLoadPromise = null;
+let workerLoadError = null;
+
+// ============================================================
+// REDE DE SEGURANÇA GLOBAL
 //
-// [CORRIGIDO] Erros de infraestrutura (pool esgotado, conexão
-// caída, timeout) NÃO matam mais o processo. São logados e seguem.
-// Só erros realmente desconhecidos (bugs) contam para o limiar
-// que encerra o processo. Isso evita crash-loop em picos de carga.
+// Erros de infraestrutura (pool esgotado, conexão caída, timeout)
+// NÃO matam o processo. São logados e seguem. Só erros realmente
+// desconhecidos (bugs) contam para o limiar que encerra o processo.
+// Isso evita crash-loop em picos de carga.
 // ============================================================
 const NON_FATAL_ERROR_PATTERNS = [
   'connection terminated',
@@ -93,8 +127,6 @@ function recordAndMaybeKill(kind, err) {
 process.on('unhandledRejection', (reason) => recordAndMaybeKill('unhandledRejection', reason));
 process.on('uncaughtException', (err) => recordAndMaybeKill('uncaughtException', err));
 
-// Rede de segurança do pool. Se `db.js` já tem `pool.on('error')`,
-// este é redundante, mas inofensivo.
 pool.on('error', (err) => {
   console.warn('[db] conexão ociosa caiu:', err?.message || err);
 });
@@ -105,15 +137,6 @@ const isProduction = process.env.NODE_ENV === 'production';
 
 // ============================================================
 // CACHE EM MEMÓRIA
-// ------------------------------------------------------------
-// Cache simples para rotas que devolvem volumes grandes e
-// estáveis (ex.: /api/metricas-assessores → 178 linhas/usuário).
-// Com N usuários carregando a mesma tela, evita rodar a mesma
-// query N vezes no mesmo intervalo.
-//
-// Para múltiplas instâncias, troque por Redis mantendo a mesma
-// interface (get/set/deleteByPrefix). Para 1 instância, resolve
-// o problema com custo zero.
 // ============================================================
 const _cache = new Map();
 const _cacheMaxSize = Number(process.env.CACHE_MAX_SIZE || 500);
@@ -164,9 +187,10 @@ setInterval(() => {
 // CONFIGURAÇÃO DE COOKIES
 // ============================================================
 const cookieSecure = process.env.COOKIE_SECURE === 'true';
-console.log(`[boot] NODE_ENV       = ${process.env.NODE_ENV || 'development'}`);
-console.log(`[boot] PORT           = ${PORT}`);
-console.log(`[boot] cookieSecure   = ${cookieSecure} (COOKIE_SECURE=${process.env.COOKIE_SECURE || 'unset'})`);
+console.log(`[boot] NODE_ENV              = ${process.env.NODE_ENV || 'development'}`);
+console.log(`[boot] PORT                  = ${PORT}`);
+console.log(`[boot] cookieSecure          = ${cookieSecure} (COOKIE_SECURE=${process.env.COOKIE_SECURE || 'unset'})`);
+console.log(`[boot] WORKER_ENABLED        = ${process.env.WORKER_ENABLED ?? '(default: true)'}`);
 
 // ============================================================
 // TRUST PROXY — necessário para req.secure / req.protocol
@@ -181,7 +205,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
   : ['http://localhost:3008'];
 
-console.log(`[boot] ALLOWED_ORIGINS = ${allowedOrigins.join(', ')}`);
+console.log(`[boot] ALLOWED_ORIGINS       = ${allowedOrigins.join(', ')}`);
 
 function originMatches(origin, pattern) {
   if (pattern === origin) return true;
@@ -300,9 +324,9 @@ app.use(session({
 
 // ============================================================
 // LOG DE AUTENTICAÇÃO
-// [CORRIGIDO] Controlado por env. Em produção, 1 console.log
-// por request × N usuários pode virar gargalo no stdout.
-// Ative com LOG_AUTH_VERBOSE=true apenas ao depurar.
+// Controlado por env. Em produção, 1 console.log por request
+// × N usuários pode virar gargalo no stdout. Ative com
+// LOG_AUTH_VERBOSE=true apenas ao depurar.
 // ============================================================
 const LOG_AUTH_VERBOSE = process.env.LOG_AUTH_VERBOSE === 'true' || !isProduction;
 
@@ -330,8 +354,8 @@ app.use((req, res, next) => {
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/ping', (req, res) => res.json({ pong: true }));
 
-// [NOVO] Health do banco. Use com monitor externo (UptimeRobot,
-// cron curl, etc.) para alertar quando `waiting > 0`.
+// Health do banco. Use com monitor externo (UptimeRobot, cron curl
+// etc.) para alertar quando `waiting > 0`.
 app.get('/api/health/db', async (req, res) => {
   const started = Date.now();
   try {
@@ -368,13 +392,64 @@ app.get('/api/health/db', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ═══ NOVO: health do worker ═══
+// ═══════════════════════════════════════════════════════════════════════════
+// Expõe o status do worker de movimentações (modo_degradado, stats,
+// funções obrigatórias do hubspot.js, etc.) sem precisar consultar o
+// banco. Útil em:
+//   • curl /api/health/worker para triagem rápida
+//   • monitor externo alertar se `running=false` ou `modo_degradado=true`
+//   • dashboard de operação
+//
+// Sem query string: retorna payload completo.
+// Com ?brief=1: retorna só o essencial (running, modo_degradado, stats).
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/health/worker', (req, res) => {
+  const brief = req.query.brief === '1';
+
+  if (process.env.WORKER_ENABLED === 'false') {
+    return res.status(200).json({
+      success: true,
+      loaded: false,
+      motivo: 'WORKER_ENABLED=false (worker rodando em processo separado)',
+    });
+  }
+
+  if (workerLoadError) {
+    return res.status(503).json({
+      success: false,
+      loaded: false,
+      erro_carregamento: workerLoadError.message,
+    });
+  }
+
+  if (!workerModule) {
+    return res.status(503).json({
+      success: false,
+      loaded: false,
+      motivo: 'worker ainda carregando (aguarde poucos segundos após boot)',
+    });
+  }
+
+  try {
+    const st = workerModule.status();
+    const ok = st.running && !st.modo_degradado;
+    const payload = { success: ok, loaded: true, ...st };
+    if (brief) delete payload.exports_hubspot;
+    return res.status(ok ? 200 : 503).json(payload);
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      loaded: true,
+      erro: err?.message || String(err),
+    });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ═══ NOVO: health do warmup / cache / singleflight ═══
 // Retorna 200 quando todos os jobs estão saudáveis (failing=0, degraded=0).
-// Retorna 503 quando algum job está travado ou falhando consecutivamente —
-// ideal para monitor externo alertar.
-//
-// Sem query string: retorna summary + jobs completos (útil em dev).
-// Com ?brief=1: retorna só o summary (útil em produção, evita payload grande).
+// Retorna 503 quando algum job está travado ou falhando consecutivamente.
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/api/health/warmup', (req, res) => {
   try {
@@ -450,9 +525,9 @@ app.use((req, res, next) => {
 // ROTAS PROTEGIDAS
 // ============================================================
 
-// [CORRIGIDO] Cache de 2 min — a rota devolve até 178 linhas por
-// usuário e é chamada a cada navegação. Com 20 usuários
-// simultâneos, o cache elimina ~95% das queries ao banco.
+// Cache de 2 min — a rota devolve até 178 linhas por usuário e é
+// chamada a cada navegação. Com 20 usuários simultâneos, o cache
+// elimina ~95% das queries ao banco.
 app.get('/api/metricas-assessores', async (req, res) => {
   try {
     const { mes, email, colaborador_id } = req.query;
@@ -514,7 +589,7 @@ app.use('/api/suporte', suporteRouter);
 app.use('/api/notificacoes', notificacoesRoutes);
 app.use('/api/tabulacoes', tabulacoesRoutes);
 
-// [CORRIGIDO] Cache de 5 min — chamado a cada navegação
+// Cache de 5 min — chamado a cada navegação
 app.get('/api/admin/months', async (req, res) => {
   try {
     const cacheKey = 'admin-months';
@@ -539,12 +614,9 @@ app.get('/api/admin/months', async (req, res) => {
   }
 });
 
-// [NOVO] Invalidação manual do cache. Chame após operações que
-// mudam dados que alimentam o cache (movimentação de leads,
-// edição de métricas etc.). Exemplo:
-//   fetch('/api/admin/cache/invalidate', {
-//     method: 'POST', headers: {...}, body: JSON.stringify({ prefix: 'metricas' })
-//   });
+// Invalidação manual do cache. Chame após operações que mudam
+// dados que alimentam o cache (movimentação de leads, edição de
+// métricas etc.).
 app.post('/api/admin/cache/invalidate', (req, res) => {
   const prefix = typeof req.body?.prefix === 'string' ? req.body.prefix : '';
   cacheDeleteByPrefix(prefix);
@@ -570,13 +642,32 @@ app.use((err, req, res, next) => {
 
 // ============================================================
 // GRACEFUL SHUTDOWN
-// [CORRIGIDO] Fecha o pool antes de sair. Sem isso, as conexões
-// do processo ficam abertas no PostgreSQL por até
-// `idleTimeoutMillis` (30s+), agravando "too many clients" em
-// cada restart.
+//
+// Ordem importa:
+//   1) Para de aceitar novas conexões HTTP
+//   2) Para o worker — deixa tickets em voo terminarem (ou faz
+//      timeout e devolve para fila via reset de órfão no próximo
+//      boot). SEM isso, o `closePool` quebra tickets em
+//      `processando` com "Cannot use a pool after calling end".
+//   3) Para o warmup scheduler
+//   4) Fecha o pool do PostgreSQL (libera slots imediatamente)
 // ============================================================
 let server = null;
 let shuttingDown = false;
+
+async function stopWorker() {
+  try {
+    if (workerLoadPromise) {
+      try { await workerLoadPromise; } catch { /* já registrado */ }
+    }
+    if (workerModule?.stop) {
+      await workerModule.stop({ timeoutMs: 10_000 });
+      console.log('[shutdown] worker de movimentações parado');
+    }
+  } catch (err) {
+    console.error('[shutdown] erro ao parar worker:', err?.message || err);
+  }
+}
 
 async function shutdown(signal) {
   if (shuttingDown) return;
@@ -594,12 +685,11 @@ async function shutdown(signal) {
     });
   }
 
-  // ═════════════════════════════════════════════════════════════════════════
-  // ═══ NOVO: para o warmup ANTES de fechar o pool ═══
-  // Jobs em voo ainda usam o pool — precisam terminar ou ser abortados
-  // antes de `closePool()`, senão o job falha com
-  // "Cannot use a pool after calling end".
-  // ═════════════════════════════════════════════════════════════════════════
+  // 2) Worker — ANTES de fechar o pool (senão tickets em processando
+  // quebram com "pool after end" e ficam travados até reset de órfão)
+  await stopWorker();
+
+  // 3) Warmup scheduler — também usa o pool
   try {
     stopPeriodRotation();
     await stopAllWarmup({ drainMs: 5_000 });
@@ -608,7 +698,7 @@ async function shutdown(signal) {
     console.error('[shutdown] erro ao parar warmup:', err?.message || err);
   }
 
-  // 3) Fecha o pool do PostgreSQL (libera slots imediatamente)
+  // 4) Fecha o pool do PostgreSQL
   try {
     await closePool();
     console.log('[shutdown] pool do PostgreSQL encerrado');
@@ -621,6 +711,44 @@ async function shutdown(signal) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// ============================================================
+// CARREGAMENTO DINÂMICO DO WORKER
+//
+// Chamado DEPOIS do app.listen. O import é dinâmico para que
+// qualquer erro (parse ESM, export faltando, dependência ausente)
+// fique contido aqui e NÃO derrube o backend.
+// ============================================================
+function startWorkerAsync() {
+  if (process.env.WORKER_ENABLED === 'false') {
+    console.log('[boot] worker desativado (WORKER_ENABLED=false)');
+    return;
+  }
+
+  workerLoadPromise = import('./services/ticketQueue.js')
+    .then((mod) => {
+      workerModule = mod;
+      if (typeof mod.bootstrap === 'function') {
+        mod.bootstrap();
+      } else if (typeof mod.startTicketQueue === 'function') {
+        mod.startTicketQueue();
+      } else if (typeof mod.start === 'function') {
+        mod.start();
+      } else {
+        throw new Error(
+          'ticketQueue.js não expõe bootstrap/startTicketQueue/start. ' +
+          `Exports disponíveis: ${Object.keys(mod).sort().join(', ')}`
+        );
+      }
+      console.log('[boot] worker de movimentações iniciado');
+    })
+    .catch((err) => {
+      workerLoadError = err;
+      console.error('[boot] ⚠️  worker NÃO carregou (backend segue funcionando):', err.message);
+      console.error('       Verifique /api/health/worker para detalhes.');
+      console.error('       Log do worker não aparecerá até restart com WORKER_ENABLED=true.');
+    });
+}
 
 // ============================================================
 // INICIALIZAÇÃO
@@ -642,16 +770,15 @@ process.on('SIGINT', () => shutdown('SIGINT'));
     server = app.listen(PORT, () => {
       console.log(`🚀 Servidor rodando na porta ${PORT} (${process.env.NODE_ENV || 'development'})`);
 
-      // ═══ NOVO: warmup ─── popula cache em background ───
-      // Chama DEPOIS do listen para não atrasar o boot.
-      // A primeira execução de cada job é agendada com 2s + jitter
-      // (definido em warmup.js), espalhando a carga inicial.
+      // Warmup — popula cache em background. Chamado depois do
+      // listen para não atrasar o boot.
       setupWarmups();
       console.log('[boot] warmup scheduler iniciado');
 
       startNotificationEngine();
-      startTicketQueue();
-      startLinkHubBatchQueue();
+
+      // Worker em import dinâmico — falha do worker NÃO derruba a API.
+      startWorkerAsync();
     });
   } catch (error) {
     console.error('❌ Erro ao conectar ao banco:', error);

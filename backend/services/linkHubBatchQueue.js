@@ -1,4 +1,59 @@
 // backend/services/linkHubBatchQueue.js
+//
+// Worker dedicado a movimentações por Link Hub (crm_origem = 'HUBSPOT_LINK').
+//
+// ─── RESPONSABILIDADE ──────────────────────────────────────────────
+// Este worker é a AUTORIDADE do fluxo Link Hub. Ele aplica validações
+// que o worker unificado (services/ticketQueue.js) NÃO tem:
+//
+//   • getActiveSupportUser(sourceOwnerEmail) — valida que o owner atual
+//     do card é colaborador ativo.
+//   • validateHubSpotMovementAccess({ enforceSourceTeam: true,
+//     sourceTeam, sourceUnitId }) — bypass de permissões entre equipes.
+//   • getHubSpotOwnerEmail(context.ownerId) — resolve e-mail do owner.
+//   • Log detalhado de "origem do card" (owner, equipe, unidade, etc.).
+//
+// Por isso, o worker CRM (services/ticketQueue.js) NÃO deve processar
+// tickets Link Hub. A query dele precisa filtrar `crm_origem = 'CRM'`
+// — sem esse filtro, os dois workers brigam por tickets e o Link Hub
+// cai no caminho simplificado, SEM as validações acima.
+//
+// ─── FLUXO ─────────────────────────────────────────────────────────
+//   pendente → processando → concluido | suporte | bloqueado | pendente
+//   (retry)                                      ↑          ↑
+//   N tentativas                      falha           bloqueio
+//   esgotadas → 'suporte'             terminal        definitivo
+//
+// ─── CONCORRÊNCIA ──────────────────────────────────────────────────
+//   • pg_try_advisory_lock($LOCK_KEY) — só 1 worker ativo por vez
+//     (se você rodar N réplicas, apenas uma processa em cada ciclo).
+//   • FOR UPDATE SKIP LOCKED no claim — cada ticket é pego uma vez.
+//   • isProcessing flag — previne ciclos sobrepostos no mesmo processo.
+//
+// ─── LEASE / RECUPERAÇÃO ───────────────────────────────────────────
+//   • Tickets em 'processando' com lease expirado (>15min) voltam
+//     para 'pendente' (ou 'suporte' se já esgotaram tentativas).
+//   • MAX_ATTEMPTS=3 por padrão — evita retry infinito.
+//
+// ─── NOTIFICAÇÃO ───────────────────────────────────────────────────
+//   • Teams: 'suporte' e 'bloqueado' disparam notificação.
+//   • 'pendente' (retry) NÃO notifica — é automático.
+//
+// ─── MODO DE OPERAÇÃO ──────────────────────────────────────────────
+//   A) Embutido no backend (server.js import dinâmico):
+//        import('./services/linkHubBatchQueue.js')
+//          .then(m => m.startLinkHubBatchQueue())
+//          .catch(err => console.error(err.message));
+//
+//   B) Processo separado (RECOMENDADO em produção):
+//        node backend/services/linkHubBatchQueue.js
+//      Com PM2:
+//        pm2 start backend/services/linkHubBatchQueue.js \
+//          --name linkHubQueue --max-memory-restart 512M --time
+//
+//   C) Desativado (se preferir usar só o ticketQueue.js unificado —
+//      mas perde as validações acima):
+//        LINKHUB_ENABLED=false
 
 import { pool } from './bd/db.js';
 import {
@@ -6,17 +61,35 @@ import {
   getDealMovementContext,
   getHubSpotOwnerEmail,
   reassignDealForLinkHubMovement,
-  HUBSPOT_PIPELINE_CLOSER_ID,
   HUBSPOT_PIPELINE_QUINQUENIO_ID,
-  HUBSPOT_PIPELINE_ISENCAO_IR_ID,   
+  HUBSPOT_PIPELINE_ISENCAO_IR_ID,
 } from './hubspot.js';
 import { getActiveSupportUser, validateHubSpotMovementAccess } from './access-control.js';
 import teamsNotificador from '../suporte/teams_notificacoes.js';
 
+// ── Configuração ────────────────────────────────────────────────────
 const LOCK_KEY = 854730;
-const MAX_ATTEMPTS = 3;
-const PROCESSING_LEASE_MINUTES = 15;
+const MAX_ATTEMPTS              = Number(process.env.LINKHUB_MAX_ATTEMPTS     || 3);
+const PROCESSING_LEASE_MINUTES  = Number(process.env.LINKHUB_LEASE_MINUTES    || 15);
+const POLL_INTERVAL_MS          = Number(process.env.LINKHUB_POLL_MS          || 5_000);
+const BATCH_SIZE                = Number(process.env.LINKHUB_BATCH            || 3);
+
 let isProcessing = false;
+let timer = null;
+let running = false;
+
+const stats = {
+  iniciado_em: null,
+  ciclos: 0,
+  processados: 0,
+  concluidos: 0,
+  suportes: 0,
+  bloqueados: 0,
+  retentativas: 0,
+  orfaos_recuperados: 0,
+  ultimo_ciclo_em: null,
+  ultimo_erro: null,
+};
 
 const RULE_LABELS = Object.freeze({
   moved_from_base_leads:
@@ -30,7 +103,7 @@ const RULE_LABELS = Object.freeze({
     'Card posicionado em Isenção de IR Aposentadoria (Em Contato).',
 });
 
-// ALTERADO: de ['erro', 'bloqueado'] para ['suporte', 'bloqueado']
+// Status que disparam notificação no Teams.
 const NOTIFY_STATUSES = new Set(['suporte', 'bloqueado']);
 
 function isRetryableError(error) {
@@ -42,7 +115,7 @@ function isRetryableError(error) {
   );
   if (status) return status === 429 || status >= 500;
   const normalizedMessage = message.toLowerCase();
-  return ![ 
+  return ![
     'não encontrado', 'nao encontrado', 'não permitida', 'nao permitida',
     'inválido', 'invalido', 'outra conta', 'mudou desde', 'mudou após',
     'sem acesso', 'própria equipe', 'propria equipe', 'somente supervisores',
@@ -93,6 +166,10 @@ function describeFailure(error, attempts) {
   const partial = error.partialResult;
   if (partial?.previousPipeline) parts.push(`Pipeline de origem: ${partial.previousPipeline}.`);
   if (partial?.previousStage) parts.push(`Etapa de origem: ${partial.previousStage}.`);
+  // [NOVO] Gravações parciais exigem revisão humana obrigatória.
+  if (error.requiresReconciliation) {
+    parts.push('Gravação parcial no HubSpot — verifique o card manualmente antes de reprocessar.');
+  }
   if (error.blocked) parts.push('Bloqueio definitivo — requer revisão manual.');
   return parts.filter(Boolean).join(' ');
 }
@@ -102,7 +179,7 @@ function resolveRuleLabel(resultData) {
   if (pipelineFinal === String(HUBSPOT_PIPELINE_QUINQUENIO_ID)) {
     return { regra: 'reassigned_in_quinquenio', mensagem: RULE_LABELS.reassigned_in_quinquenio };
   }
-  // [ISENÇÃO IR] Pipeline dedicado da Equipe Leticia Mathias.
+  // [ISENÇÃO IR]
   if (pipelineFinal === String(HUBSPOT_PIPELINE_ISENCAO_IR_ID)) {
     return { regra: 'reassigned_in_isencao_ir', mensagem: RULE_LABELS.reassigned_in_isencao_ir };
   }
@@ -113,12 +190,21 @@ function resolveRuleLabel(resultData) {
 }
 
 async function reclaimStaleLeases(client) {
-  await client.query(
+  // [CORRIGIDO]
+  //   • 'erro' → 'suporte' (consistência com markFailure para falhas terminais)
+  //   • analisado_em = NOW() quando transiciona para 'suporte'
+  //   • erro_lease preenchido para rastreabilidade
+  const result = await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
      SET status_mapeamento = CASE
            WHEN COALESCE((observacao_sales_ops::jsonb #>> '{_worker,tentativas}')::int, 0) >= $2
-             THEN 'erro'
+             THEN 'suporte'
            ELSE 'pendente'
+         END,
+         analisado_em = CASE
+           WHEN COALESCE((observacao_sales_ops::jsonb #>> '{_worker,tentativas}')::int, 0) >= $2
+             THEN NOW()
+           ELSE analisado_em
          END,
          observacao_sales_ops = jsonb_set(
            jsonb_set(
@@ -141,12 +227,24 @@ async function reclaimStaleLeases(client) {
        AND COALESCE(
              (observacao_sales_ops::jsonb #>> '{_worker,processando_desde}')::timestamptz,
              '1970-01-01'::timestamptz
-           ) < NOW() - ($1 * INTERVAL '1 minute')`,
+           ) < NOW() - ($1 * INTERVAL '1 minute')
+     RETURNING id_ticket_movimentacao`,
     [PROCESSING_LEASE_MINUTES, MAX_ATTEMPTS]
   );
+  if (result.rowCount > 0) {
+    stats.orfaos_recuperados += result.rowCount;
+    console.log(
+      `[linkHubBatchQueue] reset de órfãos: ${result.rowCount} ticket(s) devolvido(s) para fila`
+    );
+  }
+  return result.rowCount;
 }
 
 async function claimNextTicket(client) {
+  // [CORRIGIDO] ORDER BY atualizado_em — evita starvation. Tickets em
+  // retry têm atualizado_em recente → vão para o fim da fila, deixando
+  // espaço para tickets novos. Antes usava id_ticket_movimentacao ASC,
+  // que prendia retries antigos na frente da fila.
   const claimed = await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
      SET status_mapeamento = 'processando',
@@ -171,7 +269,7 @@ async function claimNextTicket(client) {
          AND (tml.status_mapeamento IS NULL
               OR tml.status_mapeamento = ''
               OR tml.status_mapeamento = 'pendente')
-       ORDER BY tml.id_ticket_movimentacao
+       ORDER BY tml.atualizado_em ASC NULLS FIRST, tml.id_ticket_movimentacao ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED
      )
@@ -232,6 +330,7 @@ async function markSuccess(client, ticket, resultData) {
     _worker: {
       ...(observacao._worker || {}),
       processando_desde: null,
+      erro_lease: null,
       concluido_em: agora,
     },
   };
@@ -251,16 +350,31 @@ async function markSuccess(client, ticket, resultData) {
      WHERE id_ticket = $1`,
     [ticket.ticket_id]
   );
+
+  stats.concluidos += 1;
 }
 
 async function markFailure(client, ticket, error) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const tentativas = Number(observacao._worker?.tentativas || 0);
-  const retryable = isRetryableError(error) && tentativas < MAX_ATTEMPTS;
-  
-  // ALTERADO: de 'erro' para 'suporte'
-  const statusFinal = error.blocked ? 'bloqueado' : retryable ? 'pendente' : 'suporte';
+
+  // [CORRIGIDO] requiresReconciliation: force 'suporte' mesmo se o
+  // worker ainda tiver tentativas sobrando — gravação parcial no
+  // HubSpot NÃO pode ser retentada automaticamente.
+  const retryable = !error.requiresReconciliation
+    && isRetryableError(error)
+    && tentativas < MAX_ATTEMPTS;
+
+  const statusFinal = error.blocked
+    ? 'bloqueado'
+    : retryable
+      ? 'pendente'
+      : 'suporte';
   const agora = new Date().toISOString();
+
+  if (statusFinal === 'pendente') stats.retentativas += 1;
+  else if (statusFinal === 'bloqueado') stats.bloqueados += 1;
+  else stats.suportes += 1;
 
   const observacaoTexto = describeFailure(error, tentativas);
   const validation = observacao.validacaoCoordenador;
@@ -300,9 +414,8 @@ async function markFailure(client, ticket, error) {
     [JSON.stringify(nova), statusFinal, ticket.id_ticket_movimentacao]
   );
 
-  // ALTERADO: de 'ERRO' para 'Aguardando Suporte'
   const supportStatus =
-    statusFinal === 'bloqueado' ? 'BLOQUEADO'
+    statusFinal === 'bloqueado' ? 'Bloqueado'
     : statusFinal === 'suporte' ? 'Aguardando Suporte'
     : 'Em Andamento';
 
@@ -439,7 +552,7 @@ async function handleLinkHubTicket(ticket, client) {
     destinationEmail: destinationEmail || undefined,
     destinationTeam,
     sourceTeam: sourceOwner?.nome_equipe || null,
-    sourceUnitId: sourceOwner?.unidade_id ?? null,  
+    sourceUnitId: sourceOwner?.unidade_id ?? null,
     enforceSourceTeam: true,
     enforceDestinationSameTeam: true,
   });
@@ -480,6 +593,7 @@ async function processLinkHubQueue() {
 
   let client = null;
   let hasLock = false;
+  let processedThisCycle = 0;
 
   try {
     client = await pool.connect();
@@ -490,9 +604,15 @@ async function processLinkHubQueue() {
 
     await reclaimStaleLeases(client);
 
-    while (true) {
+    // [CORRIGIDO] batch configurável — processa N tickets por ciclo.
+    // Antes era while(true), que podia segurar um ciclo por muito tempo
+    // se houvesse muitos pendentes.
+    while (processedThisCycle < BATCH_SIZE) {
       const ticket = await claimNextTicket(client);
       if (!ticket) break;
+
+      processedThisCycle += 1;
+      stats.processados += 1;
 
       try {
         const resultData = await handleLinkHubTicket(ticket, client);
@@ -509,6 +629,7 @@ async function processLinkHubQueue() {
       }
     }
   } catch (error) {
+    stats.ultimo_erro = { em: new Date().toISOString(), msg: error?.message || String(error) };
     console.error('[linkHubBatchQueue] ciclo interrompido:', error?.message || error);
   } finally {
     if (client && hasLock) {
@@ -535,9 +656,24 @@ async function processLinkHubQueue() {
   }
 }
 
-export function startLinkHubBatchQueue(intervalMs = 5000) {
+// ────────────────────────────────────────────────────────────────────
+// API pública
+// ────────────────────────────────────────────────────────────────────
+
+export function startLinkHubBatchQueue(intervalMs = POLL_INTERVAL_MS) {
+  if (running) {
+    console.warn('[linkHubBatchQueue] startLinkHubBatchQueue ignorado — já rodando');
+    return { stop, status: statusLinkHubBatchQueue };
+  }
+  running = true;
+  stats.iniciado_em = new Date().toISOString();
+
   const safeRun = () => {
+    if (!running) return;
+    stats.ciclos += 1;
+    stats.ultimo_ciclo_em = new Date().toISOString();
     processLinkHubQueue().catch((err) => {
+      stats.ultimo_erro = { em: new Date().toISOString(), msg: err?.message || String(err) };
       console.error(
         '[linkHubBatchQueue] falha não tratada no ciclo:',
         err?.stack || err?.message || err
@@ -545,9 +681,61 @@ export function startLinkHubBatchQueue(intervalMs = 5000) {
     });
   };
 
-  const timer = setInterval(safeRun, intervalMs);
+  timer = setInterval(safeRun, intervalMs);
   if (typeof timer.unref === 'function') timer.unref();
 
-  console.log('🔄 Fila de lotes Link Hub iniciada');
-  return timer;
+  console.log(
+    `🔄 Fila de lotes Link Hub iniciada (poll=${intervalMs}ms, batch=${BATCH_SIZE}, ` +
+    `lease=${PROCESSING_LEASE_MINUTES}min, max_attempts=${MAX_ATTEMPTS})`
+  );
+  return { stop, status: statusLinkHubBatchQueue };
+}
+
+export async function stopLinkHubBatchQueue({ timeoutMs = 15_000 } = {}) {
+  if (!running) return;
+  running = false;
+  if (timer) { clearInterval(timer); timer = null; }
+  const inicio = Date.now();
+  while (isProcessing && (Date.now() - inicio) < timeoutMs) {
+    await new Promise(r => setTimeout(r, 200));
+  }
+  if (isProcessing) {
+    console.warn(`[linkHubBatchQueue] stop timeout após ${timeoutMs}ms — abandonando ciclo em andamento`);
+  }
+  console.log('[linkHubBatchQueue] worker parado');
+}
+
+export function statusLinkHubBatchQueue() {
+  return {
+    running,
+    isProcessing,
+    config: { MAX_ATTEMPTS, PROCESSING_LEASE_MINUTES, POLL_INTERVAL_MS, BATCH_SIZE, LOCK_KEY },
+    stats,
+  };
+}
+
+// ── Entrypoint standalone ───────────────────────────────────────────
+// Permite: `node backend/services/linkHubBatchQueue.js`
+if (import.meta.url === `file://${process.argv[1]}`) {
+  if (process.env.LINKHUB_ENABLED === 'false') {
+    console.log('[linkHubBatchQueue] desativado por LINKHUB_ENABLED=false — saindo');
+    process.exit(0);
+  }
+
+  startLinkHubBatchQueue();
+
+  const shutdown = async (signal) => {
+    console.log(`[linkHubBatchQueue] sinal ${signal} recebido`);
+    await stopLinkHubBatchQueue({ timeoutMs: 10_000 });
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
+  process.on('unhandledRejection', (reason) => {
+    console.error('[linkHubBatchQueue] unhandledRejection:', reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[linkHubBatchQueue] uncaughtException:', err);
+    // Não derruba — próximo ciclo tenta de novo
+  });
 }
