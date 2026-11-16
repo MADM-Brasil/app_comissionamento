@@ -195,7 +195,8 @@ type StatKey = "received" | "worked" | "contact" | "signed" | "gained" | "protoc
 
 type FiltersState = {
   equipe: string; colaborador: string; colaboradorId?: string | number;
-  produto: string; unidadeId?: number;
+  produto?: string;
+  unidadeId?: number;
 };
 
 const STAT_CARDS: { key: StatKey; label: string; sub: string; highlight?: "signed" | "disq" | "gained" }[] = [
@@ -486,6 +487,12 @@ export default function Inte_commerce() {
   const [selectedMonth, setSelectedMonth] = useState(today.slice(0, 7));
   const [comparisonMonth, setComparisonMonth] = useState<string | null>(null);
 
+  // ✅ FIX A: só deixa o reload disparar depois que o FilterBar notificar
+  // a primeira vez (com os valores do localStorage). Sem isso, o 1º fetch
+  // roda com `produto: "Todos"` antes do FilterBar montar, exibindo o
+  // painel sem filtro por ~1s.
+  const [filtersReady, setFiltersReady] = useState(false);
+
   const reportPeriod = useMemo(() => {
     const limits = getInteComerceDateLimits(new Date(`${today}T12:00:00`), 24);
     const [year, month] = selectedMonth.split("-").map(Number);
@@ -507,7 +514,9 @@ export default function Inte_commerce() {
   const [filters, setFilters] = useState<FiltersState>({
     equipe: "todas", colaborador: "todos", produto: "Todos", unidadeId: undefined,
   });
-  const { equipe, colaborador, colaboradorId, produto } = filters;
+
+  const { equipe, colaborador, colaboradorId } = filters;
+  const produto = filters.produto ?? "Todos";
 
   const [grouping, setGrouping] = useState<"person" | "team">("person");
   const [search, setSearch] = useState<string>("");
@@ -535,15 +544,12 @@ export default function Inte_commerce() {
 
   // ═══════════════════════════════════════════════════════════════
   // reloadData — 3 waves para reduzir pico de concorrência no backend
-  // ───────────────────────────────────────────────────────────────
-  // Wave 1: dados principais (bloqueia UI até KPIs aparecerem)
-  // Wave 2: tabela + 3 séries diárias (leads, assinados, ganhos)
-  // Wave 3: 2 séries diárias (protocolados, perdidos) + comparação
   //
-  // Antes: 6 fetch em paralelo → estourava analyticsPool=3
-  // Depois: máximo 3 paralelos em cada wave
-  // ═══════════════════════════════════════════════════════════════
-  const reloadData = useCallback(async () => {
+  // ✅ FIX E: aceita `{ refresh?: boolean }` e propaga para `params`,
+  //   `dailySeriesParams` e `comparisonParams`. Usado pelo botão
+  //   Atualizar (handleRefresh) para forçar bypass de cache.
+  // ───────────────────────────────────────────────────────────────
+  const reloadData = useCallback(async (opts?: { refresh?: boolean }) => {
     if (!reportPeriod.start || !reportPeriod.end) return;
     if (reportPeriod.unavailable) {
       setLoading(false);
@@ -570,24 +576,33 @@ export default function Inte_commerce() {
     setError(null);
     setTableError(null);
 
+    const produtoNormalizado =
+      produto && produto !== "Todos" ? produto : undefined;
+
+    // ✅ FIX E: propaga `refresh` em todos os params
+    const refreshFlag = opts?.refresh === true ? ({ refresh: true as const }) : {};
+
     const params = {
       start: reportPeriod.start, end: reportPeriod.end,
       equipe: equipe !== "todas" ? equipe : undefined,
-      colaboradorId, produto, unidadeId: filters.unidadeId,
+      colaboradorId,
+      produto: produtoNormalizado,
+      unidadeId: filters.unidadeId,
       mode: viewMode,
+      ...refreshFlag,
     };
 
-    // ═══ FIX: mode entra em dailySeriesParams ═══
-    // /ganhos e /protocolados aceitam mode; os outros 3 ignoram.
-    // Sem mode, o AreaChart "Evolução Diária" sempre mostra dados de produção.
+    console.log("[Inte_commerce] reloadData params", params);
+
     const dailySeriesParams = {
       start: reportPeriod.start, end: reportPeriod.end,
       equipe: equipe !== "todas" ? equipe : undefined,
       colaborador: colaborador !== "todos" ? colaborador : undefined,
       colaboradorId,
-      produto: produto !== "Todos" ? produto : undefined,
+      produto: produtoNormalizado,
       granularity: "daily" as const,
       mode: viewMode,
+      ...refreshFlag,
     };
 
     const comparisonParams = comparisonPeriod
@@ -604,7 +619,6 @@ export default function Inte_commerce() {
         allResult = { status: "rejected", reason };
       }
 
-      // Aplica KPIs da wave 1 ANTES das próximas waves → usuário vê rápido
       if (allResult.status === "fulfilled") {
         setDataAsOf(allResult.value.dataAsOf || null);
         setOverview(allResult.value.overview || EMPTY_OVERVIEW);
@@ -669,7 +683,7 @@ export default function Inte_commerce() {
         );
         setDailySeriesError(null);
       } else {
-        console.warn("[Inte_comerce] série diária parcialmente indisponível");
+        console.warn("[Inte_commerce] série diária parcialmente indisponível");
         setDailySeries([]);
         setDailySeriesError("Falha parcial ao carregar a série diária.");
       }
@@ -700,22 +714,55 @@ export default function Inte_commerce() {
     grouping, viewMode, comparisonPeriod,
   ]);
 
-  useEffect(() => { void reloadData(); }, [reloadData]);
+  // ✅ FIX C: só dispara o reload depois do FilterBar notificar (filtersReady).
+  // Antes, este efeito rodava no mount com `produto: "Todos"`, exibindo
+  // o painel sem filtro por ~1s até o FilterBar carregar o localStorage.
+  useEffect(() => {
+    if (!filtersReady) return;
+    void reloadData();
+  }, [filtersReady, reloadData]);
 
-  const handleFilterChange = useCallback((rawFilters: FiltersState) => {
+  // ✅ FIX D: safety net — se o FilterBar quebrar e nunca notificar em 8s,
+  // liberamos o reload para não deixar o painel travado.
+  useEffect(() => {
+    if (filtersReady) return;
+    const t = setTimeout(() => {
+      console.warn("[Inte_commerce] FilterBar não notificou em 8s — liberando reload");
+      setFiltersReady(true);
+    }, 8000);
+    return () => clearTimeout(t);
+  }, [filtersReady]);
+
+  // Diagnóstico de state (visível no console do browser).
+  useEffect(() => {
+    console.log("[Inte_commerce] filters state changed:", filters, "filtersReady=", filtersReady);
+  }, [filters, filtersReady]);
+
+  // ✅ FIX B: marca filtersReady na primeira notificação do FilterBar
+  const handleFilterChange = useCallback((rawFilters: Partial<FiltersState>) => {
+    setFiltersReady(true);
     setFilters((prev) => {
+      const next: FiltersState = {
+        ...prev,
+        ...rawFilters,
+        produto: (rawFilters.produto ?? prev.produto ?? "Todos") || "Todos",
+      };
       if (
-        prev.equipe === rawFilters.equipe &&
-        prev.colaborador === rawFilters.colaborador &&
-        String(prev.colaboradorId ?? "") === String(rawFilters.colaboradorId ?? "") &&
-        prev.produto === rawFilters.produto &&
-        prev.unidadeId === rawFilters.unidadeId
+        prev.equipe === next.equipe &&
+        prev.colaborador === next.colaborador &&
+        String(prev.colaboradorId ?? "") === String(next.colaboradorId ?? "") &&
+        prev.produto === next.produto &&
+        prev.unidadeId === next.unidadeId
       ) return prev;
-      return rawFilters;
+      console.log("[Inte_commerce] filters updated", { from: prev, to: next });
+      return next;
     });
   }, []);
 
-  const handleRefresh = useCallback(async () => { await reloadData(); }, [reloadData]);
+  // ✅ FIX F: botão Atualizar força refresh (bypass de cache L1/L2/Redis)
+  const handleRefresh = useCallback(async () => {
+    await reloadData({ refresh: true });
+  }, [reloadData]);
 
   const aggregates = useMemo(
     () => ({
@@ -882,7 +929,6 @@ export default function Inte_commerce() {
   const comparisonTableRows = useMemo(() => {
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasComp = hasComparison;
-    // Labels de ganhos/protocolados refletem o mode
     const metrics = [
       ["recebidos", viewMode === "producao" ? "Leads recebidos" : "Negócios criados"],
       ["assinados", "Assinados"],
@@ -966,11 +1012,9 @@ export default function Inte_commerce() {
     if (comparisonMonth === value) setComparisonMonth(null);
   };
 
-  // ═══ FIX: modeDescription completo (antes era erro de sintaxe) ═══
   const comparisonSectionTitle = viewMode === "safra" ? "Comparativo de Safra" : "Comparativo de Produção";
   const comparisonSectionDescription = `Total de ${selectedMonth} × mês ${comparisonMonth}.`;
 
-  // ═══ FIX: labels de card com modo explícito para ganhos/protocolados ═══
   const getCardLabel = (card: typeof STAT_CARDS[number]) => {
     if (card.key === "received" && viewMode === "producao") return "Leads recebidos";
     if (card.key === "gained") return viewMode === "safra" ? "Ganhos da safra" : "Ganhos no período";
@@ -1039,7 +1083,6 @@ export default function Inte_commerce() {
     </div>
   );
 
-  // ═══════════════════════════════════════════════════════════
   return (
     <DashboardLayout
       title="Comercial"
@@ -1057,7 +1100,7 @@ export default function Inte_commerce() {
         onClick={() => void handleRefresh()}
         disabled={loading}
         className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-        title="Atualizar dados"
+        title="Atualizar dados (força bypass de cache)"
         aria-label="Atualizar dados"
       >
         <RefreshCw size={13} className={cn(loading && "animate-spin")} />

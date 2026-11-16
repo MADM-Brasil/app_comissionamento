@@ -12,7 +12,26 @@
 //      - outros (401/403/5xx)
 //   4. probeInteComerceEndpoints() continua disponível, agora com
 //      `variant` na tabela (canonical / aliases / post).
-//   5. Contrato público INALTERADO — Inte_comerce.tsx não muda.
+//   5. Contrato público INALTERADO — Inte_commerce.tsx não muda.
+//
+// Correções adicionais (fix de produção):
+//   6. Removida a base '' dos candidatos. A base vazia estava gerando
+//      GET /metrics/inte-comerce/* (sem /api), que o proxy do frontend
+//      devolve com o index.html do SPA (200 + HTML). Isso poluía o log
+//      e mascarava o diagnóstico. Só /api (absoluto via API_BASE ou
+//      relativo) é tentado agora.
+//   7. AbortController com timeout por tentativa (FETCH_TIMEOUT_MS).
+//      Traefik responde 504 em ~60s; o timeout local (120s) só pega
+//      upstream realmente travado (sem resposta nenhuma).
+//   8. Detecção explícita de HTML-SPA: se 200 com content-type não-JSON,
+//      loga o URL que retornou HTML para facilitar rastrear proxy mal
+//      configurado. Continua marcado como `missing`.
+//   9. fetchInteComerceAll NÃO cai para endpoints individuais em 504/5xx.
+//      Se o backend está lento, os individuais também estão — disparar
+//      5 timeouts em paralelo pioraria. Fallback continua só em
+//      isEndpointMissing / isStartEndComplaint.
+//  10. Mensagem de erro final distingue "upstream timeout" de
+//      "router ausente".
 
 import { API_BASE } from '@/lib/api';
 
@@ -127,6 +146,9 @@ export class InteComerceHttpError extends Error {
   get isStartEndComplaint(): boolean {
     return this.status === 400 && START_END_RE.test(this.bodyPreview || this.message);
   }
+  get isUpstreamTimeout(): boolean {
+    return this.status === 504 || this.status === 0;
+  }
 }
 
 const START_END_RE = /start\s*(e|&)\s*end|start.*end.*obrigat|inicio.*fim/i;
@@ -137,6 +159,11 @@ const START_END_RE = /start\s*(e|&)\s*end|start.*end.*obrigat|inicio.*fim/i;
 let resolvedBase: string | null = null;
 let resolvedVariant: 'canonical' | 'aliases' | 'post' | null = null;
 
+// Timeout por tentativa HTTP. Deve ser > timeout do Traefik (~60s) para
+// que o 504 do upstream seja a primeira coisa que recebemos — assim
+// conseguimos propagar o erro real em vez de AbortError genérico.
+const FETCH_TIMEOUT_MS = 120_000;
+
 function getCandidateBases(): string[] {
   const out: string[] = [];
   const push = (b: string) => {
@@ -146,7 +173,10 @@ function getCandidateBases(): string[] {
   if (resolvedBase != null) push(resolvedBase);
   push(API_BASE);
   push('/api');
-  push('');
+  // NUNCA incluir '' — a base vazia mapeia para /metrics/inte-comerce/*
+  // que no proxy do frontend cai no SPA fallback (index.html 200),
+  // poluindo o log e mascarando o diagnóstico. Se /api falhar, é erro
+  // real e deve ser propagado.
   return out;
 }
 
@@ -204,7 +234,6 @@ export function debugInteComerceUrl(path: string, params: InteComerceParams): st
   return buildUrlWithBase(bases[0] ?? '', path, params, variant);
 }
 
-// isDebugEnabled — sem @ts-expect-error
 function isDebugEnabled(): boolean {
   try {
     const meta = import.meta as unknown as {
@@ -235,6 +264,7 @@ interface FetchOutcome {
   variant: InteComerceAttempt['variant'];
   startEndComplaint: boolean;
   missing: boolean;
+  timedOut: boolean;
 }
 
 async function attemptFetch(
@@ -242,26 +272,61 @@ async function attemptFetch(
   variant: InteComerceAttempt['variant'],
   init: RequestInit,
 ): Promise<FetchOutcome> {
-  const base: Omit<FetchOutcome, 'ok'|'data'|'startEndComplaint'|'missing'> = {
+  const base: Omit<
+    FetchOutcome,
+    'ok'|'data'|'startEndComplaint'|'missing'|'timedOut'|'status'|'bodyPreview'
+  > & { status: number; bodyPreview: string } = {
     url, variant, status: 0, contentType: '', bodyPreview: '',
   };
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
   let res: Response;
   try {
-    res = await fetch(url, init);
+    res = await fetch(url, { ...init, signal: controller.signal });
   } catch (e) {
+    clearTimeout(timeoutId);
+    const aborted =
+      (e as { name?: string })?.name === 'AbortError' ||
+      // Alguns browsers usam DOMException com code 20
+      (e as { code?: number })?.code === 20;
+    if (aborted) {
+      if (isDebugEnabled()) {
+        // eslint-disable-next-line no-console
+        console.warn(`[inteComerce] timeout ${FETCH_TIMEOUT_MS}ms em ${url}`);
+      }
+      return {
+        ...base,
+        ok: false, status: 0,
+        bodyPreview: `timeout após ${FETCH_TIMEOUT_MS}ms`,
+        data: null, startEndComplaint: false, missing: false, timedOut: true,
+      };
+    }
     return {
       ...base,
       ok: false, status: 0,
       bodyPreview: e instanceof Error ? e.message : String(e),
-      data: null, startEndComplaint: false, missing: false,
+      data: null, startEndComplaint: false, missing: false, timedOut: false,
     };
   }
+  clearTimeout(timeoutId);
 
   const ct = res.headers.get('content-type') || '';
   const isJson = ct.includes('application/json');
   const text = await res.text().catch(() => '');
   const preview = text.replace(/\s+/g, ' ').trim().slice(0, 200);
+
+  // Diagnóstico: 200 + HTML = SPA fallback. Não deveria acontecer se
+  // as bases estão corretas, mas se acontecer, registra o URL para
+  // facilitar rastrear proxy mal configurado.
+  if (res.ok && !isJson && /<html|<!doctype html/i.test(text)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[inteComerce] resposta HTML (SPA fallback) em ${url} — ` +
+      `verifique se o proxy está roteando /api/* para o backend.`,
+    );
+  }
 
   let data: unknown = null;
   let parsed: any = null;
@@ -277,14 +342,14 @@ async function attemptFetch(
     return {
       ...base,
       ok: true, status: res.status, contentType: ct, bodyPreview: preview,
-      data: parsed.data, startEndComplaint: false, missing: false,
+      data: parsed.data, startEndComplaint: false, missing: false, timedOut: false,
     };
   }
 
   return {
     ...base,
     ok: false, status: res.status, contentType: ct, bodyPreview: preview,
-    data: null, startEndComplaint, missing,
+    data: null, startEndComplaint, missing, timedOut: false,
   };
 }
 
@@ -305,6 +370,7 @@ async function call<T>(path: string, params: InteComerceParams): Promise<T> {
   const attempts: InteComerceAttempt[] = [];
   let sawStartEndComplaint = false;
   let sawMissing = false;
+  let sawTimeout = false;
 
   // Se já sabemos a variante que funcionou, tenta ela primeiro.
   const variantOrder: Array<InteComerceAttempt['variant']> =
@@ -316,9 +382,6 @@ async function call<T>(path: string, params: InteComerceParams): Promise<T> {
 
   for (const base of bases) {
     for (const variant of variantOrder) {
-      // Evita alternar POST/canonical pra cada base — o laço tenta
-      // variantes dentro da mesma base só quando a anterior falhou por
-      // "start/end". Para 404 puro, pula variantes e vai pra próxima base.
       const isPost = variant === 'post';
       const canonicalUrl = buildUrlWithBase(
         base, path, params,
@@ -366,6 +429,12 @@ async function call<T>(path: string, params: InteComerceParams): Promise<T> {
         return outcome.data as T;
       }
 
+      if (outcome.timedOut) {
+        sawTimeout = true;
+        // Timeout do cliente (upstream travado sem resposta). Não adianta
+        // tentar aliases/post — o servidor não está respondendo nada.
+        break;
+      }
       if (outcome.startEndComplaint) {
         sawStartEndComplaint = true;
         // Próxima variante dentro da MESMA base
@@ -399,7 +468,12 @@ async function call<T>(path: string, params: InteComerceParams): Promise<T> {
     .join('\n');
 
   let cause = 'Router /metrics/inte-comerce NÃO está registrado no backend.';
-  if (sawStartEndComplaint) {
+  if (sawTimeout) {
+    cause =
+      `Upstream respondeu com timeout (sem corpo). O backend ou o proxy ` +
+      `(Traefik/Nginx) está levando > ${FETCH_TIMEOUT_MS}ms para responder. ` +
+      `Verifique duração do HubSpot e timeouts do Traefik.`;
+  } else if (sawStartEndComplaint) {
     cause =
       `Router responde, mas rejeita start/end em TODAS as variantes ` +
       `(canonical, aliases, POST). O handler lê req.query/req.body com nomes ` +
@@ -503,9 +577,30 @@ export async function fetchInteComerceAll(
     return await call<InteComerceAll>('/all', p);
   } catch (err) {
     const httpErr = err instanceof InteComerceHttpError ? err : null;
+
+    // Só cai para individuais quando o problema é "rota /all não existe"
+    // ou "router /all rejeita start/end". Em 504/5xx NÃO cai — se o
+    // backend está lento, disparar 5 timeouts em paralelo só piora.
     const shouldFallback =
       !!httpErr && (httpErr.isEndpointMissing || httpErr.isStartEndComplaint);
-    if (!shouldFallback) throw err;
+
+    if (!shouldFallback) {
+      // Melhora a mensagem para o caso específico de upstream timeout,
+      // que é o sintoma de produção mais comum (Traefik corta em 60s).
+      if (httpErr?.isUpstreamTimeout) {
+        const attemptsDetail = (httpErr.attempts ?? [])
+          .map((a) => `  • ${a.variant} ${a.url} → HTTP ${a.status}${a.preview ? `: ${a.preview}` : ''}`)
+          .join('\n');
+        throw new Error(
+          `Upstream timeout em /metrics/inte-comerce/all. ` +
+          `O backend (ou o Traefik) não respondeu em tempo. ` +
+          `Verifique duração do HubSpot (fetchHubSpotOverview) e timeouts do Traefik.\n` +
+          (attemptsDetail ? `Tentativas:\n${attemptsDetail}\n` : '') +
+          `Original: ${httpErr.message}`,
+        );
+      }
+      throw err;
+    }
 
     // eslint-disable-next-line no-console
     console.warn(
