@@ -346,7 +346,7 @@ router.get('/teams', async (req, res, next) => {
     const r = await getInteComerceRawAnalytics(params);
     return ok(res, r.teams);
   } catch (e) { next(e); }
-});
+}); 
 
 router.get('/all', async (req, res, next) => {
   try {

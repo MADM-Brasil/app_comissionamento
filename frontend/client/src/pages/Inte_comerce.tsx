@@ -2,7 +2,7 @@
 import { useState, useMemo, useCallback, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
-import { useAppStore, type Collaborator } from "@/lib/dataStore";
+import { useAppStore, Collaborator } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
 import { getAccessLevel, LEVELS } from "@/lib/accessControl";
 import {
@@ -17,32 +17,19 @@ import {
   CartesianGrid, Tooltip, Legend,
 } from "recharts";
 import {
-  fetchLeadsRecebidos,
-  fetchAssinados,
-  fetchGanhos,
-  fetchProtocolados,
-  fetchPerdidos,
+  fetchLeadsRecebidos, fetchAssinados, fetchGanhos,
+  fetchProtocolados, fetchPerdidos,
 } from "@/lib/api";
 import {
-  getActiveRecommendationsFor,
-  subscribeRecommendations,
-  addRecommendation,
-  removeRecommendation,
-  getRemainingTimeLabel,
-  type TemporaryRecommendation,
-  type RecommendationPriority,
+  getActiveRecommendationsFor, subscribeRecommendations, addRecommendation,
+  removeRecommendation, getRemainingTimeLabel,
+  type TemporaryRecommendation, type RecommendationPriority,
 } from "@/lib/recommendations";
 import {
-  fetchInteComerceAll,
-  fetchInteComerceCollaborators,
-  fetchInteComerceTeams,
-  type InteComerceOverview,
-  type InteComerceStrategic,
-  type InteComerceFunnel,
-  type InteComerceReason,
-  type InteComerceDaily,
-  type InteComerceCollaborator,
-  type InteComerceTeam,
+  fetchInteComerceAll, fetchInteComerceCollaborators, fetchInteComerceTeams,
+  type InteComerceOverview, type InteComerceStrategic, type InteComerceFunnel,
+  type InteComerceReason, type InteComerceDaily,
+  type InteComerceCollaborator, type InteComerceTeam,
 } from "@/lib/inteComerce";
 
 // ───────────────────────────────────────────────────────────
@@ -61,6 +48,12 @@ function isExcludedTeam(team: string | null | undefined): boolean {
   if (!team) return false;
   return EXCLUDED_TEAMS_UPPER.has(String(team).trim().toUpperCase());
 }
+
+const EXCLUDED_CARGOS_FOR_DISPLAY = [
+  "desativado", "assistente", "analista juridico", "gestor de projetos", "analista",
+  "analista de discadora", "supervisor", "coordenador", "salesops", "ceo",
+  "analista de crm", "desenvolvedor", "diretora", "analista de dados", "desenvolvedor make",
+];
 
 // ───────────────────────────────────────────────────────────
 const formatInt = (n: number) => (n || 0).toLocaleString("pt-BR");
@@ -102,8 +95,114 @@ function countWeekdays(start: string, end: string): number {
   }
   return count;
 }
+
+// ─── Normalização / helpers de status e cargo ───
 const normalizeKey = (s: string | undefined | null) =>
   String(s || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+const EXCLUDED_CARGOS_SET = new Set(EXCLUDED_CARGOS_FOR_DISPLAY.map(normalizeKey));
+
+const DEACTIVATED_VALUES = new Set(
+  [
+    "desativado", "desativada", "desativados", "desativadas",
+    "inativo", "inativa", "inativos", "inativas",
+    "desligado", "desligada", "desligados", "desligadas",
+    "inactive", "disabled", "off", "suspenso", "suspensa",
+    "bloqueado", "bloqueada",
+    "inabilitado", "inabilitada", "afastado", "afastada",
+    "desativado(a)", "inativo(a)",
+  ].map(normalizeKey),
+);
+
+const STATUS_LIKE_KEYS = [
+  "status", "status_colaborador", "statusColaborador",
+  "situacao", "situação", "situacao_colaborador", "situacaoColaborador",
+  "estado", "state",
+  "classificacao", "classificacaoOperacional", "classificacao_operacional",
+  "grupo", "canal", "tipo",
+  "situacao_operacional", "status_operacional",
+];
+
+function hasDeactivatedValue(c: any): boolean {
+  if (!c) return false;
+  for (const key of STATUS_LIKE_KEYS) {
+    const n = normalizeKey((c as any)[key]);
+    if (n && DEACTIVATED_VALUES.has(n)) return true;
+  }
+  for (const key of Object.keys(c)) {
+    const kl = key.toLowerCase();
+    if (
+      !kl.includes("status") && !kl.includes("situacao") && !kl.includes("situação") &&
+      !kl.includes("classificacao") && !kl.includes("classificação") &&
+      !kl.includes("canal") && !kl.includes("grupo") &&
+      !kl.includes("tipo") && !kl.includes("estado")
+    ) continue;
+    const v = (c as any)[key];
+    if (typeof v !== "string") continue;
+    const n = normalizeKey(v);
+    if (n && DEACTIVATED_VALUES.has(n)) return true;
+  }
+  return false;
+}
+
+function pickCargo(c: any): string {
+  if (!c) return "";
+  return normalizeKey(
+    c.cargo ?? c.cargoNome ?? c.cargo_nome ??
+    c.role ?? c.funcao ?? c.função ?? c.cargoAtual,
+  );
+}
+
+function pickStatus(c: any): string {
+  if (!c) return "";
+  for (const key of STATUS_LIKE_KEYS) {
+    const v = (c as any)[key];
+    if (v != null && String(v).trim() !== "") return normalizeKey(v);
+  }
+  return "";
+}
+
+function isHiddenCollaborator(c: any): boolean {
+  if (!c) return false;
+  if (hasDeactivatedValue(c)) return true;
+  const cargo = pickCargo(c);
+  if (!cargo) return false;
+  if (DEACTIVATED_VALUES.has(cargo)) return true;
+  if (EXCLUDED_CARGOS_SET.has(cargo)) return true;
+  return false;
+}
+
+// Comparação de nomes tolerante.
+function nameKey(fullName: string | undefined | null): string {
+  return normalizeKey(fullName).replace(/\s+/g, " ").trim();
+}
+function nameKeyShort(fullName: string | undefined | null): string {
+  const parts = nameKey(fullName).split(" ").filter(Boolean);
+  if (parts.length <= 1) return parts[0] || "";
+  return `${parts[0]} ${parts[parts.length - 1]}`;
+}
+function nameKeyFirstTwo(fullName: string | undefined | null): string {
+  const parts = nameKey(fullName).split(" ").filter(Boolean);
+  if (parts.length < 2) return parts[0] || "";
+  return `${parts[0]} ${parts[1]}`;
+}
+const NAME_STOPWORDS = new Set(["de", "da", "do", "dos", "das", "e"]);
+function nameTokens(fullName: string | undefined | null): string[] {
+  return nameKey(fullName)
+    .split(" ")
+    .filter((t) => t.length >= 2 && !NAME_STOPWORDS.has(t));
+}
+function tokensContained(small: string[], big: string[]): boolean {
+  if (small.length === 0 || big.length === 0) return false;
+  const bigSet = new Set(big);
+  return small.every((t) => bigSet.has(t));
+}
+
+const isUnassignedName = (s: string | null | undefined) =>
+  normalizeKey(s).replace(/[()_]/g, " ").replace(/\s+/g, " ").trim() === "sem atribuicao";
+
+const isNoTeam = (s: string | null | undefined) =>
+  normalizeKey(s).replace(/[()_]/g, " ").replace(/\s+/g, " ").trim() === "sem equipe";
 
 function formatMotivo(raw: string | undefined | null): string {
   const s = String(raw ?? "").trim();
@@ -200,7 +299,7 @@ type FiltersState = {
 };
 
 const STAT_CARDS: { key: StatKey; label: string; sub: string; highlight?: "signed" | "disq" | "gained" }[] = [
-  { key: "received",     label: "Leads recebidos", sub: "" },
+  { key: "received",     label: "Negócios Criados", sub: "" },
   { key: "worked",       label: "Trabalhados",      sub: "" },
   { key: "contact",      label: "Em contato",       sub: "" },
   { key: "signed",       label: "Assinados",        sub: "", highlight: "signed" },
@@ -210,7 +309,7 @@ const STAT_CARDS: { key: StatKey; label: string; sub: string; highlight?: "signe
 ];
 
 const FUNNEL_STAGES: { key: keyof InteComerceFunnel; label: string; gradient: string }[] = [
-  { key: "recebidos",     label: "Recebidos",     gradient: "from-[#3972e0] to-[#83adfa]" },
+  { key: "recebidos",     label: "Criados",     gradient: "from-[#3972e0] to-[#83adfa]" },
   { key: "trabalhados",   label: "Trabalhados",   gradient: "from-[#3685e8] to-[#61aee8]" },
   { key: "em_contato",    label: "Em contato",    gradient: "from-[#269cc1] to-[#6ac4d5]" },
   { key: "coleta",        label: "Coleta",        gradient: "from-[#2c9aa8] to-[#5dbec4]" },
@@ -255,7 +354,6 @@ const REC_PRIORITY_STYLES: Record<
   danger:  { border: "border-red-200",   bg: "bg-red-50",   text: "text-red-700",   label: "Urgente",     Icon: AlertTriangle },
 };
 
-// ───────────────────────────────────────────────────────────
 function RecomendacoesCard({ filters, colaboradores }: { filters: FiltersState; colaboradores: Collaborator[]; }) {
   const { currentUser } = useAccessControl();
   const userLevel = getAccessLevel(currentUser?.cargo, currentUser?.status);
@@ -479,18 +577,12 @@ const EvolucaoTooltip = ({ active, payload, label }: any) => {
   return null;
 };
 
-// ───────────────────────────────────────────────────────────
 export default function Inte_commerce() {
   const { collaborators } = useAppStore();
   const [today] = useState(() => new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(new Date()));
   const [viewMode, setViewMode] = useState<"safra" | "producao">("safra");
   const [selectedMonth, setSelectedMonth] = useState(today.slice(0, 7));
   const [comparisonMonth, setComparisonMonth] = useState<string | null>(null);
-
-  // ✅ FIX A: só deixa o reload disparar depois que o FilterBar notificar
-  // a primeira vez (com os valores do localStorage). Sem isso, o 1º fetch
-  // roda com `produto: "Todos"` antes do FilterBar montar, exibindo o
-  // painel sem filtro por ~1s.
   const [filtersReady, setFiltersReady] = useState(false);
 
   const reportPeriod = useMemo(() => {
@@ -542,13 +634,6 @@ export default function Inte_commerce() {
   const [collabTable, setCollabTable] = useState<InteComerceCollaborator[]>([]);
   const [teamTable, setTeamTable] = useState<InteComerceTeam[]>([]);
 
-  // ═══════════════════════════════════════════════════════════════
-  // reloadData — 3 waves para reduzir pico de concorrência no backend
-  //
-  // ✅ FIX E: aceita `{ refresh?: boolean }` e propaga para `params`,
-  //   `dailySeriesParams` e `comparisonParams`. Usado pelo botão
-  //   Atualizar (handleRefresh) para forçar bypass de cache.
-  // ───────────────────────────────────────────────────────────────
   const reloadData = useCallback(async (opts?: { refresh?: boolean }) => {
     if (!reportPeriod.start || !reportPeriod.end) return;
     if (reportPeriod.unavailable) {
@@ -579,7 +664,6 @@ export default function Inte_commerce() {
     const produtoNormalizado =
       produto && produto !== "Todos" ? produto : undefined;
 
-    // ✅ FIX E: propaga `refresh` em todos os params
     const refreshFlag = opts?.refresh === true ? ({ refresh: true as const }) : {};
 
     const params = {
@@ -610,7 +694,6 @@ export default function Inte_commerce() {
       : null;
 
     try {
-      // ═══ WAVE 1: dados principais (bloqueia UI) ═══
       let allResult: { status: "fulfilled"; value: AllResult } | { status: "rejected"; reason: unknown };
       try {
         const mainData = await fetchInteComerceAll(params);
@@ -629,13 +712,12 @@ export default function Inte_commerce() {
         setSafraComparison((allResult.value.safraComparison as any) || null);
         setProductionComparison((allResult.value.productionComparison as any) || null);
       } else {
-        console.error("Erro ao carregar indicadores de Inte_comerce:", allResult.reason);
+        console.error("Erro ao carregar indicadores de Inte_commerce:", allResult.reason);
         setError(
           allResult.reason instanceof Error ? allResult.reason.message : "Falha ao carregar os indicadores.",
         );
       }
 
-      // ═══ WAVE 2: tabela + 3 primeiras séries diárias ═══
       const [tableResult, wave2DailyResult] = await Promise.allSettled([
         grouping === "team"
           ? fetchInteComerceTeams(params).then((data) => ({ kind: "team" as const, data }))
@@ -652,7 +734,7 @@ export default function Inte_commerce() {
         if (tableResult.value.kind === "team") setTeamTable(tableResult.value.data || []);
         else setCollabTable(tableResult.value.data || []);
       } else {
-        console.warn("Tabela de Inte_comerce indisponível:", tableResult.reason);
+        console.warn("Tabela de Inte_commerce indisponível:", tableResult.reason);
         setTableError(
           tableResult.reason instanceof Error ? tableResult.reason.message : "Falha ao carregar a tabela.",
         );
@@ -660,7 +742,6 @@ export default function Inte_commerce() {
         else setCollabTable([]);
       }
 
-      // ═══ WAVE 3: 2 últimas séries + comparação ═══
       const [wave3DailyResult, monthCompareResult] = await Promise.allSettled([
         Promise.all([
           fetchProtocolados(dailySeriesParams),
@@ -714,16 +795,11 @@ export default function Inte_commerce() {
     grouping, viewMode, comparisonPeriod,
   ]);
 
-  // ✅ FIX C: só dispara o reload depois do FilterBar notificar (filtersReady).
-  // Antes, este efeito rodava no mount com `produto: "Todos"`, exibindo
-  // o painel sem filtro por ~1s até o FilterBar carregar o localStorage.
   useEffect(() => {
     if (!filtersReady) return;
     void reloadData();
   }, [filtersReady, reloadData]);
 
-  // ✅ FIX D: safety net — se o FilterBar quebrar e nunca notificar em 8s,
-  // liberamos o reload para não deixar o painel travado.
   useEffect(() => {
     if (filtersReady) return;
     const t = setTimeout(() => {
@@ -733,12 +809,10 @@ export default function Inte_commerce() {
     return () => clearTimeout(t);
   }, [filtersReady]);
 
-  // Diagnóstico de state (visível no console do browser).
   useEffect(() => {
     console.log("[Inte_commerce] filters state changed:", filters, "filtersReady=", filtersReady);
   }, [filters, filtersReady]);
 
-  // ✅ FIX B: marca filtersReady na primeira notificação do FilterBar
   const handleFilterChange = useCallback((rawFilters: Partial<FiltersState>) => {
     setFiltersReady(true);
     setFilters((prev) => {
@@ -759,7 +833,6 @@ export default function Inte_commerce() {
     });
   }, []);
 
-  // ✅ FIX F: botão Atualizar força refresh (bypass de cache L1/L2/Redis)
   const handleRefresh = useCallback(async () => {
     await reloadData({ refresh: true });
   }, [reloadData]);
@@ -815,6 +888,119 @@ export default function Inte_commerce() {
     return map;
   }, [collaborators]);
 
+  const hiddenCollabKeys = useMemo(() => {
+    const ids = new Set<string>();
+    const names = new Set<string>();
+    const namesShort = new Set<string>();
+    const firstTwoNames = new Set<string>();
+    const emails = new Set<string>();
+    const tokenSets: string[][] = [];
+
+    for (const c of collaborators) {
+      if (!isHiddenCollaborator(c)) continue;
+
+      if (c.id != null) ids.add(String(c.id).trim());
+      if (c.email) emails.add(String(c.email).trim().toLowerCase());
+
+      if (c.name) {
+        names.add(nameKey(c.name));
+        namesShort.add(nameKeyShort(c.name));
+        const ft = nameKeyFirstTwo(c.name);
+        if (ft) firstTwoNames.add(ft);
+        const toks = nameTokens(c.name);
+        if (toks.length > 0) tokenSets.push(toks);
+      }
+    }
+    return { ids, names, namesShort, firstTwoNames, emails, tokenSets };
+  }, [collaborators]);
+
+  const hiddenByTeam = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const c of collaborators) {
+      if (!isHiddenCollaborator(c)) continue;
+      const eq = normalizeKey(c.equipeNome);
+      if (!eq) continue;
+      if (!map.has(eq)) map.set(eq, new Set());
+      const set = map.get(eq)!;
+      if (c.name) {
+        set.add(nameKey(c.name));
+        set.add(nameKeyShort(c.name));
+        const ft = nameKeyFirstTwo(c.name);
+        if (ft) set.add(ft);
+      }
+    }
+    return map;
+  }, [collaborators]);
+
+  // Índice rápido de tokens de TODOS os colaboradores ativos do store
+  // (para detectar "órfãos": linha da API que não casa com nenhum do store).
+  const storeTokensIndex = useMemo(() => {
+    const arr: string[][] = [];
+    for (const c of collaborators) {
+      if (!c.name) continue;
+      const toks = nameTokens(c.name);
+      if (toks.length > 0) arr.push(toks);
+    }
+    return arr;
+  }, [collaborators]);
+
+  // Diagnóstico — mostra quem está sendo ocultado no store.
+  useEffect(() => {
+    const desativadosNoStore = collaborators
+      .filter((c) => isHiddenCollaborator(c))
+      .slice(0, 20)
+      .map((c) => ({
+        name: c.name,
+        status: (c as any).status,
+        classificacaoOperacional: (c as any).classificacaoOperacional,
+        cargo: (c as any).cargo,
+        canal: (c as any).canal,
+        grupo: (c as any).grupo,
+        _pickStatus: pickStatus(c),
+        _pickCargo: pickCargo(c),
+        _hasDeactivatedValue: hasDeactivatedValue(c),
+      }));
+    console.debug("[Inte_commerce] desativados no STORE:", {
+      total: hiddenCollabKeys.ids.size,
+      amostra: desativadosNoStore,
+    });
+    if (import.meta.env.DEV && hiddenCollabKeys.tokenSets.length > 0) {
+      console.debug(
+        "[Inte_commerce] amostra de tokens de desativados no STORE:",
+        hiddenCollabKeys.tokenSets.slice(0, 10),
+      );
+    }
+  }, [collaborators, hiddenCollabKeys]);
+
+  // Diagnóstico cruzado: para cada linha da tabela, mostra o que o store tem.
+  useEffect(() => {
+    if (!import.meta.env.DEV || !collabTable.length) return;
+    const storeByName = new Map<string, any[]>();
+    for (const c of collaborators) {
+      const k = nameKey(c.name);
+      if (!storeByName.has(k)) storeByName.set(k, []);
+      storeByName.get(k)!.push(c);
+    }
+    const rows = collabTable.slice(0, 50).map((r) => {
+      const matches = storeByName.get(nameKey(r.colaborador)) || [];
+      return {
+        api: r.colaborador,
+        id: r.colaborador_id,
+        eq: r.equipe_atual,
+        storeMatches: matches.map((m) => ({
+          name: m.name,
+          status: m.status,
+          classificacaoOperacional: m.classificacaoOperacional,
+          cargo: m.cargo,
+          canal: m.canal,
+          grupo: m.grupo,
+          _hidden: isHiddenCollaborator(m),
+        })),
+      };
+    });
+    console.debug("[Inte_commerce][CROSS] API × STORE (primeiros 50):", rows);
+  }, [collabTable, collaborators]);
+
   const teamMetaByKey = useMemo(() => {
     const map = new Map<string, { metaMensalGanhos: number; metaMensalAssinados: number }>();
     for (const c of collaborators) {
@@ -831,7 +1017,11 @@ export default function Inte_commerce() {
   const tableRows = useMemo<Row[]>(() => {
     if (grouping === "team") {
       return teamTable
-        .filter((t) => !isExcludedTeam(t.equipe))
+        .filter((t) =>
+          !isExcludedTeam(t.equipe) &&
+          !isUnassignedName(t.equipe) &&
+          !isNoTeam(t.equipe)
+        )
         .map((t) => {
           const meta = teamMetaByKey.get(normalizeKey(t.equipe));
           return {
@@ -844,15 +1034,73 @@ export default function Inte_commerce() {
           };
         });
     }
+
     return collabTable
-      .filter((c) => !isExcludedTeam(c.equipe_atual))
+      .filter((c) => {
+        const apiName = nameKey(c.colaborador);
+        const apiNameShort = nameKeyShort(c.colaborador);
+        const apiNameFT = nameKeyFirstTwo(c.colaborador);
+        const apiTokens = nameTokens(c.colaborador);
+
+        const eqNorm = normalizeKey(c.equipe_atual);
+        const hiddenNamesInTeam = eqNorm ? hiddenByTeam.get(eqNorm) : undefined;
+
+        const byTokens = hiddenCollabKeys.tokenSets.some((storeTokens) => {
+          if (tokensContained(storeTokens, apiTokens)) return true;
+          if (tokensContained(apiTokens, storeTokens)) return true;
+          const common = storeTokens.filter((t) => apiTokens.includes(t));
+          return common.length >= 2;
+        });
+
+        // Órfão: a linha da API não casa com NENHUM colaborador do store
+        // (nem por nome completo, nem por tokens em qualquer direção).
+        // Cobre owners do HubSpot que não existem mais no banco.
+        const existsInStore = storeTokensIndex.some((storeTokens) => {
+          return (
+            tokensContained(storeTokens, apiTokens) ||
+            tokensContained(apiTokens, storeTokens)
+          );
+        });
+        const orphan = !existsInStore && !isUnassignedName(c.colaborador);
+
+        const drop = {
+          team: isExcludedTeam(c.equipe_atual),
+          unassigned: isUnassignedName(c.colaborador),
+          apiHidden: isHiddenCollaborator(c as any),
+          byId:
+            c.colaborador_id != null &&
+            hiddenCollabKeys.ids.has(String(c.colaborador_id).trim()),
+          byEmail:
+            !!(c as any).colaborador_email &&
+            hiddenCollabKeys.emails.has(
+              String((c as any).colaborador_email).trim().toLowerCase(),
+            ),
+          byName: !!apiName && hiddenCollabKeys.names.has(apiName),
+          byNameShort: !!apiNameShort && hiddenCollabKeys.namesShort.has(apiNameShort),
+          byFirstTwo: !!apiNameFT && hiddenCollabKeys.firstTwoNames.has(apiNameFT),
+          byTeam:
+            !!hiddenNamesInTeam &&
+            (hiddenNamesInTeam.has(apiName) ||
+              hiddenNamesInTeam.has(apiNameShort) ||
+              hiddenNamesInTeam.has(apiNameFT)),
+          byTokens,
+          orphan,
+        };
+        const shouldDrop = Object.values(drop).some(Boolean);
+
+        if (import.meta.env.DEV) {
+          console.debug("[row]", c.colaborador, "id:", c.colaborador_id, "eq:", c.equipe_atual, drop);
+        }
+        return !shouldDrop;
+      })
       .map((c) => {
         const byId = c.colaborador_id != null ? collabMetaByKey.get(`id:${String(c.colaborador_id)}`) : undefined;
         const byName = collabMetaByKey.get(`name:${c.colaborador}`);
         const meta = byId ?? byName;
         return {
           key: c.colaborador_id || c.colaborador,
-          name: c.colaborador, team: c.equipe_atual || "—",
+          name: c.colaborador,
+          team: isNoTeam(c.equipe_atual) ? "—" : (c.equipe_atual || "—"),
           received: c.recebimentos_deal_dia,
           worked: c.trabalhados, contact: c.em_contato,
           collection: c.coleta, signed: c.assinados,
@@ -860,7 +1108,7 @@ export default function Inte_commerce() {
           metaGanhosMensal: meta?.metaMensalGanhos ?? 0,
         };
       });
-  }, [grouping, collabTable, teamTable, collabMetaByKey, teamMetaByKey]);
+  }, [grouping, collabTable, teamTable, collabMetaByKey, teamMetaByKey, hiddenCollabKeys, hiddenByTeam, storeTokensIndex]);
 
   const filteredTable = useMemo(() => {
     const q = search.trim().toLocaleLowerCase("pt-BR");
@@ -930,7 +1178,7 @@ export default function Inte_commerce() {
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasComp = hasComparison;
     const metrics = [
-      ["recebidos", viewMode === "producao" ? "Leads recebidos" : "Leads recebidos"],
+      ["recebidos", viewMode === "producao" ? "Negócios Criados" : "Negócios Criados"],
       ["assinados", "Assinados"],
       ["ganhos", viewMode === "safra" ? "Ganhos (da safra)" : "Ganhos (no período)"],
       ["protocolados", viewMode === "safra" ? "Protocolados (da safra)" : "Protocolados (no período)"],
@@ -952,7 +1200,7 @@ export default function Inte_commerce() {
     if (filteredTable.length === 0) return;
     const header = [
       grouping === "person" ? "Colaborador" : "Equipe",
-      "Equipe", "Recebidos", "Trabalhados", "Em contato",
+      "Equipe", "Criados", "Trabalhados", "Em contato",
       "Coleta", "Assinados", "Ganhos", "Protocolados",
       "Meta mensal (Ganhos)", "% da meta",
     ];
@@ -1016,9 +1264,9 @@ export default function Inte_commerce() {
   const comparisonSectionDescription = `Total de ${selectedMonth} × mês ${comparisonMonth}.`;
 
   const getCardLabel = (card: typeof STAT_CARDS[number]) => {
-    if (card.key === "received" && viewMode === "producao") return "Leads recebidos";
-    if (card.key === "gained") return viewMode === "safra" ? "Ganhos da safra" : "Ganhos no período";
-    if (card.key === "protocolados") return viewMode === "safra" ? "Protocolados da safra" : "Protocolados no período";
+    if (card.key === "received" && viewMode === "producao") return "Negócios Criados";
+    if (card.key === "gained") return viewMode === "safra" ? "Ganhos" : "Ganhos";
+    if (card.key === "protocolados") return viewMode === "safra" ? "Protocolados" : "Protocolados";
     return card.label;
   };
 
@@ -1107,7 +1355,6 @@ export default function Inte_commerce() {
         <span className="hidden sm:inline">Atualizar</span>
       </button>
 
-
       {hasComparison && (
         <details className="card mb-4 mt-3 group">
           <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 [&::-webkit-details-marker]:hidden">
@@ -1187,7 +1434,7 @@ export default function Inte_commerce() {
 
       {loading && (
         <div className="mb-4 flex items-center gap-2 text-xs text-[#64748b]">
-          <Loader2 className="w-4 h-4 animate-spin" /> Carregando dados de Inte_comerce…
+          <Loader2 className="w-4 h-4 animate-spin" /> Carregando dados de Inte_commerce…
         </div>
       )}
 
@@ -1258,20 +1505,20 @@ export default function Inte_commerce() {
             </div>
           </div>
           <div className="card p-5 relative overflow-hidden">
-  <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
-  <h3 className="text-sm font-bold text-[#50627a]">
-    Conversão assinados → ganhos
-  </h3>
-  <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
-    {viewMode === "producao"
-      ? aggregates.signed > 0
-        ? `${((aggregates.gained / aggregates.signed) * 100).toFixed(1).replace(".", ",")}%`
-        : "—"
-      : strategic.pct_assinados_ate_ganhos != null
-        ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
-        : "—"}
-  </div>
-</div>
+            <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
+            <h3 className="text-sm font-bold text-[#50627a]">
+              Conversão assinados → ganhos
+            </h3>
+            <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
+              {viewMode === "producao"
+                ? aggregates.signed > 0
+                  ? `${((aggregates.gained / aggregates.signed) * 100).toFixed(1).replace(".", ",")}%`
+                  : "—"
+                : strategic.pct_assinados_ate_ganhos != null
+                  ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
+                  : "—"}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1515,7 +1762,7 @@ export default function Inte_commerce() {
                 <tr>
                   {[
                     { key: "name", label: grouping === "person" ? "Colaborador" : "Equipe" },
-                    { key: "received", label: "Recebidos" },
+                    { key: "received", label: "Criados" },
                     { key: "worked", label: "Trabalhados" },
                     { key: "contact", label: "Em contato" },
                     { key: "collection", label: "Coleta" },
@@ -1617,17 +1864,17 @@ export default function Inte_commerce() {
       {/* 5) EVOLUÇÃO DIÁRIA (BarChart) */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div><h2 className="text-lg font-bold text-[#0f172a]">Recebidos × Assinados por dia</h2></div>
+          <div><h2 className="text-lg font-bold text-[#0f172a]">Criados × Assinados por dia</h2></div>
         </div>
         <div className="card p-5">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
             {comparisonResult && (
               <div className="flex items-center gap-3 text-[10px] text-slate-500">
                 <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]/50" /> Recebidos (comp.)
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]/50" /> Criados (comp.)
                 </span>
                 <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]" /> Recebidos (ref.)
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]" /> Criados (ref.)
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]/50" /> Assinados (comp.)
@@ -1652,10 +1899,10 @@ export default function Inte_commerce() {
                   labelFormatter={(v) => `Dia ${v}`}
                   formatter={(value: any, name: any) => {
                     const labels: Record<string, string> = {
-                      received: viewMode === "producao" ? "Leads recebidos" : "Recebidos",
+                      received: viewMode === "producao" ? "Negócios Criados" : "Criados",
                       signed: "Assinados",
                       gained: "Ganhos",
-                      receivedComp: viewMode === "producao" ? "Leads recebidos (comparação)" : "Recebidos (comparação)",
+                      receivedComp: viewMode === "producao" ? "Negócios Criados (comparação)" : "Criados (comparação)",
                       signedComp: "Assinados (comparação)",
                     };
                     return [formatInt(Number(value)), labels[name] || name];
@@ -1666,10 +1913,10 @@ export default function Inte_commerce() {
                   wrapperStyle={{ fontSize: 11 }}
                   formatter={(value) => {
                     const labels: Record<string, string> = {
-                      received: viewMode === "producao" ? "Leads recebidos" : "Recebidos",
+                      received: viewMode === "producao" ? "Negócios Criados" : "Criados",
                       signed: "Assinados",
                       gained: "Ganhos",
-                      receivedComp: "Recebidos (comparação)",
+                      receivedComp: "Criados (comparação)",
                       signedComp: "Assinados (comparação)",
                     };
                     return labels[value] || value;

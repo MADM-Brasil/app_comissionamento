@@ -236,7 +236,7 @@ const RULE_MESSAGES = Object.freeze({
   closer_without_owner: 'Card estava sem responsável; atribuído agora.',
   reassigned_by_last_modified_date: 'Card reatribuído com base na última modificação.',
   already_assigned: 'Card já está com o responsável informado; contato alinhado.',
-  ambiguous_deals: 'Contato associado a vários cards. Use o link do card correto.',
+  ambiguous_deals: 'Contato associado a vários cards.',
   fallback_block: 'Card fora dos pipelines permitidos.',
   owned_by_another_recent_activity: 'Card pertence a outro responsável e a última modificação está dentro do prazo mínimo.',
   owner_missing: 'Responsável destino não informado.',

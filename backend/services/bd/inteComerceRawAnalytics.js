@@ -1111,7 +1111,7 @@ async function getRawEvents(params) {
   return cached(`inte-comerce-raw:${rawCacheKey(params)}`, () => loadRawEvents(params), { forceRefresh: params.refresh === true });
 }
 
-function emptyResult() {
+function emptyResult() { 
   return {
     overview: { recebidos:0, trabalhados_proxy:0, em_contato_crm:0, assinados:0, ganhos:0, protocolados:0, desqualificados:0 },
     strategic: { recebidos:0, em_contato:0, assinados:0, assinados_que_ganharam:0, pct_recebidos_ate_assinados:null, pct_recebidos_ate_em_contato:null, pct_assinados_ate_ganhos:null, variacao_safra_sem_maturidade_equivalente:null },

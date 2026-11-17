@@ -182,8 +182,8 @@ router.post('/update-team-metrics', async (req, res) => {
       peso_ganhos,
       bonus,
       data_metrica,
-      meta_gols_assinados,   // ✅ adicionado
-      meta_gols_ganhos,      // ✅ adicionado
+      meta_gols_assinados,
+      meta_gols_ganhos,
     } = req.body;
 
     console.log('🔍 [update-team-metrics] Dados recebidos:', { equipe, periodo, peso_assinados, peso_ganhos, bonus, data_metrica, meta_gols_assinados, meta_gols_ganhos });
