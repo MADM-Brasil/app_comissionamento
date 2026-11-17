@@ -1,27 +1,4 @@
 // backend/services/bd/inteComerceRawAnalytics.js
-//
-// Exports: getInteComerceRawAnalytics, getInteComercePeriodSummary
-//
-// ✅ FIX 12: filtro de produto em desq — stages específicos de pipeline
-//            (Quinquenio/concomitante, Isenção de IR) só entram quando o
-//            produto filtrado bate. Stages genéricos entram sempre.
-// ✅ FIX 13: "sem filtro de produto" (undefined) = todos os produtos → aceita
-//            TODAS as etapas desq.
-// ✅ FIX 14: em_contato em produção usa hubspotSearchTotalGroups sobre
-//            TODAS as etapas "em contato".
-// ✅ FIX 15: hubspotDiagnostics expõe metodo.em_contato + desq_stages
-//            { all, used, excluded }.
-// ✅ FIX 16: buildDateFilter aceita HUBSPOT_DATE_FILTER_MODE
-//            (gte_lt | between | between_num | iso). Default: between.
-// ✅ FIX 17: hubspotSearchTotalGroups loga payload completo em HTTP 400.
-// ✅ FIX 18: *_metodo é setado ANTES do await.
-// ✅ FIX 19: HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER=true → produção usa
-//            dealstage IN (mesma de safra) — emergência.
-// ✅ FIX 20: pct_assinados_ate_ganhos em produção usa:
-//              numerador = deals GANHOS no período com assinatura ATÉ a data
-//                          do ganho (busca em TODO o histórico, não só no mês)
-//              denominador = ganhos no período
-//            Corrige o "0%" causado por filtrar assinaturas ao mês corrente.
 
 import { createHash } from 'node:crypto';
 import db from './db.js';
@@ -31,6 +8,7 @@ import {
   loadGanhosTotal,
   loadProtocoladosTotal,
   loadEmitidosTotal,
+  loadDesqualificadosTotal,
   metricCacheKey,
 } from './metricsLoaders.js';
 
@@ -494,19 +472,16 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     if (stages.emContato.size > 0) {
       const stageList = [...stages.emContato];
       const useDateFilter = isProducao && !HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER;
+
       if (useDateFilter) {
-        result.em_contato_metodo = `or(date_entered)(${stageList.join(',')}) [mode=${HUBSPOT_DATE_FILTER_MODE}]`;
-        console.log('[hubspot] em_contato build', {
-          branch: 'date_entered', dateFilterMode: HUBSPOT_DATE_FILTER_MODE, stageList,
-        });
-        const buildGroup = (stageId) => ({
-          filters: [
-            ...productFilter, ...ownerFilter,
-            ...buildDateFilter(`hs_v2_date_entered_${stageId}`, 'datetime', startMs, endMs),
-          ],
-        });
-        result.em_contato = await hubspotSearchTotalGroups(stageList.map(buildGroup));
+        // PRODUÇÃO: o HubSpot recusa (HTTP 400) a busca por data de entrada na
+        // etapa (hs_date_entered_* e hs_v2_date_entered_*). Não consulta o HubSpot:
+        // em_contato fica null e setFromHs mantém o valor calculado pelo banco
+        // (entrada na etapa "Em contato" dentro do período, sem olhar a criação).
+        result.em_contato = null;
+        result.em_contato_metodo = 'banco (produção: entrada na etapa no período)';
       } else {
+        // SAFRA: criado no período + etapa atual "Em contato".
         result.em_contato_metodo = `created in period + dealstage IN (${stageList.join(',')})`;
         result.em_contato = await hubspotSearchTotal([
           ...creationFilter,
@@ -521,48 +496,15 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
     result.erros.em_contato = e.message;
   }
 
-  const { all: allDesqStages, filtered: desqStages } = selectDesqStages(stages, produto);
-  const excludedDesqStages = allDesqStages.filter((id) => !desqStages.includes(id));
-  result.desq_stages_all = allDesqStages;
-  result.desq_stages_used = desqStages;
-  result.desq_stages_excluded = excludedDesqStages;
-
-  console.log('[hubspot] desq stages', {
-    produto: produto ?? '(todos)',
-    all: allDesqStages,
-    used: desqStages,
-    excluded: excludedDesqStages,
-    dateFilterMode: HUBSPOT_DATE_FILTER_MODE,
-    disableProductionDateFilter: HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER,
-  });
-
-  try {
-    if (desqStages.length > 0) {
-      const useDateFilter = isProducao && !HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER;
-      if (useDateFilter) {
-        result.desqualificados_metodo = `or(date_entered)(${desqStages.join(',')}) [mode=${HUBSPOT_DATE_FILTER_MODE}]`;
-        console.log('[hubspot] desq build', {
-          branch: 'date_entered', dateFilterMode: HUBSPOT_DATE_FILTER_MODE, desqStages,
-        });
-        const buildGroup = (stageId) => ({
-          filters: [
-            ...productFilter, ...ownerFilter,
-            ...buildDateFilter(`hs_v2_date_entered_${stageId}`, 'datetime', startMs, endMs),
-          ],
-        });
-        result.desqualificados = await hubspotSearchTotalGroups(desqStages.map(buildGroup));
-      } else {
-        result.desqualificados_metodo = `etapa_atual(${desqStages.join(',')})`;
-        const filters = [...creationFilter, { propertyName: 'dealstage', operator: 'IN', values: desqStages }];
-        result.desqualificados = await hubspotSearchTotal(filters);
-      }
-    } else {
-      result.erros.desqualificados = `Nenhum stage desq aplicável ao produto "${produto ?? '(todos)'}" (todos excluídos pelo mapa de produto)`;
-    }
-  } catch (e) {
-    result.desqualificados = null;
-    result.erros.desqualificados = e.message;
-  }
+  // ─── DESQUALIFICADOS ───────────────────────────────────────────────────────
+  // Não consulta mais o HubSpot: o total vem do banco (loadDesqualificadosTotal,
+  // por data_movimentacao + data_criacao_deal) via applyCanonicalDesqualificados.
+  // Isso também elimina o HTTP 400 das buscas por hs_v2_date_entered_<etapa>.
+  result.desqualificados = null;
+  result.desqualificados_metodo = 'banco (canonical_metrics)';
+  result.desq_stages_all = [];
+  result.desq_stages_used = [];
+  result.desq_stages_excluded = [];
 
   result.ganhos_metodo = 'canonical_metrics';
 
@@ -732,7 +674,6 @@ function buildAttributions(history, deal, collaborators, now) {
   return { episodes, groups, groupByTime, attributionsByDeal, attributionAt, stageChanges };
 }
 
-// ─── Continuação (2/3) de backend/services/bd/inteComerceRawAnalytics.js ────
 
 async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
   const useViews = PRODUCTION_MODES.has(mode);
@@ -1748,7 +1689,6 @@ function buildComparisonResults(raw, params) {
   return result;
 }
 
-// ─── Continuação (3/3) de backend/services/bd/inteComerceRawAnalytics.js ────
 
 function buildHubspotCards(hs) {
   return {
@@ -1779,11 +1719,76 @@ function hubspotDiagnostics(hs) {
   };
 }
 
+// ─── CANONICAL (banco) ───────────────────────────────────────────────────────
+// ✅ FIX 21: assinados e desqualificados passam a valer em TODOS os blocos
+//            (visão geral, funil, estratégico, produção), com ou sem HubSpot.
+//            Antes, assinados só era corrigido quando o HubSpot estava ativo e
+//            liberado para o filtro — e desqualificados vinha da API do HubSpot.
+//            Agora desqualificados vem do banco: negócios que ENTRARAM na etapa
+//            6659 dentro do período e continuam nela hoje.
+//
+// ⚠️ São `function` de módulo (hoistadas) — nunca `const` declarado depois do
+//    uso, senão estoura "Cannot access '...' before initialization".
+
+async function canonicalTotal(label, loaderFn, params, extra = {}) {
+  let val = null;
+  try {
+    val = await cached(
+      metricCacheKey(label, { ...params, ...extra }),
+      () => loaderFn({
+        start: params.inicio,
+        end: params.fim_exclusivo,
+        equipe: params.equipe,
+        produto: params.produto,
+        ...extra,
+      }),
+      { forceRefresh: params.refresh === true }
+    );
+  } catch (e) {
+    console.error(`[inte-comerce] ${label}: loader falhou (${e?.message || e})`);
+  }
+  if (typeof val === 'number' && Number.isFinite(val)) return val;
+  console.error(
+    `[BACKEND ERROR] [inte-comerce] ${label}: load retornou ${typeof val}, ` +
+    `mantendo valor do builder`
+  );
+  return null;
+}
+
+// assinados: visão geral + funil + estratégico + produção
+async function applyCanonicalAssinados(result, params) {
+  const val = await canonicalTotal('assinados', loadAssinadosTotal, params);
+  if (val == null) return 'banco';
+  result.overview.assinados = val;
+  if (result.funnel) result.funnel.assinados = val;
+  if (result.strategic) result.strategic.assinados = val;
+  const pc = result.productionComparison;
+  if (pc?.month) pc.month.assinados = val;
+  if (pc?.day) pc.day.assinados = val;
+  if (result.strategic && result.overview.recebidos > 0) {
+    result.strategic.pct_recebidos_ate_assinados =
+      Number((100 * val / result.overview.recebidos).toFixed(2));
+  }
+  return 'canonical_metrics';
+}
+
+// desqualificados: visão geral + saída do funil
+async function applyCanonicalDesqualificados(result, params) {
+  const val = await canonicalTotal('desqualificados', loadDesqualificadosTotal, params, { mode: params.mode });
+  if (val == null) return 'banco';
+  result.overview.desqualificados = val;
+  if (result.funnel) result.funnel.desqualificados_saida = val;
+  return 'canonical_metrics';
+}
+
 async function mergeHubSpot(result, hs, params) {
   if (!hs.ok) {
+    const fonte = {};
+    fonte.assinados       = await applyCanonicalAssinados(result, params);
+    fonte.desqualificados = await applyCanonicalDesqualificados(result, params);
     result.hubspot = {
       ativo: false,
-      fonte: {},
+      fonte,
       produto_aplicado: params.produto ?? null,
       motivo: hs.motivo || 'HubSpot indisponível',
     };
@@ -1801,7 +1806,6 @@ async function mergeHubSpot(result, hs, params) {
   };
   setFromHs('recebidos',       hs.criados);
   setFromHs('em_contato_crm',  hs.em_contato);
-  setFromHs('desqualificados', hs.desqualificados);
   fonte.assinados          = 'canonical_metrics';
   fonte.ganhos             = 'canonical_metrics';
   fonte.protocolados       = 'canonical_metrics';
@@ -1851,10 +1855,15 @@ async function mergeHubSpot(result, hs, params) {
     return 'banco';
   };
 
-  fonte.assinados    = await applyCanonical('assinados',    loadAssinadosTotal,    result.overview, 'assinados');
+  fonte.assinados    = await applyCanonicalAssinados(result, params);
   fonte.ganhos       = await applyCanonical('ganhos',       loadGanhosTotal,       result.overview, 'ganhos',       { mode: params.mode });
   fonte.protocolados = await applyCanonical('protocolados', loadProtocoladosTotal, result.overview, 'protocolados', { mode: params.mode });
   fonte.emitidos     = await applyCanonical('emitidos',     loadEmitidosTotal,     result.funnel,   'emitidos');
+
+  // ✅ FIX 21: desqualificados vem do banco (etapa 6659), não da API do HubSpot.
+  //    Precisou ficar DEPOIS da definição de `applyCanonical` (const) e depois
+  //    de `setFromHs('desqualificados', ...)`, para o banco ter a última palavra.
+  fonte.desqualificados = await applyCanonicalDesqualificados(result, params);
 
   // ✅ Recalcula estratégicos após canonical_metrics (pode ter alterado assinados/ganhos)
   result.strategic.recebidos  = result.overview.recebidos;
@@ -1909,17 +1918,23 @@ export async function getInteComerceRawAnalytics(params) {
       });
       await mergeHubSpot(result, hs, params);
     } else {
+      const fonte = {};
+      fonte.assinados       = await applyCanonicalAssinados(result, params);
+      fonte.desqualificados = await applyCanonicalDesqualificados(result, params);
       result.hubspot = {
         ativo: false,
-        fonte: {},
+        fonte,
         produto_aplicado: params.produto ?? null,
         motivo: gate.motivo,
       };
     }
   } else {
+    const fonte = {};
+    fonte.assinados       = await applyCanonicalAssinados(result, params);
+    fonte.desqualificados = await applyCanonicalDesqualificados(result, params);
     result.hubspot = {
       ativo: false,
-      fonte: {},
+      fonte,
       produto_aplicado: params.produto ?? null,
       motivo: 'HUBSPOT_ACCESS_TOKEN não configurado',
     };
@@ -1939,6 +1954,9 @@ export async function getInteComercePeriodSummary(params) {
   } else {
     full = buildOperationalResults(raw, params);
   }
+
+  // ✅ FIX 21: o resumo usa o mesmo total de assinados do resto do relatório
+  await applyCanonicalAssinados(full, params);
 
   const month = full.productionComparison?.month
     ? {

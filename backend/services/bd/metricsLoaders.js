@@ -26,7 +26,8 @@
 // Consumidores que só precisam do agregado do período (ex.:
 // inteComerceRawAnalytics.mergeHubSpot) devem usar os wrappers
 // `loadAssinadosTotal`, `loadEmitidosTotal`, `loadGanhosTotal`,
-// `loadProtocoladosTotal` — que somam `total` e devolvem `number` (ou null).
+// `loadProtocoladosTotal`, `loadDesqualificadosTotal` — que somam `total` e
+// devolvem `number` (ou null).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import db, { analyticsQuery } from './db.js';
@@ -529,6 +530,79 @@ export async function loadPerdidos({ start, end, equipe, produto, granularity })
 // Wrapper escalar — devolve `number` (soma `total` do período inteiro)
 export async function loadPerdidosTotal(params = {}) {
   const rows = await loadPerdidos({ ...params, granularity: null });
+  return sumTotal(rows);
+}
+
+// ─── DESQUALIFICADOS (banco, com mode safra/produção) ─────────────────────────────────────────────────
+// Negócios que ENTRARAM na etapa 6659 dentro do período E continuam nela hoje.
+//   • h.etapa_nova_id = 6659  → a movimentação que levou o negócio à etapa
+//   • d.etapa_id      = 6659  → o negócio ainda está desqualificado hoje
+//   • DISTINCT ON (d.deal_id) + ORDER BY data_movimentacao DESC
+//       → a entrada MAIS RECENTE de cada negócio, uma linha por deal
+//   • responsável/equipe: COALESCE(d.closer_id, d.responsavel_id), o mesmo
+//       critério de leads-recebidos
+export const DESQ_ETAPA_ID = 6659;
+
+export async function loadDesqualificados({ start, end, equipe, produto, granularity, mode }) {
+  const gran = mapGranularity(granularity);
+  // SAFRA    → também exige que o negócio tenha sido CRIADO no período.
+  // PRODUÇÃO → só a entrada na etapa 6659 no período (ignora a criação).
+  const isSafra = String(mode || '').toLowerCase() === 'safra';
+  const safraClause = isSafra
+    ? `
+      AND d.data_criacao_deal::date >= $1::date
+      AND d.data_criacao_deal::date <  $2::date`
+    : '';
+
+  let base = `
+    SELECT DISTINCT ON (d.deal_id)
+      d.deal_id,
+      COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
+      COALESCE(c.nome_equipe, '') AS equipe,
+      h.data_movimentacao::date AS data_entrada_etapa
+    FROM core.historico_movimentacoes h
+    INNER JOIN core.deals d ON d.deal_id = h.deal_id
+    LEFT JOIN core.colaboradores c
+      ON c.colaborador_id = COALESCE(d.closer_id, d.responsavel_id)
+    LEFT JOIN core.produtos pr ON pr.produto_id = d.produto_id
+    WHERE h.etapa_nova_id = ${DESQ_ETAPA_ID}
+      AND d.etapa_id = ${DESQ_ETAPA_ID}
+      AND h.data_movimentacao::date >= $1::date
+      AND h.data_movimentacao::date <  $2::date${safraClause}
+  `;
+
+  const params = [start, end];
+  let idx = 3;
+  if (equipe && equipe !== 'todas') {
+    base += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
+    params.push(equipe); idx++;
+  }
+  const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+  base += prod.clause;
+  params.push(...prod.params);
+  base += ` ORDER BY d.deal_id, h.data_movimentacao DESC`;
+
+  const query = gran
+    ? `SELECT colaborador, equipe,
+              (DATE_TRUNC('${gran}', data_entrada_etapa))::date AS periodo,
+              COUNT(*)::int AS total
+        FROM (${base}) q
+        GROUP BY colaborador, equipe, (DATE_TRUNC('${gran}', data_entrada_etapa))::date
+        ORDER BY periodo, colaborador`
+    : `SELECT colaborador, equipe, COUNT(*)::int AS total
+        FROM (${base}) q
+        GROUP BY colaborador, equipe
+        ORDER BY colaborador`;
+
+  const result = await analyticsQuery(query, params);
+  const label = `desqualificados:${gran || 'agg'}`;
+  warnIfLarge(result.rows, label);
+  return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
+}
+
+// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
+export async function loadDesqualificadosTotal(params = {}) {
+  const rows = await loadDesqualificados({ ...params, granularity: null });
   return sumTotal(rows);
 }
 

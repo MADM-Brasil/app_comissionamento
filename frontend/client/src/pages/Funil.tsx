@@ -596,15 +596,6 @@ export default function Funil() {
         onRefresh={handleRefresh}
       />
 
-      {/* ═══ NOVO: badge "Modo Produção" ═══ */}
-      <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
-        <span className="font-semibold">📊 Modo Produção</span>
-        <span className="text-slate-500">
-          Métricas do período selecionado (assinaturas, ganhos, protocolos),
-          independente de quando o deal foi criado.
-        </span>
-      </div>
-
       {loading && (
         <div className="flex justify-center items-center py-4">
           <Loader2 className="w-5 h-5 animate-spin text-[#09175b]" />
