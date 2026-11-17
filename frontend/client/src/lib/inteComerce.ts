@@ -1,37 +1,4 @@
 // src/lib/inteComerce.ts
-//
-// Correções desta versão:
-//   1. GET canônico → GET com aliases (inicio/fim_exclusivo/data_inicio/data_fim)
-//      → POST com body. Resolve o bug de backend que lê nomes errados
-//      de req.query (o serviço internamente usa inicio/fim_exclusivo).
-//   2. /all ausente (404) → fallback para /overview + /strategic + /funnel
-//      + /disqualify-reasons + /daily, cada um com a mesma cadeia de fallback.
-//   3. Mensagem de erro final separa os 3 cenários:
-//      - router não montado (todos 404/HTML)
-//      - rota existe mas rejeita start/end (400 start/end)
-//      - outros (401/403/5xx)
-//   4. probeInteComerceEndpoints() continua disponível, agora com
-//      `variant` na tabela (canonical / aliases / post).
-//   5. Contrato público INALTERADO — Inte_commerce.tsx não muda.
-//
-// Correções adicionais (fix de produção):
-//   6. Removida a base '' dos candidatos. A base vazia estava gerando
-//      GET /metrics/inte-comerce/* (sem /api), que o proxy do frontend
-//      devolve com o index.html do SPA (200 + HTML). Isso poluía o log
-//      e mascarava o diagnóstico. Só /api (absoluto via API_BASE ou
-//      relativo) é tentado agora.
-//   7. AbortController com timeout por tentativa (FETCH_TIMEOUT_MS).
-//      Traefik responde 504 em ~60s; o timeout local (120s) só pega
-//      upstream realmente travado (sem resposta nenhuma).
-//   8. Detecção explícita de HTML-SPA: se 200 com content-type não-JSON,
-//      loga o URL que retornou HTML para facilitar rastrear proxy mal
-//      configurado. Continua marcado como `missing`.
-//   9. fetchInteComerceAll NÃO cai para endpoints individuais em 504/5xx.
-//      Se o backend está lento, os individuais também estão — disparar
-//      5 timeouts em paralelo pioraria. Fallback continua só em
-//      isEndpointMissing / isStartEndComplaint.
-//  10. Mensagem de erro final distingue "upstream timeout" de
-//      "router ausente".
 
 import { API_BASE } from '@/lib/api';
 
@@ -65,7 +32,7 @@ export interface InteComerceStrategic {
 
 export interface InteComerceFunnel {
   recebidos: number; trabalhados: number; em_contato: number;
-  coleta: number; contrato: number; emitidos: number; assinados: number;
+  coleta: number; validacao_supervisor: number; contrato: number; emitidos: number; assinados: number;
   ganhos: number; protocolados: number; desqualificados_saida: number;
   coleta_sem_contato_observado: number;
 }
@@ -77,14 +44,14 @@ export interface InteComerceReason {
 export interface InteComerceCollaborator {
   colaborador_id: string; colaborador: string; equipe_atual: string;
   recebimentos_deal_dia: number; trabalhados: number; em_contato: number;
-  coleta: number; assinados: number; ganhos: number; protocolados: number;
+  coleta: number; validacao_supervisor?: number; emitidos?: number; assinados: number; ganhos: number; protocolados: number;
   pct_olos_pendente: number | null; pct_hubspot_pendente: number | null;
 }
 
 export interface InteComerceTeam {
   equipe: string; recebimentos_assessor_deal_dia: number;
   deals_unicos_da_equipe: number; trabalhados: number; em_contato: number;
-  coleta: number; assinados: number; ganhos: number; protocolados: number;
+  coleta: number; validacao_supervisor?: number; emitidos?: number; assinados: number; ganhos: number; protocolados: number;
 }
 
 export interface InteComerceDaily {

@@ -1045,3 +1045,215 @@ export async function loadDemanda({ tipo, equipe, produto }) {
     { ttlMs: 300_000, staleMs: 1_800_000 } // 5min / 30min
   );
 }
+
+
+// ─── QUANTIDADE DE CARDS POR ETAPA (Recebidos / Em contato / Coleta / Validação Sup) ───
+// Fonte única para as quantidades de cards nas etapas do funil comercial.
+// Replica a consulta SQL de referência:
+//   • recebidos            → core.deals com data_distribuicao_comercial no período
+//   • em_contato           → deals que ENTRARAM em "Em contato" no período (histórico)
+//   • coleta               → deals que ENTRARAM em "Coleta de documentação" no período
+//   • validacao_supervisor → deals que ENTRARAM em "Validação Sup" no período
+//   • responsável/equipe: COALESCE(d.closer_id, d.responsavel_id) → core.colaboradores
+//   • mode=safra → também exige d.data_criacao_deal dentro do período (linhas "(Safra)")
+//   • COUNT(DISTINCT deal_id) por colaborador/equipe e por etapa
+export const STAGE_COUNT_ETAPAS = Object.freeze({
+  em_contato:           Object.freeze([6650, 8594, 14105]),
+  coleta:               Object.freeze([8595, 6651, 14106]),
+  validacao_supervisor: Object.freeze([14108, 6656, 14023, 128366]),
+});
+
+function etapaList(ids) {
+  return ids.map((n) => {
+    const v = Number(n);
+    if (!Number.isInteger(v) || v <= 0) throw new Error(`etapa_id inválido: ${n}`);
+    return v;
+  }).join(', ');
+}
+
+/**
+ * @param {object}   p
+ * @param {string}   p.start          data inicial (inclusiva, YYYY-MM-DD)
+ * @param {string}   p.end            data final (exclusiva, YYYY-MM-DD)
+ * @param {string}  [p.equipe]        filtra por c.nome_equipe
+ * @param {string}  [p.produto]       filtra por core.produtos.nome_produto
+ * @param {string}  [p.mode]          'safra' aplica o filtro de criação do deal
+ * @param {string[]|null} [p.colaboradorIds] null = conta inteira; [] = escopo vazio
+ * @returns {Promise<Array<{colaborador_id:string|null, colaborador:string, equipe:string,
+ *   recebidos:number, em_contato:number, coleta:number, validacao_supervisor:number}>>}
+ */
+export async function loadStageCounts({ start, end, equipe, produto, mode, colaboradorIds = null }) {
+  if (Array.isArray(colaboradorIds) && colaboradorIds.length === 0) return [];
+
+  const isSafra = String(mode || '').toLowerCase() === 'safra';
+  const params = [start, end];
+  let idx = 3;
+  let filters = '';
+
+  if (isSafra) {
+    filters += `
+      AND d.data_criacao_deal IS NOT NULL
+      AND d.data_criacao_deal::date >= $1::date
+      AND d.data_criacao_deal::date <  $2::date`;
+  }
+  if (equipe && equipe !== 'todas') {
+    filters += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
+    params.push(equipe); idx++;
+  }
+  if (Array.isArray(colaboradorIds)) {
+    filters += ` AND COALESCE(d.closer_id, d.responsavel_id)::text = ANY($${idx}::text[])`;
+    params.push(colaboradorIds.map(String)); idx++;
+  }
+  const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+  filters += prod.clause;
+  params.push(...prod.params);
+
+  const joins = `
+      LEFT JOIN core.colaboradores c
+        ON c.colaborador_id = COALESCE(d.closer_id, d.responsavel_id)
+      LEFT JOIN core.produtos pr
+        ON pr.produto_id = d.produto_id`;
+  const cols = `
+        d.deal_id,
+        c.colaborador_id::text                                AS colaborador_id,
+        COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
+        COALESCE(c.nome_equipe, '')                           AS equipe`;
+  const stageCte = (etapa, ids) => `
+      SELECT ${cols}, '${etapa}' AS etapa
+      FROM core.historico_movimentacoes h
+      INNER JOIN core.deals d ON d.deal_id = h.deal_id${joins}
+      WHERE h.etapa_nova_id IN (${etapaList(ids)})
+        AND h.data_movimentacao::date >= $1::date
+        AND h.data_movimentacao::date <  $2::date${filters}`;
+
+  const query = `
+    WITH movimentos AS (
+      SELECT ${cols}, 'recebidos' AS etapa
+      FROM core.deals d${joins}
+      WHERE d.data_distribuicao_comercial IS NOT NULL
+        AND d.data_distribuicao_comercial::date >= $1::date
+        AND d.data_distribuicao_comercial::date <  $2::date${filters}
+      UNION ALL${stageCte('em_contato', STAGE_COUNT_ETAPAS.em_contato)}
+      UNION ALL${stageCte('coleta', STAGE_COUNT_ETAPAS.coleta)}
+      UNION ALL${stageCte('validacao_supervisor', STAGE_COUNT_ETAPAS.validacao_supervisor)}
+    )
+    SELECT
+      colaborador_id, colaborador, equipe,
+      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'recebidos')::int            AS recebidos,
+      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'em_contato')::int           AS em_contato,
+      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'coleta')::int               AS coleta,
+      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'validacao_supervisor')::int AS validacao_supervisor
+    FROM movimentos
+    GROUP BY colaborador_id, colaborador, equipe
+    ORDER BY recebidos DESC, colaborador
+  `;
+
+  const result = await analyticsQuery(query, params);
+  const label = 'stage-counts';
+  warnIfLarge(result.rows, label);
+  return capRows(result.rows, CAP_AGG, label);
+}
+
+
+// ─── ASSINADOS / EMITIDOS DO FUNIL (core.assinaturas, safra x produção) ──────
+// Fonte das quantidades de Emitidos e Assinados no funil comercial.
+//   • Só contratos ORIGINAIS e não cancelados.
+//   • emitidos  → data_emissao   no período
+//   • assinados → data_assinatura no período + status 'ASSINADO'
+//   • PRODUÇÃO → NÃO olha a data de criação do negócio.
+//   • SAFRA    → também exige d.data_criacao_deal dentro do período
+//                (mesma regra da consulta de etapas).
+//   • Conta cards (negócios distintos); assinatura sem negócio vinculado
+//     conta como 1 card próprio (apenas em produção — em safra precisa do negócio).
+//   • Responsável: consultor da assinatura/emissão; sem consultor →
+//     COALESCE(d.closer_id, d.responsavel_id).
+export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, colaboradorIds = null }) {
+  if (Array.isArray(colaboradorIds) && colaboradorIds.length === 0) return [];
+
+  const isSafra = String(mode || '').toLowerCase() === 'safra';
+  const params = [start, end];
+  let idx = 3;
+  let filters = '';
+  if (isSafra) {
+    filters += `
+      AND b.data_criacao_deal IS NOT NULL
+      AND b.data_criacao_deal::date >= $1::date
+      AND b.data_criacao_deal::date <  $2::date`;
+  }
+  if (equipe && equipe !== 'todas') {
+    filters += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
+    params.push(equipe); idx++;
+  }
+  if (Array.isArray(colaboradorIds)) {
+    filters += ` AND b.dono_id::text = ANY($${idx}::text[])`;
+    params.push(colaboradorIds.map(String)); idx++;
+  }
+  const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+  filters += prod.clause;
+  params.push(...prod.params);
+
+  const query = `
+    WITH base AS (
+      SELECT
+        a.assinatura_id,
+        a.produto_id,
+        COALESCE(d1.deal_id, d2.deal_id)                     AS deal_id,
+        COALESCE(d1.data_criacao_deal, d2.data_criacao_deal) AS data_criacao_deal,
+        COALESCE(d1.closer_id, d1.responsavel_id,
+                 d2.closer_id, d2.responsavel_id)           AS dono_deal_id,
+        a.consultor_responsavel_assinatura_id,
+        a.consultor_responsavel_emissao_id,
+        a.data_emissao,
+        a.data_assinatura,
+        a.status_assinatura
+      FROM core.assinaturas a
+      LEFT JOIN core.deals d1
+        ON d1.deal_id = a.deal_id
+      LEFT JOIN core.deals d2
+        ON a.deal_id IS NULL
+       AND d2.hubspot_deal_id = a.hubspot_deal_id
+       AND d2.crm_origem = 'HUBSPOT'
+       AND d2.is_deleted IS NOT TRUE
+      WHERE a.tipo_emissao = 'ORIGINAL'
+        AND a.data_cancelamento IS NULL
+    ),
+    eventos AS (
+      SELECT b.*, 'emitidos' AS tipo,
+             COALESCE(b.consultor_responsavel_emissao_id,
+                      b.consultor_responsavel_assinatura_id,
+                      b.dono_deal_id) AS dono_id
+      FROM base b
+      WHERE b.data_emissao IS NOT NULL
+        AND (b.data_emissao AT TIME ZONE 'UTC')::date >= $1::date
+        AND (b.data_emissao AT TIME ZONE 'UTC')::date <  $2::date
+      UNION ALL
+      SELECT b.*, 'assinados' AS tipo,
+             COALESCE(b.consultor_responsavel_assinatura_id,
+                      b.dono_deal_id) AS dono_id
+      FROM base b
+      WHERE b.data_assinatura IS NOT NULL
+        AND UPPER(TRIM(COALESCE(b.status_assinatura, ''))) = 'ASSINADO'
+        AND (b.data_assinatura AT TIME ZONE 'UTC')::date >= $1::date
+        AND (b.data_assinatura AT TIME ZONE 'UTC')::date <  $2::date
+    )
+    SELECT
+      c.colaborador_id::text                                AS colaborador_id,
+      COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
+      COALESCE(c.nome_equipe, '')                           AS equipe,
+      COUNT(DISTINCT COALESCE(b.deal_id::text, 'assinatura:' || b.assinatura_id::text))
+        FILTER (WHERE b.tipo = 'emitidos')::int  AS emitidos,
+      COUNT(DISTINCT COALESCE(b.deal_id::text, 'assinatura:' || b.assinatura_id::text))
+        FILTER (WHERE b.tipo = 'assinados')::int AS assinados
+    FROM eventos b
+    LEFT JOIN core.colaboradores c ON c.colaborador_id = b.dono_id
+    LEFT JOIN core.produtos pr     ON pr.produto_id    = b.produto_id
+    WHERE 1 = 1${filters}
+    GROUP BY c.colaborador_id, COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável'), COALESCE(c.nome_equipe, '')
+    ORDER BY assinados DESC, colaborador
+  `;
+
+  const result = await analyticsQuery(query, params);
+  const label = `assinaturas-funil:${isSafra ? 'safra' : 'producao'}`;
+  warnIfLarge(result.rows, label);
+  return capRows(result.rows, CAP_AGG, label);
+}
