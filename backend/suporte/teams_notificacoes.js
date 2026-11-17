@@ -67,21 +67,132 @@ class TeamsNotificadorSuporte {
         });
     }
 
-    criarCartaoValidacaoCoordenador(dados, assunto, unidadeId) {
+    /**
+     * URL que abre a aba "Visão Coordenador" já focada no caso.
+     * A página /suporte lê ?aba=coordenador&id=<id_ticket_movimentacao>.
+     */
+    montarUrlCoordenador(idTicketMovimentacao) {
         const baseUrl = process.env.APP_PUBLIC_URL ||
             process.env.SUPPORT_PUBLIC_BASE_URL ||
             'https://comissionamento.madmbrasil.com.br';
         const sistemaUrl = new URL('/suporte', baseUrl);
         sistemaUrl.searchParams.set('aba', 'coordenador');
-        if (dados.idTicketMovimentacao != null) {
-            sistemaUrl.searchParams.set('id', String(dados.idTicketMovimentacao));
+        if (idTicketMovimentacao != null) {
+            sistemaUrl.searchParams.set('id', String(idTicketMovimentacao));
+        }
+        return sistemaUrl.href;
+    }
+
+    /**
+     * [CORRIGIDO] Cartão de validação do coordenador já com os valores
+     * preenchidos no servidor. Nada de `${...}` chega ao Teams: o Power
+     * Automate deve apenas repassar `adaptiveCard` (ver README).
+     */
+    criarCartaoValidacaoCoordenador(dados, assunto, unidadeId) {
+        const valor = (v) => {
+            const s = v === undefined || v === null ? '' : String(v).trim();
+            return s || 'Não informado';
+        };
+        const fact = (title, value) => ({ title, value: valor(value) });
+
+        const idCaso = dados.idTicketMovimentacao ?? null;
+        const pipeline = dados.pipelineNome || dados.pipeline;
+        const stage = dados.stageNome || dados.stage;
+        const pipelineEtapa = [pipeline, stage].filter(Boolean).join(' / ');
+        const solicitante = dados.solicitante && dados.equipe
+            ? `${dados.solicitante} (${dados.equipe})`
+            : dados.solicitante || dados.equipe;
+
+        const body = [
+            {
+                type: 'Container',
+                style: 'emphasis',
+                bleed: true,
+                items: [{
+                    type: 'ColumnSet',
+                    columns: [
+                        {
+                            type: 'Column',
+                            width: 'stretch',
+                            items: [
+                                {
+                                    type: 'TextBlock',
+                                    text: 'Movimentação aguardando validação',
+                                    weight: 'Bolder',
+                                    size: 'Medium',
+                                    wrap: true,
+                                },
+                                {
+                                    type: 'TextBlock',
+                                    text: `Ticket de movimentação #${valor(idCaso)} — requer decisão do coordenador`,
+                                    isSubtle: true,
+                                    spacing: 'None',
+                                    wrap: true,
+                                },
+                            ],
+                        },
+                        {
+                            type: 'Column',
+                            width: 'auto',
+                            items: [{
+                                type: 'TextBlock',
+                                text: 'BLOQUEADO',
+                                color: 'Attention',
+                                weight: 'Bolder',
+                                size: 'Small',
+                                horizontalAlignment: 'Right',
+                            }],
+                        },
+                    ],
+                }],
+            },
+            {
+                type: 'FactSet',
+                spacing: 'Medium',
+                facts: [
+                    fact('Cliente', dados.cliente),
+                    fact('Telefone', dados.telefone),
+                    fact('Equipe destino', dados.equipeDestino),
+                    fact('Assessor destino', dados.assessorDestino),
+                    fact('Produto', dados.produto),
+                    fact('Pipeline / Etapa', pipelineEtapa),
+                    fact('Solicitante', solicitante),
+                    fact('Unidade', unidadeId),
+                ],
+            },
+            {
+                type: 'TextBlock',
+                text: '**Motivo do bloqueio:**',
+                spacing: 'Medium',
+                wrap: true,
+            },
+            {
+                type: 'TextBlock',
+                text: valor(dados.mensagem),
+                wrap: true,
+                isSubtle: true,
+                maxLines: 8,
+            },
+        ];
+
+        if (dados.notesLastUpdated) {
+            body.push({
+                type: 'Container',
+                spacing: 'Medium',
+                items: [{
+                    type: 'TextBlock',
+                    text: `🕓 Última modificação: ${dados.notesLastUpdated}`,
+                    wrap: true,
+                    isSubtle: true,
+                    size: 'Small',
+                }],
+            });
         }
 
-        const fact = (title, value) => ({ title, value: String(value || 'Não informado') });
         const actions = [{
             type: 'Action.OpenUrl',
-            title: 'Validar caso no sistema',
-            url: sistemaUrl.href,
+            title: '🔗 Validar caso no sistema',
+            url: this.montarUrlCoordenador(idCaso),
         }];
         if (dados.link) {
             actions.push({
@@ -92,53 +203,12 @@ class TeamsNotificadorSuporte {
         }
 
         return {
-            type: 'AdaptiveCard',
             $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+            type: 'AdaptiveCard',
             version: '1.4',
-            body: [
-                {
-                    type: 'TextBlock',
-                    size: 'Medium',
-                    weight: 'Bolder',
-                    color: 'Attention',
-                    text: '📢 VALIDAÇÃO DO COORDENADOR',
-                    wrap: true,
-                },
-                {
-                    type: 'TextBlock',
-                    text: assunto,
-                    weight: 'Bolder',
-                    wrap: true,
-                },
-                {
-                    type: 'FactSet',
-                    facts: [
-                        fact('🆔 Caso', dados.idTicketMovimentacao),
-                        fact('🎫 Ticket', dados.idTicket),
-                        fact('👤 Cliente', dados.cliente),
-                        fact('📱 Telefone', dados.telefone),
-                        fact('🏢 Equipe origem', dados.equipe),
-                        fact('🏢 Equipe destino', dados.equipeDestino),
-                        fact('👨‍💼 Assessor destino', dados.assessorDestino),
-                        fact('🧑 Solicitante', dados.solicitante),
-                        fact('✉️ E-mail solicitante', dados.solicitanteEmail),
-                        fact('📍 Unidade', unidadeId),
-                        fact('🎯 Status', 'Bloqueado - aguardando coordenador'),
-                        fact('📝 Mensagem', dados.mensagem),
-                        fact('🏁 Pipeline', dados.pipelineNome || dados.pipeline),
-                        fact('📊 Estágio', dados.stageNome || dados.stage),
-                        fact('📦 Produto', dados.produto),
-                        fact('🕒 Data/Hora', this.formatarDataHora()),
-                        ...(dados.notesLastUpdated
-                            ? [fact('🕓 Última modificação', dados.notesLastUpdated)]
-                            : []),
-                    ],
-                },
-                {
-                    type: 'ActionSet',
-                    actions,
-                },
-            ],
+            msteams: { width: 'Full' },
+            body,
+            actions,
         };
     }
 
@@ -272,6 +342,8 @@ class TeamsNotificadorSuporte {
                 dealId: dados.dealId,
                 notesLastUpdated: dados.notesLastUpdated,
                 titulo: dados.titulo,
+                idTicketMovimentacao: dados.idTicketMovimentacao,
+                idTicket: dados.idTicket,
                 assunto,
             };
 
@@ -285,6 +357,13 @@ class TeamsNotificadorSuporte {
                 descricao: descricaoRenderizada,
                 mensagem: mensagemRenderizada,
             };
+
+            // [CORRIGIDO] Cartão montado no servidor, com valores reais.
+            const adaptiveCard = casoCoordenador
+                ? this.criarCartaoValidacaoCoordenador(dadosRenderizados, assunto, unidadeId)
+                : assunto.toLowerCase().startsWith('movimentacao')
+                    ? this.criarCartaoMovimentacao({ ...dadosRenderizados, unidadeId }, assunto)
+                    : null;
 
             // Monta o JSON raiz exatamente como o Power Automate espera
             const payload = {
@@ -313,11 +392,21 @@ class TeamsNotificadorSuporte {
                 produto: dados.produto || null,
                 regra: dados.regra || null,
                 notesLastUpdated: dados.notesLastUpdated || null,
-                ...(casoCoordenador
-                    ? { adaptiveCard: this.criarCartaoValidacaoCoordenador(dadosRenderizados, assunto, unidadeId) }
-                    : assunto.toLowerCase().startsWith('movimentacao')
-                        ? { adaptiveCard: this.criarCartaoMovimentacao({ ...dadosRenderizados, unidadeId }, assunto) }
-                        : {}),
+                // [CORRIGIDO] Campos que o cartão do coordenador usa e que
+                // antes não eram enviados (por isso apareciam como ${...}).
+                idTicketMovimentacao: dados.idTicketMovimentacao ?? null,
+                idTicket: dados.idTicket ?? null,
+                equipeOrigem: dados.equipe || null,
+                unidade: casoCoordenador ? unidadeId : (dados.unidadeId || null),
+                urlValidacao: casoCoordenador ? this.montarUrlCoordenador(dados.idTicketMovimentacao) : null,
+                ...(adaptiveCard
+                    ? {
+                        adaptiveCard,
+                        // Mesmo cartão como texto, para o campo "Adaptive Card"
+                        // do Power Automate (que espera uma string JSON).
+                        adaptiveCardJson: JSON.stringify(adaptiveCard),
+                    }
+                    : {}),
             };
 
             const response = await fetch(webhookUrl, {
