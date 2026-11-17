@@ -107,6 +107,7 @@ interface MovementItem {
   atualizadoEm: string;
   observacao_sales_ops?: string;
   produto?: string | null;
+  link?: string | null;
   hubspot?: {
     contactId?: string;
     existe?: boolean;
@@ -330,6 +331,59 @@ const MOVIMENTACOES_STATUS_COLUMNS_VISIVEIS = [
 ];
 
 const COORDENADOR_STATUS_COLUMNS = ["coordenador", "bloqueado", "concluido"];
+
+// [CORRIGIDO] Leitura única da observação/retorno de um caso.
+// `observacao_sales_ops` pode ser JSON (metadados do worker) ou texto legado.
+// Ordem: observação gravada → mensagem do HubSpot → motivo do erro → último
+// erro do worker. Textos com `${...}` não preenchidos são ignorados.
+const TEMPLATE_NAO_PREENCHIDO = /\$\{[^}]*\}/;
+function textoValido(valor: unknown): valor is string {
+  return typeof valor === "string" && valor.trim() !== "" && !TEMPLATE_NAO_PREENCHIDO.test(valor);
+}
+function extrairObservacaoCaso(raw?: string | null): string {
+  if (!raw) return "";
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return textoValido(raw) ? raw.trim() : "";
+  }
+  if (!parsed || typeof parsed !== "object") return textoValido(raw) ? raw.trim() : "";
+  const candidatos = [
+    parsed.observacao,
+    parsed.hubspot?.mensagem,
+    parsed.hubspot?.message,
+    parsed.erro_motivo,
+    parsed._worker?.ultimo_erro,
+  ];
+  const encontrado = candidatos.find(textoValido);
+  return encontrado ? encontrado.trim() : "";
+}
+
+// [NOVO] Link clicável do caso localizado/criado na HubSpot.
+// `/record/0-1/` = contato; qualquer outro = card (negócio).
+function LinkHubSpotCaso({ link, compacto = false }: { link?: string | null; compacto?: boolean }) {
+  if (!link) return null;
+  const ehContato = link.includes("/record/0-1/");
+  return (
+    <a
+      href={link}
+      target="_blank"
+      rel="noopener noreferrer"
+      draggable={false}
+      onClick={(e) => e.stopPropagation()}
+      onMouseDown={(e) => e.stopPropagation()}
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md font-medium text-[#2F6FED] hover:underline",
+        compacto ? "text-xs mt-1.5" : "text-xs mt-1",
+      )}
+      title={ehContato ? "Abrir contato na HubSpot" : "Abrir card na HubSpot"}
+    >
+      <ExternalLink className="w-3 h-3" />
+      {ehContato ? "Ver contato na HubSpot" : "Ver card na HubSpot"}
+    </a>
+  );
+}
 
 const EXCLUDED_TEAMS = [
   'Coordenacao Closer', 'Departamento Backoffice', 'Diretoria','Departamento Marketing','Departamento Comercial',
@@ -689,10 +743,10 @@ function MovimentacaoTab() {
               const parsed = JSON.parse(ticket.observacao_sales_ops);
               if (parsed.hubspot) hubspotData = parsed.hubspot;
               if (parsed.motivoOriginal) motivoOriginal = parsed.motivoOriginal;
-              if (parsed.observacao) observacao = parsed.observacao;
+              observacao = extrairObservacaoCaso(ticket.observacao_sales_ops);
               if (!produtoHistorico && parsed.produto) produtoHistorico = parsed.produto;
             } catch {
-              observacao = ticket.observacao_sales_ops;
+              observacao = extrairObservacaoCaso(ticket.observacao_sales_ops);
             }
           }
 
@@ -723,6 +777,7 @@ function MovimentacaoTab() {
             observacao_sales_ops: observacao,
             hubspot: hubspotData,
             produto: produtoHistorico,
+            link: ticket.link || null,
           };
         });
         setMovements(historico);
@@ -1015,7 +1070,7 @@ function MovimentacaoTab() {
 
   const exportHistory = () => {
     if (movements.length === 0) return;
-    const headers = ["Data/Hora", "Cliente", "E-mail", "Telefone", "CPF", "Equipe", "Assessor", "Produto", "Status", "HubSpot", "Resultado"];
+    const headers = ["Data/Hora", "Cliente", "E-mail", "Telefone", "CPF", "Equipe", "Assessor", "Produto", "Status", "HubSpot", "Resultado", "Link HubSpot"];
     const rows = movements.map((m) => {
       const hubspotInfo = m.hubspot
         ? m.hubspot.erro
@@ -1036,6 +1091,7 @@ function MovimentacaoTab() {
         `"${getStatusInfo(m.status).label}"`,
         `"${hubspotInfo}"`,
         `"${m.resultado}"`,
+        `"${m.link || ""}"`,
       ].join(";");
     });
     const csv = [headers.join(";"), ...rows].join("\n");
@@ -1366,7 +1422,10 @@ function MovimentacaoTab() {
                       <td className="whitespace-nowrap align-top">
                         {new Date(m.timestamp).toLocaleString("pt-BR")}
                       </td>
-                      <td className="align-top">{m.cliente}</td>
+                      <td className="align-top">
+                        <div>{m.cliente}</div>
+                        <LinkHubSpotCaso link={m.link} />
+                      </td>
                       <td className="align-top">
                         <div>{m.telefone}</div>
                         <div className="text-[#64748b]">{m.email}</div>
@@ -2659,14 +2718,7 @@ function ReprocessModal({ isOpen, onClose, ticket, onConfirm, saving }: Reproces
     }
   })();
 
-  const motivoAtual = (() => {
-    try {
-      const parsed = JSON.parse(ticket.observacao_sales_ops || "{}");
-      return parsed?.hubspot?.mensagem || parsed?.observacao || "—";
-    } catch {
-      return ticket.observacao_sales_ops || "—";
-    }
-  })();
+  const motivoAtual = extrairObservacaoCaso(ticket.observacao_sales_ops) || "—";
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -2803,13 +2855,7 @@ function MovimentacoesSuporteTab() {
 
   const openEditModal = (ticket: TicketMovimentacao) => {
     setEditingTicket(ticket);
-    let observacao = ticket.observacao_sales_ops || "";
-    try {
-      const parsed = JSON.parse(observacao);
-      observacao = typeof parsed?.observacao === "string" ? parsed.observacao : "";
-    } catch {
-      // Mantém observações antigas salvas como texto simples.
-    }
+    const observacao = extrairObservacaoCaso(ticket.observacao_sales_ops);
     setEditForm({
       status_mapeamento: ticket.status_mapeamento || "pendente",
       observacao_sales_ops: observacao,
@@ -3135,6 +3181,7 @@ function MovimentacoesSuporteTab() {
                             {ticket.nome_cliente_informado} {ticket.sobrenome_cliente_informado}
                           </div>
                           <div className="text-xs text-[#64748b]">{ticket.equipe_destino_nome}</div>
+                          <LinkHubSpotCaso link={ticket.link} compacto />
                         </div>
                       ))
                     )}
@@ -3704,13 +3751,7 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
 
   const openEditModal = (ticket: TicketMovimentacao) => {
     setEditingTicket(ticket);
-    let observacao = ticket.observacao_sales_ops || "";
-    try {
-      const parsed = JSON.parse(observacao);
-      observacao = typeof parsed?.observacao === "string" ? parsed.observacao : "";
-    } catch {
-      // Mantém observações antigas salvas como texto simples.
-    }
+    const observacao = extrairObservacaoCaso(ticket.observacao_sales_ops);
     setEditForm({
       observacao_sales_ops: observacao,
       nome_cliente_informado: ticket.nome_cliente_informado || "",
@@ -3969,12 +4010,7 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
                       <div className="text-center py-6 text-xs text-[#94a3b8]">Nenhum caso</div>
                     ) : (
                       ticketsColuna.map((ticket) => {
-                        let motivo = "";
-                        try {
-                          motivo = JSON.parse(ticket.observacao_sales_ops || "{}").observacao || "";
-                        } catch {
-                          motivo = ticket.observacao_sales_ops || "";
-                        }
+                        const motivo = extrairObservacaoCaso(ticket.observacao_sales_ops);
                         return (
                           <div
                             key={ticket.id_ticket_movimentacao}
@@ -4014,6 +4050,7 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
                                 {motivo}
                               </div>
                             )}
+                            <LinkHubSpotCaso link={ticket.link} compacto />
                           </div>
                         );
                       })

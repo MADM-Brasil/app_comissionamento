@@ -194,7 +194,9 @@ async function executarCrm({ movement, produto, ownerId, bypassRegraTemporal }) 
       { bypassTemporalRestriction: Boolean(bypassRegraTemporal) },
     );
   } catch (err) {
-    return mapErroHubSpot(err);
+    // [NOVO] Mantém o contato localizado/criado para gerar o link do caso.
+    const mapeado = mapErroHubSpot(err);
+    return { ...mapeado, hubspot: { ...(mapeado.hubspot || {}), contactId } };
   }
 
   if (resultado && resultado.blocked === false) {
@@ -394,6 +396,43 @@ async function claimLote(limit) {
   }
 }
 
+// [NOVO] Link clicável do caso (card localizado/criado; sem card, o contato).
+// Lido pelas abas Histórico, Visão SalesOps e Visão Coordenador.
+function linkDoCaso(movement, resultado) {
+  const h = resultado?.hubspot || {};
+  if (h.link) return h.link;
+  const parcial = h.resultado_parcial || {};
+  if (parcial.link) return parcial.link;
+  const dealId = h.dealId || parcial.createdDealId || parcial.dealId ||
+    (movement.crm_origem === 'HUBSPOT_LINK' ? movement.crm_lead_id : null);
+  if (dealId) return hubspotModule.hubspotRecordLink('deals', dealId);
+  const contactId = h.contactId || h.contato_id || parcial.contactId;
+  return contactId ? hubspotModule.hubspotRecordLink('contacts', contactId) : null;
+}
+
+// [CORRIGIDO] Nota exibida quando o coordenador autorizou o reprocessamento.
+function notaCoordenador(meta) {
+  const v = meta?.validacaoCoordenador;
+  if (v?.acao === 'autorizar') {
+    const quem = v.nome || v.usuario || 'nome não informado';
+    return `Validado pelo coordenador (${quem})${v.observacao ? `: ${v.observacao}` : ''}`;
+  }
+  const b = meta?.bypass_regra_temporal;
+  if (b) {
+    return `Validado pelo coordenador (${b.autorizado_por || 'nome não informado'})${b.observacao ? `: ${b.observacao}` : ''}`;
+  }
+  return '';
+}
+
+// [CORRIGIDO] Texto de retorno do sistema que vai em `observacao`
+// (é o campo lido pelas abas Histórico, Visão SalesOps e Visão Coordenador).
+function montarObservacaoSistema(novoStatus, resultado, meta) {
+  const base = novoStatus === 'concluido'
+    ? (resultado?.hubspot?.message || resultado?.hubspot?.mensagem || 'Movimentação concluída.')
+    : (resultado?.erro || resultado?.hubspot?.message || 'Movimentação não concluída.');
+  return [base, notaCoordenador(meta)].filter(Boolean).join('\n');
+}
+
 async function finalizar(movementId, ticketId, novoStatus, metadataExtra = {}, erro = null) {
   const client = await pool.connect();
   try {
@@ -411,9 +450,19 @@ async function finalizar(movementId, ticketId, novoStatus, metadataExtra = {}, e
     }
     const baseMeta = parseJson(metaAtual.rows[0].observacao_sales_ops);
     const tentativas = Number(baseMeta?._worker?.tentativas || 0);
+    // [CORRIGIDO] `observacao` passa a ser SEMPRE o retorno do sistema.
+    // O texto original digitado pelo solicitante fica preservado em
+    // `observacao_solicitante` (gravado só na primeira vez).
+    const { observacaoSistema, ...extrasSemObservacao } = metadataExtra;
+    const observacaoSolicitante = Object.hasOwn(baseMeta || {}, 'observacao_solicitante')
+      ? baseMeta.observacao_solicitante
+      : (typeof baseMeta?.observacao === 'string' ? baseMeta.observacao : null);
     const novoMeta = {
       ...baseMeta,
-      ...metadataExtra,
+      ...extrasSemObservacao,
+      ...(observacaoSistema
+        ? { observacao: observacaoSistema, observacao_solicitante: observacaoSolicitante }
+        : {}),
       processado: novoStatus === 'concluido',
       _worker: {
         processando_desde: null,
@@ -430,6 +479,8 @@ async function finalizar(movementId, ticketId, novoStatus, metadataExtra = {}, e
     if (novoStatus === 'concluido') {
       novoMeta._worker.concluido_em = new Date().toISOString();
     }
+    // [NOVO] Nunca perde um link já conhecido do caso.
+    if (!novoMeta.link && baseMeta?.link) novoMeta.link = baseMeta.link;
     await client.query(
       `UPDATE app_comissionamento.tickets_movimentacao_lead
           SET status_mapeamento = $2,
@@ -480,6 +531,7 @@ async function processar(movement) {
     log('warn', `#${movementId} excedeu ${MAX_TENTATIVAS} tentativas — 'suporte'`);
     await finalizar(movementId, ticketId, 'suporte', {
       erro_motivo: `Excedeu ${MAX_TENTATIVAS} tentativas de processamento`,
+      observacaoSistema: `Excedeu ${MAX_TENTATIVAS} tentativas de processamento — encaminhado ao suporte.`,
     }, 'max_tentativas_excedido');
     stats.suportes += 1;
     return;
@@ -499,13 +551,21 @@ async function processar(movement) {
     log('error', `#${movementId} timeout/exceção:`, err.message);
     await finalizar(movementId, ticketId, 'erro', {
       hubspot: { erro: String(err.message || err).slice(0, 1000), em: new Date().toISOString() },
+      link: linkDoCaso(movement, null),
+      observacaoSistema: `Erro ao processar: ${String(err.message || err).slice(0, 1000)}`,
     }, err.message);
     stats.erros += 1;
     return;
   }
 
   if (resultado?.ok) {
-    await finalizar(movementId, ticketId, 'concluido', { hubspot: resultado.hubspot || {} });
+    await finalizar(movementId, ticketId, 'concluido', {
+      // `mensagem` (pt) espelha `message` para a UI, que lê hubspot.mensagem.
+      hubspot: { ...(resultado.hubspot || {}), mensagem: resultado.hubspot?.message || resultado.hubspot?.mensagem || null },
+      observacaoSistema: montarObservacaoSistema('concluido', resultado, metadata),
+      link: linkDoCaso(movement, resultado),
+      dealId: resultado.hubspot?.dealId || null,
+    });
     stats.concluidos += 1;
     log('info', `#${movementId} → 'concluido'`);
     notificarSolicitante(ticketId, movementId, 'concluido', null);
@@ -514,8 +574,11 @@ async function processar(movement) {
 
   const status = resultado?.status || 'erro';
   const extras = {
-    hubspot: resultado?.hubspot || {},
+    hubspot: { ...(resultado?.hubspot || {}), mensagem: resultado?.erro || resultado?.hubspot?.message || null },
     erro_motivo: resultado?.erro || null,
+    observacaoSistema: montarObservacaoSistema(status, resultado, metadata),
+    link: linkDoCaso(movement, resultado),
+    ...(resultado?.hubspot?.dealId ? { dealId: resultado.hubspot.dealId } : {}),
     ...(resultado?.requiresCoordinator ? { requiresCoordinator: true } : {}),
   };
   await finalizar(movementId, ticketId, status, extras, resultado?.erro);

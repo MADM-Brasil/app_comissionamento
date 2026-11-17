@@ -1129,6 +1129,8 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
 
   const isAdmin = req.supportLevel >= accessControl.LEVELS.ADMINISTRATIVO;
   const { page, limit, offset } = pageParams(req.query);
+  // [NOVO] Portal usado para montar o link quando o metadata só tem IDs.
+  const portalId = String(HUBSPOT_PORTAL_ID_CONFIGURED || '').trim();
   const rows = await pool.query(`
     SELECT
       to_jsonb(tml) || jsonb_build_object(
@@ -1149,36 +1151,62 @@ router.get('/tickets-movimentacao', requireNonJuridico, asyncRoute(async (req, r
             ELSE NULL
           END
         ),
+        -- [NOVO] Regra aplicada (a tela usa para o bloqueio jurídico).
+        'ruleApplied', COALESCE(obs.j->'hubspot'->>'ruleApplied', obs.j->>'regra'),
+        'isJuridicoBlocked', COALESCE(obs.j->'hubspot'->>'ruleApplied', obs.j->>'regra', '') = 'contact_has_juridico_deal',
+        -- [CORRIGIDO] Link do caso localizado/criado: link gravado pelo
+        -- worker → card (dealId) → contato → card do Link Hub.
         'link', COALESCE(
-          tml.observacao_sales_ops::jsonb->>'link',
-          tml.observacao_sales_ops::jsonb->'hubspot'->>'link',
-          CASE
-            WHEN tml.observacao_sales_ops::jsonb->>'dealId' ~ '^\\d+$'
-             AND COALESCE(ts.metadados->>'portal_id','') ~ '^\\d+$'
-            THEN 'https://app.hubspot.com/contacts/'
-                 || (ts.metadados->>'portal_id')
-                 || '/record/0-3/'
-                 || (tml.observacao_sales_ops::jsonb->>'dealId')
-            WHEN tml.crm_origem = 'HUBSPOT_LINK'
-             AND tml.crm_lead_id ~ '^\\d+$'
-             AND COALESCE(ts.metadados->>'portal_id','') ~ '^\\d+$'
-            THEN 'https://app.hubspot.com/contacts/'
-                 || (ts.metadados->>'portal_id')
-                 || '/record/0-3/'
-                 || tml.crm_lead_id
-            ELSE NULL
-          END
+          NULLIF(obs.j->>'link', ''),
+          NULLIF(obs.j->'hubspot'->>'link', ''),
+          NULLIF(obs.j->'hubspot'->'resultado_parcial'->>'link', ''),
+          CASE WHEN COALESCE(NULLIF(ts.metadados->>'portal_id',''), $7::text) ~ '^\\d+$' THEN
+            CASE
+              WHEN COALESCE(obs.j->>'dealId', obs.j->'hubspot'->>'dealId') ~ '^\\d+$'
+              THEN 'https://app.hubspot.com/contacts/'
+                   || COALESCE(NULLIF(ts.metadados->>'portal_id',''), $7::text)
+                   || '/record/0-3/'
+                   || COALESCE(obs.j->>'dealId', obs.j->'hubspot'->>'dealId')
+              WHEN tml.crm_origem = 'HUBSPOT_LINK' AND tml.crm_lead_id ~ '^\\d+$'
+              THEN 'https://app.hubspot.com/contacts/'
+                   || COALESCE(NULLIF(ts.metadados->>'portal_id',''), $7::text)
+                   || '/record/0-3/'
+                   || tml.crm_lead_id
+              WHEN COALESCE(obs.j->'hubspot'->>'contactId', obs.j->'hubspot'->>'contato_id') ~ '^\\d+$'
+              THEN 'https://app.hubspot.com/contacts/'
+                   || COALESCE(NULLIF(ts.metadados->>'portal_id',''), $7::text)
+                   || '/record/0-1/'
+                   || COALESCE(obs.j->'hubspot'->>'contactId', obs.j->'hubspot'->>'contato_id')
+              ELSE NULL
+            END
+          ELSE NULL END
         )
       ) AS payload
     FROM app_comissionamento.tickets_movimentacao_lead tml
     LEFT JOIN app_comissionamento.tickets_suporte ts ON ts.id_ticket = tml.ticket_id
+    -- [CORRIGIDO] Observações legadas em texto simples não quebram mais a consulta.
+    CROSS JOIN LATERAL (
+      SELECT CASE WHEN tml.observacao_sales_ops ~ '^\\s*\\{'
+                  THEN tml.observacao_sales_ops::jsonb
+                  ELSE '{}'::jsonb END AS j
+    ) obs
     WHERE ($1::text   IS NULL OR LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_email',''))) = $1)
       AND ($2::text   IS NULL OR LOWER(TRIM(COALESCE(ts.metadados->>'solicitante_nome','')))  = LOWER(TRIM($2)))
       AND ($3::text[] IS NULL OR LOWER(TRIM(tml.status_mapeamento::text)) = ANY($3::text[]))
     ORDER BY tml.atualizado_em DESC NULLS LAST, tml.id_ticket_movimentacao DESC
     LIMIT $5 OFFSET $6`,
-  [scope.email, scope.name, statusList, isAdmin, limit + 1, offset]);
-  const data = rows.rows.slice(0, limit).map(row => row.payload);
+  [scope.email, scope.name, statusList, isAdmin, limit + 1, offset, /^\d+$/.test(portalId) ? portalId : null]);
+
+  // [NOVO] Mesma regra da busca de cliente: supervisor não recebe o link de
+  // card que pertence a outra equipe (bloqueio por prazo/outro responsável)
+  // nem de card com negócio no Jurídico.
+  const ocultarLinkRestrito = isSupportSupervisor(req.supportActor?.cargo) && !req.supportIsJuridico;
+  const REGRAS_LINK_RESTRITO = new Set(['owned_by_another_recent_activity', 'contact_has_juridico_deal']);
+  const data = rows.rows.slice(0, limit).map(row => {
+    const item = row.payload;
+    if (ocultarLinkRestrito && REGRAS_LINK_RESTRITO.has(item.ruleApplied)) return { ...item, link: null };
+    return item;
+  });
   res.json({ success: true, data, pagination: { page, limit, hasMore: rows.rows.length > limit } });
 }));
 
@@ -2077,6 +2105,17 @@ router.post('/tickets-movimentacao/:id/reprocessar-coordenador', asyncRoute(asyn
         ...(observacaoOperador ? { observacao: observacaoOperador } : {}),
       };
     }
+
+    // [CORRIGIDO] Registro lido pelos workers para anexar
+    // "Validado pelo coordenador (...)" à observação de retorno.
+    // Antes ninguém gravava este campo e a nota nunca aparecia.
+    novoMetadata.validacaoCoordenador = {
+      acao: 'autorizar',
+      nome: actor.nome || null,
+      usuario: actor.email || null,
+      em: new Date().toISOString(),
+      ...(observacaoOperador ? { observacao: observacaoOperador } : {}),
+    };
 
     // Reset de _worker para AMBOS os fluxos.
     novoMetadata._worker = {

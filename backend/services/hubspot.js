@@ -53,6 +53,17 @@ export const HUBSPOT_STAGE_ENTRADA_ID = STAGE_ENTRADA_ID;
 export const HUBSPOT_STAGE_QUINQUENIO_EM_CONTATO_ID = STAGE_QUINQUENIO_EM_CONTATO_ID;
 export const HUBSPOT_STAGE_ISENCAO_IR_EM_CONTATO_ID = STAGE_ISENCAO_IR_EM_CONTATO_ID;
 
+// [NOVO] Link clicável de um registro no HubSpot (card = deals, contato = contacts).
+// Fonte única usada por workers e rotas para gravar o link do caso.
+const HUBSPOT_OBJECT_TYPE_IDS = Object.freeze({ deals: '0-3', contacts: '0-1' });
+export function hubspotRecordLink(objectType, recordId) {
+  const typeId = HUBSPOT_OBJECT_TYPE_IDS[objectType];
+  const portal = String(HUBSPOT_PORTAL_ID || '').trim();
+  const recId = String(recordId ?? '').trim();
+  if (!typeId || !/^\d+$/.test(portal) || !/^\d+$/.test(recId)) return null;
+  return `https://app.hubspot.com/contacts/${portal}/record/${typeId}/${recId}`;
+}
+
 const CONTACT_PROPERTIES = ['email','firstname','lastname','phone','hs_whatsapp_phone_number','contact_cpf','contact_fonte','contact_produto','hubspot_owner_id'];
 const DEAL_PROPERTIES = ['dealname','pipeline','dealstage','hubspot_owner_id','notes_last_updated','motivo_da_perda','hs_lastmodifieddate','produto'];
 
@@ -739,11 +750,13 @@ function temporalCheck(deal, { bypassTimeLimit = false } = {}) {
   }
 
   const hours = hoursSince(deal.lastModifiedDate);
-  const allowed = hours !== null && requiredHours !== undefined &&
-    (bypassTimeLimit || hours > requiredHours);
-  const reason = hours === null ? 'Data da última modificação ausente, inválida ou futura'
-    : requiredHours === undefined ? 'Etapa não elegível para movimentação por tempo'
+  // [CORRIGIDO] Com autorização do coordenador, a data ausente/futura não
+  // trava mais o caso (antes o bypass era ignorado e o caso voltava em loop).
+  const allowed = requiredHours !== undefined &&
+    (bypassTimeLimit || (hours !== null && hours > requiredHours));
+  const reason = requiredHours === undefined ? 'Etapa não elegível para movimentação por tempo'
     : bypassTimeLimit ? 'Prazo de modificação autorizado pelo coordenador'
+    : hours === null ? 'Data da última modificação ausente, inválida ou futura'
     : allowed ? `Última modificação há mais de ${requiredHours}h`
     : `Prazo de mais de ${requiredHours}h desde a última modificação ainda não atingido`;
   return { allowed, reason, requiredHours: requiredHours ?? null, hoursSinceNote: hours, lastUpdated: deal.lastModifiedDate || null };
@@ -754,10 +767,15 @@ async function assignmentResult(deal, extras = {}) {
     ? await resolveDealNames(deal.pipeline, deal.stage)
     : { pipelineNome: null, stageNome: null };
 
+  // [NOVO] Link do card localizado/criado; sem card, cai para o contato.
+  const link = deal?.id
+    ? hubspotRecordLink('deals', deal.id)
+    : (extras.contactId ? hubspotRecordLink('contacts', extras.contactId) : null);
+
   return { blocked: false, dealId: deal?.id || null, pipeline: deal?.pipeline || null, stage: deal?.stage || null,
     pipelineNome: resolvedNames.pipelineNome || PIPELINE_NAMES[deal?.pipeline] || deal?.pipeline || null,
     stageNome: resolvedNames.stageNome || STAGE_NAMES[deal?.stage] || deal?.stage || null,
-    lastUpdatedAt: deal?.lastModifiedDate || null, ...extras };
+    lastUpdatedAt: deal?.lastModifiedDate || null, link, ...extras };
 }
 
 export async function garantirLeadNoCloser(
@@ -768,7 +786,9 @@ export async function garantirLeadNoCloser(
   produto = null,
   { bypassTemporalRestriction = false } = {},
 ) {
-  if (!ownerId) return assignmentResult(null, { blocked: true, ruleApplied: 'owner_missing', message: RULE_MESSAGES.owner_missing });
+  // [NOVO] Todo retorno leva contactId (e, por consequência, o link).
+  const resultado = (deal, extras = {}) => assignmentResult(deal, { contactId: String(contactId ?? ''), ...extras });
+  if (!ownerId) return resultado(null, { blocked: true, ruleApplied: 'owner_missing', message: RULE_MESSAGES.owner_missing });
   await accountReady(); await activeOwner(ownerId);
   return withLocks([`contact:${id(contactId)}`], async () => {
     const destination = movementDestination(produto);
@@ -782,7 +802,7 @@ export async function garantirLeadNoCloser(
     );
 
     if (negocioJuridico) {
-      return assignmentResult(negocioJuridico, {
+      return resultado(negocioJuridico, {
         blocked: true,
         ruleApplied: 'contact_has_juridico_deal',
         message:
@@ -801,7 +821,7 @@ export async function garantirLeadNoCloser(
     );
 
     if (deals.length > 1) {
-      return assignmentResult(null, {
+      return resultado(null, {
         blocked: true,
         ruleApplied: 'ambiguous_deals',
         message: RULE_MESSAGES.ambiguous_deals,
@@ -823,7 +843,7 @@ export async function garantirLeadNoCloser(
         } else {
           await updateContactOwner(contactId, ownerId, produto);
           await syncMovementProduct(deal.id, contactId, produto);
-          return assignmentResult(mapDeal(await getDeal(deal.id)), {
+          return resultado(mapDeal(await getDeal(deal.id)), {
             alreadyAssigned: true,
             ruleApplied: 'already_assigned',
             message: RULE_MESSAGES.already_assigned,
@@ -835,12 +855,12 @@ export async function garantirLeadNoCloser(
       }
     } else {
       const check = temporalCheck(deal, { bypassTimeLimit: bypassTemporalRestriction });
-      if (!check.allowed) return assignmentResult(deal, {
+      if (!check.allowed) return resultado(deal, {
         blocked: true,
-        // [NOVO] sinaliza que este bloqueio pode ser autorizado pelo coordenador.
-        // Os demais motivos (jurídico, ambíguo, owner_missing, fallback) não
-        // recebem este flag e continuam exigindo tratamento manual.
-        requiresCoordinator: true,
+        // [CORRIGIDO] Só vai para o coordenador quando é bloqueio de PRAZO
+        // (etapa elegível). Etapa não elegível não se resolve com autorização
+        // do coordenador — antes o caso voltava para "coordenador" em loop.
+        requiresCoordinator: check.requiredHours !== null,
         ruleApplied: 'owned_by_another_recent_activity',
         message: `${RULE_MESSAGES.owned_by_another_recent_activity} ${check.reason}.`,
         requiredHours: check.requiredHours,
@@ -876,13 +896,14 @@ export async function garantirLeadNoCloser(
           String(confirmedContact.properties?.hubspot_owner_id) !== String(ownerId)) {
         throw hubError('Atribuição final não confirmada.', { code: 'CONFIRMATION_FAILED' });
       }
-      return assignmentResult(confirmedDeal, { ruleApplied: rule, message: movementMessage(rule, destination) });
+      return resultado(confirmedDeal, { ruleApplied: rule, message: movementMessage(rule, destination) });
     } catch (error) {
       if (writeAttempted) {
         error.partialResult = {
           dealId: deal?.id || null, createdDealId, contactId: String(contactId),
           previousContactOwnerId: previousContact.properties?.hubspot_owner_id || '',
           writeAttempted: true, produto,
+          link: hubspotRecordLink('deals', createdDealId || deal?.id) || hubspotRecordLink('contacts', contactId),
         };
         error.requiresReconciliation = true; error.retryable = false;
       }
@@ -1047,6 +1068,7 @@ async function reassignWithContext(dealId, ownerId, portalId, expectedCurrentCon
         return {
           dealId: String(dealId),
           dealName: finalContext.dealName,
+          link: hubspotRecordLink('deals', dealId),
 
           // Localização atual (após a movimentação)
           pipeline: finalContext.pipeline,

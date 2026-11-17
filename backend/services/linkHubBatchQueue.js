@@ -61,6 +61,7 @@ import {
   getDealMovementContext,
   getHubSpotOwnerEmail,
   reassignDealForLinkHubMovement,
+  hubspotRecordLink,
   HUBSPOT_PIPELINE_QUINQUENIO_ID,
   HUBSPOT_PIPELINE_ISENCAO_IR_ID,
 } from './hubspot.js';
@@ -290,15 +291,26 @@ async function claimNextTicket(client) {
   return full.rows[0];
 }
 
+// [CORRIGIDO] Preserva o texto original do solicitante na 1ª vez que o
+// worker sobrescreve `observacao` com o retorno do sistema.
+function observacaoSolicitanteDe(meta) {
+  if (Object.hasOwn(meta || {}, 'observacao_solicitante')) return meta.observacao_solicitante;
+  return typeof meta?.observacao === 'string' ? meta.observacao : null;
+}
+
+function notaCoordenador(meta) {
+  const v = meta?.validacaoCoordenador;
+  if (v?.acao !== 'autorizar') return '';
+  const quem = v.nome || v.usuario || 'nome não informado';
+  return `Validado pelo coordenador (${quem})${v.observacao ? `: ${v.observacao}` : ''}`;
+}
+
 async function markSuccess(client, ticket, resultData) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const { regra, mensagem } = resolveRuleLabel(resultData);
   const movedFromBase = Boolean(resultData.movedFromBaseLeads);
   const agora = new Date().toISOString();
-  const validation = observacao.validacaoCoordenador;
-  const coordinatorNote = validation?.acao === 'autorizar'
-    ? `Validado pelo coordenador (${validation.nome || validation.usuario || 'nome não informado'})`
-    : '';
+  const coordinatorNote = notaCoordenador(observacao);
 
   const nova = {
     ...observacao,
@@ -325,6 +337,9 @@ async function markSuccess(client, ticket, resultData) {
     },
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
     observacao: [mensagem, coordinatorNote].filter(Boolean).join('\n'),
+    observacao_solicitante: observacaoSolicitanteDe(observacao),
+    // [NOVO] Link clicável do card movimentado.
+    link: resultData.link || hubspotRecordLink('deals', resultData.dealId || ticket.crm_lead_id),
     colaboradorDestinoNome: ticket.colaborador_destino_nome,
     validacaoFinal: true,
     _worker: {
@@ -377,10 +392,7 @@ async function markFailure(client, ticket, error) {
   else stats.suportes += 1;
 
   const observacaoTexto = describeFailure(error, tentativas);
-  const validation = observacao.validacaoCoordenador;
-  const coordinatorNote = validation?.acao === 'autorizar'
-    ? `Validado pelo coordenador (${validation.nome || validation.usuario || 'nome não informado'})`
-    : '';
+  const coordinatorNote = notaCoordenador(observacao);
 
   const nova = {
     ...observacao,
@@ -395,6 +407,9 @@ async function markFailure(client, ticket, error) {
     },
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
     observacao: [observacaoTexto, coordinatorNote].filter(Boolean).join('\n'),
+    observacao_solicitante: observacaoSolicitanteDe(observacao),
+    // [NOVO] Link do card informado no Link Hub (mesmo quando falha).
+    link: error.partialResult?.link || hubspotRecordLink('deals', ticket.crm_lead_id) || observacao.link || null,
     _worker: {
       ...(observacao._worker || {}),
       tentativas,
