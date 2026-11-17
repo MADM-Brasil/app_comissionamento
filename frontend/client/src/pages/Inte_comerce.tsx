@@ -200,7 +200,7 @@ type FiltersState = {
 };
 
 const STAT_CARDS: { key: StatKey; label: string; sub: string; highlight?: "signed" | "disq" | "gained" }[] = [
-  { key: "received",     label: "Negócios criados", sub: "" },
+  { key: "received",     label: "Leads recebidos", sub: "" },
   { key: "worked",       label: "Trabalhados",      sub: "" },
   { key: "contact",      label: "Em contato",       sub: "" },
   { key: "signed",       label: "Assinados",        sub: "", highlight: "signed" },
@@ -930,7 +930,7 @@ export default function Inte_commerce() {
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasComp = hasComparison;
     const metrics = [
-      ["recebidos", viewMode === "producao" ? "Leads recebidos" : "Negócios criados"],
+      ["recebidos", viewMode === "producao" ? "Leads recebidos" : "Leads recebidos"],
       ["assinados", "Assinados"],
       ["ganhos", viewMode === "safra" ? "Ganhos (da safra)" : "Ganhos (no período)"],
       ["protocolados", viewMode === "safra" ? "Protocolados (da safra)" : "Protocolados (no período)"],
@@ -1258,14 +1258,20 @@ export default function Inte_commerce() {
             </div>
           </div>
           <div className="card p-5 relative overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
-            <h3 className="text-sm font-bold text-[#50627a]">Conversão assinados → ganhos</h3>
-            <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
-              {strategic.pct_assinados_ate_ganhos != null
-                ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
-                : "—"}
-            </div>
-          </div>
+  <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
+  <h3 className="text-sm font-bold text-[#50627a]">
+    Conversão assinados → ganhos
+  </h3>
+  <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
+    {viewMode === "producao"
+      ? aggregates.signed > 0
+        ? `${((aggregates.gained / aggregates.signed) * 100).toFixed(1).replace(".", ",")}%`
+        : "—"
+      : strategic.pct_assinados_ate_ganhos != null
+        ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
+        : "—"}
+  </div>
+</div>
         </div>
       </div>
 

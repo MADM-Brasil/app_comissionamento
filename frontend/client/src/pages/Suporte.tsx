@@ -2806,9 +2806,9 @@ function MovimentacoesSuporteTab() {
     let observacao = ticket.observacao_sales_ops || "";
     try {
       const parsed = JSON.parse(observacao);
-      observacao = parsed.observacao || observacao;
+      observacao = typeof parsed?.observacao === "string" ? parsed.observacao : "";
     } catch {
-      /* mantém */
+      // Mantém observações antigas salvas como texto simples.
     }
     setEditForm({
       status_mapeamento: ticket.status_mapeamento || "pendente",
@@ -3706,9 +3706,10 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
     setEditingTicket(ticket);
     let observacao = ticket.observacao_sales_ops || "";
     try {
-      observacao = JSON.parse(observacao).observacao || observacao;
+      const parsed = JSON.parse(observacao);
+      observacao = typeof parsed?.observacao === "string" ? parsed.observacao : "";
     } catch {
-      /* mantém */
+      // Mantém observações antigas salvas como texto simples.
     }
     setEditForm({
       observacao_sales_ops: observacao,
