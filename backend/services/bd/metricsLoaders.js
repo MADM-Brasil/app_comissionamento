@@ -1036,7 +1036,7 @@ async function loadDemandaUncached({ tipo, equipe, produto }) {
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_DETAIL, label);
 }
-
+ 
 export async function loadDemanda({ tipo, equipe, produto }) {
   const key = `demanda:${tipo}:${equipe || 'todas'}:${produto || 'Todos'}`;
   return cacheFirst(

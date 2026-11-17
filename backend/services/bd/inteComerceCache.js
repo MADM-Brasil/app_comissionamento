@@ -71,4 +71,4 @@ export async function cached(key, fetcher, options = {}) {
  */
 export function invalidate(key) {
   cache.delete(key);
-}
+} 
