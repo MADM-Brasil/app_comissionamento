@@ -1,35 +1,7 @@
 // backend/services/bd/cache.js
 // ─────────────────────────────────────────────────────────────────────────────
 // Cache híbrido Redis + L1 (memória local) COM CIRCUIT BREAKER.
-//
-// Interface pública:
-//   cacheGet(key)                  → value | null
-//   cacheSet(key, value, ttlMs)    → void
-//   cacheSetMany(entries)          → void   (pipeline, 1 round-trip p/ N sets)
-//   cacheGetMany(keys)             → { [key]: value }
-//   cacheDelete(key)               → void
-//   cacheDeleteByPrefix(prefix)    → void
-//   cacheKeyOf(prefix, params)     → string
-//   cacheStats()                   → { ...contadores, hitRatio, circuit }
-//   cacheClearLocal()              → void   (shutdown)
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// CIRCUIT BREAKER
-// ─────────────────────────────────────────────────────────────────────────────
-// O sintoma "Redis timeout após 800ms" quase sempre NÃO é Redis lento —
-// é o event loop do Node travado em JSON.stringify de payloads grandes.
-// O setTimeout(800ms) vence a corrida contra o `await redis.get()` que já
-// resolveu, mas cuja promise só é entregue quando o event loop respira.
-//
-// Solução:
-//   • 3 timeouts consecutivos → circuit ABRE por 60s.
-//   • Operando aberto → skipa Redis, usa L1 direto (<1ms).
-//   • Após 60s → half-open: 1 operação de teste.
-//   • Sucesso → fecha. Falha → reabre por mais 60s.
-//
-// Efeito prático:
-//   Sem CB: cada request paga REDIS_OP_TIMEOUT_MS durante o pico
-//   Com CB: 3 requests pagam, o resto cai em L1 com <1ms
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { redis } from './redis.js';

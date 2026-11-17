@@ -299,8 +299,7 @@ type FiltersState = {
 };
 
 const STAT_CARDS: { key: StatKey; label: string; sub: string; highlight?: "signed" | "disq" | "gained" }[] = [
-  { key: "received",     label: "Negócios Criados", sub: "" },
-  { key: "worked",       label: "Trabalhados",      sub: "" },
+  { key: "received",     label: "Leads Recebidos", sub: "" },
   { key: "contact",      label: "Em contato",       sub: "" },
   { key: "signed",       label: "Assinados",        sub: "", highlight: "signed" },
   { key: "gained",       label: "Ganhos",           sub: "", highlight: "gained" },
@@ -309,11 +308,10 @@ const STAT_CARDS: { key: StatKey; label: string; sub: string; highlight?: "signe
 ];
 
 const FUNNEL_STAGES: { key: keyof InteComerceFunnel; label: string; gradient: string }[] = [
-  { key: "recebidos",     label: "Criados",     gradient: "from-[#3972e0] to-[#83adfa]" },
-  { key: "trabalhados",   label: "Trabalhados",   gradient: "from-[#3685e8] to-[#61aee8]" },
+  { key: "recebidos",     label: "Recebidos",   gradient: "from-[#3972e0] to-[#83adfa]" },
   { key: "em_contato",    label: "Em contato",    gradient: "from-[#269cc1] to-[#6ac4d5]" },
   { key: "coleta",        label: "Coleta",        gradient: "from-[#2c9aa8] to-[#5dbec4]" },
-  { key: "contrato",      label: "Contrato",      gradient: "from-[#2c9aa8] to-[#5dbec4]" },
+  { key: "validacao_supervisor", label: "Validação Sup", gradient: "from-[#2c9aa8] to-[#5dbec4]" },
   { key: "emitidos",      label: "Emitidos",      gradient: "from-[#2c9aa8] to-[#5dbec4]" },
   { key: "assinados",     label: "Assinados",     gradient: "from-[#299875] to-[#6ac9a2]" },
   { key: "ganhos",        label: "Ganhos",        gradient: "from-[#299875] to-[#6ac9a2]" },
@@ -330,7 +328,7 @@ const EMPTY_STRATEGIC: InteComerceStrategic = {
   pct_assinados_ate_ganhos: 0, variacao_safra_sem_maturidade_equivalente: null,
 };
 const EMPTY_FUNNEL: InteComerceFunnel = {
-  recebidos: 0, trabalhados: 0, em_contato: 0, coleta: 0, contrato: 0,
+  recebidos: 0, trabalhados: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0, contrato: 0,
   emitidos: 0, assinados: 0, ganhos: 0, protocolados: 0,
   desqualificados_saida: 0, coleta_sem_contato_observado: 0,
 };
@@ -1178,7 +1176,7 @@ export default function Inte_commerce() {
     const data = viewMode === "safra" ? safraComparison : productionComparison;
     const hasComp = hasComparison;
     const metrics = [
-      ["recebidos", viewMode === "producao" ? "Negócios Criados" : "Negócios Criados"],
+      ["recebidos", viewMode === "producao" ? "Leads Recebidos" : "Leads Recebidos"],
       ["assinados", "Assinados"],
       ["ganhos", viewMode === "safra" ? "Ganhos (da safra)" : "Ganhos (no período)"],
       ["protocolados", viewMode === "safra" ? "Protocolados (da safra)" : "Protocolados (no período)"],
@@ -1200,7 +1198,7 @@ export default function Inte_commerce() {
     if (filteredTable.length === 0) return;
     const header = [
       grouping === "person" ? "Colaborador" : "Equipe",
-      "Equipe", "Criados", "Trabalhados", "Em contato",
+      "Equipe", "Recebidos", "Em contato",
       "Coleta", "Assinados", "Ganhos", "Protocolados",
       "Meta mensal (Ganhos)", "% da meta",
     ];
@@ -1264,7 +1262,7 @@ export default function Inte_commerce() {
   const comparisonSectionDescription = `Total de ${selectedMonth} × mês ${comparisonMonth}.`;
 
   const getCardLabel = (card: typeof STAT_CARDS[number]) => {
-    if (card.key === "received" && viewMode === "producao") return "Negócios Criados";
+    if (card.key === "received" && viewMode === "producao") return "Leads Recebidos";
     if (card.key === "gained") return viewMode === "safra" ? "Ganhos" : "Ganhos";
     if (card.key === "protocolados") return viewMode === "safra" ? "Protocolados" : "Protocolados";
     return card.label;
@@ -1762,8 +1760,7 @@ export default function Inte_commerce() {
                 <tr>
                   {[
                     { key: "name", label: grouping === "person" ? "Colaborador" : "Equipe" },
-                    { key: "received", label: "Criados" },
-                    { key: "worked", label: "Trabalhados" },
+                    { key: "received", label: "Recebidos" },
                     { key: "contact", label: "Em contato" },
                     { key: "collection", label: "Coleta" },
                     { key: "signed", label: "Assinados" },
@@ -1864,17 +1861,17 @@ export default function Inte_commerce() {
       {/* 5) EVOLUÇÃO DIÁRIA (BarChart) */}
       <div className="mb-6">
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div><h2 className="text-lg font-bold text-[#0f172a]">Criados × Assinados por dia</h2></div>
+          <div><h2 className="text-lg font-bold text-[#0f172a]">Recebidos × Assinados por dia</h2></div>
         </div>
         <div className="card p-5">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
             {comparisonResult && (
               <div className="flex items-center gap-3 text-[10px] text-slate-500">
                 <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]/50" /> Criados (comp.)
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]/50" /> Recebidos (comp.)
                 </span>
                 <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]" /> Criados (ref.)
+                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]" /> Recebidos (ref.)
                 </span>
                 <span className="flex items-center gap-1">
                   <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]/50" /> Assinados (comp.)
@@ -1899,10 +1896,10 @@ export default function Inte_commerce() {
                   labelFormatter={(v) => `Dia ${v}`}
                   formatter={(value: any, name: any) => {
                     const labels: Record<string, string> = {
-                      received: viewMode === "producao" ? "Negócios Criados" : "Criados",
+                      received: viewMode === "producao" ? "Leads Recebidos" : "Recebidos",
                       signed: "Assinados",
                       gained: "Ganhos",
-                      receivedComp: viewMode === "producao" ? "Negócios Criados (comparação)" : "Criados (comparação)",
+                      receivedComp: viewMode === "producao" ? "Leads Recebidos (comparação)" : "Recebidos (comparação)",
                       signedComp: "Assinados (comparação)",
                     };
                     return [formatInt(Number(value)), labels[name] || name];
@@ -1913,10 +1910,10 @@ export default function Inte_commerce() {
                   wrapperStyle={{ fontSize: 11 }}
                   formatter={(value) => {
                     const labels: Record<string, string> = {
-                      received: viewMode === "producao" ? "Negócios Criados" : "Criados",
+                      received: viewMode === "producao" ? "Leads Recebidos" : "Recebidos",
                       signed: "Assinados",
                       gained: "Ganhos",
-                      receivedComp: "Criados (comparação)",
+                      receivedComp: "Recebidos (comparação)",
                       signedComp: "Assinados (comparação)",
                     };
                     return labels[value] || value;

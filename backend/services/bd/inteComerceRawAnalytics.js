@@ -9,6 +9,8 @@ import {
   loadProtocoladosTotal,
   loadEmitidosTotal,
   loadDesqualificadosTotal,
+  loadStageCounts,
+  loadAssinaturasFunil,
   metricCacheKey,
 } from './metricsLoaders.js';
 
@@ -1115,7 +1117,7 @@ function emptyResult() {
   return {
     overview: { recebidos:0, trabalhados_proxy:0, em_contato_crm:0, assinados:0, ganhos:0, protocolados:0, desqualificados:0 },
     strategic: { recebidos:0, em_contato:0, assinados:0, assinados_que_ganharam:0, pct_recebidos_ate_assinados:null, pct_recebidos_ate_em_contato:null, pct_assinados_ate_ganhos:null, variacao_safra_sem_maturidade_equivalente:null },
-    funnel: { recebidos:0, trabalhados:0, em_contato:0, coleta:0, contrato:0, emitidos:0, assinados:0, ganhos:0, protocolados:0, desqualificados_saida:0, coleta_sem_contato_observado:0 },
+    funnel: { recebidos:0, trabalhados:0, em_contato:0, coleta:0, validacao_supervisor:0, contrato:0, emitidos:0, assinados:0, ganhos:0, protocolados:0, desqualificados_saida:0, coleta_sem_contato_observado:0 },
     daily: [], reasons: [], collaborators: [], teams: [],
     hubspot: null, hubspotCards: null,
     productionComparison: null,
@@ -1892,6 +1894,253 @@ async function mergeHubSpot(result, hs, params) {
   };
 }
 
+// ─── QUANTIDADES POR ETAPA (banco, consulta de referência) ───────────────────
+// Recebidos, Em contato, Coleta e Validação Sup passam a vir de
+// metricsLoaders.loadStageCounts em TODOS os blocos (visão geral, funil,
+// estratégico, colaboradores, equipes e produção). Roda DEPOIS do merge com o
+// HubSpot para o banco ter a última palavra nessas quatro quantidades.
+function stageScopeIds(params) {
+  if (params.colaborador_id != null) return [String(params.colaborador_id)];
+  if (params.colaborador_ids_escopo != null) return params.colaborador_ids_escopo.map(String);
+  return null;
+}
+
+async function loadScopedCached(label, loaderFn, params) {
+  const colaboradorIds = stageScopeIds(params);
+  const scopeKey = colaboradorIds == null
+    ? 'all'
+    : createHash('sha256').update(colaboradorIds.slice().sort().join(',')).digest('hex');
+  try {
+    const rows = await cached(
+      metricCacheKey(label, {
+        start: params.inicio, end: params.fim_exclusivo,
+        equipe: params.equipe, produto: params.produto,
+        mode: params.mode, scope: scopeKey,
+      }),
+      () => loaderFn({
+        start: params.inicio,
+        end: params.fim_exclusivo,
+        equipe: params.equipe,
+        produto: params.produto,
+        mode: params.mode,
+        colaboradorIds,
+      }),
+      { forceRefresh: params.refresh === true }
+    );
+    if (Array.isArray(rows)) return rows;
+    console.error(`[BACKEND ERROR] [inte-comerce] ${label}: load retornou ${typeof rows}, mantendo valores do builder`);
+  } catch (e) {
+    console.error(`[inte-comerce] ${label}: loader falhou (${e?.message || e})`);
+  }
+  return null;
+}
+
+async function loadStageCountsCached(params) {
+  const colaboradorIds = stageScopeIds(params);
+  const scopeKey = colaboradorIds == null
+    ? 'all'
+    : createHash('sha256').update(colaboradorIds.slice().sort().join(',')).digest('hex');
+  try {
+    const rows = await cached(
+      metricCacheKey('stage-counts', {
+        start: params.inicio, end: params.fim_exclusivo,
+        equipe: params.equipe, produto: params.produto,
+        mode: params.mode, scope: scopeKey,
+      }),
+      () => loadStageCounts({
+        start: params.inicio,
+        end: params.fim_exclusivo,
+        equipe: params.equipe,
+        produto: params.produto,
+        mode: params.mode,
+        colaboradorIds,
+      }),
+      { forceRefresh: params.refresh === true }
+    );
+    if (Array.isArray(rows)) return rows;
+    console.error(`[BACKEND ERROR] [inte-comerce] stage-counts: load retornou ${typeof rows}, mantendo valores do builder`);
+  } catch (e) {
+    console.error(`[inte-comerce] stage-counts: loader falhou (${e?.message || e})`);
+  }
+  return null;
+}
+
+const STAGE_KEYS = ['recebidos', 'em_contato', 'coleta', 'validacao_supervisor'];
+const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+
+// Assinados e Emitidos do funil (core.assinaturas) — respeitam safra x produção
+// e o escopo (unidade / equipe / colaborador). Última palavra nesses números.
+async function applyCanonicalAssinaturasFunil(result, params) {
+  const rows = await loadScopedCached('assinaturas-funil', loadAssinaturasFunil, params);
+  if (!rows) return 'banco';
+
+  let emitidos = 0, assinados = 0;
+  for (const r of rows) { emitidos += num(r.emitidos); assinados += num(r.assinados); }
+
+  result.overview.assinados = assinados;
+  if (result.funnel) { result.funnel.assinados = assinados; result.funnel.emitidos = emitidos; }
+  if (result.strategic) {
+    result.strategic.assinados = assinados;
+    const rec = num(result.overview.recebidos);
+    result.strategic.pct_recebidos_ate_assinados = rec ? Number((100 * assinados / rec).toFixed(2)) : null;
+  }
+  if (result.productionComparison?.month) result.productionComparison.month.assinados = assinados;
+  if (result.safraComparison?.month) result.safraComparison.month.assinados = assinados;
+
+  if (Array.isArray(result.collaborators)) {
+    const byId = new Map();
+    for (const r of rows) if (r.colaborador_id != null) byId.set(String(r.colaborador_id), r);
+    const used = new Set();
+    for (const c of result.collaborators) {
+      const id = c.colaborador_id != null ? String(c.colaborador_id) : null;
+      const src = id && !used.has(id) ? byId.get(id) : null;
+      if (src) used.add(id);
+      c.assinados = num(src?.assinados);
+      c.emitidos = num(src?.emitidos);
+    }
+    for (const [id, src] of byId) {
+      if (used.has(id) || (!num(src.assinados) && !num(src.emitidos))) continue;
+      result.collaborators.push({
+        colaborador_id: id, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
+        recebimentos_deal_dia: 0, trabalhados: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0,
+        emitidos: num(src.emitidos), assinados: num(src.assinados), ganhos: 0, protocolados: 0,
+        pct_olos_pendente: null, pct_hubspot_pendente: null,
+      });
+    }
+    result.collaborators.sort((a, b) => b.assinados - a.assinados || b.recebimentos_deal_dia - a.recebimentos_deal_dia);
+  }
+
+  if (Array.isArray(result.teams)) {
+    const byTeam = new Map();
+    for (const r of rows) {
+      const key = normalizeTeamKey(r.equipe);
+      if (!key) continue;
+      const acc = byTeam.get(key) || { equipe: r.equipe, assinados: 0, emitidos: 0 };
+      acc.assinados += num(r.assinados); acc.emitidos += num(r.emitidos);
+      byTeam.set(key, acc);
+    }
+    const seen = new Set();
+    for (const t of result.teams) {
+      const key = normalizeTeamKey(t.equipe);
+      seen.add(key);
+      const src = byTeam.get(key);
+      t.assinados = num(src?.assinados);
+      t.emitidos = num(src?.emitidos);
+    }
+    for (const [key, src] of byTeam) {
+      if (seen.has(key) || (!src.assinados && !src.emitidos)) continue;
+      result.teams.push({
+        equipe: src.equipe, recebimentos_assessor_deal_dia: 0, deals_unicos_da_equipe: 0,
+        trabalhados: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0,
+        emitidos: src.emitidos, assinados: src.assinados, ganhos: 0, protocolados: 0,
+      });
+    }
+    result.teams.sort((a, b) => b.assinados - a.assinados);
+  }
+
+  return 'banco_assinaturas';
+}
+
+async function applyCanonicalStageCounts(result, params) {
+  const rows = await loadStageCountsCached(params);
+  if (!rows) return 'banco';
+
+  // Totais (cada deal pertence a um único responsável → soma = distintos)
+  const totals = { recebidos: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0 };
+  for (const r of rows) for (const k of STAGE_KEYS) totals[k] += num(r[k]);
+
+  result.overview.recebidos = totals.recebidos;
+  result.overview.em_contato_crm = totals.em_contato;
+  if (result.funnel) {
+    result.funnel.recebidos = totals.recebidos;
+    result.funnel.em_contato = totals.em_contato;
+    result.funnel.coleta = totals.coleta;
+    result.funnel.validacao_supervisor = totals.validacao_supervisor;
+  }
+  if (result.strategic) {
+    result.strategic.recebidos = totals.recebidos;
+    result.strategic.em_contato = totals.em_contato;
+    result.strategic.pct_recebidos_ate_em_contato = totals.recebidos
+      ? Number((100 * totals.em_contato / totals.recebidos).toFixed(2)) : null;
+    result.strategic.pct_recebidos_ate_assinados = totals.recebidos
+      ? Number((100 * num(result.overview.assinados) / totals.recebidos).toFixed(2)) : null;
+  }
+  if (result.productionComparison?.month) result.productionComparison.month.recebidos = totals.recebidos;
+  if (result.safraComparison?.month) result.safraComparison.month.recebidos = totals.recebidos;
+
+  // Colaboradores — uma linha da consulta por colaborador_id
+  if (Array.isArray(result.collaborators)) {
+    const byId = new Map();
+    for (const r of rows) if (r.colaborador_id != null) byId.set(String(r.colaborador_id), r);
+
+    const rowsById = new Map();
+    for (const c of result.collaborators) {
+      const id = c.colaborador_id != null ? String(c.colaborador_id) : null;
+      if (!id) continue;
+      if (!rowsById.has(id)) rowsById.set(id, []);
+      rowsById.get(id).push(c);
+    }
+    for (const [id, list] of rowsById) {
+      const src = byId.get(id);
+      const target = (src && list.find((c) => normalizeTeamKey(c.equipe_atual) === normalizeTeamKey(src.equipe))) || list[0];
+      for (const c of list) {
+        const s = c === target ? src : null;
+        c.recebimentos_deal_dia = num(s?.recebidos);
+        c.em_contato = num(s?.em_contato);
+        c.coleta = num(s?.coleta);
+        c.validacao_supervisor = num(s?.validacao_supervisor);
+      }
+    }
+    for (const [id, src] of byId) {
+      if (rowsById.has(id)) continue;
+      result.collaborators.push({
+        colaborador_id: id, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
+        recebimentos_deal_dia: num(src.recebidos), trabalhados: 0,
+        em_contato: num(src.em_contato), coleta: num(src.coleta),
+        validacao_supervisor: num(src.validacao_supervisor),
+        assinados: 0, ganhos: 0, protocolados: 0,
+        pct_olos_pendente: null, pct_hubspot_pendente: null,
+      });
+    }
+    result.collaborators.sort((a, b) => b.assinados - a.assinados || b.recebimentos_deal_dia - a.recebimentos_deal_dia);
+  }
+
+  // Equipes — soma da consulta por nome_equipe
+  if (Array.isArray(result.teams)) {
+    const byTeam = new Map();
+    for (const r of rows) {
+      const key = normalizeTeamKey(r.equipe);
+      if (!key) continue;
+      const acc = byTeam.get(key) || { equipe: r.equipe, recebidos: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0 };
+      for (const k of STAGE_KEYS) acc[k] += num(r[k]);
+      byTeam.set(key, acc);
+    }
+    const seen = new Set();
+    for (const t of result.teams) {
+      const key = normalizeTeamKey(t.equipe);
+      const src = byTeam.get(key);
+      seen.add(key);
+      t.recebimentos_assessor_deal_dia = num(src?.recebidos);
+      t.em_contato = num(src?.em_contato);
+      t.coleta = num(src?.coleta);
+      t.validacao_supervisor = num(src?.validacao_supervisor);
+    }
+    for (const [key, src] of byTeam) {
+      if (seen.has(key)) continue;
+      result.teams.push({
+        equipe: src.equipe, recebimentos_assessor_deal_dia: src.recebidos,
+        deals_unicos_da_equipe: src.recebidos, trabalhados: 0,
+        em_contato: src.em_contato, coleta: src.coleta,
+        validacao_supervisor: src.validacao_supervisor,
+        assinados: 0, ganhos: 0, protocolados: 0,
+      });
+    }
+    result.teams.sort((a, b) => b.assinados - a.assinados);
+  }
+
+  return 'banco_etapas';
+}
+
 export async function getInteComerceRawAnalytics(params) {
   const raw = await getRawEvents(params);
 
@@ -1940,6 +2189,20 @@ export async function getInteComerceRawAnalytics(params) {
     };
   }
 
+  // Quantidades por etapa (Recebidos / Em contato / Coleta / Validação Sup)
+  // sempre vêm da consulta de referência no banco — última palavra.
+  const fonteEtapas = await applyCanonicalStageCounts(result, params);
+  // Assinados / Emitidos — depois das etapas (usa recebidos final no %)
+  const fonteAssinaturas = await applyCanonicalAssinaturasFunil(result, params);
+  if (result.hubspot) {
+    result.hubspot.fonte = {
+      ...(result.hubspot.fonte || {}),
+      recebidos: fonteEtapas, em_contato_crm: fonteEtapas,
+      coleta: fonteEtapas, validacao_supervisor: fonteEtapas,
+      assinados: fonteAssinaturas, emitidos: fonteAssinaturas,
+    };
+  }
+
   return result;
 }
 
@@ -1957,6 +2220,8 @@ export async function getInteComercePeriodSummary(params) {
 
   // ✅ FIX 21: o resumo usa o mesmo total de assinados do resto do relatório
   await applyCanonicalAssinados(full, params);
+  await applyCanonicalStageCounts(full, params);
+  await applyCanonicalAssinaturasFunil(full, params);
 
   const month = full.productionComparison?.month
     ? {
