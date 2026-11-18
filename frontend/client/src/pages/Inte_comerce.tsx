@@ -1341,17 +1341,6 @@ export default function Inte_commerce() {
         showColaboradorFilter={true}
         className="mb-4"
       />
-      <button
-        type="button"
-        onClick={() => void handleRefresh()}
-        disabled={loading}
-        className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
-        title="Atualizar dados (força bypass de cache)"
-        aria-label="Atualizar dados"
-      >
-        <RefreshCw size={13} className={cn(loading && "animate-spin")} />
-        <span className="hidden sm:inline">Atualizar</span>
-      </button>
 
       {hasComparison && (
         <details className="card mb-4 mt-3 group">
