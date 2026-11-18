@@ -311,15 +311,14 @@ const FUNNEL_STAGES: { key: keyof InteComerceFunnel; label: string; gradient: st
   { key: "recebidos",     label: "Recebidos",   gradient: "from-[#3972e0] to-[#83adfa]" },
   { key: "em_contato",    label: "Em contato",    gradient: "from-[#269cc1] to-[#6ac4d5]" },
   { key: "coleta",        label: "Coleta",        gradient: "from-[#2c9aa8] to-[#5dbec4]" },
-  { key: "validacao_supervisor", label: "Validação Sup", gradient: "from-[#2c9aa8] to-[#5dbec4]" },
+  { key: "contrato",      label: "Contrato",      gradient: "from-[#2c9aa8] to-[#5dbec4]" },
+  { key: "validacao_supervisor", label: "Validação Supervisor", gradient: "from-[#2c9aa8] to-[#5dbec4]" },
   { key: "emitidos",      label: "Emitidos",      gradient: "from-[#2c9aa8] to-[#5dbec4]" },
   { key: "assinados",     label: "Assinados",     gradient: "from-[#299875] to-[#6ac9a2]" },
   { key: "ganhos",        label: "Ganhos",        gradient: "from-[#299875] to-[#6ac9a2]" },
   { key: "protocolados",  label: "Protocolados",  gradient: "from-[#299875] to-[#6ac9a2]" },
 ];
 
-// A partir desta etapa, a porcentagem é calculada sobre os leads recebidos.
-const EMITIDOS_INDEX = FUNNEL_STAGES.findIndex((s) => s.key === "emitidos");
 
 const EMPTY_OVERVIEW: InteComerceOverview = {
   recebidos: 0, trabalhados_proxy: 0, em_contato_crm: 0,
@@ -1132,17 +1131,12 @@ export default function Inte_commerce() {
     });
   }, [tableRows, search, sortKey, sortDir]);
 
-  const pctOfPrevious = (index: number) => {
+  // Todas as etapas (Em contato, Coleta, Contrato, Validação Sup, Emitidos...)
+  // têm a % calculada sobre os leads recebidos — Recebidos é sempre 100%.
+  const pctOfRecebidos = (index: number) => {
     if (index === 0) return "100%";
     const curr = FUNNEL_STAGES[index].key;
-
-    // A partir de "Emitidos": % em relação aos leads recebidos
-    if (index >= EMITIDOS_INDEX) {
-      return formatPct(funnel[curr] as number, funnel.recebidos);
-    }
-
-    const prev = FUNNEL_STAGES[index - 1].key;
-    return formatPct(funnel[curr] as number, funnel[prev] as number);
+    return formatPct(funnel[curr] as number, funnel.recebidos);
   };
 
   const weekdays = countWeekdays(reportPeriod.start, reportPeriod.end);
@@ -1591,7 +1585,7 @@ export default function Inte_commerce() {
                       {comparisonFunnel && (
                         <span className="text-right text-slate-400 tabular-nums">{formatInt(compValue || 0)}</span>
                       )}
-                      <span className="text-right text-[#94a3b8] tabular-nums">{pctOfPrevious(i)}</span>
+                      <span className="text-right text-[#94a3b8] tabular-nums">{pctOfRecebidos(i)}</span>
                     </div>
                   </Fragment>
                 );
