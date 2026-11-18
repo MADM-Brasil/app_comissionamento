@@ -4,41 +4,6 @@
 // (mês atual, semana atual, hoje, mês anterior × todos × Todos) sempre
 // no cache Redis. O usuário nunca paga uma query lenta.
 //
-// ─────────────────────────────────────────────────────────────────────────────
-// ⚠️ CONTRATO COM metrics.js
-// ─────────────────────────────────────────────────────────────────────────────
-// As cache keys geradas AQUI devem ser byte-a-byte idênticas às geradas em
-// routes/metrics.js. Se você mudar o formato em um lugar, mude no outro
-// IMEDIATAMENTE — senão o warmup aquece uma entrada que ninguém lê (perda
-// de 100% do esforço) e o usuário continua batendo no banco.
-//
-// Os 5 endpoints principais usam `metricCacheKey` (importado de
-// metricsLoaders.js) — se a rota usa a mesma função, keys nunca divergem.
-//
-// Os endpoints auxiliares (leads, ligacoes, leads-stages) usam keys inline
-// e são ESPELHADAS aqui em `routeKeyBuilders`. Se você renomear a string
-// em metrics.js, ajuste aqui.
-//
-// `validateWarmupKeysAgainstRoutes()` roda no boot e detecta divergência
-// óbvia (key que não bate com o formato esperado). É uma rede de segurança,
-// não uma prova formal.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// ⚠️ TTLs E INTERVALOS
-// ─────────────────────────────────────────────────────────────────────────────
-// A regra é: intervalMs ≈ ttlMs * 0.8 (renova um pouco antes de expirar).
-// Períodos "quentes" (hoje, semana, mês atual) → TTL curto, intervalo curto.
-// Período "fechado" (mês anterior) → TTL longo, intervalo longo.
-// ─────────────────────────────────────────────────────────────────────────────
-// ⚠️ ROTAÇÃO DE PERÍODO
-// ─────────────────────────────────────────────────────────────────────────────
-// "currentMonth" muda quando o mês vira; "today" muda à meia-noite. Se o
-// servidor rodar por semanas sem restart, os jobs ficariam presos no período
-// antigo. Para evitar isso, `setupWarmups` é idempotente e `registerWarmup`
-// substitui jobs existentes. Agendamos uma "rotação" para 00:01 todo dia,
-// que re-chama `setupWarmups()` e faz os jobs de hoje/semana/mês pularem
-// para o novo período. Entradas antigas no Redis expiram pelo TTL sozinhas.
-// ─────────────────────────────────────────────────────────────────────────────
 
 import { registerWarmup } from './warmup.js';
 import {

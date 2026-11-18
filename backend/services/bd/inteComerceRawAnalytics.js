@@ -28,7 +28,6 @@ const EVENT_TYPES = new Set([
 const STAGE_TYPES = new Map([
   ['6650','EM_CONTATO'],['8594','EM_CONTATO'],['14105','EM_CONTATO'],
   ['6651','COLETA'],    ['8595','COLETA'],    ['14106','COLETA'],
-  ['6652','CONTRATO'],  ['8596','CONTRATO'],  ['14107','CONTRATO'],
   ['6659','DESQUALIFICADO'],
 ]);
 const PIPELINE_COMERCIAL = '572';
@@ -1124,7 +1123,7 @@ function emptyResult() {
   return {
     overview: { recebidos:0, trabalhados_proxy:0, em_contato_crm:0, assinados:0, ganhos:0, protocolados:0, desqualificados:0 },
     strategic: { recebidos:0, em_contato:0, assinados:0, assinados_que_ganharam:0, pct_recebidos_ate_assinados:null, pct_recebidos_ate_em_contato:null, pct_assinados_ate_ganhos:null, variacao_safra_sem_maturidade_equivalente:null },
-    funnel: { recebidos:0, trabalhados:0, em_contato:0, coleta:0, validacao_supervisor:0, contrato:0, emitidos:0, assinados:0, ganhos:0, protocolados:0, desqualificados_saida:0, coleta_sem_contato_observado:0 },
+    funnel: { recebidos:0, trabalhados:0, em_contato:0, coleta:0, emitidos:0, assinados:0, ganhos:0, protocolados:0, desqualificados_saida:0, coleta_sem_contato_observado:0 },
     daily: [], reasons: [], collaborators: [], teams: [],
     hubspot: null, hubspotCards: null,
     productionComparison: null,
@@ -1139,7 +1138,7 @@ function buildProductionComparisonResults(raw, params) {
   const noFilter = !params.equipe && params.colaborador_id == null;
   const scopedRestriction = params.colaborador_ids_escopo != null;
 
-  const metrics = { recebidos: null, trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO', coleta: 'COLETA', contrato: 'CONTRATO', emitidos: 'EMITIDO_ORIGINAL', assinados: 'ASSINADO_ORIGINAL', ganhos: 'GANHO', protocolados: 'PROTOCOLADO', desqualificados: 'DESQUALIFICADO' };
+  const metrics = { recebidos: null, trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO', coleta: 'COLETA', emitidos: 'EMITIDO_ORIGINAL', assinados: 'ASSINADO_ORIGINAL', ganhos: 'GANHO', protocolados: 'PROTOCOLADO', desqualificados: 'DESQUALIFICADO' };
   const broadMetrics = new Set(['emitidos','assinados','ganhos','protocolados']);
   const metricKeys = Object.keys(metrics);
   const metricByType = new Map(Object.entries(metrics).filter(([, t]) => t != null).map(([k, t]) => [t, k]));
@@ -1272,7 +1271,7 @@ function buildProductionComparisonResults(raw, params) {
 
   const result = emptyResult();
   result.overview = { recebidos: monthTotals.recebidos, trabalhados_proxy: monthTotals.trabalhados_proxy, em_contato_crm: monthTotals.em_contato_crm, assinados: monthTotals.assinados, ganhos: monthTotals.ganhos, protocolados: monthTotals.protocolados, desqualificados: monthTotals.desqualificados };
-  result.funnel = { recebidos: monthTotals.recebidos, trabalhados: monthTotals.trabalhados_proxy, em_contato: monthTotals.em_contato_crm, coleta: monthTotals.coleta, contrato: monthTotals.contrato, emitidos: monthTotals.emitidos, assinados: monthTotals.assinados, ganhos: monthTotals.ganhos, protocolados: monthTotals.protocolados, desqualificados_saida: monthTotals.desqualificados, coleta_sem_contato_observado: 0 };
+  result.funnel = { recebidos: monthTotals.recebidos, trabalhados: monthTotals.trabalhados_proxy, em_contato: monthTotals.em_contato_crm, coleta: monthTotals.coleta, emitidos: monthTotals.emitidos, assinados: monthTotals.assinados, ganhos: monthTotals.ganhos, protocolados: monthTotals.protocolados, desqualificados_saida: monthTotals.desqualificados, coleta_sem_contato_observado: 0 };
   result.strategic = {
     recebidos: monthTotals.recebidos, em_contato: monthTotals.em_contato_crm,
     assinados: monthTotals.assinados, assinados_que_ganharam: signedAndGained,
@@ -1386,7 +1385,6 @@ function buildOperationalResults(raw, params) {
   const funnel = {
     recebidos: cohort.length, trabalhados: counts.trabalhados_proxy, em_contato: contactCount,
     coleta: cohort.filter((i) => inRange(i.firstCollectionAt, i.receiptAt)).length,
-    contrato: cohort.filter((i) => inRange(i.firstContractAt, i.receiptAt)).length,
     emitidos: cohort.filter((i) => inRange(i.firstEmissionAt, i.receiptAt)).length,
     assinados: counts.assinados, ganhos: counts.ganhos, protocolados: counts.protocolados,
     desqualificados_saida: counts.desqualificados,
@@ -1531,7 +1529,7 @@ function buildComparisonResults(raw, params) {
     const list = eventsByDeal.get(e.dealId) || [];
     list.push(e); eventsByDeal.set(e.dealId, list);
   }
-  const metricTypes = { trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO', coleta: 'COLETA', contrato: 'CONTRATO', emitidos: 'EMITIDO_ORIGINAL', assinados: 'ASSINADO_ORIGINAL', ganhos: 'GANHO', protocolados: 'PROTOCOLADO', desqualificados: 'DESQUALIFICADO' };
+  const metricTypes = { trabalhados_proxy: 'TRABALHADO_PROXY', em_contato_crm: 'EM_CONTATO', coleta: 'COLETA', emitidos: 'EMITIDO_ORIGINAL', assinados: 'ASSINADO_ORIGINAL', ganhos: 'GANHO', protocolados: 'PROTOCOLADO', desqualificados: 'DESQUALIFICADO' };
 
   const dealsByMetric = new Map(Object.keys(metricTypes).map((k) => [k, new Set()]));
   const firstMetricAtByDeal = new Map();
@@ -1591,7 +1589,7 @@ function buildComparisonResults(raw, params) {
   const counts = { recebidos: cohort.length, trabalhados_proxy: metricCount('trabalhados_proxy'), em_contato_crm: emContatoAtualSet.size, assinados: metricCount('assinados'), ganhos: metricCount('ganhos'), protocolados: metricCount('protocolados'), desqualificados: metricCount('desqualificados') };
   const funnel = {
     recebidos: cohort.length, trabalhados: counts.trabalhados_proxy, em_contato: emContatoHistoricoSet.size,
-    coleta: metricCount('coleta'), contrato: metricCount('contrato'), emitidos: metricCount('emitidos'),
+    coleta: metricCount('coleta'), emitidos: metricCount('emitidos'),
     assinados: counts.assinados, ganhos: counts.ganhos, protocolados: counts.protocolados,
     desqualificados_saida: counts.desqualificados,
     coleta_sem_contato_observado: cohort.filter((i) => dealsByMetric.get('coleta').has(i.dealId) && !dealsByMetric.get('em_contato_crm').has(i.dealId)).length,
@@ -1887,7 +1885,7 @@ async function mergeHubSpot(result, hs, params) {
 }
 
 // ─── QUANTIDADES POR ETAPA (banco, consulta de referência) ───────────────────
-// Recebidos, Em contato, Coleta, Contrato e Validação Sup passam a vir de
+// Recebidos, Em contato, Coleta e Validação Sup passam a vir de
 // metricsLoaders.loadStageCounts em TODOS os blocos (visão geral, funil,
 // estratégico, colaboradores, equipes e produção). Roda DEPOIS do merge com o
 // HubSpot para o banco ter a última palavra nessas quatro quantidades.
@@ -1957,7 +1955,7 @@ async function loadStageCountsCached(params) {
   return null;
 }
 
-const STAGE_KEYS = ['recebidos', 'em_contato', 'coleta', 'contrato', 'validacao_supervisor'];
+const STAGE_KEYS = ['recebidos', 'em_contato', 'coleta'];
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
 // Assinados e Emitidos do funil (core.assinaturas) — respeitam safra x produção
@@ -1994,7 +1992,7 @@ async function applyCanonicalAssinaturasFunil(result, params) {
       if (used.has(id) || (!num(src.assinados) && !num(src.emitidos))) continue;
       result.collaborators.push({
         colaborador_id: id, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
-        recebimentos_deal_dia: 0, trabalhados: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0,
+        recebimentos_deal_dia: 0, trabalhados: 0, em_contato: 0, coleta: 0, 
         emitidos: num(src.emitidos), assinados: num(src.assinados), ganhos: 0, protocolados: 0,
         pct_olos_pendente: null, pct_hubspot_pendente: null,
       });
@@ -2023,7 +2021,7 @@ async function applyCanonicalAssinaturasFunil(result, params) {
       if (seen.has(key) || (!src.assinados && !src.emitidos)) continue;
       result.teams.push({
         equipe: src.equipe, recebimentos_assessor_deal_dia: 0, deals_unicos_da_equipe: 0,
-        trabalhados: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0,
+        trabalhados: 0, em_contato: 0, coleta: 0,
         emitidos: src.emitidos, assinados: src.assinados, ganhos: 0, protocolados: 0,
       });
     }
@@ -2038,7 +2036,7 @@ async function applyCanonicalStageCounts(result, params) {
   if (!rows) return 'banco';
 
   // Totais (cada deal pertence a um único responsável → soma = distintos)
-  const totals = { recebidos: 0, em_contato: 0, coleta: 0, contrato: 0, validacao_supervisor: 0 };
+  const totals = { recebidos: 0, em_contato: 0, coleta: 0 };
   for (const r of rows) for (const k of STAGE_KEYS) totals[k] += num(r[k]);
 
   result.overview.recebidos = totals.recebidos;
@@ -2047,8 +2045,6 @@ async function applyCanonicalStageCounts(result, params) {
     result.funnel.recebidos = totals.recebidos;
     result.funnel.em_contato = totals.em_contato;
     result.funnel.coleta = totals.coleta;
-    result.funnel.contrato = totals.contrato;
-    result.funnel.validacao_supervisor = totals.validacao_supervisor;
   }
   if (result.strategic) {
     result.strategic.recebidos = totals.recebidos;
@@ -2081,8 +2077,6 @@ async function applyCanonicalStageCounts(result, params) {
         c.recebimentos_deal_dia = num(s?.recebidos);
         c.em_contato = num(s?.em_contato);
         c.coleta = num(s?.coleta);
-        c.contrato = num(s?.contrato);
-        c.validacao_supervisor = num(s?.validacao_supervisor);
       }
     }
     for (const [id, src] of byId) {
@@ -2091,8 +2085,6 @@ async function applyCanonicalStageCounts(result, params) {
         colaborador_id: id, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
         recebimentos_deal_dia: num(src.recebidos), trabalhados: 0,
         em_contato: num(src.em_contato), coleta: num(src.coleta),
-        contrato: num(src.contrato),
-        validacao_supervisor: num(src.validacao_supervisor),
         assinados: 0, ganhos: 0, protocolados: 0,
         pct_olos_pendente: null, pct_hubspot_pendente: null,
       });
@@ -2106,7 +2098,7 @@ async function applyCanonicalStageCounts(result, params) {
     for (const r of rows) {
       const key = normalizeTeamKey(r.equipe);
       if (!key) continue;
-      const acc = byTeam.get(key) || { equipe: r.equipe, recebidos: 0, em_contato: 0, coleta: 0, contrato: 0, validacao_supervisor: 0 };
+      const acc = byTeam.get(key) || { equipe: r.equipe, recebidos: 0, em_contato: 0, coleta: 0 };
       for (const k of STAGE_KEYS) acc[k] += num(r[k]);
       byTeam.set(key, acc);
     }
@@ -2118,8 +2110,6 @@ async function applyCanonicalStageCounts(result, params) {
       t.recebimentos_assessor_deal_dia = num(src?.recebidos);
       t.em_contato = num(src?.em_contato);
       t.coleta = num(src?.coleta);
-      t.contrato = num(src?.contrato);
-      t.validacao_supervisor = num(src?.validacao_supervisor);
     }
     for (const [key, src] of byTeam) {
       if (seen.has(key)) continue;
@@ -2127,8 +2117,6 @@ async function applyCanonicalStageCounts(result, params) {
         equipe: src.equipe, recebimentos_assessor_deal_dia: src.recebidos,
         deals_unicos_da_equipe: src.recebidos, trabalhados: 0,
         em_contato: src.em_contato, coleta: src.coleta,
-        contrato: src.contrato,
-        validacao_supervisor: src.validacao_supervisor,
         assinados: 0, ganhos: 0, protocolados: 0,
       });
     }
@@ -2195,7 +2183,7 @@ export async function getInteComerceRawAnalytics(params) {
     result.hubspot.fonte = {
       ...(result.hubspot.fonte || {}),
       recebidos: fonteEtapas, em_contato_crm: fonteEtapas,
-      coleta: fonteEtapas, validacao_supervisor: fonteEtapas,
+      coleta: fonteEtapas,
       assinados: fonteAssinaturas, emitidos: fonteAssinaturas,
     };
   }
