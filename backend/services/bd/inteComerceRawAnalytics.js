@@ -21,37 +21,14 @@ const HUBSPOT_DATE_FILTER_MODE = (process.env.HUBSPOT_DATE_FILTER_MODE || 'betwe
 const HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER = process.env.HUBSPOT_DISABLE_PRODUCTION_DATE_FILTER === 'true';
 
 const EVENT_TYPES = new Set([
-  'DEAL_CREATED','RECEBIDO_CORPORATIVO','RECEBIDO_ASSESSOR',
-  'EM_CONTATO','COLETA','CONTRATO','VALIDACAO_SUPERVISOR','EMITIDO_ORIGINAL','ASSINADO_ORIGINAL',
+  'DEAL_CREATED','RECEBIDO_CORPORATIVO','RECEBIDO_ASSESSOR','TRABALHADO_PROXY',
+  'EM_CONTATO','COLETA','CONTRATO','EMITIDO_ORIGINAL','ASSINADO_ORIGINAL',
   'GANHO','PROTOCOLADO','DESQUALIFICADO',
 ]);
-
-// Fonte única dos ids de etapa (iguais aos das consultas de referência)
-const STAGE_IDS = Object.freeze({
-  EM_CONTATO:           ['6650', '8594', '14105'],
-  COLETA:               ['8595', '6651', '14106'],
-  CONTRATO:             ['14107', '8596', '6652'],
-  VALIDACAO_SUPERVISOR: ['14108', '6656', '14023', '128366'],
-  DESQUALIFICADO:       ['14110', '8598', '6659', '8589'],
-});
-// etapa_id -> tipo de evento (cada entrada é [chave, valor])
-const STAGE_TYPES = new Map(
-  Object.entries(STAGE_IDS).flatMap(([type, ids]) => ids.map((id) => [id, type])),
-);
-
-// Pipelines comerciais: 572 Closer (Auxílio Acidente), 1899 Isenção de IR, 738 Quinquênio/Concomitante
-const PIPELINES_COMERCIAIS = new Set(['572', '1899', '738']);
-const isComercialPipeline = (id) => PIPELINES_COMERCIAIS.has(String(id ?? '').trim());
-
-// Etapas em que o lead pode estar quando é recebido pelo assessor
-// ('6649' = etapa inicial já usada hoje; confirmar se 572/1899/738 têm outras)
-const RECEIVE_STAGE_IDS = new Set(['6649', ...STAGE_IDS.EM_CONTATO]);
-// Etapas que contam como "trabalhado" (primeiro avanço do lead)
-const WORK_STAGE_IDS = new Set([
-  ...STAGE_IDS.EM_CONTATO, ...STAGE_IDS.COLETA,
-  ...STAGE_IDS.CONTRATO, ...STAGE_IDS.VALIDACAO_SUPERVISOR,
+const STAGE_TYPES = new Map([
+  ['6650','EM_CONTATO'],['6651','COLETA'],['6652','CONTRATO'],['6659','DESQUALIFICADO'],
 ]);
-
+const PIPELINE_COMERCIAL = '572';
 const PRODUCT_VARIANTS = {
   'Auxilio Acidente': ['Auxilio Acidente','Auxílio Acidente'],
   'Quinquenio': ['Quinquenio','Quinquênio'],
@@ -195,7 +172,7 @@ function normalizeLabel(s) {
   return String(s || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
 
-const DESQ_STAGE_IDS_FALLBACK = new Set(STAGE_IDS.DESQUALIFICADO);
+const DESQ_STAGE_IDS_FALLBACK = new Set(['6659']);
 let DESQ_STAGE_IDS_CACHE = null;
 let DESQ_STAGE_IDS_AT = 0;
 const DESQ_STAGE_IDS_TTL = 5 * 60_000;
@@ -203,14 +180,7 @@ async function getDesqStageIds(client) {
   const now = Date.now();
   if (DESQ_STAGE_IDS_CACHE && now - DESQ_STAGE_IDS_AT < DESQ_STAGE_IDS_TTL) return DESQ_STAGE_IDS_CACHE;
   try {
-
-    const { rows } = await client.query(
-  `SELECT etapa_id::text AS id FROM ops.crm_etapas
-   WHERE crm = 'HUBSPOT'
-     AND (LOWER(TRIM(nome_etapa)) LIKE '%desqualific%' OR etapa_id::text = ANY($1::text[]))`,
-    [STAGE_IDS.DESQUALIFICADO],
-   );
-
+    const { rows } = await client.query(`SELECT etapa_id::text AS id FROM ops.crm_etapas WHERE crm = 'HUBSPOT' AND (LOWER(TRIM(nome_etapa)) LIKE '%desqualific%' OR etapa_id::text = '6659')`);
     const ids = new Set(rows.map((r) => r.id));
     DESQ_STAGE_IDS_CACHE = ids.size > 0 ? ids : DESQ_STAGE_IDS_FALLBACK;
   } catch { DESQ_STAGE_IDS_CACHE = DESQ_STAGE_IDS_FALLBACK; }
@@ -218,7 +188,7 @@ async function getDesqStageIds(client) {
   return DESQ_STAGE_IDS_CACHE;
 }
 
-const EM_CONTATO_FALLBACK = new Set(STAGE_IDS.EM_CONTATO);
+const EM_CONTATO_FALLBACK = new Set(['6650']);
 let EM_CONTATO_IDS_CACHE = null;
 let EM_CONTATO_IDS_AT = 0;
 const EM_CONTATO_IDS_TTL = 5 * 60_000;
@@ -226,12 +196,7 @@ async function getEmContatoStageIds(client) {
   const now = Date.now();
   if (EM_CONTATO_IDS_CACHE && now - EM_CONTATO_IDS_AT < EM_CONTATO_IDS_TTL) return EM_CONTATO_IDS_CACHE;
   try {
-    const { rows } = await client.query(
-  `SELECT etapa_id::text AS id FROM ops.crm_etapas
-   WHERE crm = 'HUBSPOT'
-     AND (LOWER(TRIM(nome_etapa)) LIKE 'em contato%' OR etapa_id::text = ANY($1::text[]))`,
-  [STAGE_IDS.EM_CONTATO],
-);
+    const { rows } = await client.query(`SELECT etapa_id::text AS id FROM ops.crm_etapas WHERE crm = 'HUBSPOT' AND LOWER(TRIM(nome_etapa)) LIKE 'em contato%'`);
     const ids = new Set(rows.map((r) => r.id));
     EM_CONTATO_IDS_CACHE = ids.size > 0 ? ids : EM_CONTATO_FALLBACK;
   } catch { EM_CONTATO_IDS_CACHE = EM_CONTATO_FALLBACK; }
@@ -656,8 +621,7 @@ function buildAttributions(history, deal, collaborators, now) {
   for (const row of history) {
     if (!['CRIACAO_DEAL','MUDANCA_RESPONSAVEL','MUDANCA_PIPELINE'].includes(row.tipo_movimentacao)) continue;
     if (row.tipo_movimentacao === 'MUDANCA_RESPONSAVEL' && String(row.responsavel_anterior_id ?? '') === String(row.responsavel_novo_id ?? '')) continue;
-    if (row.tipo_movimentacao === 'MUDANCA_PIPELINE' &&
-    (!isComercialPipeline(row.pipeline_novo_id) || isComercialPipeline(row.pipeline_anterior_id))) continue;
+    if (row.tipo_movimentacao === 'MUDANCA_PIPELINE' && (String(row.pipeline_novo_id ?? '') !== PIPELINE_COMERCIAL || String(row.pipeline_anterior_id ?? '') === PIPELINE_COMERCIAL)) continue;
     const time = timestamp(row.data_movimentacao);
     const group = time && groupByTime.get(time.getTime());
     if (!group) continue;
@@ -665,10 +629,7 @@ function buildAttributions(history, deal, collaborators, now) {
     const collaborator = collaborators.get(String(collaboratorId ?? ''));
     const stageAtReceive = group.etapaSame ?? row.etapa_nova_id ?? group.previousStage;
     const pipelineAtReceive = group.pipelineSame ?? row.pipeline_novo_id ?? group.previousPipeline;
-    if (!deal || !isComercialPipeline(pipelineAtReceive) ||
-    !RECEIVE_STAGE_IDS.has(String(stageAtReceive ?? '')) ||
-    !collaborator || collaborator.departamento !== 'Comercial' ||
-    !['Assessor','Supervisor'].includes(collaborator.cargo)) continue;
+    if (!deal || String(pipelineAtReceive ?? '') !== PIPELINE_COMERCIAL || !['6649','6650'].includes(String(stageAtReceive ?? '')) || !collaborator || collaborator.departamento !== 'Comercial' || !['Assessor','Supervisor'].includes(collaborator.cargo)) continue;
     const key = `${deal.deal_id}|${time.toISOString()}|${collaboratorId}`;
     if (episodeKeys.has(key)) continue;
     episodeKeys.add(key);
@@ -677,9 +638,7 @@ function buildAttributions(history, deal, collaborators, now) {
   episodes.sort((a, b) => a.receivedAt - b.receivedAt || Number(a.episodioId) - Number(b.episodioId));
 
   const ownerChanges = history.filter((r) => r.tipo_movimentacao === 'MUDANCA_RESPONSAVEL');
-  const pipelineExits = history.filter((r) =>
-  r.tipo_movimentacao === 'MUDANCA_PIPELINE' &&
-  isComercialPipeline(r.pipeline_anterior_id) && !isComercialPipeline(r.pipeline_novo_id));
+  const pipelineExits = history.filter((r) => r.tipo_movimentacao === 'MUDANCA_PIPELINE' && String(r.pipeline_anterior_id ?? '') === PIPELINE_COMERCIAL && String(r.pipeline_novo_id ?? '') !== PIPELINE_COMERCIAL);
   const stageChanges = history.filter((r) => r.tipo_movimentacao === 'MUDANCA_ETAPA' && r.etapa_nova_id != null && String(r.etapa_nova_id) !== String(r.etapa_anterior_id ?? ''));
 
   for (const episode of episodes) {
@@ -695,7 +654,7 @@ function buildAttributions(history, deal, collaborators, now) {
     episode.endAt = new Date(Math.min(...endTimes.map((v) => v.getTime())));
     const firstWork = stageChanges.find((r) => {
       const at = timestamp(r.data_movimentacao);
-      return at > episode.receivedAt && at < episode.endAt && WORK_STAGE_IDS.has(String(r.etapa_nova_id));
+      return at > episode.receivedAt && at < episode.endAt && ['6650','6651','6652','6656'].includes(String(r.etapa_nova_id));
     });
     episode.workedAt = firstWork ? timestamp(firstWork.data_movimentacao) : null;
   }
@@ -979,15 +938,14 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       for (const r of history) {
         const t = timestamp(r.data_movimentacao); if (!t || t > asOf) continue;
         const isEntry =
-          (r.tipo_movimentacao === 'CRIACAO_DEAL' && isComercialPipeline(r.pipeline_novo_id)) ||
-          (r.tipo_movimentacao === 'MUDANCA_PIPELINE' && isComercialPipeline(r.pipeline_novo_id) && !isComercialPipeline(r.pipeline_anterior_id));
+          (r.tipo_movimentacao === 'CRIACAO_DEAL' && String(r.pipeline_novo_id) === PIPELINE_COMERCIAL) ||
+          (r.tipo_movimentacao === 'MUDANCA_PIPELINE' && String(r.pipeline_novo_id) === PIPELINE_COMERCIAL && String(r.pipeline_anterior_id) !== PIPELINE_COMERCIAL);
         if (isEntry && (entryAt === null || t < entryAt)) entryAt = t;
       }
       if (entryAt) events.push({ dealId: deal.deal_id, occurredAt: entryAt, dateKey: utcDate(entryAt), collaboratorId: null, team: null, type: 'RECEBIDO_CORPORATIVO' });
 
       const creationRows = history.filter((r) => r.tipo_movimentacao === 'CRIACAO_DEAL').sort((a, b) => (timestamp(a.data_movimentacao)?.getTime() ?? 0) - (timestamp(b.data_movimentacao)?.getTime() ?? 0));
       const firstCreation = creationRows[0];
-      const createdInEmContato = STAGE_TYPES.get(String(firstCreation?.etapa_nova_id ?? '')) === 'EM_CONTATO';
 
       let createdAt = null;
       if (deal.created_at) createdAt = timestamp(deal.created_at);
@@ -998,7 +956,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       if (createdAt && createdAt <= asOf) {
         const assigned = attribution.attributionAt(createdAt);
         events.push({ dealId: deal.deal_id, occurredAt: createdAt, dateKey: utcDate(createdAt), collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type: 'DEAL_CREATED' });
-        if (createdInEmContato) {
+        if (firstCreation && String(firstCreation.etapa_nova_id) === '6650') {
           events.push({ dealId: deal.deal_id, occurredAt: createdAt, dateKey: utcDate(createdAt), collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type: 'EM_CONTATO' });
         }
       }
@@ -1013,7 +971,7 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         const eventAt = timestamp(row.data_movimentacao);
         const group = eventAt && attribution.groupByTime.get(eventAt.getTime());
         if (!group) continue;
-        const pipelineAtEvent = group.pipelineSame ?? group.previousPipelineChange ?? group.previousPipeline ?? deal.current_pipeline_id;
+        const pipelineAtEvent = group.pipelineSame ?? group.previousPipelineChange ?? PIPELINE_COMERCIAL;
         const etapaNovaId = String(row.etapa_nova_id ?? '');
 
         if (desqStageIds.has(etapaNovaId)) {
@@ -1022,8 +980,8 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
           continue;
         }
         const type = STAGE_TYPES.get(etapaNovaId);
-        if (!isComercialPipeline(pipelineAtEvent) || !type) continue;
-        if (type === 'EM_CONTATO' && createdInEmContato && eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
+        if (String(pipelineAtEvent) !== PIPELINE_COMERCIAL || !type) continue;
+        if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650' && eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
         const assigned = attribution.attributionAt(eventAt);
         events.push({ dealId: deal.deal_id, occurredAt: eventAt, dateKey: utcDate(eventAt), collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type });
       }
