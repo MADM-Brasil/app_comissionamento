@@ -52,9 +52,6 @@ coverage/
 # nyc test coverage
 .nyc_output
 
-# Dependency directories
-jspm_packages/
-
 # TypeScript cache
 *.tsbuildinfo
 
