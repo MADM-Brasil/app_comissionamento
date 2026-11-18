@@ -26,7 +26,10 @@ const EVENT_TYPES = new Set([
   'GANHO','PROTOCOLADO','DESQUALIFICADO',
 ]);
 const STAGE_TYPES = new Map([
-  ['6650','EM_CONTATO'],['6651','COLETA'],['6652','CONTRATO'],['6659','DESQUALIFICADO'],
+  ['6650','EM_CONTATO'],['8594','EM_CONTATO'],['14105','EM_CONTATO'],
+  ['6651','COLETA'],    ['8595','COLETA'],    ['14106','COLETA'],
+  ['6652','CONTRATO'],  ['8596','CONTRATO'],  ['14107','CONTRATO'],
+  ['6659','DESQUALIFICADO'],
 ]);
 const PIPELINE_COMERCIAL = '572';
 const PRODUCT_VARIANTS = {
@@ -968,23 +971,27 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       }
 
       for (const row of attribution.stageChanges) {
-        const eventAt = timestamp(row.data_movimentacao);
-        const group = eventAt && attribution.groupByTime.get(eventAt.getTime());
-        if (!group) continue;
-        const pipelineAtEvent = group.pipelineSame ?? group.previousPipelineChange ?? PIPELINE_COMERCIAL;
-        const etapaNovaId = String(row.etapa_nova_id ?? '');
+  const eventAt = timestamp(row.data_movimentacao);
+  const group = eventAt && attribution.groupByTime.get(eventAt.getTime());
+  if (!group) continue;
+  const pipelineAtEvent = group.pipelineSame ?? group.previousPipelineChange ?? PIPELINE_COMERCIAL;
+  const etapaNovaId = String(row.etapa_nova_id ?? '');
 
-        if (desqStageIds.has(etapaNovaId)) {
-          const assigned = attribution.attributionAt(eventAt);
-          events.push({ dealId: deal.deal_id, occurredAt: eventAt, dateKey: utcDate(eventAt), collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type: 'DESQUALIFICADO' });
-          continue;
-        }
-        const type = STAGE_TYPES.get(etapaNovaId);
-        if (String(pipelineAtEvent) !== PIPELINE_COMERCIAL || !type) continue;
-        if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650' && eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
-        const assigned = attribution.attributionAt(eventAt);
-        events.push({ dealId: deal.deal_id, occurredAt: eventAt, dateKey: utcDate(eventAt), collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null, type });
-      }
+  if (desqStageIds.has(etapaNovaId)) {
+    const assigned = attribution.attributionAt(eventAt);
+    events.push({ dealId: deal.deal_id, occurredAt: eventAt, dateKey: utcDate(eventAt),
+                  collaboratorId: assigned?.collaboratorId ?? null, team: assigned?.team ?? null,
+                  type: 'DESQUALIFICADO' });
+    continue;
+  }
+
+  const type = STAGE_TYPES.get(etapaNovaId);
+  if (!type) continue;
+  if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650'
+      && eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
+  const assigned = attribution.attributionAt(eventAt);
+  events.push({ ... type });
+}
     }
 
     if (useViews) {
@@ -1164,21 +1171,6 @@ function buildProductionComparisonResults(raw, params) {
     if (!dayRow) { dayRow = { dealIds: new Map(metricKeys.map((k) => [k, new Set()])) }; dailyByDay.set(day, dayRow); }
     return dayRow;
   };
-
-  // ✅ FIX 20: conversão assinados → ganhos em PRODUÇÃO
-  //
-  // Definição: "dos deals GANHOS no período, quantos foram assinados ANTES do
-  // ganho (em qualquer momento — não só no mês)".
-  //
-  // Antes: filtrava assinaturas ao mês corrente → deals assinados em outubro e
-  // ganhos em novembro ficavam de fora do numerador → pct = 0%.
-  //
-  // Agora:
-  //   1) signedDateByDeal = 1ª assinatura histórica por deal (qualquer data ≤ asOf)
-  //   2) ganhoDateByDeal  = 1º ganho por deal DENTRO do período
-  //   3) signedAndGained  = deals com ganho no período E assinatura ≤ data do ganho
-  //   4) denominador de pct_assinados_ate_ganhos = monthTotals.ganhos
-  //      (numerador ⊆ denominador → pct nunca passa de 100%)
 
   const signedDateByDeal = new Map();
   for (const event of raw.events) {
@@ -1895,7 +1887,7 @@ async function mergeHubSpot(result, hs, params) {
 }
 
 // ─── QUANTIDADES POR ETAPA (banco, consulta de referência) ───────────────────
-// Recebidos, Em contato, Coleta e Validação Sup passam a vir de
+// Recebidos, Em contato, Coleta, Contrato e Validação Sup passam a vir de
 // metricsLoaders.loadStageCounts em TODOS os blocos (visão geral, funil,
 // estratégico, colaboradores, equipes e produção). Roda DEPOIS do merge com o
 // HubSpot para o banco ter a última palavra nessas quatro quantidades.
@@ -1965,7 +1957,7 @@ async function loadStageCountsCached(params) {
   return null;
 }
 
-const STAGE_KEYS = ['recebidos', 'em_contato', 'coleta', 'validacao_supervisor'];
+const STAGE_KEYS = ['recebidos', 'em_contato', 'coleta', 'contrato', 'validacao_supervisor'];
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
 // Assinados e Emitidos do funil (core.assinaturas) — respeitam safra x produção
@@ -2046,7 +2038,7 @@ async function applyCanonicalStageCounts(result, params) {
   if (!rows) return 'banco';
 
   // Totais (cada deal pertence a um único responsável → soma = distintos)
-  const totals = { recebidos: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0 };
+  const totals = { recebidos: 0, em_contato: 0, coleta: 0, contrato: 0, validacao_supervisor: 0 };
   for (const r of rows) for (const k of STAGE_KEYS) totals[k] += num(r[k]);
 
   result.overview.recebidos = totals.recebidos;
@@ -2055,6 +2047,7 @@ async function applyCanonicalStageCounts(result, params) {
     result.funnel.recebidos = totals.recebidos;
     result.funnel.em_contato = totals.em_contato;
     result.funnel.coleta = totals.coleta;
+    result.funnel.contrato = totals.contrato;
     result.funnel.validacao_supervisor = totals.validacao_supervisor;
   }
   if (result.strategic) {
@@ -2088,6 +2081,7 @@ async function applyCanonicalStageCounts(result, params) {
         c.recebimentos_deal_dia = num(s?.recebidos);
         c.em_contato = num(s?.em_contato);
         c.coleta = num(s?.coleta);
+        c.contrato = num(s?.contrato);
         c.validacao_supervisor = num(s?.validacao_supervisor);
       }
     }
@@ -2097,6 +2091,7 @@ async function applyCanonicalStageCounts(result, params) {
         colaborador_id: id, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
         recebimentos_deal_dia: num(src.recebidos), trabalhados: 0,
         em_contato: num(src.em_contato), coleta: num(src.coleta),
+        contrato: num(src.contrato),
         validacao_supervisor: num(src.validacao_supervisor),
         assinados: 0, ganhos: 0, protocolados: 0,
         pct_olos_pendente: null, pct_hubspot_pendente: null,
@@ -2111,7 +2106,7 @@ async function applyCanonicalStageCounts(result, params) {
     for (const r of rows) {
       const key = normalizeTeamKey(r.equipe);
       if (!key) continue;
-      const acc = byTeam.get(key) || { equipe: r.equipe, recebidos: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0 };
+      const acc = byTeam.get(key) || { equipe: r.equipe, recebidos: 0, em_contato: 0, coleta: 0, contrato: 0, validacao_supervisor: 0 };
       for (const k of STAGE_KEYS) acc[k] += num(r[k]);
       byTeam.set(key, acc);
     }
@@ -2123,6 +2118,7 @@ async function applyCanonicalStageCounts(result, params) {
       t.recebimentos_assessor_deal_dia = num(src?.recebidos);
       t.em_contato = num(src?.em_contato);
       t.coleta = num(src?.coleta);
+      t.contrato = num(src?.contrato);
       t.validacao_supervisor = num(src?.validacao_supervisor);
     }
     for (const [key, src] of byTeam) {
@@ -2131,6 +2127,7 @@ async function applyCanonicalStageCounts(result, params) {
         equipe: src.equipe, recebimentos_assessor_deal_dia: src.recebidos,
         deals_unicos_da_equipe: src.recebidos, trabalhados: 0,
         em_contato: src.em_contato, coleta: src.coleta,
+        contrato: src.contrato,
         validacao_supervisor: src.validacao_supervisor,
         assinados: 0, ganhos: 0, protocolados: 0,
       });
