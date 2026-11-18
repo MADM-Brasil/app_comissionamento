@@ -1147,7 +1147,7 @@ export default function FilterBar({
             }
           >
             <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
-            {hasPendingChanges ? "Atualizar Dados *" : "Atualizar Dados"}
+            {hasPendingChanges ? "Atualizar Dados" : "Atualizar Dados"}
           </button>
         </div>
       </div>
