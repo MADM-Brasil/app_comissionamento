@@ -1,5 +1,5 @@
 // src/pages/Inte_commerce.tsx
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, Fragment } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, Collaborator } from "@/lib/dataStore";
@@ -317,6 +317,9 @@ const FUNNEL_STAGES: { key: keyof InteComerceFunnel; label: string; gradient: st
   { key: "ganhos",        label: "Ganhos",        gradient: "from-[#299875] to-[#6ac9a2]" },
   { key: "protocolados",  label: "Protocolados",  gradient: "from-[#299875] to-[#6ac9a2]" },
 ];
+
+// A partir desta etapa, a porcentagem é calculada sobre os leads recebidos.
+const EMITIDOS_INDEX = FUNNEL_STAGES.findIndex((s) => s.key === "emitidos");
 
 const EMPTY_OVERVIEW: InteComerceOverview = {
   recebidos: 0, trabalhados_proxy: 0, em_contato_crm: 0,
@@ -1131,8 +1134,14 @@ export default function Inte_commerce() {
 
   const pctOfPrevious = (index: number) => {
     if (index === 0) return "100%";
-    const prev = FUNNEL_STAGES[index - 1].key;
     const curr = FUNNEL_STAGES[index].key;
+
+    // A partir de "Emitidos": % em relação aos leads recebidos
+    if (index >= EMITIDOS_INDEX) {
+      return formatPct(funnel[curr] as number, funnel.recebidos);
+    }
+
+    const prev = FUNNEL_STAGES[index - 1].key;
     return formatPct(funnel[curr] as number, funnel[prev] as number);
   };
 
@@ -1527,14 +1536,14 @@ export default function Inte_commerce() {
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div>
             <h2 className="text-lg font-bold text-[#0f172a]">
-              Progressão do funil comercial e desqualificação
+              Progressão do Funil comercial e desqualificação
             </h2>
           </div>
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
           <div className="card p-5 lg:col-span-2 h-full flex flex-col">
             <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-              <h3 className="text-sm font-bold text-[#0f172a]">Progressão do funil comercial</h3>
+              <h3 className="text-sm font-bold text-[#0f172a]">Progressão do Funil Comercial</h3>
               {comparisonFunnel && (
                 <div className="flex items-center gap-3 text-[10px] text-slate-500">
                   <span className="flex items-center gap-1">
@@ -1560,24 +1569,31 @@ export default function Inte_commerce() {
                   ? "grid-cols-[110px_1fr_56px_56px_56px]"
                   : "grid-cols-[110px_1fr_70px_70px]";
                 return (
-                  <div key={stage.key} className={cn("w-full grid items-center gap-3 text-xs py-1 px-1", grid)}>
-                    <span className="font-medium text-[#0f172a] text-left">{stage.label}</span>
-                    <div className="flex flex-col gap-0.5">
-                      {comparisonFunnel && (
-                        <div className="h-1.5 rounded-full bg-[#edf2f8] overflow-hidden">
-                          <div className="h-full rounded-full bg-slate-400/50" style={{ width: `${compWidth}%` }} />
-                        </div>
-                      )}
-                      <div className="h-2.5 rounded-full bg-[#edf2f8] overflow-hidden">
-                        <div className={cn("h-full rounded-full bg-gradient-to-r", stage.gradient)} style={{ width: `${width}%` }} />
-                      </div>
-                    </div>
-                    <span className="font-bold text-right text-[#0f172a] tabular-nums">{formatInt(value)}</span>
-                    {comparisonFunnel && (
-                      <span className="text-right text-slate-400 tabular-nums">{formatInt(compValue || 0)}</span>
+                  <Fragment key={stage.key}>
+                    {stage.key === "emitidos" && (
+                      <h3 className="text-sm font-bold text-[#0f172a] border-t border-dashed border-[#e2e8f0] pt-3 mt-1">
+                        Progressão do Funil de Etapas
+                      </h3>
                     )}
-                    <span className="text-right text-[#94a3b8] tabular-nums">{pctOfPrevious(i)}</span>
-                  </div>
+                    <div className={cn("w-full grid items-center gap-3 text-xs py-1 px-1", grid)}>
+                      <span className="font-medium text-[#0f172a] text-left">{stage.label}</span>
+                      <div className="flex flex-col gap-0.5">
+                        {comparisonFunnel && (
+                          <div className="h-1.5 rounded-full bg-[#edf2f8] overflow-hidden">
+                            <div className="h-full rounded-full bg-slate-400/50" style={{ width: `${compWidth}%` }} />
+                          </div>
+                        )}
+                        <div className="h-2.5 rounded-full bg-[#edf2f8] overflow-hidden">
+                          <div className={cn("h-full rounded-full bg-gradient-to-r", stage.gradient)} style={{ width: `${width}%` }} />
+                        </div>
+                      </div>
+                      <span className="font-bold text-right text-[#0f172a] tabular-nums">{formatInt(value)}</span>
+                      {comparisonFunnel && (
+                        <span className="text-right text-slate-400 tabular-nums">{formatInt(compValue || 0)}</span>
+                      )}
+                      <span className="text-right text-[#94a3b8] tabular-nums">{pctOfPrevious(i)}</span>
+                    </div>
+                  </Fragment>
                 );
               })}
               <div
