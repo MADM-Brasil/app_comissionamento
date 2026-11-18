@@ -1051,19 +1051,14 @@ export async function loadDemanda({ tipo, equipe, produto }) {
 // Fonte única para as quantidades de cards nas etapas do funil comercial.
 // Replica a consulta SQL de referência:
 //   • recebidos            → core.deals com data_distribuicao_comercial no período
-//   • em_contato / coleta / contrato / validacao_supervisor →
-//       deals que ENTRARAM na etapa no período (h.etapa_nova_id + h.data_movimentacao)
-//       E QUE AINDA ESTÃO nessa etapa (d.etapa_id no mesmo grupo de etapas).
-//       Card que entrou e já avançou/saiu NÃO conta (mesma regra de desqualificados).
-//   • PRODUÇÃO (default) → só entrada na etapa no período + etapa atual
-//   • SAFRA              → idem + d.data_criacao_deal dentro do período
+//   • em_contato           → deals que ENTRARAM em "Em contato" no período (histórico)
+//   • coleta               → deals que ENTRARAM em "Coleta de documentação" no período
 //   • responsável/equipe: COALESCE(d.closer_id, d.responsavel_id) → core.colaboradores
+//   • mode=safra → também exige d.data_criacao_deal dentro do período (linhas "(Safra)")
 //   • COUNT(DISTINCT deal_id) por colaborador/equipe e por etapa
 export const STAGE_COUNT_ETAPAS = Object.freeze({
   em_contato:           Object.freeze([6650, 8594, 14105]),
   coleta:               Object.freeze([8595, 6651, 14106]),
-  validacao_supervisor: Object.freeze([14108, 6656, 14023]),
-  contrato:             Object.freeze([6652, 8596, 14107]),
 });
 
 function etapaList(ids) {
@@ -1081,10 +1076,9 @@ function etapaList(ids) {
  * @param {string}  [p.equipe]        filtra por c.nome_equipe
  * @param {string}  [p.produto]       filtra por core.produtos.nome_produto
  * @param {string}  [p.mode]          'safra' aplica o filtro de criação do deal
- *                                   (ambos os modos exigem que o deal ainda esteja na etapa)
  * @param {string[]|null} [p.colaboradorIds] null = conta inteira; [] = escopo vazio
  * @returns {Promise<Array<{colaborador_id:string|null, colaborador:string, equipe:string,
- *   recebidos:number, em_contato:number, coleta:number, validacao_supervisor:number}>>}
+ *   recebidos:number, em_contato:number, coleta:number,}>>}
  */
 export async function loadStageCounts({ start, end, equipe, produto, mode, colaboradorIds = null }) {
   if (Array.isArray(colaboradorIds) && colaboradorIds.length === 0) return [];
@@ -1127,7 +1121,6 @@ export async function loadStageCounts({ start, end, equipe, produto, mode, colab
       FROM core.historico_movimentacoes h
       INNER JOIN core.deals d ON d.deal_id = h.deal_id${joins}
       WHERE h.etapa_nova_id IN (${etapaList(ids)})
-        AND d.etapa_id      IN (${etapaList(ids)})   -- ainda está na etapa
         AND h.data_movimentacao::date >= $1::date
         AND h.data_movimentacao::date <  $2::date${filters}`;
 
@@ -1140,16 +1133,12 @@ export async function loadStageCounts({ start, end, equipe, produto, mode, colab
         AND d.data_distribuicao_comercial::date <  $2::date${filters}
       UNION ALL${stageCte('em_contato', STAGE_COUNT_ETAPAS.em_contato)}
       UNION ALL${stageCte('coleta', STAGE_COUNT_ETAPAS.coleta)}
-      UNION ALL${stageCte('contrato', STAGE_COUNT_ETAPAS.contrato)}              -- ← ADD
-      UNION ALL${stageCte('validacao_supervisor', STAGE_COUNT_ETAPAS.validacao_supervisor)}
     )
     SELECT
       colaborador_id, colaborador, equipe,
       COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'recebidos')::int            AS recebidos,
       COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'em_contato')::int           AS em_contato,
-      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'coleta')::int               AS coleta,
-      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'contrato')::int             AS contrato,       -- ← ADD
-      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'validacao_supervisor')::int AS validacao_supervisor
+      COUNT(DISTINCT deal_id) FILTER (WHERE etapa = 'coleta')::int               AS coleta
     FROM movimentos
     GROUP BY colaborador_id, colaborador, equipe
     ORDER BY recebidos DESC, colaborador

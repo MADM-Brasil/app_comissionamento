@@ -32,7 +32,7 @@ export interface InteComerceStrategic {
 
 export interface InteComerceFunnel {
   recebidos: number; trabalhados: number; em_contato: number;
-  coleta: number; validacao_supervisor: number; contrato: number; emitidos: number; assinados: number;
+  coleta: number; emitidos: number; assinados: number;
   ganhos: number; protocolados: number; desqualificados_saida: number;
   coleta_sem_contato_observado: number;
 }
@@ -44,14 +44,14 @@ export interface InteComerceReason {
 export interface InteComerceCollaborator {
   colaborador_id: string; colaborador: string; equipe_atual: string;
   recebimentos_deal_dia: number; trabalhados: number; em_contato: number;
-  coleta: number; validacao_supervisor?: number; emitidos?: number; assinados: number; ganhos: number; protocolados: number;
+  coleta: number; emitidos?: number; assinados: number; ganhos: number; protocolados: number;
   pct_olos_pendente: number | null; pct_hubspot_pendente: number | null;
 }
 
 export interface InteComerceTeam {
   equipe: string; recebimentos_assessor_deal_dia: number;
   deals_unicos_da_equipe: number; trabalhados: number; em_contato: number;
-  coleta: number; validacao_supervisor?: number; emitidos?: number; assinados: number; ganhos: number; protocolados: number;
+  coleta: number; emitidos?: number; assinados: number; ganhos: number; protocolados: number;
 }
 
 export interface InteComerceDaily {
@@ -517,7 +517,7 @@ export async function probeInteComerceEndpoints(
 }
 
 // ───────────────────────────────────────────────────────────
-// Endpoints individuais (contrato inalterado)
+// Endpoints individuais 
 // ───────────────────────────────────────────────────────────
 export const fetchInteComerceOverview = (p: InteComerceParams) =>
   call<InteComerceOverview>('/overview', p);

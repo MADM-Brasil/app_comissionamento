@@ -1,5 +1,5 @@
 // src/pages/Inte_commerce.tsx
-import { useState, useMemo, useCallback, useEffect, Fragment } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, Collaborator } from "@/lib/dataStore";
@@ -311,14 +311,11 @@ const FUNNEL_STAGES: { key: keyof InteComerceFunnel; label: string; gradient: st
   { key: "recebidos",     label: "Recebidos",   gradient: "from-[#3972e0] to-[#83adfa]" },
   { key: "em_contato",    label: "Em contato",    gradient: "from-[#269cc1] to-[#6ac4d5]" },
   { key: "coleta",        label: "Coleta",        gradient: "from-[#2c9aa8] to-[#5dbec4]" },
-  { key: "contrato",      label: "Contrato",      gradient: "from-[#2c9aa8] to-[#5dbec4]" },
-  { key: "validacao_supervisor", label: "Validação Supervisor", gradient: "from-[#2c9aa8] to-[#5dbec4]" },
   { key: "emitidos",      label: "Emitidos",      gradient: "from-[#2c9aa8] to-[#5dbec4]" },
   { key: "assinados",     label: "Assinados",     gradient: "from-[#299875] to-[#6ac9a2]" },
   { key: "ganhos",        label: "Ganhos",        gradient: "from-[#299875] to-[#6ac9a2]" },
   { key: "protocolados",  label: "Protocolados",  gradient: "from-[#299875] to-[#6ac9a2]" },
 ];
-
 
 const EMPTY_OVERVIEW: InteComerceOverview = {
   recebidos: 0, trabalhados_proxy: 0, em_contato_crm: 0,
@@ -330,7 +327,7 @@ const EMPTY_STRATEGIC: InteComerceStrategic = {
   pct_assinados_ate_ganhos: 0, variacao_safra_sem_maturidade_equivalente: null,
 };
 const EMPTY_FUNNEL: InteComerceFunnel = {
-  recebidos: 0, trabalhados: 0, em_contato: 0, coleta: 0, validacao_supervisor: 0, contrato: 0,
+  recebidos: 0, trabalhados: 0, em_contato: 0, coleta: 0,
   emitidos: 0, assinados: 0, ganhos: 0, protocolados: 0,
   desqualificados_saida: 0, coleta_sem_contato_observado: 0,
 };
@@ -1131,12 +1128,12 @@ export default function Inte_commerce() {
     });
   }, [tableRows, search, sortKey, sortDir]);
 
-  // Todas as etapas (Em contato, Coleta, Contrato, Validação Sup, Emitidos...)
-  // têm a % calculada sobre os leads recebidos — Recebidos é sempre 100%.
-  const pctOfRecebidos = (index: number) => {
+  // Cada etapa é calculada sobre a etapa imediatamente anterior.
+  const pctOfPrevious = (index: number) => {
     if (index === 0) return "100%";
     const curr = FUNNEL_STAGES[index].key;
-    return formatPct(funnel[curr] as number, funnel.recebidos);
+    const prev = FUNNEL_STAGES[index - 1].key;
+    return formatPct(funnel[curr] as number, funnel[prev] as number);
   };
 
   const weekdays = countWeekdays(reportPeriod.start, reportPeriod.end);
@@ -1461,15 +1458,15 @@ export default function Inte_commerce() {
         <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
           <div><h2 className="text-lg font-bold text-[#0f172a]">Visão geral do funil</h2></div>
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2">
+        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 xl:gap-6">
           {STAT_CARDS.map((card) => (
-            <div key={card.key} className="card p-3">
-              <div className="text-xs text-[#64748b] font-medium leading-tight min-h-[28px]">
+            <div key={card.key} className="card p-4 md:p-5 flex flex-col justify-between min-h-[110px]">
+              <div className="text-xs md:text-sm text-[#64748b] font-medium leading-tight min-h-[28px]">
                 {getCardLabel(card)}
               </div>
               <div
                 className={cn(
-                  "text-2xl font-extrabold mt-1.5 tabular-nums leading-none",
+                  "text-3xl md:text-4xl font-extrabold mt-2 tabular-nums leading-none",
                   card.highlight === "signed" && "text-[#2F6FED]",
                   card.highlight === "gained" && "text-[#16A34A]",
                   card.highlight === "disq" && "text-[#DC2626]",
@@ -1563,13 +1560,10 @@ export default function Inte_commerce() {
                   ? "grid-cols-[110px_1fr_56px_56px_56px]"
                   : "grid-cols-[110px_1fr_70px_70px]";
                 return (
-                  <Fragment key={stage.key}>
-                    {stage.key === "emitidos" && (
-                      <h3 className="text-sm font-bold text-[#0f172a] border-t border-dashed border-[#e2e8f0] pt-3 mt-1">
-                        Progressão do Funil de Etapas
-                      </h3>
-                    )}
-                    <div className={cn("w-full grid items-center gap-3 text-xs py-1 px-1", grid)}>
+                  <div
+                    key={stage.key}
+                    className={cn("w-full grid items-center gap-3 text-xs py-1 px-1", grid)}
+                  >
                       <span className="font-medium text-[#0f172a] text-left">{stage.label}</span>
                       <div className="flex flex-col gap-0.5">
                         {comparisonFunnel && (
@@ -1585,9 +1579,8 @@ export default function Inte_commerce() {
                       {comparisonFunnel && (
                         <span className="text-right text-slate-400 tabular-nums">{formatInt(compValue || 0)}</span>
                       )}
-                      <span className="text-right text-[#94a3b8] tabular-nums">{pctOfRecebidos(i)}</span>
-                    </div>
-                  </Fragment>
+                      <span className="text-right text-[#94a3b8] tabular-nums">{pctOfPrevious(i)}</span>
+                  </div>
                 );
               })}
               <div
