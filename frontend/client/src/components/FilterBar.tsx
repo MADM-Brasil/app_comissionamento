@@ -189,6 +189,31 @@ export default function FilterBar({
   const [refreshing, setRefreshing] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string>("");
 
+  // ─── Aplicação diferida de filtros ──────────────────────────────────────
+  // Estado local (selects) muda livremente. O pai só é notificado quando o
+  // usuário clica em "Atualizar Dados". Assim evitamos reloads a cada clique.
+  const initialNotifyDoneRef = useRef(false);
+  const lastAppliedSignatureRef = useRef<string | null>(null);
+
+  const computeSignature = (
+    eq: string,
+    colab: string,
+    prod: string,
+    unit: number | "todas",
+  ) => JSON.stringify([eq, colab, prod, unit]); // searchTerm fica de fora — não vai ao backend
+
+  const currentSignature = computeSignature(
+    selectedEquipe,
+    selectedColaborador,
+    selectedProduto,
+    selectedUnitForSignature(selectedEquipe), // placeholder — substituído abaixo
+  );
+
+  function selectedUnitForSignature(_eq: string): number | "todas" {
+    // apenas para evitar TDZ — será recomputado logo abaixo
+    return "todas";
+  }
+
   const userLevel = getEffectiveAccessLevel();
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
@@ -205,6 +230,19 @@ export default function FilterBar({
     ? userUnidade ?? "todas"
     : initialStored.unidadeId ?? "todas";
   const [selectedUnit, setSelectedUnit] = useState<number | "todas">(initialUnit);
+
+  // Recalcula a signature já com `selectedUnit` disponível
+  const realCurrentSignature = computeSignature(
+    selectedEquipe,
+    selectedColaborador,
+    selectedProduto,
+    selectedUnit,
+  );
+
+  const hasPendingChanges =
+    isReady &&
+    lastAppliedSignatureRef.current !== null &&
+    lastAppliedSignatureRef.current !== realCurrentSignature;
 
   const userTeam = useMemo(() => {
     if (!currentUser) return '';
@@ -369,8 +407,7 @@ export default function FilterBar({
 
   // ─── useEffect de restrições ────────────────────────────────────────────
   // Aplica restrições uma vez. Para admin/superior, NÃO reseta selectedProduto
-  // (já vem inicializado com initialStored.produto). Mantém log para
-  // diagnosticar se algo está resetando.
+  // (já vem inicializado com initialStored.produto).
   useEffect(() => {
     if (!isReady) return;
     if (hasAppliedRestrictions) return;
@@ -476,6 +513,45 @@ export default function FilterBar({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEquipe, escopoData, isReady, hasAppliedRestrictions]);
+
+  // ─── Apply inicial (uma única vez, depois das restrições) ──────────────
+  // Debounce de 100ms para deixar os effects de sincronização (produto,
+  // userTeam, unidade) assentarem antes de notificar o pai.
+  useEffect(() => {
+    if (!isReady || !hasAppliedRestrictions) return;
+    if (initialNotifyDoneRef.current) return;
+
+    const timer = setTimeout(() => {
+      if (initialNotifyDoneRef.current) return;
+      initialNotifyDoneRef.current = true;
+
+      lastAppliedSignatureRef.current = computeSignature(
+        selectedEquipe,
+        selectedColaborador,
+        selectedProduto,
+        selectedUnit,
+      );
+
+      console.log("[FilterBar] apply inicial → notifyParent", {
+        selectedEquipe,
+        selectedColaborador,
+        selectedProduto,
+        selectedUnit,
+      });
+
+      notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
+    }, 100);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    isReady,
+    hasAppliedRestrictions,
+    selectedEquipe,
+    selectedColaborador,
+    selectedProduto,
+    selectedUnit,
+  ]);
 
   const equipesDisponiveis = useMemo(() => {
     let nomes = equipeConfigs.map((eq) => eq.nome).filter((nome) => !isExcludedTeam(nome));
@@ -599,10 +675,7 @@ export default function FilterBar({
   }, [onFilterChange]);
 
   // ─── notifyParent ───────────────────────────────────────────────────────
-  // Só depende de `isReady`. Removemos `hasAppliedRestrictions` porque ele é
-  // sempre `true` após o mount e, se por qualquer motivo ficar `false`, os
-  // handlers de filtro (que chamam notifyParent) seriam silenciosamente
-  // ignorados — o que explica o backend recebendo `produto: undefined`.
+  // Chamado APENAS pelo apply inicial (1x) e pelo botão "Atualizar Dados".
   const notifyParent = (
     equipe: string,
     colaborador: string,
@@ -634,7 +707,7 @@ export default function FilterBar({
     console.log("[FilterBar] notifyParent:", {
       equipe: finalEquipe,
       colaborador: finalColaborador,
-      produto,                       // ← o valor que vai para o pai
+      produto,
       unidadeId: unidadeId === "todas" ? undefined : unidadeId,
       hasAppliedRestrictions,
       isReady,
@@ -660,43 +733,7 @@ export default function FilterBar({
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [selectedEquipe, selectedColaborador, selectedProduto, searchTerm, selectedUnit]);
 
-  // ─── Notificação inicial ────────────────────────────────────────────────
-  // Removida a dependência de `hasAppliedRestrictions` (só `isReady`), e
-  // adicionada assinatura que inclui os 4 campos que o pai precisa.
-  // O `lastNotifiedFilters` evita re-notificações redundantes.
-  const lastNotifiedFilters = useRef<string | null>(null);
-  useEffect(() => {
-    if (!isReady) return;
-    const signature = JSON.stringify([
-      selectedEquipe,
-      selectedColaborador,
-      selectedProduto,
-      selectedUnit,
-    ]);
-    if (lastNotifiedFilters.current === signature) return;
-    lastNotifiedFilters.current = signature;
-    console.log("[FilterBar] useEffect inicial → notifyParent", {
-      selectedEquipe, selectedColaborador, selectedProduto, selectedUnit,
-    });
-    notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isReady, selectedEquipe, selectedColaborador, selectedProduto, selectedUnit]);
-
-  // ─── Notificação quando SÓ o produto muda ───────────────────────────────
-  // Garante que, mesmo que outro useEffect atrase a sincronização,
-  // o produto chegue ao pai. Não redunda com o useEffect acima porque
-  // este tem uma dependência mais estreita.
-  const lastNotifiedProduto = useRef<string | null>(null);
-  useEffect(() => {
-    if (!isReady) return;
-    if (lastNotifiedProduto.current === selectedProduto) return;
-    lastNotifiedProduto.current = selectedProduto;
-    console.log("[FilterBar] useEffect produto → notifyParent", {
-      selectedProduto,
-    });
-    notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isReady, selectedProduto]);
+  // ─── Handlers (mudam SOMENTE estado local; não notificam o pai) ─────────
 
   const handleEquipeChange = (novaEquipe: string) => {
     setSelectedEquipe(novaEquipe);
@@ -723,20 +760,16 @@ export default function FilterBar({
       setSelectedProduto(produtoFinal);
     }
 
-    let nextColaborador = selectedColaborador;
     if (selectedColaborador !== "todos" && novaEquipe !== "todas") {
       const stillInTeam = collaborators.some(
         (c) => c.name === selectedColaborador && normalize(c.equipeNome) === normalize(novaEquipe)
       );
       if (!stillInTeam) {
-        nextColaborador = "todos";
         setSelectedColaborador("todos");
         if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
       }
     }
-
-    console.log("[FilterBar] handleEquipeChange → notifyParent", { novaEquipe, nextColaborador, produtoFinal });
-    notifyParent(novaEquipe, nextColaborador, produtoFinal);
+    // ❌ notifyParent removido — aplica só no botão "Atualizar Dados"
   };
 
   const handleUnitChange = (value: string) => {
@@ -745,8 +778,7 @@ export default function FilterBar({
     setSelectedEquipe("todas");
     setSelectedColaborador("todos");
     if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
-    console.log("[FilterBar] handleUnitChange → notifyParent", { unidadeId, produto: selectedProduto });
-    notifyParent("todas", "todos", selectedProduto, undefined, unidadeId);
+    // ❌ notifyParent removido
   };
 
   const handleColaboradorChange = (novoColaborador: string) => {
@@ -762,9 +794,7 @@ export default function FilterBar({
     } else {
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
     }
-
-    console.log("[FilterBar] handleColaboradorChange → notifyParent", { novoColaborador, produto: selectedProduto });
-    notifyParent(selectedEquipe, novoColaborador, selectedProduto);
+    // ❌ notifyParent removido
   };
 
   const handleProdutoChange = (novoProduto: string) => {
@@ -775,47 +805,24 @@ export default function FilterBar({
       produtoAnterior: selectedProduto,
     });
     setSelectedProduto(novoProduto);
-    notifyParent(selectedEquipe, selectedColaborador, novoProduto);
+    // ❌ notifyParent removido
   };
 
   const handleSearchChange = (novoTermo: string) => {
     setSearchTerm(novoTermo);
-    if (!isReady) return;
-
-    let finalEquipe = selectedEquipe;
-    let finalColaborador = selectedColaborador;
-    if (currentUser && isAssessor) {
-      finalEquipe = userTeam || "todas";
-      finalColaborador = currentUser.nome || "todos";
-    } else if (currentUser && isSupervisor) {
-      finalEquipe = userTeam || "todas";
-    }
-    const colaboradorId =
-      finalColaborador !== "todos"
-        ? collaborators.find((c) => c.name === finalColaborador)?.id
-        : undefined;
-
-    console.log("[FilterBar] handleSearchChange → notifyParent", { produto: selectedProduto });
-    onFilterChangeRef.current({
-      equipe: finalEquipe,
-      colaborador: finalColaborador,
-      colaboradorId,
-      produto: selectedProduto,
-      unidadeId: selectedUnit === "todas" ? undefined : selectedUnit,
-    });
+    // ❌ Bloco inteiro de onFilterChangeRef.current removido —
+    // busca só filtra o dropdown localmente.
   };
 
   const clearFilters = () => {
     if (!isReady) return;
     if (isAssessor && currentUser) {
       setSelectedProduto("Todos");
-      notifyParent(selectedEquipe, selectedColaborador, "Todos");
     } else if (isSupervisor && currentUser) {
       setSelectedColaborador("todos");
       setSearchTerm("");
       setSelectedProduto("Todos");
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
-      notifyParent(selectedEquipe, "todos", "Todos");
     } else {
       setSelectedEquipe("todas");
       setSelectedColaborador("todos");
@@ -823,21 +830,42 @@ export default function FilterBar({
       setSearchTerm("");
       setSelectedProduto("Todos");
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
-      notifyParent(
-        "todas",
-        "todos",
-        "Todos",
-        undefined,
-        isUnitRestricted && userUnidade != null ? userUnidade : "todas",
-      );
     }
+    // ❌ notifyParent removido — aplica só no botão "Atualizar Dados"
   };
 
+  // ─── handleRefresh: ÚNICO ponto que aplica filtros ao pai ──────────────
   const handleRefresh = async () => {
-    if (refreshing || !onRefresh) return;
+    if (refreshing || !isReady) return;
     setRefreshing(true);
     try {
-      await onRefresh();
+      // 1) Marca a signature como aplicada — impede o "apply inicial" de
+      //    disparar caso o usuário clique antes do debounce.
+      initialNotifyDoneRef.current = true;
+      lastAppliedSignatureRef.current = computeSignature(
+        selectedEquipe,
+        selectedColaborador,
+        selectedProduto,
+        selectedUnit,
+      );
+
+      console.log("[FilterBar] Atualizar Dados → aplicar filtros", {
+        selectedEquipe,
+        selectedColaborador,
+        selectedProduto,
+        selectedUnit,
+      });
+
+      notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
+
+      // 2) Força bypass de cache no pai (se ele fornecer `onRefresh`).
+      //    setTimeout(0) garante que o React já comitou o novo `filters`
+      //    no pai antes de chamar `onRefresh()` — senão `onRefresh` usaria
+      //    a closure antiga (com filtros velhos).
+      if (onRefresh) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await onRefresh();
+      }
       setLastUpdated(new Date().toLocaleTimeString());
     } catch (error) {
       console.error("Erro ao atualizar dados:", error);
@@ -1092,29 +1120,36 @@ export default function FilterBar({
           )}
         </div>
 
-        {onRefresh && (
-          <div className="flex items-center justify-end gap-2 mb-2">
-            {refreshing && (
-              <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
-                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                <span>Atualizando dados...</span>
-              </div>
+        <div className="flex items-center justify-end gap-2 mb-2 flex-wrap">
+          {refreshing && (
+            <div className="flex items-center gap-1.5 text-xs text-gray-500 animate-pulse">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>Atualizando dados...</span>
+            </div>
+          )}
+          <span className="text-[10px] text-gray-400">
+            Atualizado {lastUpdated || new Date().toLocaleTimeString()}
+          </span>
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing || !isReady}
+            className={cn(
+              "ml-2 px-3 py-1.5 text-xs font-medium rounded-lg text-white transition-colors disabled:opacity-50",
+              hasPendingChanges
+                ? "bg-amber-600 hover:bg-amber-700"
+                : "bg-[#09175b] hover:bg-[#09175b]/90",
             )}
-            <span className="text-[10px] text-gray-400">
-              Atualizado {lastUpdated || new Date().toLocaleTimeString()}
-            </span>
-            <button
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="ml-2 px-3 py-1.5 text-xs font-medium rounded-lg bg-[#09175b] text-white hover:bg-[#09175b]/90 disabled:opacity-50 transition-colors"
-              aria-label="Atualizar dados manualmente"
-              title="Clique para recarregar os dados mantendo os filtros atuais"
-            >
-              <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
-              Atualizar Dados
-            </button>
-          </div>
-        )}
+            aria-label="Atualizar dados manualmente"
+            title={
+              hasPendingChanges
+                ? "Aplicar os filtros selecionados e recarregar"
+                : "Recarregar os dados mantendo os filtros atuais"
+            }
+          >
+            <RefreshCw className={cn("w-3.5 h-3.5 inline mr-1", refreshing && "animate-spin")} />
+            {hasPendingChanges ? "Atualizar Dados *" : "Atualizar Dados"}
+          </button>
+        </div>
       </div>
     </div>
   );
