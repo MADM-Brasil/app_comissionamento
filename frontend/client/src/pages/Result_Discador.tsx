@@ -534,8 +534,8 @@ export default function ResultDiscador() {
   // ═══════════════════════════════════════════════════════════
   return (
     <DashboardLayout
-      title="Resultado do Discador × Assinaturas"
-      subtitle="Performance de acionamentos, CPC-A e conversão de assinaturas por agente, equipe e campanha."
+      title="Discador × Assinaturas"
+      subtitle="Performance de acionamentos, CPC-A e conversão de assinaturas."
     >
       <FilterBar
         onFilterChange={handleFilterChange}
