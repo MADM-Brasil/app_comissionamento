@@ -479,9 +479,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
 
       if (useDateFilter) {
         // PRODUÇÃO: o HubSpot recusa (HTTP 400) a busca por data de entrada na
-        // etapa (hs_date_entered_* e hs_v2_date_entered_*). Não consulta o HubSpot:
-        // em_contato fica null e setFromHs mantém o valor calculado pelo banco
-        // (entrada na etapa "Em contato" dentro do período, sem olhar a criação).
         result.em_contato = null;
         result.em_contato_metodo = 'banco (produção: entrada na etapa no período)';
       } else {
@@ -501,9 +498,6 @@ async function fetchHubSpotOverview({ inicio, fim_exclusivo, produto, mode, owne
   }
 
   // ─── DESQUALIFICADOS ───────────────────────────────────────────────────────
-  // Não consulta mais o HubSpot: o total vem do banco (loadDesqualificadosTotal,
-  // por data_movimentacao + data_criacao_deal) via applyCanonicalDesqualificados.
-  // Isso também elimina o HTTP 400 das buscas por hs_v2_date_entered_<etapa>.
   result.desqualificados = null;
   result.desqualificados_metodo = 'banco (canonical_metrics)';
   result.desq_stages_all = [];
@@ -1277,7 +1271,6 @@ function buildProductionComparisonResults(raw, params) {
     assinados: monthTotals.assinados, assinados_que_ganharam: signedAndGained,
     pct_recebidos_ate_assinados: monthTotals.recebidos ? Number((100 * monthTotals.assinados / monthTotals.recebidos).toFixed(2)) : null,
     pct_recebidos_ate_em_contato: monthTotals.recebidos ? Number((100 * monthTotals.em_contato_crm / monthTotals.recebidos).toFixed(2)) : null,
-    // ✅ FIX 20: denominador = ganhos (numerador ⊆ denominador)
     pct_assinados_ate_ganhos: monthTotals.ganhos ? Number((100 * signedAndGained / monthTotals.ganhos).toFixed(2)) : null,
     variacao_safra_sem_maturidade_equivalente: null,
   };
@@ -1712,15 +1705,6 @@ function hubspotDiagnostics(hs) {
 }
 
 // ─── CANONICAL (banco) ───────────────────────────────────────────────────────
-// ✅ FIX 21: assinados e desqualificados passam a valer em TODOS os blocos
-//            (visão geral, funil, estratégico, produção), com ou sem HubSpot.
-//            Antes, assinados só era corrigido quando o HubSpot estava ativo e
-//            liberado para o filtro — e desqualificados vinha da API do HubSpot.
-//            Agora desqualificados vem do banco: negócios que ENTRARAM na etapa
-//            6659 dentro do período e continuam nela hoje.
-//
-// ⚠️ São `function` de módulo (hoistadas) — nunca `const` declarado depois do
-//    uso, senão estoura "Cannot access '...' before initialization".
 
 async function canonicalTotal(label, loaderFn, params, extra = {}) {
   let val = null;
@@ -1851,13 +1835,8 @@ async function mergeHubSpot(result, hs, params) {
   fonte.ganhos       = await applyCanonical('ganhos',       loadGanhosTotal,       result.overview, 'ganhos',       { mode: params.mode });
   fonte.protocolados = await applyCanonical('protocolados', loadProtocoladosTotal, result.overview, 'protocolados', { mode: params.mode });
   fonte.emitidos     = await applyCanonical('emitidos',     loadEmitidosTotal,     result.funnel,   'emitidos');
-
-  // ✅ FIX 21: desqualificados vem do banco (etapa 6659), não da API do HubSpot.
-  //    Precisou ficar DEPOIS da definição de `applyCanonical` (const) e depois
-  //    de `setFromHs('desqualificados', ...)`, para o banco ter a última palavra.
   fonte.desqualificados = await applyCanonicalDesqualificados(result, params);
 
-  // ✅ Recalcula estratégicos após canonical_metrics (pode ter alterado assinados/ganhos)
   result.strategic.recebidos  = result.overview.recebidos;
   result.strategic.em_contato = result.overview.em_contato_crm;
   result.strategic.assinados  = result.overview.assinados;
