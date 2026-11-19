@@ -1,5 +1,5 @@
 // src/pages/Result_Discador.tsx
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore } from "@/lib/dataStore";
@@ -140,15 +140,83 @@ type SubView = "equipes" | "agentes" | "campanhas";
 type SortKey = "n" | "t" | "c" | "d" | "tx" | "ca" | "as" | "cv" | "qr" | "tm";
 
 // ============================================================
+// TOOLTIPS (hover) — termos técnicos
+// ============================================================
+const TERM_TIPS: Record<string, { title: string; text: string }> = {
+  acionamentos: { title: "Acionamento",  text: "Alô / atendida. Toda tentativa de contato efetivamente atendida." },
+  cpc:          { title: "CPC",          text: "Contato com a pessoa certa (decisor / responsável pelo negócio)." },
+  "cpc-a":      { title: "CPC-A",        text: "CPC com intenção de prosseguir — é tudo aquilo que foi prospectado." },
+  assinados:    { title: "Assinados",    text: "Contratos assinados atribuídos à discadora no período." },
+  conversao:    { title: "Conversão",    text: "Assinados ÷ CPC-A. Mede a eficiência sobre o que realmente foi prospectado." },
+  tma:          { title: "TMA por CPC",  text: "Tempo médio de atendimento (em minutos:segundos) por CPC." },
+  queda:        { title: "Queda",        text: "Percentual de acionamentos encerrados por queda de ligação." },
+};
+
+function Tip({ term, children }: { term: keyof typeof TERM_TIPS; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const ref = useRef<HTMLSpanElement>(null);
+  const data = TERM_TIPS[term];
+
+  const show = () => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ x: r.left + r.width / 2, y: r.top });
+    setOpen(true);
+  };
+
+  return (
+    <>
+      <span
+        ref={ref}
+        onMouseEnter={show}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={show}
+        onBlur={() => setOpen(false)}
+        tabIndex={0}
+        className={cn(
+          "border-b border-dotted border-[#94a3b8] cursor-help outline-none transition-colors",
+          "hover:border-[#2F6FED] hover:text-[#2F6FED]",
+          "focus-visible:border-[#2F6FED] focus-visible:text-[#2F6FED]",
+        )}
+      >
+        {children}
+      </span>
+      {open && data && (
+        <div
+          role="tooltip"
+          className={cn(
+            "fixed z-50 max-w-[260px] px-3 py-2 rounded-lg pointer-events-none",
+            "bg-white text-[#334155] text-[12px] leading-snug font-medium",
+            "border border-[#e2e8f0] shadow-md",
+          )}
+          style={{
+            left: Math.max(8, Math.min(pos.x - 130, window.innerWidth - 268)),
+            top: Math.max(8, pos.y - 68),
+          }}
+        >
+          <b className="block text-[10px] uppercase tracking-wider text-[#2F6FED] mb-1">
+            {data.title}
+          </b>
+          {data.text}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ============================================================
 // COMPONENTES DE APOIO
 // ============================================================
 function KpiCard({
-  label, value, sub, accent,
+  label, value, sub, accent, tip,
 }: {
   label: string;
   value: string | number;
   sub?: string;
   accent?: "danger" | "warning" | "brand" | "success";
+  tip?: keyof typeof TERM_TIPS;
 }) {
   const colorClass =
     accent === "danger" ? "text-red-600"
@@ -158,7 +226,9 @@ function KpiCard({
       : "text-[#0f172a]";
   return (
     <Card className="p-4">
-      <div className="text-[11px] text-[#64748b] font-medium">{label}</div>
+      <div className="text-[11px] text-[#64748b] font-medium">
+        {tip ? <Tip term={tip}>{label}</Tip> : label}
+      </div>
       <div className={cn("text-2xl font-black mt-1 tabular-nums", colorClass)}>{value}</div>
       {sub && <div className="text-[10px] text-[#94a3b8] mt-1 leading-snug">{sub}</div>}
     </Card>
@@ -660,12 +730,46 @@ function GerencialView({
     <div className="space-y-4">
       {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-        <KpiCard label="Acionamentos" value={fmtInt(T.d)} sub={`${pct(txOf(T.cp, T.d))} viraram contato`} />
-        <KpiCard label="CPC" value={fmtInt(T.cp)} sub="contatos com a pessoa certa" accent="brand" />
-        <KpiCard label="CPC-A" value={fmtInt(T.ca)} sub={`${pct(T.cp > 0 ? T.ca / T.cp : 0)} dos CPC`} accent="brand" />
-        <KpiCard label="Assinados Discadora" value={fmtInt(T.as)} sub={`${fmtInt(noDial)} sem acionamento`} accent="success" />
-        <KpiCard label="Conversão" value={pct(conv)} sub="assinados ÷ CPC-A" accent="success" />
-        <KpiCard label="TMA por CPC" value={T.cp ? mm(tmaCpc) : "–"} sub="minutos:segundos" />
+        <KpiCard
+          label="Acionamentos"
+          value={fmtInt(T.d)}
+          sub={`${pct(txOf(T.cp, T.d))} viraram contato`}
+          tip="acionamentos"
+        />
+        <KpiCard
+          label="CPC"
+          value={fmtInt(T.cp)}
+          sub="contatos com a pessoa certa"
+          accent="brand"
+          tip="cpc"
+        />
+        <KpiCard
+          label="CPC-A"
+          value={fmtInt(T.ca)}
+          sub={`${pct(T.cp > 0 ? T.ca / T.cp : 0)} dos CPC`}
+          accent="brand"
+          tip="cpc-a"
+        />
+        <KpiCard
+          label="Assinados Discadora"
+          value={fmtInt(T.as)}
+          sub={`${fmtInt(noDial)} sem acionamento`}
+          accent="success"
+          tip="assinados"
+        />
+        <KpiCard
+          label="Conversão"
+          value={pct(conv)}
+          sub="assinados ÷ CPC-A"
+          accent="success"
+          tip="conversao"
+        />
+        <KpiCard
+          label="TMA por CPC"
+          value={T.cp ? mm(tmaCpc) : "–"}
+          sub="minutos:segundos"
+          tip="tma"
+        />
       </div>
 
       {/* Donut + Funil */}
