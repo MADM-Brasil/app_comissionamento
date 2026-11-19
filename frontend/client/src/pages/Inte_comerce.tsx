@@ -357,29 +357,75 @@ function RecomendacoesCard({ filters, colaboradores }: { filters: FiltersState; 
   const canAuthorRecommendations = userLevel >= LEVELS.SUPERVISAO;
   const canDeleteAny = userLevel >= LEVELS.COORDENADOR;
 
+  // ─── Resolução do escopo em cascata ─────────────────────────────────────
+  // Ordem: base visível → unidade → equipe → colaborador.
+  // - "todos" (nenhum filtro) = todos os colaboradores visíveis
+  // - unidade sem equipe/colaborador = todos da unidade
+  // - equipe sem colaborador = todos da equipe
+  // - colaborador = somente ele (já intersectado com unidade/equipe, se setadas)
   const targetColaboradores = useMemo<Collaborator[]>(() => {
+    let list = colaboradores.filter(
+      (c) => !isHiddenCollaborator(c) && !isExcludedTeam((c as any).equipeNome),
+    );
+
+    // 1) Unidade — só aplica se a store carrega o campo, para não esvaziar
+    //    silenciosamente a lista quando o dado não existe no front.
+    if (filters.unidadeId != null) {
+      const uid = Number(filters.unidadeId);
+      const hasUnitField = list.some((c) => {
+        const u = (c as any).unidadeId ?? (c as any).unidade_id;
+        return u != null;
+      });
+      if (hasUnitField) {
+        list = list.filter((c) => {
+          const u = (c as any).unidadeId ?? (c as any).unidade_id;
+          return u != null && Number(u) === uid;
+        });
+      }
+    }
+
+    // 2) Equipe
+    if (filters.equipe && filters.equipe !== "todas") {
+      const eq = normalizeKey(filters.equipe);
+      list = list.filter((c) => normalizeKey(c.equipeNome) === eq);
+    }
+
+    // 3) Colaborador
     const isIndividual =
       filters.colaboradorId != null ||
       (filters.colaborador && filters.colaborador !== "todos");
     if (isIndividual) {
-      return colaboradores.filter(
+      list = list.filter(
         (c) =>
-          (filters.colaboradorId != null && String(c.id) === String(filters.colaboradorId)) ||
-          (filters.colaborador && filters.colaborador !== "todos" && c.name === filters.colaborador),
+          (filters.colaboradorId != null &&
+            String(c.id) === String(filters.colaboradorId)) ||
+          (filters.colaborador &&
+            filters.colaborador !== "todos" &&
+            c.name === filters.colaborador),
       );
     }
-    if (filters.equipe && filters.equipe !== "todas") {
-      const eq = normalizeKey(filters.equipe);
-      return colaboradores.filter((c) => normalizeKey(c.equipeNome) === eq);
-    }
-    return [];
+
+    return list;
   }, [filters, colaboradores]);
 
   const targetLabel = useMemo(() => {
     if (targetColaboradores.length === 0) return "—";
     if (targetColaboradores.length === 1) return targetColaboradores[0].name;
-    return `${targetColaboradores.length} colaboradores da equipe ${filters.equipe}`;
-  }, [targetColaboradores, filters.equipe]);
+
+    const isIndividual =
+      filters.colaboradorId != null ||
+      (filters.colaborador && filters.colaborador !== "todos");
+    if (isIndividual && filters.colaborador && filters.colaborador !== "todos") {
+      return filters.colaborador;
+    }
+    if (filters.equipe && filters.equipe !== "todas") {
+      return `${targetColaboradores.length} colaboradores da equipe ${filters.equipe}`;
+    }
+    if (filters.unidadeId != null) {
+      return `${targetColaboradores.length} colaboradores da unidade ${filters.unidadeId}`;
+    }
+    return `${targetColaboradores.length} colaboradores (todos)`;
+  }, [targetColaboradores, filters]);
 
   const [tempRecs, setTempRecs] = useState<TemporaryRecommendation[]>([]);
   const [newRecText, setNewRecText] = useState("");
@@ -455,18 +501,15 @@ function RecomendacoesCard({ filters, colaboradores }: { filters: FiltersState; 
         {!hasTarget ? (
           <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
             <p className="text-sm text-slate-500">
-              Selecione uma <b>equipe</b> ou um <b>colaborador</b> no filtro acima
-              para publicar ou visualizar recomendações temporárias.
+              Nenhum colaborador corresponde ao filtro atual. Ajuste os filtros
+              (equipe, unidade ou colaborador) para publicar recomendações.
             </p>
           </div>
         ) : (
           <>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 mb-3">
               <p className="text-xs font-semibold text-slate-700 mb-2">
-                Nova recomendação para{" "}
-                {targetColaboradores.length === 1
-                  ? targetColaboradores[0].name
-                  : `${targetColaboradores.length} colaboradores da equipe ${filters.equipe}`}
+                Nova recomendação para <b>{targetLabel}</b>
               </p>
               <textarea
                 value={newRecText}
