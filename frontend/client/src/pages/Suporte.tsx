@@ -260,6 +260,9 @@ const STATUS_REPORTE_BLOQUEIA_EDICAO = new Set([
   "cancelado",
 ]);
 
+// Status em que a aba Movimentar permite reprocessar (mesmo conjunto do SalesOps)
+const STATUS_REPROCESSAVEIS = new Set(["erro", "bloqueado", "aviso", "suporte", "fora_pipeline"]);
+
 function getSupportAccessLevel(user?: any): number {
   if (!user) return LEVELS.NONE;
   const level = getEffectiveAccessLevel(user);
@@ -605,6 +608,10 @@ function MovimentacaoTab() {
     origem_cliente_informada: "",
   });
 
+  // [NOVO] Estado do modal de reprocessamento
+  const [reprocessingItem, setReprocessingItem] = useState<MovementItem | null>(null);
+  const [reprocessing, setReprocessing] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -808,6 +815,14 @@ function MovimentacaoTab() {
     return !STATUS_BLOQUEIAM_EDICAO_DADOS.has(normalizeStatus(item.status));
   };
 
+  // [NOVO] Reaproveita o conjunto do SalesOps — só faz sentido reprocessar
+  // casos que o worker pode tentar novamente. "suporte" e "aviso" continuam
+  // podendo ser corrigidos, mas o reprocessamento é liberado só para os
+  // status em que o worker atua.
+  const statusPermiteReprocessar = (item: MovementItem): boolean => {
+    return STATUS_REPROCESSAVEIS.has(normalizeStatus(item.status));
+  };
+
   const podeEditarItemHistorico = (item: MovementItem): boolean =>
     podeEditarDadosHistorico && statusPermiteEdicao(item);
 
@@ -892,6 +907,46 @@ function MovimentacaoTab() {
       setMessage({ text: err.message || "Erro ao salvar dados do cliente.", type: "error" });
     } finally {
       setSavingHistory(false);
+    }
+  };
+
+  // [NOVO] Reprocessar — mesmo endpoint/força do SalesOps.
+  // A regra de 24h NÃO é furada aqui (só o Coordenador tem essa prerrogativa
+  // via /reprocessar-coordenador).
+  const confirmarReprocessar = async (params: { force: boolean; observacao: string }) => {
+    if (!reprocessingItem) return;
+    setReprocessing(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/suporte/tickets-movimentacao/${reprocessingItem.id_ticket_movimentacao}/reprocessar`,
+        {
+          method: "POST",
+          headers: getCsrfHeaders(),
+          credentials: "include",
+          body: JSON.stringify(params),
+        },
+      );
+      const data = await safeJson(res);
+      if (!res.ok || !data.success) throw new Error(data.error || "Erro ao reprocessar");
+
+      setMessage({
+        text: data.message || `Caso #${reprocessingItem.id_ticket_movimentacao} reenfileirado.`,
+        type: "success",
+      });
+
+      // Atualização otimista até o polling confirmar
+      setMovements((prev) =>
+        prev.map((m) =>
+          m.id === reprocessingItem.id ? { ...m, status: "pendente", resultado: "Reprocessando" } : m,
+        ),
+      );
+
+      setReprocessingItem(null);
+      await loadUserHistory();
+    } catch (err: any) {
+      setMessage({ text: err.message || "Erro ao reprocessar caso.", type: "error" });
+    } finally {
+      setReprocessing(false);
     }
   };
 
@@ -1410,13 +1465,14 @@ function MovimentacaoTab() {
                   <th>Contato</th>
                   <th>Status</th>
                   <th>Obs. Comercial</th>
-                  {podeEditarDadosHistorico && <th className="w-24 text-center">Corrigir</th>}
+                  {podeEditarDadosHistorico && <th className="w-48 text-center">Ações</th>}
                 </tr>
               </thead>
               <tbody>
                 {filteredMovements.map((m) => {
                   const info = getStatusInfo(m.status);
                   const habilitadoEdicao = podeEditarItemHistorico(m);
+                  const habilitadoReprocessar = statusPermiteReprocessar(m);
                   return (
                     <tr key={m.id}>
                       <td className="whitespace-nowrap align-top">
@@ -1450,25 +1506,44 @@ function MovimentacaoTab() {
                       </td>
                       {podeEditarDadosHistorico && (
                         <td className="text-center align-top">
-                          {habilitadoEdicao ? (
-                            <button
-                              type="button"
-                              onClick={() => openEditHistory(m)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[#eff6ff] text-[#2F6FED] hover:bg-[#dbeafe] text-xs font-semibold transition-colors"
-                              title="Corrigir dados do cliente"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                              Corrigir
-                            </button>
-                          ) : (
-                            <span
-                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-gray-50 text-[#94a3b8] text-xs font-semibold cursor-not-allowed"
-                              title="Correção bloqueada para este status (concluído, bloqueado, suporte ou coordenador)"
-                            >
-                              <Lock className="w-3.5 h-3.5" />
-                              Bloqueado
-                            </span>
-                          )}
+                          <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                            {habilitadoEdicao ? (
+                              <button
+                                type="button"
+                                onClick={() => openEditHistory(m)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-[#eff6ff] text-[#2F6FED] hover:bg-[#dbeafe] text-xs font-semibold transition-colors"
+                                title="Corrigir dados do cliente"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" /> Corrigir
+                              </button>
+                            ) : (
+                              <span
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-gray-50 text-[#94a3b8] text-xs font-semibold cursor-not-allowed"
+                                title="Correção bloqueada para este status (concluído, bloqueado, suporte ou coordenador)"
+                              >
+                                <Lock className="w-3.5 h-3.5" /> Bloqueado
+                              </span>
+                            )}
+
+                            {habilitadoReprocessar ? (
+                              <button
+                                type="button"
+                                onClick={() => setReprocessingItem(m)}
+                                disabled={reprocessing}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 text-amber-700 hover:bg-amber-100 border border-amber-200 text-xs font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="Reprocessar o caso (mantém os dados já corrigidos)"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" /> Reprocessar
+                              </button>
+                            ) : (
+                              <span
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-gray-50 text-[#94a3b8] text-xs font-semibold cursor-not-allowed"
+                                title="Reprocessamento permitido apenas para status erro, bloqueado, aviso, suporte ou fora do pipeline"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" /> Reprocessar
+                              </span>
+                            )}
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -1571,6 +1646,37 @@ function MovimentacaoTab() {
           </div>
         </div>
       </EditModal>
+
+      <ReprocessModal
+        isOpen={reprocessingItem !== null}
+        onClose={() => setReprocessingItem(null)}
+        ticket={
+          reprocessingItem
+            ? {
+                id_ticket_movimentacao: reprocessingItem.id_ticket_movimentacao,
+                crm_origem: "CRM",
+                tipo_solicitacao: "Movimentação",
+                nome_cliente_informado: reprocessingItem.nome_cliente_informado,
+                sobrenome_cliente_informado: reprocessingItem.sobrenome_cliente_informado,
+                email_cliente_informado: reprocessingItem.email,
+                telefone_cliente_informado: reprocessingItem.telefone,
+                cpf_cliente_informado: reprocessingItem.cpf,
+                origem_cliente_informada: reprocessingItem.origem,
+                colaborador_origem_nome: reprocessingItem.usuario,
+                equipe_origem_nome: "",
+                colaborador_destino_nome: reprocessingItem.assessor,
+                equipe_destino_nome: reprocessingItem.equipe,
+                status_mapeamento: reprocessingItem.status,
+                observacao_sales_ops: reprocessingItem.observacao_sales_ops,
+                criado_em: reprocessingItem.timestamp,
+                produto: reprocessingItem.produto ?? null,
+                link: reprocessingItem.link ?? null,
+              }
+            : null
+        }
+        onConfirm={confirmarReprocessar}
+        saving={reprocessing}
+      />
     </div>
   );
 }
@@ -3701,19 +3807,6 @@ function CoordenadorTab({ initialTicketId }: { initialTicketId?: number | null }
           const u = t.unidade_id ?? null;
           return u == null || Number(u) === unidadeId;
         });
-      }
-
-      if (raw.length === 0) {
-        console.warn(
-          "[CoordenadorTab] Backend retornou 0 tickets. " +
-            `isAdmin=${isAdmin} level=${accessLevel} url=${url}`,
-        );
-      } else if (lista.length === 0) {
-        console.warn(
-          "[CoordenadorTab] Backend retornou tickets, mas todos foram filtrados. " +
-            "Status distintos recebidos:",
-          [...new Set(raw.map((t: any) => String(t.status_mapeamento ?? "")))],
-        );
       }
 
       setTickets(lista);

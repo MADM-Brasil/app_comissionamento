@@ -492,7 +492,7 @@ function validateContact(contact, input) {
   if (input.phone && phones.length && !phones.some(phone => phonesMatch(phone, input.phone))) divergences.push('telefone');
   if (input.cpf && props.contact_cpf && normalizePhone(props.contact_cpf) !== input.cpf) divergences.push('CPF');
   return { found: true, divergente: divergences.length > 0, contact,
-    ...(divergences.length ? { motivo: `Informações registradas estão diferentes no card localizado, valide: ${divergences.join(', ')}` } : {}) };
+    ...(divergences.length ? { motivo: `Card localizado com informações divergentes, valide a informação: ${divergences.join(', ')}` } : {}) };
 }
 
 export async function findContactAndValidate({ email, phone, cpf } = {}) {
