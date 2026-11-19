@@ -11,6 +11,7 @@ import Home from "./pages/Home";
 import Comissoes from "./pages/Comissoes";
 import Funil from "./pages/Funil";
 import Tabulacoes from "./pages/Tabulacoes";
+import Result_Discador from "./pages/Result_Discador";
 import Ranking from "./pages/Ranking";
 import Configuration from "./pages/Configuration";
 import Suporte from "./pages/Suporte";
@@ -33,19 +34,6 @@ import {
   type Permissions,
 } from "@/lib/accessControl";
 
-/**
- * Redireciona usuário autenticado para a landing page correta
- * (definida em `getDefaultLandingPage`):
- *   • Assessor/Supervisor/Coordenador da UNIDADE 3 (ou equipe liberada) → /home
- *   • JURIDICO                                                          → /suporte
- *   • ASSESSOR_PLUS                                                     → /suporte
- *   • Supervisor fora da UNIDADE 3 / equipes liberadas                  → /suporte
- *   • Demais                                                            → /
- *
- * [CHANGELOG] Passa o `accessUser` (enriquecido via `resolveAccessUser`)
- * para `getDefaultLandingPage`, garantindo que `nome_equipe`/`unidade_id`
- * estejam presentes mesmo quando o payload do `/auth/me` não os trouxer.
- */
 function PublicRoute({ children }: { children: React.ReactNode }) {
   const currentUser = useAppStore((s) => s.currentUser);
   const collaborators = useAppStore((s) => s.collaborators);
@@ -74,26 +62,6 @@ function LandingRedirect() {
   return <Suporte />;
 }
 
-/**
- * Guard genérico de permissão.
- *
- * Enriquece o usuário com `resolveAccessUser` antes de chamar
- * `getUserPermissions`. Sem isso, `getUserPermissions(currentUser)`
- * enxergava apenas o payload bruto do `/auth/me` (que, em sessões
- * antigas ou fluxos legados, pode não trazer `nome_equipe`/`unidade_id`).
- * Sem esses campos:
- *   • canSeeHomeComissoes → false
- *   • canAccessDashboard / canAccessComissoes → false
- *   • guard retorna "Acesso não autorizado"
- *
- * Enquanto `collaborators` ainda não carregou E o payload não trouxe
- * os campos, renderizamos um loader curto em vez de negar — evita o
- * "flash" de acesso negado na primeira renderização.
- *
- * [CHANGELOG] Perfis "suporte-only" (JURIDICO e ASSESSOR_PLUS) são
- * redirecionados para /suporte quando tentam acessar rotas sem a
- * permissão exigida.
- */
 function ProtectedRouteWithPermission({
   permission,
   minimumLevel,
@@ -229,7 +197,6 @@ function Router() {
         </PeriodProvider>
       </Route>
 
-
       {/* Comercial */}
       <Route path="/inte_comerce">
         <PeriodProvider>
@@ -245,8 +212,13 @@ function Router() {
           </ProtectedRouteWithPermission>
         </PeriodProvider>
       </Route>
-
-
+      <Route path="/Result_Discador">
+        <PeriodProvider>
+          <ProtectedRouteWithPermission permission="canAccessReports">
+            <Result_Discador />
+          </ProtectedRouteWithPermission>
+        </PeriodProvider>
+      </Route>
       
       {/* Configuração */}
       <Route path="/configuration">

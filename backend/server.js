@@ -23,6 +23,7 @@ import suporteRouter from './routes/suporte.js';
 import campanhasRoutes from './routes/campanhas.js';
 import notificacoesRoutes from './routes/notificacoes.js';
 import tabulacoesRoutes from './routes/tabulacoes.js';
+import discadorRouter from './routes/discador.js';
 
 // ---------- Serviço de background ----------
 import { startNotificationEngine } from './services/notificationEngine.js';
@@ -588,6 +589,7 @@ app.use('/api/user', userRouter);
 app.use('/api/suporte', suporteRouter);
 app.use('/api/notificacoes', notificacoesRoutes);
 app.use('/api/tabulacoes', tabulacoesRoutes);
+app.use('/api/discador', discadorRouter);
 
 // Cache de 5 min — chamado a cada navegação
 app.get('/api/admin/months', async (req, res) => {

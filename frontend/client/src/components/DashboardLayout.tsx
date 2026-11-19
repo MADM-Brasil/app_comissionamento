@@ -235,7 +235,10 @@ export default function DashboardLayout({
       items.push({
         label: "Discadora",
         icon: Phone,
-        children: [{ path: "/tabulacoes", label: "Não Tabuladas", icon: Phone }],
+        children: [
+          { path: "/Result_Discador", label: "Desempenho", icon: Phone },
+          { path: "/tabulacoes", label: "Não Tabuladas", icon: Phone }
+        ]
       });
     }
 
@@ -277,6 +280,7 @@ export default function DashboardLayout({
     if (permissions.canAccessReports) {
       flat.push({ path: "/funil", label: "Funil", icon: GitBranch });
       flat.push({ path: "/tabulacoes", label: "Não Tabuladas", icon: Phone });
+      flat.push({ path: "/Result_Discador", label: "Discadora", icon: Phone });
 
     }
 
