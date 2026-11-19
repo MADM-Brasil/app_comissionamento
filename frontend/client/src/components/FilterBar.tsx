@@ -13,6 +13,9 @@ interface FilterBarProps {
     colaboradorId?: string | number;
     produto: string;
     unidadeId?: number;
+    /** true quando o botão "Atualizar Dados" foi clicado sem mudança de assinatura.
+     *  Consumidores podem usar esse flag para forçar um reload mesmo sem mudança de escopo. */
+    forceReload?: boolean;
   }) => void;
   showColaboradorFilter?: boolean;
   showProdutoFilter?: boolean;
@@ -191,7 +194,7 @@ export default function FilterBar({
 
   // ─── Aplicação diferida de filtros ──────────────────────────────────────
   // Estado local (selects) muda livremente. O pai só é notificado quando o
-  // usuário clica em "Atualizar Dados". Assim evitamos reloads a cada clique.
+  // usuário clica em "Atualizar Dados" OU no apply inicial (uma vez).
   const initialNotifyDoneRef = useRef(false);
   const lastAppliedSignatureRef = useRef<string | null>(null);
 
@@ -201,18 +204,6 @@ export default function FilterBar({
     prod: string,
     unit: number | "todas",
   ) => JSON.stringify([eq, colab, prod, unit]); // searchTerm fica de fora — não vai ao backend
-
-  const currentSignature = computeSignature(
-    selectedEquipe,
-    selectedColaborador,
-    selectedProduto,
-    selectedUnitForSignature(selectedEquipe), // placeholder — substituído abaixo
-  );
-
-  function selectedUnitForSignature(_eq: string): number | "todas" {
-    // apenas para evitar TDZ — será recomputado logo abaixo
-    return "todas";
-  }
 
   const userLevel = getEffectiveAccessLevel();
   const isAssessor = userLevel === LEVELS.ASSESSOR;
@@ -231,7 +222,6 @@ export default function FilterBar({
     : initialStored.unidadeId ?? "todas";
   const [selectedUnit, setSelectedUnit] = useState<number | "todas">(initialUnit);
 
-  // Recalcula a signature já com `selectedUnit` disponível
   const realCurrentSignature = computeSignature(
     selectedEquipe,
     selectedColaborador,
@@ -539,7 +529,7 @@ export default function FilterBar({
         selectedUnit,
       });
 
-      notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
+      notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm, selectedUnit, false);
     }, 100);
 
     return () => clearTimeout(timer);
@@ -682,6 +672,7 @@ export default function FilterBar({
     produto: string,
     _search?: string,
     unidadeId: number | "todas" = selectedUnit,
+    forceReload = false,
   ) => {
     if (!isReady) {
       console.warn("[FilterBar] notifyParent BLOQUEADO (isReady=false)", { equipe, colaborador, produto });
@@ -711,6 +702,7 @@ export default function FilterBar({
       unidadeId: unidadeId === "todas" ? undefined : unidadeId,
       hasAppliedRestrictions,
       isReady,
+      forceReload,
     });
 
     onFilterChangeRef.current({
@@ -719,6 +711,7 @@ export default function FilterBar({
       colaboradorId,
       produto,
       unidadeId: unidadeId === "todas" ? undefined : unidadeId,
+      forceReload,
     });
   };
 
@@ -810,8 +803,7 @@ export default function FilterBar({
 
   const handleSearchChange = (novoTermo: string) => {
     setSearchTerm(novoTermo);
-    // ❌ Bloco inteiro de onFilterChangeRef.current removido —
-    // busca só filtra o dropdown localmente.
+    // ❌ notifyParent removido — busca só filtra o dropdown localmente.
   };
 
   const clearFilters = () => {
@@ -835,30 +827,51 @@ export default function FilterBar({
   };
 
   // ─── handleRefresh: ÚNICO ponto que aplica filtros ao pai ──────────────
+  // CORREÇÃO PRINCIPAL:
+  // - Se a assinatura mudou → notifica normalmente (o consumidor detecta mudança).
+  // - Se a assinatura NÃO mudou (ex.: usuário clicou "Limpar" e o estado já
+  //   estava limpo, ou simplesmente quer recarregar) → SEMPRE chama onRefresh
+  //   E também chama notifyParent com forceReload=true, para que consumidores
+  //   que não passaram `onRefresh` ainda recebam o sinal e possam recarregar.
   const handleRefresh = async () => {
     if (refreshing || !isReady) return;
     setRefreshing(true);
     try {
-      // 1) Marca a signature como aplicada — impede o "apply inicial" de
-      //    disparar caso o usuário clique antes do debounce.
-      initialNotifyDoneRef.current = true;
-      lastAppliedSignatureRef.current = computeSignature(
+      const currentSig = computeSignature(
         selectedEquipe,
         selectedColaborador,
         selectedProduto,
         selectedUnit,
       );
+      const signatureChanged =
+        lastAppliedSignatureRef.current !== null &&
+        lastAppliedSignatureRef.current !== currentSig;
+
+      // 1) Marca a signature como aplicada — impede o "apply inicial" de
+      //    disparar caso o usuário clique antes do debounce.
+      initialNotifyDoneRef.current = true;
+      lastAppliedSignatureRef.current = currentSig;
 
       console.log("[FilterBar] Atualizar Dados → aplicar filtros", {
         selectedEquipe,
         selectedColaborador,
         selectedProduto,
         selectedUnit,
+        signatureChanged,
       });
 
-      notifyParent(selectedEquipe, selectedColaborador, selectedProduto, searchTerm);
+      // 2) Notifica SEMPRE. Com signatureChanged=false, marca forceReload=true
+      //    para o consumidor saber que deve recarregar mesmo sem mudança.
+      notifyParent(
+        selectedEquipe,
+        selectedColaborador,
+        selectedProduto,
+        searchTerm,
+        selectedUnit,
+        !signatureChanged,
+      );
 
-      // 2) Força bypass de cache no pai (se ele fornecer `onRefresh`).
+      // 3) Força bypass de cache no pai (se ele fornecer `onRefresh`).
       //    setTimeout(0) garante que o React já comitou o novo `filters`
       //    no pai antes de chamar `onRefresh()` — senão `onRefresh` usaria
       //    a closure antiga (com filtros velhos).

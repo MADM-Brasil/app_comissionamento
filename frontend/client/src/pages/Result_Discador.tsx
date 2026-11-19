@@ -603,15 +603,6 @@ export default function ResultDiscador() {
                 Operacional
               </button>
             </div>
-            <button
-              type="button"
-              onClick={() => void reload()}
-              disabled={loading}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-[#e2e8f0] rounded-lg text-xs font-semibold text-[#475569] bg-white hover:bg-[#f1f5f9] disabled:opacity-50"
-            >
-              {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-              Atualizar
-            </button>
             {view === "operacional" && (
               <>
                 <div className="ml-auto flex rounded-lg border border-[#e2e8f0] overflow-hidden">
