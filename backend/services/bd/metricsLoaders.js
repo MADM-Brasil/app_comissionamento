@@ -1242,7 +1242,7 @@ const sqlPhoneKey = (expr) =>
 
 export async function loadDiscadorResultado({ start, end }) {
   const query = `
-    WITH periodo AS (
+    WITH periodo AS MATERIALIZED (
       SELECT $1::date AS inicio, $2::date AS fim
     ),
     equipes_excluidas (equipe) AS (
@@ -1260,7 +1260,11 @@ export async function loadDiscadorResultado({ start, end }) {
         ('Equipe SP01'),('Equipe Adriele'),('Equipe Toledo'),('Equipe Priscila'),
         ('Equipe Maiana'),('Equipe Marcio')
     ),
-    classificacao (qualification_name, categoria) AS (
+    equipes_excluidas_norm AS MATERIALIZED (
+      SELECT DISTINCT LOWER(TRIM(equipe)) AS equipe_norm
+      FROM equipes_excluidas
+    ),
+    classificacao (qualification_name, categoria) AS MATERIALIZED (
       VALUES
         ('Acidente a mais de 20 anos','cpc_sem_negocio'),
         ('Acidente recente','cpc_sem_negocio'),
@@ -1295,6 +1299,12 @@ export async function loadDiscadorResultado({ start, end }) {
         ('Mudo','mudo'),
         ('Queda de ligacao','queda_ligacao')
     ),
+    classificacao_norm AS MATERIALIZED (
+      SELECT LOWER(TRIM(qualification_name)) AS qualification_name_norm, categoria
+      FROM classificacao
+    ),
+
+    -- CTE de discagens: filtro de período sargável, uso de classificacao_norm
     base AS (
       SELECT
         COALESCE(NULLIF(TRIM(o.agent_name),''),'(sem agente)')      AS agent_name,
@@ -1303,12 +1313,12 @@ export async function loadDiscadorResultado({ start, end }) {
         COALESCE(c.categoria,'outros') AS categoria
       FROM madm.view_base_olos_temp o
       CROSS JOIN periodo p
-      LEFT JOIN classificacao c
-        ON LOWER(TRIM(o.qualification_name)) = LOWER(TRIM(c.qualification_name))
-      WHERE o.call_date::date BETWEEN p.inicio AND p.fim
+      LEFT JOIN classificacao_norm c
+        ON LOWER(TRIM(o.qualification_name)) = c.qualification_name_norm
+      WHERE o.call_date >= p.inicio
+        AND o.call_date <  p.fim + INTERVAL '1 day'
     ),
 
-    -- Colaboradores com nome normalizado + flag de equipe excluída
     colaboradores_norm AS (
       SELECT
         c.colaborador_id,
@@ -1316,14 +1326,12 @@ export async function loadDiscadorResultado({ start, end }) {
         NULLIF(TRIM(c.nome_equipe), '')    AS nome_equipe,
         c.unidade_id,
         ${sqlNameKey('c.nome')}            AS nome_key,
-        LOWER(TRIM(COALESCE(c.nome_equipe,''))) IN (
-          SELECT LOWER(TRIM(e.equipe)) FROM equipes_excluidas e
-        ) AS excluida
+        (ee.equipe_norm IS NOT NULL)       AS excluida
       FROM core.colaboradores c
+      LEFT JOIN equipes_excluidas_norm ee
+        ON LOWER(TRIM(COALESCE(c.nome_equipe,''))) = ee.equipe_norm
       WHERE NULLIF(TRIM(c.nome), '') IS NOT NULL
     ),
-    -- 1 linha por nome: id, unidade e equipe(s) válidas.
-    -- Prioriza o cadastro que NÃO está em equipe excluída.
     colaboradores_unicos AS (
       SELECT
         nome_key,
@@ -1341,27 +1349,7 @@ export async function loadDiscadorResultado({ start, end }) {
       GROUP BY colaborador_id
     ),
 
-    -- Última ligação por telefone (prioriza ligações dentro do período),
-    -- calculada uma vez só em vez de um LATERAL por assinatura.
-    ultima_ligacao AS (
-      SELECT DISTINCT ON (phone_key)
-        phone_key, agent_name, campaign_name
-      FROM (
-        SELECT
-          ${sqlPhoneKey('o.number')} AS phone_key,
-          NULLIF(TRIM(o.agent_name), '')    AS agent_name,
-          NULLIF(TRIM(o.campaign_name), '') AS campaign_name,
-          o.call_date,
-          (o.call_date::date BETWEEN p.inicio AND p.fim) AS no_periodo
-        FROM madm.view_base_olos_temp o
-        CROSS JOIN periodo p
-        WHERE o.number IS NOT NULL
-      ) x
-      WHERE LENGTH(phone_key) >= 10
-      ORDER BY phone_key, no_periodo DESC, call_date DESC NULLS LAST
-    ),
-
-    assinaturas_unicas AS (
+    assinaturas_unicas AS MATERIALIZED (
       SELECT DISTINCT ON (a.deal_id)
         a.deal_id,
         ${sqlPhoneKey('a.telefone')} AS phone_key,
@@ -1370,8 +1358,43 @@ export async function loadDiscadorResultado({ start, end }) {
       FROM core.assinaturas a
       CROSS JOIN periodo p
       WHERE a.deal_id IS NOT NULL
-        AND a.data_assinatura::date BETWEEN p.inicio AND p.fim
+        AND a.data_assinatura >= p.inicio
+        AND a.data_assinatura <  p.fim + INTERVAL '1 day'
       ORDER BY a.deal_id, a.data_assinatura DESC NULLS LAST
+    ),
+
+    -- Última ligação por telefone. A grande diferença em relação à versão
+    -- anterior: restringimos o scan de base_olos_temp aos telefones que
+    -- EXISTEM em assinaturas_unicas. Isso troca um DISTINCT ON sobre todo
+    -- o histórico por um hash semi-join (IN) sobre o conjunto pequeno de
+    -- telefones com assinatura. A regra "última ligação, priorizando
+    -- in-period" continua idêntica: chamadas fora do período ainda são
+    -- consideradas, apenas priorizadas depois das in-period.
+    ultima_ligacao AS MATERIALIZED (
+      SELECT DISTINCT ON (l.phone_key)
+        l.phone_key, l.agent_name, l.campaign_name
+      FROM (
+        SELECT
+          ${sqlPhoneKey('o.number')}        AS phone_key,
+          NULLIF(TRIM(o.agent_name), '')    AS agent_name,
+          NULLIF(TRIM(o.campaign_name), '') AS campaign_name,
+          o.call_date
+        FROM madm.view_base_olos_temp o
+        WHERE o.number IS NOT NULL
+      ) l
+      CROSS JOIN periodo p
+      WHERE LENGTH(l.phone_key) >= 10
+        AND l.phone_key IN (
+          SELECT phone_key
+          FROM assinaturas_unicas
+          WHERE phone_key IS NOT NULL
+            AND phone_key <> ''
+        )
+      ORDER BY
+        l.phone_key,
+        (l.call_date >= p.inicio
+          AND l.call_date <  p.fim + INTERVAL '1 day') DESC,
+        l.call_date DESC NULLS LAST
     ),
 
     -- Crédito da assinatura: agente da última ligação para o telefone.
