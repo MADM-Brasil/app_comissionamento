@@ -1,34 +1,4 @@
 // backend/services/bd/metricsLoaders.js
-// ─────────────────────────────────────────────────────────────────────────────
-// Data-access layer de métricas. Cada `load*` é uma query pura — sem cache.
-// Exceções (com cache interno, compartilhado entre rotas):
-//   • loadDemanda          → /demanda-atual, /demanda-reprimida, /demanda-resumo
-//   • resolveNomesPorEquipe → /ligacoes, /ligacoes/tabulacoes, /ligacoes-produtivas
-//
-// ⚠️ SAfra vs PRODUÇÃO (aplicado em loadGanhos e loadProtocolados)
-// ─────────────────────────────────────────────────────────────────────────────
-//   • mode=producao (default) → filtra por data_ganho da view (data do evento)
-//   • mode=safra              → INNER JOIN em core.deals e filtra por
-//                               d.created_at (data de criação do deal)
-//
-// O filtro de safra é a coorte por created_at: "dos deals criados no período,
-// quantos já foram ganhos/protocolados". Produção é "dos ganhos/protocolados
-// no período, independente de quando o deal foi criado".
-//
-// ⚠️ TIMEZONE — data_ganho vs created_at
-//   • data_ganho  é timestamptz → precisa AT TIME ZONE 'UTC'
-//   • created_at  é timestamp (já em SP) → ::date direto, sem conversão
-//   (mesma regra de data_distribuicao_comercial em leads-recebidos)
-//
-// ⚠️ WRAPPERS ESCALARES (load*Total)
-// ─────────────────────────────────────────────────────────────────────────────
-// Os loaders "cru" devolvem Array<{ colaborador, equipe, total, periodo? }>.
-// Consumidores que só precisam do agregado do período (ex.:
-// inteComerceRawAnalytics.mergeHubSpot) devem usar os wrappers
-// `loadAssinadosTotal`, `loadEmitidosTotal`, `loadGanhosTotal`,
-// `loadProtocoladosTotal`, `loadDesqualificadosTotal` — que somam `total` e
-// devolvem `number` (ou null).
-// ─────────────────────────────────────────────────────────────────────────────
 
 import db, { analyticsQuery } from './db.js';
 import { cacheFirst } from './cacheFirst.js';
@@ -1252,4 +1222,266 @@ export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, 
   const label = `assinaturas-funil:${isSafra ? 'safra' : 'producao'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_AGG, label);
+}
+
+// ─── DISCADOR × ASSINATURAS ──────────────────────────────────────────────────
+// Chave de nome usada em TODOS os cruzamentos por nome: sem acento, maiúscula,
+// espaços colapsados. Antes o cruzamento era só UPPER(TRIM()), então
+// "João  Silva" (OLOS) × "Joao Silva" (CRM) não batiam e a linha ficava sem
+// equipe/unidade.
+const SQL_ACENTOS = 'ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ';
+const SQL_SEM_ACENTOS = 'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCcNn';
+const sqlNameKey = (expr) =>
+  `UPPER(REGEXP_REPLACE(TRIM(TRANSLATE(COALESCE(${expr}, ''), '${SQL_ACENTOS}', '${SQL_SEM_ACENTOS}')), '\\s+', ' ', 'g'))`;
+
+// Telefone só com dígitos, sem zeros à esquerda e sem DDI 55.
+// Antes era igualdade exata (a.telefone = o.number): "+55 (11) 9..." ×
+// "119..." não cruzava e a assinatura sumia do relatório.
+const sqlPhoneKey = (expr) =>
+  `REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(COALESCE(${expr}::text, ''), '\\D', '', 'g'), '^0+', ''), '^55(?=\\d{10,11}$)', '')`;
+
+export async function loadDiscadorResultado({ start, end }) {
+  const query = `
+    WITH periodo AS (
+      SELECT $1::date AS inicio, $2::date AS fim
+    ),
+    equipes_excluidas (equipe) AS (
+      VALUES
+        ('Coordenacao Closer'),('Departamento Backoffice'),('Diretoria'),
+        ('Departamento Marketing'),('Departamento Comercial'),
+        ('Equipe Erika'),('Equipe Leonardo'),('Equipe Leticia'),
+        ('Equipe Michael'),('Equipe Erica'),('Equipe Thales'),
+        ('Equipe Yuri'),('Equipe Rodolfo'),('Equipe Jennifer'),
+        ('Equipe Natalia'),('Equipe Maria Eduarda'),('Equipe Reciclagem'),
+        (''),('Equipe'),('Equipe Camila'),('Sales Ops'),
+        ('Equipe Elizandra'),('Equipe Bruno Abreu'),('Equipe Lucas Magno'),
+        ('Equipe SP1'),('Equipe Marcia'),('Equipe Lucilene'),('backoffice'),
+        ('Equipe Debora'),('Equipe Curitiba'),('Equipe Gabriela Toledo'),
+        ('Equipe SP01'),('Equipe Adriele'),('Equipe Toledo'),('Equipe Priscila'),
+        ('Equipe Maiana'),('Equipe Marcio')
+    ),
+    classificacao (qualification_name, categoria) AS (
+      VALUES
+        ('Acidente a mais de 20 anos','cpc_sem_negocio'),
+        ('Acidente recente','cpc_sem_negocio'),
+        ('Aposentado','cpc_sem_negocio'),
+        ('BPC - LOAS Desqualificado','cpc_sem_negocio'),
+        ('BPC - LOAS Ganho','cpc_sem_negocio'),
+        ('Cliente atritado','cpc_sem_negocio'),
+        ('Cliente desconhece o cadastro','cpc_sem_negocio'),
+        ('Contribuinte individual - autonomo','cpc_sem_negocio'),
+        ('Em processo com a MADM','cpc_sem_negocio'),
+        ('Fora do periodo aquisitivo','cpc_sem_negocio'),
+        ('Fora do periodo de graca','cpc_sem_negocio'),
+        ('Ja recebe o auxilio-acidente','cpc_sem_negocio'),
+        ('Ja revisado','cpc_sem_negocio'),
+        ('Ja tem acao','cpc_sem_negocio'),
+        ('Ja tem advogado','cpc_sem_negocio'),
+        ('Ja tem processo de auxilio acidente','cpc_sem_negocio'),
+        ('Nao aposentado','cpc_sem_negocio'),
+        ('Nao concomitante','cpc_sem_negocio'),
+        ('Nao tem direito','cpc_sem_negocio'),
+        ('Nunca sofreu acidente','cpc_sem_negocio'),
+        ('Nunca trabalhou de carteira assinada','cpc_sem_negocio'),
+        ('Pensionista','cpc_sem_negocio'),
+        ('Recebendo auxilio-doenca','cpc_sem_negocio'),
+        ('Sem interesse','cpc_sem_negocio'),
+        ('Sem sequela','cpc_sem_negocio'),
+        ('Trabalhando','cpc_sem_negocio'),
+        ('Emissao de contrato','cpc_a'),
+        ('Pediu contato via WhatsApp','cpc_a'),
+        ('Tratativa via WhatsApp','cpc_a'),
+        ('Coleta de documentacao','cpc_a'),
+        ('Mudo','mudo'),
+        ('Queda de ligacao','queda_ligacao')
+    ),
+    base AS (
+      SELECT
+        COALESCE(NULLIF(TRIM(o.agent_name),''),'(sem agente)')      AS agent_name,
+        COALESCE(NULLIF(TRIM(o.campaign_name),''),'(sem campanha)') AS campaign_name,
+        o.tma,
+        COALESCE(c.categoria,'outros') AS categoria
+      FROM madm.view_base_olos_temp o
+      CROSS JOIN periodo p
+      LEFT JOIN classificacao c
+        ON LOWER(TRIM(o.qualification_name)) = LOWER(TRIM(c.qualification_name))
+      WHERE o.call_date::date BETWEEN p.inicio AND p.fim
+    ),
+
+    -- Colaboradores com nome normalizado + flag de equipe excluída
+    colaboradores_norm AS (
+      SELECT
+        c.colaborador_id,
+        TRIM(c.nome)                       AS nome,
+        NULLIF(TRIM(c.nome_equipe), '')    AS nome_equipe,
+        c.unidade_id,
+        ${sqlNameKey('c.nome')}            AS nome_key,
+        LOWER(TRIM(COALESCE(c.nome_equipe,''))) IN (
+          SELECT LOWER(TRIM(e.equipe)) FROM equipes_excluidas e
+        ) AS excluida
+      FROM core.colaboradores c
+      WHERE NULLIF(TRIM(c.nome), '') IS NOT NULL
+    ),
+    -- 1 linha por nome: id, unidade e equipe(s) válidas.
+    -- Prioriza o cadastro que NÃO está em equipe excluída.
+    colaboradores_unicos AS (
+      SELECT
+        nome_key,
+        (ARRAY_AGG(colaborador_id ORDER BY excluida, colaborador_id))[1] AS colaborador_id,
+        (ARRAY_AGG(unidade_id ORDER BY excluida, (unidade_id IS NULL), colaborador_id))[1] AS unidade_id,
+        STRING_AGG(DISTINCT nome_equipe, ' / ' ORDER BY nome_equipe)
+          FILTER (WHERE NOT excluida AND nome_equipe IS NOT NULL) AS nome_equipe,
+        BOOL_AND(excluida) AS somente_equipes_excluidas
+      FROM colaboradores_norm
+      GROUP BY nome_key
+    ),
+    colaboradores_por_id AS (
+      SELECT colaborador_id, MAX(nome) AS nome
+      FROM colaboradores_norm
+      GROUP BY colaborador_id
+    ),
+
+    -- Última ligação por telefone (prioriza ligações dentro do período),
+    -- calculada uma vez só em vez de um LATERAL por assinatura.
+    ultima_ligacao AS (
+      SELECT DISTINCT ON (phone_key)
+        phone_key, agent_name, campaign_name
+      FROM (
+        SELECT
+          ${sqlPhoneKey('o.number')} AS phone_key,
+          NULLIF(TRIM(o.agent_name), '')    AS agent_name,
+          NULLIF(TRIM(o.campaign_name), '') AS campaign_name,
+          o.call_date,
+          (o.call_date::date BETWEEN p.inicio AND p.fim) AS no_periodo
+        FROM madm.view_base_olos_temp o
+        CROSS JOIN periodo p
+        WHERE o.number IS NOT NULL
+      ) x
+      WHERE LENGTH(phone_key) >= 10
+      ORDER BY phone_key, no_periodo DESC, call_date DESC NULLS LAST
+    ),
+
+    assinaturas_unicas AS (
+      SELECT DISTINCT ON (a.deal_id)
+        a.deal_id,
+        ${sqlPhoneKey('a.telefone')} AS phone_key,
+        a.data_assinatura,
+        a.consultor_responsavel_assinatura_id
+      FROM core.assinaturas a
+      CROSS JOIN periodo p
+      WHERE a.deal_id IS NOT NULL
+        AND a.data_assinatura::date BETWEEN p.inicio AND p.fim
+      ORDER BY a.deal_id, a.data_assinatura DESC NULLS LAST
+    ),
+
+    -- Crédito da assinatura: agente da última ligação para o telefone.
+    -- Se esse agente NÃO existe no cadastro de colaboradores (login do OLOS
+    -- diferente do nome, agente vazio etc.), o crédito vai para o consultor
+    -- responsável pela assinatura — assim ela ganha equipe/unidade e não some
+    -- quando se filtra por unidade/equipe.
+    assinaturas_atribuidas AS (
+      SELECT
+        au.deal_id,
+        CASE
+          WHEN cu_ag.nome_key IS NOT NULL THEN ul.agent_name
+          ELSE COALESCE(NULLIF(TRIM(cp.nome), ''), ul.agent_name, '(sem agente)')
+        END AS agent_name,
+        COALESCE(ul.campaign_name, '(sem campanha)') AS campaign_name
+      FROM assinaturas_unicas au
+      INNER JOIN ultima_ligacao ul
+        ON ul.phone_key = au.phone_key
+      LEFT JOIN colaboradores_unicos cu_ag
+        ON ul.agent_name IS NOT NULL
+       AND cu_ag.nome_key = ${sqlNameKey('ul.agent_name')}
+      LEFT JOIN colaboradores_por_id cp
+        ON cp.colaborador_id = au.consultor_responsavel_assinatura_id
+    ),
+    assinaturas_agregadas AS (
+      SELECT
+        ${sqlNameKey('agent_name')}    AS agent_key,
+        UPPER(TRIM(campaign_name))     AS campaign_key,
+        MAX(agent_name)                AS agent_name,
+        MAX(campaign_name)             AS campaign_name,
+        COUNT(*)                       AS assinados
+      FROM assinaturas_atribuidas
+      GROUP BY 1, 2
+    ),
+    discagens_agregadas AS (
+      SELECT
+        ${sqlNameKey('agent_name')}    AS agent_key,
+        UPPER(TRIM(campaign_name))     AS campaign_key,
+        MAX(agent_name)                AS agent_name,
+        MAX(campaign_name)             AS campaign_name,
+        COUNT(*) AS total_discagens,
+        COUNT(*) FILTER (WHERE categoria='cpc_sem_negocio') AS cpc_sem_negocio,
+        COUNT(*) FILTER (WHERE categoria='cpc_a')           AS cpc_a,
+        COUNT(*) FILTER (WHERE categoria='mudo')            AS mudo,
+        COUNT(*) FILTER (WHERE categoria='queda_ligacao')   AS queda_ligacao,
+        COUNT(*) FILTER (WHERE categoria IN ('cpc_sem_negocio','cpc_a')) AS cpc_total,
+        SUM(COALESCE(tma,0)) AS tma_total
+      FROM base
+      GROUP BY 1, 2
+    )
+    SELECT
+      COALESCE(d.agent_name, s.agent_name)       AS agent_name,
+      COALESCE(d.campaign_name, s.campaign_name) AS campaign_name,
+      cu.colaborador_id,
+      cu.unidade_id,
+      cu.nome_equipe,
+      COALESCE(d.total_discagens,0) AS total_discagens,
+      COALESCE(d.cpc_sem_negocio,0) AS cpc_sem_negocio,
+      COALESCE(d.cpc_a,0)           AS cpc_a,
+      COALESCE(d.mudo,0)            AS mudo,
+      COALESCE(d.queda_ligacao,0)   AS queda_ligacao,
+      COALESCE(d.cpc_total,0)       AS cpc_total,
+      COALESCE(d.tma_total,0)       AS tma_total,
+      COALESCE(s.assinados,0)       AS assinados,
+      ROUND(
+        100.0 * COALESCE(s.assinados,0)::numeric
+        / NULLIF(COALESCE(d.cpc_a,0),0),
+        2
+      ) AS conversao_ass_cpc_a,
+      p.inicio AS periodo_inicio,
+      p.fim    AS periodo_fim
+    FROM discagens_agregadas d
+    FULL OUTER JOIN assinaturas_agregadas s
+      ON s.agent_key    = d.agent_key
+     AND s.campaign_key = d.campaign_key
+    LEFT JOIN colaboradores_unicos cu
+      ON cu.nome_key = COALESCE(d.agent_key, s.agent_key)
+    CROSS JOIN periodo p
+    WHERE COALESCE(cu.somente_equipes_excluidas, FALSE) = FALSE
+    ORDER BY 1, 2
+  `;
+
+  const result = await analyticsQuery(query, [start, end]);
+  const label = 'discador-resultado';
+  warnIfLarge(result.rows, label);
+
+  // Postgres devolve bigint como string no driver `pg`.
+  const rows = result.rows.map((r) => ({
+    agent_name: r.agent_name,
+    campaign_name: r.campaign_name,
+    colaborador_id: r.colaborador_id ?? null,
+    unidade_id: r.unidade_id == null ? null : Number(r.unidade_id),
+    nome_equipe: r.nome_equipe,
+    total_discagens: Number(r.total_discagens) || 0,
+    cpc_sem_negocio: Number(r.cpc_sem_negocio) || 0,
+    cpc_a: Number(r.cpc_a) || 0,
+    mudo: Number(r.mudo) || 0,
+    queda_ligacao: Number(r.queda_ligacao) || 0,
+    cpc_total: Number(r.cpc_total) || 0,
+    tma_total: Number(r.tma_total) || 0,
+    assinados: Number(r.assinados) || 0,
+    conversao_ass_cpc_a: Number(r.conversao_ass_cpc_a) || 0,
+    periodo_inicio: r.periodo_inicio,
+    periodo_fim: r.periodo_fim,
+  }));
+
+  // NÃO truncar: o frontend soma estas linhas. Cortar em CAP_AGG (8.000)
+  // fazia assinaturas sumirem em períodos longos.
+  if (rows.length > CAP_AGG) {
+    console.warn(`[loader:${label}] ${rows.length} linhas (acima de ${CAP_AGG}) — retornando todas.`);
+  }
+  return rows;
 }
