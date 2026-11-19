@@ -10,6 +10,7 @@ import { fileURLToPath } from 'url';
 
 import { pool, logDatabaseAccess, waitForDatabase, closePool } from './services/bd/db.js';
 import { PostgreSqlSessionStore } from './PostgreSqlSessionStore.js';
+import { redis, redisSub, closeRedis } from './services/bd/redis.js';
 
 // ---------- Routers ----------
 import authRoutes from './routes/auth.js';
@@ -303,51 +304,18 @@ function csrfProtection(req, res, next) {
 }
 
 // ============================================================
-// SESSÃO
+// SESSION STORE
+// Cache em memória + Redis, leituras deduplicadas e touch em lote.
+// Ver comentário no topo de PostgreSqlSessionStore.js.
 // ============================================================
-const sessionStore = new PostgreSqlSessionStore(pool);
-
-app.use(session({
-  store: sessionStore,
-  secret: process.env.SESSION_SECRET || 'chave-secreta-sessao',
-  resave: false,
-  saveUninitialized: false,
-  rolling: true,
-  proxy: true,
-  cookie: {
-    secure: cookieSecure,
-    httpOnly: true,
-    sameSite: 'lax',
-    maxAge: 24 * 60 * 60 * 1000,
-    path: '/',
-  },
-}));
+const sessionStore = new PostgreSqlSessionStore(pool, { redis, redisSub });
 
 // ============================================================
-// LOG DE AUTENTICAÇÃO
-// Controlado por env. Em produção, 1 console.log por request
-// × N usuários pode virar gargalo no stdout. Ative com
-// LOG_AUTH_VERBOSE=true apenas ao depurar.
+// ROTAS PÚBLICAS SEM SESSÃO
+// Registradas ANTES do middleware de sessão: health checks, token CSRF
+// e imagens de /uploads não precisam de sessão e, antes, cada uma delas
+// consultava o banco para carregar a sessão do usuário.
 // ============================================================
-const LOG_AUTH_VERBOSE = process.env.LOG_AUTH_VERBOSE === 'true' || !isProduction;
-
-app.use((req, res, next) => {
-  if (!LOG_AUTH_VERBOSE) return next();
-  const reqPath = req.path || '';
-  const skip =
-    reqPath === '/api/health' ||
-    reqPath === '/api/ping' ||
-    reqPath === '/api/csrf-token';
-  if (reqPath.startsWith('/api/') && !skip) {
-    const sid = req.sessionID ? `${req.sessionID.slice(0, 8)}…` : 'none';
-    const authed = Boolean(req.session?.isAuthenticated);
-    const cookieNames = Object.keys(req.cookies || {}).join(',') || 'none';
-    console.log(
-      `[auth] ${req.method} ${reqPath} | sid=${sid} | autenticado=${authed} | cookies=${cookieNames}`
-    );
-  }
-  next();
-});
 
 // ============================================================
 // HEALTH / MONITORAMENTO — público, antes de auth/CSRF
@@ -483,17 +451,17 @@ app.get('/api/health/warmup', (req, res) => {
   }
 });
 
+// Estatísticas do session store (quantas idas ao banco foram evitadas).
+app.get('/api/health/sessions', (req, res) => {
+  res.json({ success: true, ...sessionStore.stats() });
+});
+
 // ============================================================
 // CSRF TOKEN ENDPOINT
 // ============================================================
 app.get('/api/csrf-token', (req, res) => {
   res.json({ csrfToken: req.csrfToken });
 });
-
-// ============================================================
-// AUTH — público (o router decide o que expor)
-// ============================================================
-app.use('/api/auth', authRoutes);
 
 // ============================================================
 // ARQUIVOS ESTÁTICOS (uploads) — públicos, inavegáveis
@@ -512,6 +480,56 @@ app.use(
     dotfiles: 'ignore',
   })
 );
+
+// ============================================================
+// SESSÃO
+// ============================================================
+app.use(session({
+  store: sessionStore,
+  secret: process.env.SESSION_SECRET || 'chave-secreta-sessao',
+  resave: false,
+  saveUninitialized: false,
+  rolling: true,
+  proxy: true,
+  cookie: {
+    secure: cookieSecure,
+    httpOnly: true,
+    sameSite: 'lax',
+    maxAge: 24 * 60 * 60 * 1000,
+    path: '/',
+  },
+}));
+
+// ============================================================
+// LOG DE AUTENTICAÇÃO
+// Controlado por env. Em produção, 1 console.log por request
+// × N usuários pode virar gargalo no stdout. Ative com
+// LOG_AUTH_VERBOSE=true apenas ao depurar.
+// ============================================================
+const LOG_AUTH_VERBOSE = process.env.LOG_AUTH_VERBOSE === 'true' || !isProduction;
+
+app.use((req, res, next) => {
+  if (!LOG_AUTH_VERBOSE) return next();
+  const reqPath = req.path || '';
+  const skip =
+    reqPath === '/api/health' ||
+    reqPath === '/api/ping' ||
+    reqPath === '/api/csrf-token';
+  if (reqPath.startsWith('/api/') && !skip) {
+    const sid = req.sessionID ? `${req.sessionID.slice(0, 8)}…` : 'none';
+    const authed = Boolean(req.session?.isAuthenticated);
+    const cookieNames = Object.keys(req.cookies || {}).join(',') || 'none';
+    console.log(
+      `[auth] ${req.method} ${reqPath} | sid=${sid} | autenticado=${authed} | cookies=${cookieNames}`
+    );
+  }
+  next();
+});
+
+// ============================================================
+// AUTH — público (o router decide o que expor)
+// ============================================================
+app.use('/api/auth', authRoutes);
 
 // ============================================================
 // MIDDLEWARES DE PROTEÇÃO
@@ -652,7 +670,9 @@ app.use((err, req, res, next) => {
 //      boot). SEM isso, o `closePool` quebra tickets em
 //      `processando` com "Cannot use a pool after calling end".
 //   3) Para o warmup scheduler
-//   4) Fecha o pool do PostgreSQL (libera slots imediatamente)
+//   4) Grava touches de sessão pendentes
+//   5) Fecha o pool do PostgreSQL (libera slots imediatamente)
+//   6) Fecha o Redis
 // ============================================================
 let server = null;
 let shuttingDown = false;
@@ -700,12 +720,27 @@ async function shutdown(signal) {
     console.error('[shutdown] erro ao parar warmup:', err?.message || err);
   }
 
-  // 4) Fecha o pool do PostgreSQL
+  // 4) Grava os últimos touches de sessão pendentes (usa o pool)
+  try {
+    await sessionStore.close();
+    console.log('[shutdown] session store encerrado');
+  } catch (err) {
+    console.error('[shutdown] erro ao encerrar session store:', err?.message || err);
+  }
+
+  // 5) Fecha o pool do PostgreSQL
   try {
     await closePool();
     console.log('[shutdown] pool do PostgreSQL encerrado');
   } catch (err) {
     console.error('[shutdown] erro ao fechar pool:', err?.message || err);
+  }
+
+  // 6) Fecha conexões do Redis
+  try {
+    await closeRedis();
+  } catch (err) {
+    console.error('[shutdown] erro ao fechar Redis:', err?.message || err);
   }
 
   process.exit(0);
