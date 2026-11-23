@@ -242,7 +242,7 @@ async function buildServiceParams(req) {
     mode: mode || 'safra',
     equipe: eq,
     colaborador_id: normalizedColabId,
-    unidade_id: unidadeIdNum,                       // ← para debug/rastreio
+    unidade_id: unidadeIdNum,
     produto: prod,
     colaborador_ids_ativos: scopedIds,
     colaborador_ids_escopo: colaboradorIdsEscopo,

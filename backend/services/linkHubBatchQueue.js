@@ -1,59 +1,4 @@
 // backend/services/linkHubBatchQueue.js
-//
-// Worker dedicado a movimentações por Link Hub (crm_origem = 'HUBSPOT_LINK').
-//
-// ─── RESPONSABILIDADE ──────────────────────────────────────────────
-// Este worker é a AUTORIDADE do fluxo Link Hub. Ele aplica validações
-// que o worker unificado (services/ticketQueue.js) NÃO tem:
-//
-//   • getActiveSupportUser(sourceOwnerEmail) — valida que o owner atual
-//     do card é colaborador ativo.
-//   • validateHubSpotMovementAccess({ enforceSourceTeam: true,
-//     sourceTeam, sourceUnitId }) — bypass de permissões entre equipes.
-//   • getHubSpotOwnerEmail(context.ownerId) — resolve e-mail do owner.
-//   • Log detalhado de "origem do card" (owner, equipe, unidade, etc.).
-//
-// Por isso, o worker CRM (services/ticketQueue.js) NÃO deve processar
-// tickets Link Hub. A query dele precisa filtrar `crm_origem = 'CRM'`
-// — sem esse filtro, os dois workers brigam por tickets e o Link Hub
-// cai no caminho simplificado, SEM as validações acima.
-//
-// ─── FLUXO ─────────────────────────────────────────────────────────
-//   pendente → processando → concluido | suporte | bloqueado | pendente
-//   (retry)                                      ↑          ↑
-//   N tentativas                      falha           bloqueio
-//   esgotadas → 'suporte'             terminal        definitivo
-//
-// ─── CONCORRÊNCIA ──────────────────────────────────────────────────
-//   • pg_try_advisory_lock($LOCK_KEY) — só 1 worker ativo por vez
-//     (se você rodar N réplicas, apenas uma processa em cada ciclo).
-//   • FOR UPDATE SKIP LOCKED no claim — cada ticket é pego uma vez.
-//   • isProcessing flag — previne ciclos sobrepostos no mesmo processo.
-//
-// ─── LEASE / RECUPERAÇÃO ───────────────────────────────────────────
-//   • Tickets em 'processando' com lease expirado (>15min) voltam
-//     para 'pendente' (ou 'suporte' se já esgotaram tentativas).
-//   • MAX_ATTEMPTS=3 por padrão — evita retry infinito.
-//
-// ─── NOTIFICAÇÃO ───────────────────────────────────────────────────
-//   • Teams: 'suporte' e 'bloqueado' disparam notificação.
-//   • 'pendente' (retry) NÃO notifica — é automático.
-//
-// ─── MODO DE OPERAÇÃO ──────────────────────────────────────────────
-//   A) Embutido no backend (server.js import dinâmico):
-//        import('./services/linkHubBatchQueue.js')
-//          .then(m => m.startLinkHubBatchQueue())
-//          .catch(err => console.error(err.message));
-//
-//   B) Processo separado (RECOMENDADO em produção):
-//        node backend/services/linkHubBatchQueue.js
-//      Com PM2:
-//        pm2 start backend/services/linkHubBatchQueue.js \
-//          --name linkHubQueue --max-memory-restart 512M --time
-//
-//   C) Desativado (se preferir usar só o ticketQueue.js unificado —
-//      mas perde as validações acima):
-//        LINKHUB_ENABLED=false
 
 import { pool } from './bd/db.js';
 import {
@@ -99,7 +44,6 @@ const RULE_LABELS = Object.freeze({
     'Responsável alterado no Closer, pipeline e etapa preservados.',
   reassigned_in_quinquenio:
     'Card posicionado em Quinquenio/concomitante (Em contato).',
-  // [ISENÇÃO IR]
   reassigned_in_isencao_ir:
     'Card posicionado em Isenção de IR Aposentadoria (Em Contato).',
 });
@@ -167,7 +111,6 @@ function describeFailure(error, attempts) {
   const partial = error.partialResult;
   if (partial?.previousPipeline) parts.push(`Pipeline de origem: ${partial.previousPipeline}.`);
   if (partial?.previousStage) parts.push(`Etapa de origem: ${partial.previousStage}.`);
-  // [NOVO] Gravações parciais exigem revisão humana obrigatória.
   if (error.requiresReconciliation) {
     parts.push('Gravação parcial no HubSpot — verifique o card manualmente antes de reprocessar.');
   }
@@ -191,10 +134,6 @@ function resolveRuleLabel(resultData) {
 }
 
 async function reclaimStaleLeases(client) {
-  // [CORRIGIDO]
-  //   • 'erro' → 'suporte' (consistência com markFailure para falhas terminais)
-  //   • analisado_em = NOW() quando transiciona para 'suporte'
-  //   • erro_lease preenchido para rastreabilidade
   const result = await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
      SET status_mapeamento = CASE
@@ -242,10 +181,6 @@ async function reclaimStaleLeases(client) {
 }
 
 async function claimNextTicket(client) {
-  // [CORRIGIDO] ORDER BY atualizado_em — evita starvation. Tickets em
-  // retry têm atualizado_em recente → vão para o fim da fila, deixando
-  // espaço para tickets novos. Antes usava id_ticket_movimentacao ASC,
-  // que prendia retries antigos na frente da fila.
   const claimed = await client.query(
     `UPDATE app_comissionamento.tickets_movimentacao_lead
      SET status_mapeamento = 'processando',
@@ -291,8 +226,6 @@ async function claimNextTicket(client) {
   return full.rows[0];
 }
 
-// [CORRIGIDO] Preserva o texto original do solicitante na 1ª vez que o
-// worker sobrescreve `observacao` com o retorno do sistema.
 function observacaoSolicitanteDe(meta) {
   if (Object.hasOwn(meta || {}, 'observacao_solicitante')) return meta.observacao_solicitante;
   return typeof meta?.observacao === 'string' ? meta.observacao : null;
@@ -372,10 +305,6 @@ async function markSuccess(client, ticket, resultData) {
 async function markFailure(client, ticket, error) {
   const observacao = safeParse(ticket.observacao_sales_ops);
   const tentativas = Number(observacao._worker?.tentativas || 0);
-
-  // [CORRIGIDO] requiresReconciliation: force 'suporte' mesmo se o
-  // worker ainda tiver tentativas sobrando — gravação parcial no
-  // HubSpot NÃO pode ser retentada automaticamente.
   const retryable = !error.requiresReconciliation
     && isRetryableError(error)
     && tentativas < MAX_ATTEMPTS;
@@ -408,7 +337,6 @@ async function markFailure(client, ticket, error) {
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
     observacao: [observacaoTexto, coordinatorNote].filter(Boolean).join('\n'),
     observacao_solicitante: observacaoSolicitanteDe(observacao),
-    // [NOVO] Link do card informado no Link Hub (mesmo quando falha).
     link: error.partialResult?.link || hubspotRecordLink('deals', ticket.crm_lead_id) || observacao.link || null,
     _worker: {
       ...(observacao._worker || {}),
@@ -619,9 +547,6 @@ async function processLinkHubQueue() {
 
     await reclaimStaleLeases(client);
 
-    // [CORRIGIDO] batch configurável — processa N tickets por ciclo.
-    // Antes era while(true), que podia segurar um ciclo por muito tempo
-    // se houvesse muitos pendentes.
     while (processedThisCycle < BATCH_SIZE) {
       const ticket = await claimNextTicket(client);
       if (!ticket) break;
@@ -730,7 +655,6 @@ export function statusLinkHubBatchQueue() {
 }
 
 // ── Entrypoint standalone ───────────────────────────────────────────
-// Permite: `node backend/services/linkHubBatchQueue.js`
 if (import.meta.url === `file://${process.argv[1]}`) {
   if (process.env.LINKHUB_ENABLED === 'false') {
     console.log('[linkHubBatchQueue] desativado por LINKHUB_ENABLED=false — saindo');
@@ -751,6 +675,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   });
   process.on('uncaughtException', (err) => {
     console.error('[linkHubBatchQueue] uncaughtException:', err);
-    // Não derruba — próximo ciclo tenta de novo
   });
 }

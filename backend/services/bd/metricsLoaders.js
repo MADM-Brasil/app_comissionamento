@@ -185,7 +185,7 @@ export const QUALIFICATIONS = {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// CACHE KEY (idêntica à usada por warmupSetup.js — nunca duplica entrada)
+// CACHE KEY 
 // ═════════════════════════════════════════════════════════════════════════════
 
 export function metricCacheKey(tipo, params) {
@@ -242,7 +242,7 @@ export async function resolveNomesPorEquipe(equipeNome) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// LOADERS PUROS (SQL direto — sem cache; o cache é por rota em metrics.js)
+// LOADERS PUROS
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ─── EMITIDOS ────────────────────────────────────────────────────────────────
@@ -327,13 +327,13 @@ export async function loadAssinados({ start, end, equipe, produto, granularity }
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
+// Wrapper escalar
 export async function loadAssinadosTotal(params = {}) {
   const rows = await loadAssinados({ ...params, granularity: null });
   return sumTotal(rows);
 }
 
-// ─── PROTOCOLADOS (com mode safra/produção) ──────────────────────────────────
+// ─── PROTOCOLADOS ──────────────────────────────────
 export async function loadProtocolados({ start, end, equipe, produto, granularity, mode }) {
   const gran = mapGranularity(granularity);
   const periodFilter = buildPeriodFilter(mode);
@@ -390,7 +390,7 @@ export async function loadProtocoladosTotal(params = {}) {
   return sumTotal(rows);
 }
 
-// ─── GANHOS (com mode safra/produção) ────────────────────────────────────────
+// ─── GANHOS ────────────────────────────────────────
 export async function loadGanhos({ start, end, equipe, produto, granularity, demanda, mode }) {
   const gran = mapGranularity(granularity);
   const somenteDemandaAtual = String(demanda || '').toLowerCase() === 'atual';
@@ -1016,16 +1016,8 @@ export async function loadDemanda({ tipo, equipe, produto }) {
   );
 }
 
-
 // ─── QUANTIDADE DE CARDS POR ETAPA (Recebidos / Em contato / Coleta / Validação Sup) ───
-// Fonte única para as quantidades de cards nas etapas do funil comercial.
-// Replica a consulta SQL de referência:
-//   • recebidos            → core.deals com data_distribuicao_comercial no período
-//   • em_contato           → deals que ENTRARAM em "Em contato" no período (histórico)
-//   • coleta               → deals que ENTRARAM em "Coleta de documentação" no período
-//   • responsável/equipe: COALESCE(d.closer_id, d.responsavel_id) → core.colaboradores
-//   • mode=safra → também exige d.data_criacao_deal dentro do período (linhas "(Safra)")
-//   • COUNT(DISTINCT deal_id) por colaborador/equipe e por etapa
+
 export const STAGE_COUNT_ETAPAS = Object.freeze({
   em_contato:           Object.freeze([6650, 8594, 14105]),
   coleta:               Object.freeze([8595, 6651, 14106]),
@@ -1122,17 +1114,7 @@ export async function loadStageCounts({ start, end, equipe, produto, mode, colab
 
 
 // ─── ASSINADOS / EMITIDOS DO FUNIL (core.assinaturas, safra x produção) ──────
-// Fonte das quantidades de Emitidos e Assinados no funil comercial.
-//   • Só contratos ORIGINAIS e não cancelados.
-//   • emitidos  → data_emissao   no período
-//   • assinados → data_assinatura no período + status 'ASSINADO'
-//   • PRODUÇÃO → NÃO olha a data de criação do negócio.
-//   • SAFRA    → também exige d.data_criacao_deal dentro do período
-//                (mesma regra da consulta de etapas).
-//   • Conta cards (negócios distintos); assinatura sem negócio vinculado
-//     conta como 1 card próprio (apenas em produção — em safra precisa do negócio).
-//   • Responsável: consultor da assinatura/emissão; sem consultor →
-//     COALESCE(d.closer_id, d.responsavel_id).
+
 export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, colaboradorIds = null }) {
   if (Array.isArray(colaboradorIds) && colaboradorIds.length === 0) return [];
 
@@ -1363,13 +1345,6 @@ export async function loadDiscadorResultado({ start, end }) {
       ORDER BY a.deal_id, a.data_assinatura DESC NULLS LAST
     ),
 
-    -- Última ligação por telefone. A grande diferença em relação à versão
-    -- anterior: restringimos o scan de base_olos_temp aos telefones que
-    -- EXISTEM em assinaturas_unicas. Isso troca um DISTINCT ON sobre todo
-    -- o histórico por um hash semi-join (IN) sobre o conjunto pequeno de
-    -- telefones com assinatura. A regra "última ligação, priorizando
-    -- in-period" continua idêntica: chamadas fora do período ainda são
-    -- consideradas, apenas priorizadas depois das in-period.
     ultima_ligacao AS MATERIALIZED (
       SELECT DISTINCT ON (l.phone_key)
         l.phone_key, l.agent_name, l.campaign_name

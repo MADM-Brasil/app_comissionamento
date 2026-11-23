@@ -1,63 +1,37 @@
 // backend/services/bd/cacheFirst.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Orquestrador cache-first com:
-//   • L1 in-process (fast path, ANTES de qualquer I/O com Redis)
-//   • Redis + L2 (via cache.js)
-//   • Singleflight (deduplicação de cargas concorrentes)
-//   • Stale-while-revalidate (retorna stale + refresh em background)
-//   • Backoff de refresh (evita storm quando o loader falha)
-//
-// Ordem de resolução:
-//   0. L1 fresco        (in-process)          → retorna, 0 I/O
-//   1. L1 stale         (in-process)          → retorna + agenda refresh bg
-//   2. cache fresco     (Redis via cacheGet)  → retorna + popula L1
-//   3. cache stale      (Redis via cacheGet)  → retorna + popula L1 + agenda refresh
-//   4. cache vazio      → singleflight(loader) → popula L1 + L2 → retorna
-//
-// ✅ FIX 1: L1 in-process como fast path ANTES de Redis. Antes, cada
-//           request pagava o round-trip ao Redis mesmo para keys quentes.
-// ✅ FIX 2: Fast-fail no cacheGet (300ms). Não deixa o timeout de 2s do
-//           cache.js propagar — falha rápido e cai para L1.
-// ✅ FIX 3: Size guard (1 MB). Payloads grandes (20k linhas de demanda)
-//           ficam SÓ em L1 — não tentam escrever/lê do Redis.
-// ✅ FIX 4: cacheSetMany não é fatal. Se Redis write falha, o valor já
-//           está em L1 e o caller recebe o valor mesmo assim.
-// ✅ FIX 5: L1 com stale-while-revalidate completo (isFresh/isStale).
-// ✅ FIX 6: Env-configurável: CACHE_FIRST_MAX_L2_BYTES,
-//           CACHE_FIRST_FAST_TIMEOUT_MS.
-// ✅ FIX 7: cacheFirstStats() expõe l1Hits/l1StaleHits/fastTimeouts/etc.
-//
-// NÃO garantido (por design — trade-off consciente):
-//   • Invalidação exata durante um load em voo. Se `cacheInvalidate(K)`
-//     for chamado enquanto um `cacheFirst(K)` está pendente, o resultado
-//     desse load pode sobrescrever o cache recém-invalidado. Use
-//     `cacheRefresh(K, loader)` para forçar nova escrita atômica.
-//   • Coordenação entre processos. Cada worker (PM2 cluster) tem seu
-//     próprio L1 e `singleflight`. Em cluster com 2 workers, uma key
-//     fria pode gerar até 2 queries concorrentes (uma por worker).
-//     Para o porte atual, é aceitável.
-// ─────────────────────────────────────────────────────────────────────────────
-
+import { gzip, gunzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import { cacheGet, cacheDelete, cacheSetMany } from './cache.js';
 import { singleflight } from './singleflight.js';
+
+const gzipAsync = promisify(gzip);
+const gunzipAsync = promisify(gunzip);
 
 // ─── Constantes ──────────────────────────────────────────────────────────────
 const STALE_PREFIX = 'stale:';
 const DEFAULT_TTL_MS = 60_000;
 const DEFAULT_STALE_MS = 300_000;       // 5min
-const MIN_REFRESH_INTERVAL_MS = 5_000;  // backoff por key em falha
+const MIN_REFRESH_INTERVAL_MS = 5_000; 
 const MAX_REFRESH_TRACK_ENTRIES = 10_000;
 
 // ─── L1 (in-process) ─────────────────────────────────────────────────────────
 const L1_MAX_ENTRIES = 500;
 const L1_DEFAULT_STALE_MS = 300_000;
 
-// ─── Limites configuráveis (FIX 6) ───────────────────────────────────────────
+// ─── Limites configuráveis ───────────────────────────────────────────
 const MAX_L2_BYTES =
-  Number(process.env.CACHE_FIRST_MAX_L2_BYTES) || 1_000_000; // 1 MB
+  Number(process.env.CACHE_FIRST_MAX_L2_BYTES) || 1_000_000; 
 const FAST_SIZE_CHECK_THRESHOLD = 5000; // heurística rápida para arrays grandes
 const CACHE_GET_FAST_TIMEOUT_MS =
   Number(process.env.CACHE_FIRST_FAST_TIMEOUT_MS) || 300; // ms
+
+// ─── Compressão para L2 (FIX 8) ──────────────────────────────────────────────
+const L2_COMPRESS_ENABLED = process.env.CACHE_FIRST_L2_COMPRESS !== '0';
+// Acima disso nem tenta comprimir (evita travar CPU com payloads absurdos).
+const MAX_L2_COMPRESS_INPUT_BYTES =
+  Number(process.env.CACHE_FIRST_MAX_L2_COMPRESS_INPUT_BYTES) || 50_000_000; // 50 MB
+const GZ_MARKER = '__cacheFirstGz';
 
 // ─── Estado interno (por processo) ───────────────────────────────────────────
 const l1Cache = new Map(); // key → { value, at, ttlMs, staleMs }
@@ -76,6 +50,9 @@ const stats = {
   fastTimeouts: 0,
   l2SkipsDueToSize: 0,
   l2WriteFailures: 0,
+  l2Compressed: 0,
+  l2CompressFailures: 0,
+  l2DecompressFailures: 0,
 };
 
 // ─── Helpers internos ────────────────────────────────────────────────────────
@@ -116,7 +93,7 @@ function validate(key, loader) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// L1 (in-process) — FIX 1 + FIX 5
+// L1 (in-process)
 // ═════════════════════════════════════════════════════════════════════════════
 function l1Get(key) {
   const entry = l1Cache.get(key);
@@ -174,27 +151,81 @@ function estimateSize(value) {
       }
       return JSON.stringify(value).length;
     }
-
-    // Padrão { rows: [...] } (retorno de loaders SQL)
     if (typeof value === 'object' && Array.isArray(value.rows)) {
       const rows = value.rows;
       if (rows.length > FAST_SIZE_CHECK_THRESHOLD) {
         const sampleSize = Math.min(100, rows.length);
         const sampleBytes = JSON.stringify(rows.slice(0, sampleSize)).length;
-        return Math.round((sampleBytes / sampleSize) * rows.length) + 200; // +overhead do wrapper
+        return Math.round((sampleBytes / sampleSize) * rows.length) + 200; 
       }
     }
 
     return JSON.stringify(value).length;
   } catch {
-    // Se não serializável, trata como muito grande (não vai pra L2)
+
     return Infinity;
   }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Fast-fail cacheGet — FIX 2
-// Não deixa o timeout de 2s do cache.js travar o request.
+// Compressão L2
+// ═════════════════════════════════════════════════════════════════════════════
+function isCompressedEnvelope(v) {
+  return (
+    v != null &&
+    typeof v === 'object' &&
+    v[GZ_MARKER] === 1 &&
+    typeof v.data === 'string'
+  );
+}
+
+/**
+ * Comprime o valor para caber em L2.
+ * @returns {Promise<{ envelope: object, rawBytes: number, l2Bytes: number } | null>}
+ *          null se não couber mesmo comprimido.
+ */
+async function compressForL2(value, key) {
+  if (!L2_COMPRESS_ENABLED) return null;
+  try {
+    const json = JSON.stringify(value);
+    if (json == null || json.length > MAX_L2_COMPRESS_INPUT_BYTES) return null;
+    const buf = await gzipAsync(json, { level: 6 });
+    const data = buf.toString('base64');
+    // +60B do envelope JSON
+    const l2Bytes = data.length + 60;
+    if (l2Bytes > MAX_L2_BYTES) return { envelope: null, rawBytes: json.length, l2Bytes };
+    return {
+      envelope: { [GZ_MARKER]: 1, enc: 'gzip-base64', data },
+      rawBytes: json.length,
+      l2Bytes,
+    };
+  } catch (err) {
+    stats.l2CompressFailures++;
+    console.warn(
+      `[cacheFirst] falha ao comprimir para L2 (key="${key}"):`,
+      err?.message || err,
+    );
+    return null;
+  }
+}
+
+async function decodeFromL2(v, key) {
+  if (!isCompressedEnvelope(v)) return v;
+  try {
+    const buf = await gunzipAsync(Buffer.from(v.data, 'base64'));
+    return JSON.parse(buf.toString('utf8'));
+  } catch (err) {
+    stats.l2DecompressFailures++;
+    console.warn(
+      `[cacheFirst] falha ao descomprimir L2 (key="${key}") — tratando como miss:`,
+      err?.message || err,
+    );
+    return null;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Fast-fail cacheGet 
 // ═════════════════════════════════════════════════════════════════════════════
 async function cacheGetSafe(key) {
   let timeoutId;
@@ -212,7 +243,8 @@ async function cacheGetSafe(key) {
       stats.fastTimeouts++;
       return null;
     }
-    return result;
+    // FIX 8: descomprime envelopes gzip gravados por loadAndCache
+    return await decodeFromL2(result, key);
   } catch {
     return null;
   } finally {
@@ -222,14 +254,6 @@ async function cacheGetSafe(key) {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // loadAndCache
-//
-// É o ÚNICO caminho que invoca o loader.
-// Foreground (MISS) e background (STALE-refresh) usam a MESMA chave de
-// singleflight → concorrência real = 1 query, sempre.
-//
-// ✅ FIX 1: L1 é populado ANTES de tocar Redis (fast path imediato).
-// ✅ FIX 3: size guard pula L2 se payload > MAX_L2_BYTES.
-// ✅ FIX 4: falha em cacheSetMany NÃO é fatal (já temos L1).
 // ═════════════════════════════════════════════════════════════════════════════
 function loadAndCache(key, loader, opts) {
   const { ttlMs, staleMs } = opts;
@@ -237,26 +261,34 @@ function loadAndCache(key, loader, opts) {
   return singleflight(`fetch:${key}`, async () => {
     try {
       const value = await loader();
-
-      // ✅ FIX 1: L1 SEMPRE — mesmo se L2 falhar ou for grande demais
       l1Set(key, value, ttlMs, staleMs);
-
-      // ✅ FIX 3: size guard antes de tocar Redis
+      let l2Value = value;
       const size = estimateSize(value);
       if (size > MAX_L2_BYTES) {
-        stats.l2SkipsDueToSize++;
-        console.warn(
-          `[cacheFirst] payload ${size}B excede MAX_L2_BYTES=${MAX_L2_BYTES} — ` +
-          `mantendo só L1 (key="${key}")`,
-        );
-      } else {
+        const compressed = await compressForL2(value, key);
+        if (compressed?.envelope) {
+          stats.l2Compressed++;
+          l2Value = compressed.envelope;
+        } else {
+          l2Value = null;
+          stats.l2SkipsDueToSize++;
+          const detail = compressed
+            ? ` (comprimido: ${compressed.l2Bytes}B)`
+            : '';
+          console.warn(
+            `[cacheFirst] payload ${size}B${detail} excede MAX_L2_BYTES=${MAX_L2_BYTES} — ` +
+            `mantendo só L1 (key="${key}")`,
+          );
+        }
+      }
+
+      if (l2Value != null) {
         try {
           await cacheSetMany([
-            { key: staleKeyOf(key), value, ttlMs: staleMs },
-            { key, value, ttlMs },
+            { key: staleKeyOf(key), value: l2Value, ttlMs: staleMs },
+            { key, value: l2Value, ttlMs },
           ]);
         } catch (err) {
-          // ✅ FIX 4: cacheSetMany não é fatal — L1 já tem o valor
           stats.l2WriteFailures++;
           console.warn(
             `[cacheFirst] cacheSetMany falhou (key="${key}"):`,
@@ -278,7 +310,7 @@ function loadAndCache(key, loader, opts) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Resolução interna (retorna { value, source })
+// Resolução interna 
 // ═════════════════════════════════════════════════════════════════════════════
 async function resolve(key, loader, opts) {
   // ── 0. L1 in-process (fast path) ───────────────────────────
@@ -416,10 +448,6 @@ export async function cacheRefresh(key, loader, opts) {
  * Use em endpoints de escrita quando os dados mudaram e você não
  * quer esperar o TTL expirar.
  *
- * ⚠️ Se houver um load em voo para essa key, o resultado desse load
- * pode sobrescrever a invalidação quando terminar. Use
- * `cacheRefresh` em vez de `cacheInvalidate`, ou aguarde o load.
- *
  * @param {string} key
  * @returns {Promise<void>}
  */
@@ -467,6 +495,8 @@ export function cacheFirstStats() {
     limits: {
       maxL2Bytes: MAX_L2_BYTES,
       fastTimeoutMs: CACHE_GET_FAST_TIMEOUT_MS,
+      l2CompressEnabled: L2_COMPRESS_ENABLED,
+      maxL2CompressInputBytes: MAX_L2_COMPRESS_INPUT_BYTES,
     },
   };
 }

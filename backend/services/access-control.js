@@ -1,5 +1,4 @@
 // backend/services/access-control.js
-// Sistema de Controle de Acesso unificado (backend).
 
 import { pool } from './bd/db.js';
 
@@ -148,8 +147,6 @@ class AccessControl {
         canAccessSuporteSalesOps: false,
       },
 
-
-      // Suporte com as MESMAS regras do COORDENADOR; todo o resto bloqueado.
       [this.LEVELS.ASSESSOR_PLUS]: {
         canAccessDashboard: false, canAccessComissoes: false, canAccessRanking: false,
         canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
@@ -215,13 +212,12 @@ class AccessControl {
   }
 
   get HOME_COMISSOES_ALLOWED_LEVELS() {
-    // Após renumeração: [2, 3, 5]. ASSESSOR_PLUS (4) fica de fora por design.
     return [this.LEVELS.ASSESSOR, this.LEVELS.SUPERVISAO, this.LEVELS.COORDENADOR];
   }
 
   isUnit3HomeComissoesUser(user) {
     if (!user) return false;
-    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
+    const level = this.getEffectiveAccessLevel(user);
     if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
     const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
     if (unidade === this.HOME_COMISSOES_ALLOWED_UNIT) return true;
@@ -235,7 +231,6 @@ class AccessControl {
     return this.HOME_COMISSOES_ALLOWED_TEAMS.has(team);
   }
 
-  /** Retorna `true` quando o e-mail do usuário está bloqueado de /comissoes. */
   isComissoesBlockedByEmail(user) {
     if (!user?.email) return false;
     return this.COMISSOES_BLOCKED_EMAILS_SET.has(this.normalize(user.email));
@@ -244,7 +239,6 @@ class AccessControl {
   isAssessorPlusUser(user) {
     if (!user?.email) return false;
     if (!this.ASSESSOR_PLUS_EMAILS_SET.has(this.normalize(user.email))) return false;
-    // A promoção só vale para quem já é assessor.
     return this.getAccessLevel(user.cargo, user.status) === this.LEVELS.ASSESSOR;
   }
 
@@ -261,7 +255,7 @@ class AccessControl {
 
   canSeeHomeComissoes(user) {
     if (!user) return false;
-    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
+    const level = this.getEffectiveAccessLevel(user);
     if (level >= this.LEVELS.ADMINISTRATIVO) return true;
     return this.isUnit3HomeComissoesUser(user);
   }
@@ -269,12 +263,9 @@ class AccessControl {
   getDefaultLandingPage(user) {
     if (!user) return '/login';
 
-    // Preserva a ordem original: quem é "unit3/Eq Felipe" cai em /home.
-    // ASSESSOR_PLUS tem nível efetivo 4, que NÃO está em HOME_COMISSOES_ALLOWED_LEVELS,
-    // portanto cai no bloco abaixo e é redirecionado para /suporte.
     if (this.isUnit3HomeComissoesUser(user)) return '/home';
 
-    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
+    const level = this.getEffectiveAccessLevel(user);
 
     if (level === this.LEVELS.JURIDICO)      return '/suporte';
     if (level === this.LEVELS.ASSESSOR_PLUS) return '/suporte';
@@ -375,7 +366,7 @@ class AccessControl {
   }
 
   getUserPermissions(user) {
-    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
+    const level = this.getEffectiveAccessLevel(user);
     const perms = this.PERMISSIONS[level];
 
     const allowHomeComissoes = this.canSeeHomeComissoes(user);
@@ -413,8 +404,7 @@ class AccessControl {
 
   filterTeamData(teamMembers, currentUser) {
     if (!currentUser || !teamMembers) return [];
-    const userLevel = this.getEffectiveAccessLevel(currentUser);   // [ALTERADO]
-    // [NOVO] ASSESSOR_PLUS herda a visão de coordenador.
+    const userLevel = this.getEffectiveAccessLevel(currentUser);
     if (userLevel >= this.LEVELS.COORDENADOR || userLevel === this.LEVELS.ASSESSOR_PLUS) {
       return teamMembers;
     }
@@ -431,14 +421,13 @@ class AccessControl {
     if (!user) {
       return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
     }
-    const level = this.getEffectiveAccessLevel(user);   // [ALTERADO]
+    const level = this.getEffectiveAccessLevel(user);
     if (level === this.LEVELS.ASSESSOR) {
       return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: true, collaboratorName: user.nome ?? null };
     }
     if (level === this.LEVELS.SUPERVISAO) {
       return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: false, collaboratorName: null };
     }
-    // ASSESSOR_PLUS cai aqui: filtros livres (regra de coordenador).
     return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
   }
 
@@ -458,9 +447,6 @@ class AccessControl {
 
   getMenuItems(permissions) {
     const items = [];
-    // Mantido: JURIDICO e qualquer perfil "só Suporte" (canAccessSuporte &&
-    // !canAccessDashboard) retornam APENAS o item Suporte. Isso cobre o
-    // ASSESSOR_PLUS naturalmente (todas as outras flags são false).
     if (
       permissions.level === this.LEVELS.JURIDICO ||
       (permissions.canAccessSuporte && !permissions.canAccessDashboard)
@@ -470,8 +456,6 @@ class AccessControl {
     }
 
     if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });
-    // O item só aparece se canAccessComissoes === true — o que já leva
-    // em conta o bloqueio individual por e-mail.
     if (permissions.canAccessComissoes) items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
     if (permissions.canViewTeam || permissions.canAccessReports) {
       items.push({ id: 'dashboard-group', label: 'Dashboard', link: '' });

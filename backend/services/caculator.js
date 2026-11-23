@@ -18,12 +18,8 @@ export class Calculator {
         return this.supervisorSREmails.has((email || '').trim().toLowerCase());
     }
 
-    // ==================== CÁLCULO DE GOLS DIÁRIOS (ATUALIZADO) ====================
-    /**
-     * Calcula gols diários de um assessor.
-     * Agora conta múltiplos gols por dia: mínimo entre assinados/meta e ganhos/meta.
-     * Normaliza a data para YYYY-MM-DD.
-     */
+    // ==================== CÁLCULO DE GOLS DIÁRIOS  ====================
+
     calculateDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos) {
         let totalGols = 0;
         const dailyGols = dailyData.map(day => {
@@ -41,13 +37,7 @@ export class Calculator {
     }
 
     // ==================== APLICAÇÃO DE CAMPANHAS ====================
-    /**
-     * Aplica campanhas ativas (aprovadas) aos gols diários.
-     * Tipos suportados:
-     * - GOLS: multiplica os gols do dia pelo multiplicador.
-    * - ASSINADOS: adiciona 1 gol a cada multiplicador de assinados no dia.
-     * - PROGRESSIVA: se assinados >= meta mínima (multiplicador), gols = assinados.
-     */
+
     applyCampaignsToDailyGoals(dailyData, metaGolsAssinados, metaGolsGanhos, campanhasAtivas = []) {
         // Normaliza datas dos dados diários
         const normalizedDailyData = dailyData.map(d => ({
@@ -57,9 +47,9 @@ export class Calculator {
 
         const base = this.calculateDailyGoals(normalizedDailyData, metaGolsAssinados, metaGolsGanhos);
 
-        const golsMap = new Map();           // data -> multiplicador máximo
-        const assinadosMap = new Map();      // data -> quantidade de assinados por gol
-        const progressivaMap = new Map();    // data -> meta mínima
+        const golsMap = new Map();
+        const assinadosMap = new Map();
+        const progressivaMap = new Map();
 
         for (const camp of campanhasAtivas) {
             const dateKey = (camp.data_publicacao || '').split('T')[0];

@@ -10,8 +10,6 @@
 //     APÓS o cache — 1 entrada serve todos os usuários, cada um filtra o seu.
 //   • A cache key inclui TUDO que está no WHERE SQL. Colaborador NÃO entra
 //     porque é filtro em JS.
-//
-// ⚠️ SAFRA vs PRODUÇÃO (/assinados, /ganhos e /protocolados)
 // ─────────────────────────────────────────────────────────────────────────────
 //   • mode=producao (default) → filtra por coluna de data do evento
 //   • mode=safra              → INNER JOIN em core.deals e filtra por created_at
@@ -362,7 +360,7 @@ router.get('/perdidos', requireAuth, async (req, res) => {
 // LEADS RECEBIDOS — dois modos (série temporal vs agregado)
 // ─────────────────────────────────────────────────────────────────────────────
 // Com granularity (daily|weekly|monthly) → série temporal
-// Sem granularity → agregado por colaborador (Home, Visão Geral)
+// Sem granularity → agregado por colaborador
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/leads-recebidos', requireAuth, async (req, res) => {
   try {
