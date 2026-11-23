@@ -1,31 +1,9 @@
 // backend/services/ticketQueue.js
-//
-// Worker unificado de movimentações (CRM + Link Hub).
-//
-// ─── FUNÇÕES REAIS DO hubspot.js ───────────────────────────────────
-//   CRM      → garantirLeadNoCloser(contactId, dealName, ownerId,
-//                                   collaboratorName, produto,
-//                                   { bypassTemporalRestriction })
-//   Link Hub → reassignDealForLinkHubMovement(dealId, ownerId, portalId,
-//                                              expectedCurrentContext, produto)
-//
-// Adapter `moverLeadHubSpot` (local) resolve ownerId, orquestra as
-// chamadas e normaliza em { ok, status, erro, hubspot, requiresCoordinator }.
-//
-// ─── FLUXO DE STATUS ───────────────────────────────────────────────
-//   pendente → processando → concluido | erro | aviso | suporte
-//                                        | coordenador | bloqueado
-//
-// ─── COMPATIBILIDADE COM server.js ─────────────────────────────────
-// Exporta `startTicketQueue` (alias de `start`) para que o import
-// estático no server.js continue funcionando.
-//
-// Idealmente em processo separado: `node backend/services/ticketQueue.js`
-// (PM2/systemd/container próprio).
 
 import { pool } from './bd/db.js';
 import * as hubspotModule from './hubspot.js';
 import { broadcastNotification } from '../routes/notificacoes.js';
+import teamsNotificador from '../suporte/teams_notificacoes.js';
 
 // ── Configuração ────────────────────────────────────────────────────
 const POLL_INTERVAL_MS      = Number(process.env.TICKET_QUEUE_POLL_MS      || 5_000);
@@ -337,6 +315,7 @@ async function claimLote(limit) {
       `SELECT tml.id_ticket_movimentacao
          FROM app_comissionamento.tickets_movimentacao_lead tml
         WHERE tml.status_mapeamento = 'pendente'
+          AND tml.crm_origem <> 'HUBSPOT_LINK'       
           AND tml.colaborador_destino_nome IS NOT NULL
           AND TRIM(tml.colaborador_destino_nome) <> ''
         ORDER BY tml.atualizado_em ASC NULLS FIRST, tml.id_ticket_movimentacao ASC
@@ -548,15 +527,18 @@ async function processar(movement) {
       `moverLeadHubSpot(#${movementId})`,
     );
   } catch (err) {
-    log('error', `#${movementId} timeout/exceção:`, err.message);
-    await finalizar(movementId, ticketId, 'erro', {
-      hubspot: { erro: String(err.message || err).slice(0, 1000), em: new Date().toISOString() },
-      link: linkDoCaso(movement, null),
-      observacaoSistema: `Erro ao processar: ${String(err.message || err).slice(0, 1000)}`,
-    }, err.message);
-    stats.erros += 1;
-    return;
-  }
+  log('error', `#${movementId} timeout/exceção:`, err.message);
+  await finalizar(movementId, ticketId, 'erro', {
+    hubspot: { erro: String(err.message || err).slice(0, 1000), em: new Date().toISOString() },
+    link: linkDoCaso(movement, null),
+    observacaoSistema: `Erro ao processar: ${String(err.message || err).slice(0, 1000)}`,
+  }, err.message);
+  stats.erros += 1;
+  await notificarSolicitante(ticketId, movementId, 'erro', err.message, {
+    movement, resultado: null,
+  });
+  return;
+}
 
   if (resultado?.ok) {
     await finalizar(movementId, ticketId, 'concluido', {
@@ -591,34 +573,101 @@ async function processar(movement) {
     default:            stats.erros += 1;
   }
   log(status === 'erro' ? 'error' : 'warn', `#${movementId} → '${status}' (${resultado?.erro || 'sem detalhe'})`);
-  if (status === 'aviso' || status === 'erro') {
-    notificarSolicitante(ticketId, movementId, status, resultado?.erro);
-  }
+  await notificarSolicitante(ticketId, movementId, status, resultado?.erro, {
+  movement,
+  resultado,
+});
 }
 
-async function notificarSolicitante(ticketId, movementId, status, erro) {
+async function notificarSolicitante(ticketId, movementId, status, erro, ctx = {}) {
+  const { movement = {}, resultado = null } = ctx;
+
+  // 1) SSE — mantém o que já funciona
   try {
     const r = await pool.query(
-      `SELECT titulo, metadados->>'solicitante_email' AS email
+      `SELECT titulo, metadados->>'solicitante_email' AS email,
+              metadados
          FROM app_comissionamento.tickets_suporte
         WHERE id_ticket = $1`,
       [ticketId],
     );
-    if (!r.rowCount || !r.rows[0].email) return;
-    const mensagens = {
-      concluido: 'sua solicitação foi concluída com sucesso.',
-      aviso: `sua solicitação precisa de atenção: ${erro || 'dado faltante'}.`,
-      erro: `sua solicitação encontrou um erro: ${erro || 'não classificado'}.`,
-    };
-    const msg = mensagens[status];
-    if (!msg) return;
-    Promise.resolve(broadcastNotification({
-      tipo: status === 'concluido' ? 'success' : 'warn',
-      titulo: `Movimentação #${movementId}`,
-      destinatario: r.rows[0].email,
-      mensagem: `Sobre "${r.rows[0].titulo}": ${msg}`,
-      data: new Date().toISOString(),
-    })).catch(err => log('error', 'broadcastNotification falhou:', err.message));
+    if (!r.rowCount) return;
+    const row = r.rows[0];
+    const meta = parseJson(row.metadados);
+
+    if (row.email) {
+      const mensagens = {
+        concluido: 'sua solicitação foi concluída com sucesso.',
+        aviso:     `sua solicitação precisa de atenção: ${erro || 'dado faltante'}.`,
+        erro:      `sua solicitação encontrou um erro: ${erro || 'não classificado'}.`,
+        suporte:   'sua solicitação foi encaminhada ao suporte.',
+        bloqueado: 'sua solicitação foi bloqueada — precisa de revisão manual.',
+        coordenador: 'sua solicitação aguarda validação do coordenador.',
+      };
+      const msg = mensagens[status];
+      if (msg) {
+        Promise.resolve(broadcastNotification({
+          tipo: status === 'concluido' ? 'success' : 'warn',
+          titulo: `Movimentação #${movementId}`,
+          destinatario: row.email,
+          mensagem: `Sobre "${row.titulo}": ${msg}`,
+          data: new Date().toISOString(),
+        })).catch((err) => log('error', 'broadcastNotification falhou:', err.message));
+      }
+    }
+
+    // 2) Teams — só para status que pedem ação de suporte
+    const STATUS_TEAMS = new Set(['suporte', 'bloqueado', 'coordenador', 'aviso']);
+    if (!STATUS_TEAMS.has(status)) return;
+
+    // Unidade 1-5 é obrigatória quando o destino é o webhook de coordenador
+    const unidadeId = Number(meta?.unidade_id ?? meta?.unidadeId) || null;
+    const viraCoordenador =
+      status === 'coordenador' ||
+      (status === 'bloqueado' && unidadeId != null && unidadeId >= 1 && unidadeId <= 5);
+
+    // Se 'coordenador' exigido mas sem unidade → cai para 'suporte' (não exige unidade)
+    if (status === 'coordenador' && !viraCoordenador) {
+      log('warn', `#${movementId} coordenador sem unidade — enviando como 'suporte'`);
+    }
+
+    const statusPayload = viraCoordenador ? 'coordenador' : 'suporte';
+    const assunto = statusPayload === 'coordenador'
+      ? `Validacao_unidade_${unidadeId}`
+      : 'Movimentacao';
+
+    const descricao =
+      `Ticket ${movementId} (origem ${movement.crm_origem || 'CRM'}) ` +
+      `terminou como "${status}". Motivo: ${erro || resultado?.erro || 'não informado'}.`;
+
+    const r2 = await teamsNotificador.enviar({
+      titulo: `Movimentação #${movementId} — ${status.toUpperCase()}`,
+      assunto,
+      descricao,
+      solicitante: meta.solicitante_nome || row.email || 'N/A',
+      solicitanteEmail: row.email || null,
+      equipe: meta.origem_equipe || meta.equipe || 'N/A',
+      cliente: movement.nome_cliente_informado || meta.cliente || 'N/A',
+      telefone: movement.telefone_cliente_informado || meta.telefone || null,
+      equipeDestino: meta.destino_equipe || movement.colaborador_destino_nome || 'N/A',
+      assessorDestino: movement.colaborador_destino_nome || meta.assessor_destino || 'N/A',
+      status: statusPayload,
+      unidadeId: viraCoordenador ? unidadeId : (unidadeId ?? null),
+      idTicketMovimentacao: movementId,
+      idTicket: ticketId,
+      mensagem: erro || resultado?.erro || null,
+      pipeline: meta.pipelineNome || meta.pipeline || null,
+      stage: meta.stageNome || meta.stage || null,
+      produto: meta.produto || null,
+      link: resultado?.hubspot?.link || movement?.link || null,
+      dealId: movement.crm_lead_id || null,
+    });
+
+    if (!r2.success) {
+      log('error', `#${movementId} Teams falhou:`, r2.error);
+    } else {
+      log('info', `#${movementId} Teams OK (canal=${r2.channel}, assunto=${r2.assunto})`);
+    }
   } catch (err) {
     log('error', 'notificarSolicitante falhou:', err.message);
   }

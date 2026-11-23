@@ -69,13 +69,22 @@ const __dirname = path.dirname(__filename);
 // ============================================================
 // WORKER — estado gerenciado (import dinâmico)
 // ============================================================
-// `workerModule` guarda o namespace do worker após carregar (para
-// `stop()` no shutdown e `status()` no health). `workerLoadPromise`
-// serve para o shutdown aguardar um carregamento em andamento sem
-// race condition.
-let workerModule = null;
-let workerLoadPromise = null;
-let workerLoadError = null;
+// Cada worker tem seu próprio slot. `module` guarda o namespace após o
+// carregamento (para stop() no shutdown e status() no health). `promise`
+// serve para o shutdown aguardar um carregamento em andamento.
+
+const workers = {
+  ticketQueue: {
+    module:  null,
+    promise: null,
+    error:   null,
+  },
+  linkHubBatchQueue: {
+    module:  null,
+    promise: null,
+    error:   null,
+  },
+};
 
 // ============================================================
 // REDE DE SEGURANÇA GLOBAL
@@ -380,39 +389,64 @@ app.get('/api/health/worker', (req, res) => {
     return res.status(200).json({
       success: true,
       loaded: false,
-      motivo: 'WORKER_ENABLED=false (worker rodando em processo separado)',
+      motivo: 'WORKER_ENABLED=false (workers rodando em processo separado)',
     });
   }
 
-  if (workerLoadError) {
-    return res.status(503).json({
-      success: false,
-      loaded: false,
-      erro_carregamento: workerLoadError.message,
-    });
+  const out = {};
+  let allOk = true;
+  let anyLoaded = false;
+
+  // ── ticketQueue ──────────────────────────────────────────────────
+  {
+    const w = workers.ticketQueue;
+    if (w.error) {
+      out.ticketQueue = { loaded: false, erro_carregamento: w.error.message };
+      allOk = false;
+    } else if (!w.module) {
+      out.ticketQueue = { loaded: false, motivo: 'carregando' };
+      allOk = false;
+    } else {
+      try {
+        const st = w.module.status();
+        const ok = st.running && !st.modo_degradado;
+        if (!ok) allOk = false;
+        anyLoaded = true;
+        const payload = { loaded: true, ok, ...st };
+        if (brief) delete payload.exports_hubspot;
+        out.ticketQueue = payload;
+      } catch (err) {
+        out.ticketQueue = { loaded: true, erro: err?.message || String(err) };
+        allOk = false;
+      }
+    }
   }
 
-  if (!workerModule) {
-    return res.status(503).json({
-      success: false,
-      loaded: false,
-      motivo: 'worker ainda carregando (aguarde poucos segundos após boot)',
-    });
+  // ── linkHubBatchQueue ────────────────────────────────────────────
+  {
+    const w = workers.linkHubBatchQueue;
+    if (w.error) {
+      out.linkHubBatchQueue = { loaded: false, erro_carregamento: w.error.message };
+      allOk = false;
+    } else if (!w.module) {
+      out.linkHubBatchQueue = { loaded: false, motivo: 'carregando' };
+      allOk = false;
+    } else {
+      try {
+        const st = w.module.statusLinkHubBatchQueue?.() || { running: false };
+        const ok = st.running === true;
+        if (!ok) allOk = false;
+        anyLoaded = true;
+        out.linkHubBatchQueue = { loaded: true, ok, ...st };
+      } catch (err) {
+        out.linkHubBatchQueue = { loaded: true, erro: err?.message || String(err) };
+        allOk = false;
+      }
+    }
   }
 
-  try {
-    const st = workerModule.status();
-    const ok = st.running && !st.modo_degradado;
-    const payload = { success: ok, loaded: true, ...st };
-    if (brief) delete payload.exports_hubspot;
-    return res.status(ok ? 200 : 503).json(payload);
-  } catch (err) {
-    return res.status(500).json({
-      success: false,
-      loaded: true,
-      erro: err?.message || String(err),
-    });
-  }
+  const success = allOk && anyLoaded;
+  return res.status(success ? 200 : 503).json({ success, workers: out });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -678,18 +712,30 @@ let server = null;
 let shuttingDown = false;
 
 async function stopWorker() {
-  try {
-    if (workerLoadPromise) {
-      try { await workerLoadPromise; } catch { /* já registrado */ }
+  const entries = Object.entries(workers);
+
+  await Promise.allSettled(entries.map(async ([name, w]) => {
+    try {
+      if (w.promise) {
+        try { await w.promise; } catch { /* já logado no catch do carregamento */ }
+      }
+
+      // ticketQueue.js exporta `stop`
+      // linkHubBatchQueue.js exporta `stopLinkHubBatchQueue`
+      const stopFn = w.module?.stop || w.module?.stopLinkHubBatchQueue;
+      if (typeof stopFn === 'function') {
+        await stopFn({ timeoutMs: 10_000 });
+        console.log(`[shutdown] worker ${name} parado`);
+      }
+    } catch (err) {
+      console.error(
+        `[shutdown] erro ao parar worker ${name}:`,
+        err?.message || err
+      );
     }
-    if (workerModule?.stop) {
-      await workerModule.stop({ timeoutMs: 10_000 });
-      console.log('[shutdown] worker de movimentações parado');
-    }
-  } catch (err) {
-    console.error('[shutdown] erro ao parar worker:', err?.message || err);
-  }
+  }));
 }
+
 
 async function shutdown(signal) {
   if (shuttingDown) return;
@@ -758,33 +804,50 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // ============================================================
 function startWorkerAsync() {
   if (process.env.WORKER_ENABLED === 'false') {
-    console.log('[boot] worker desativado (WORKER_ENABLED=false)');
+    console.log('[boot] workers desativados (WORKER_ENABLED=false)');
     return;
   }
 
-  workerLoadPromise = import('./services/ticketQueue.js')
+  // ── ticketQueue (CRM) ────────────────────────────────────────────
+  workers.ticketQueue.promise = import('./services/ticketQueue.js')
     .then((mod) => {
-      workerModule = mod;
-      if (typeof mod.bootstrap === 'function') {
-        mod.bootstrap();
-      } else if (typeof mod.startTicketQueue === 'function') {
-        mod.startTicketQueue();
-      } else if (typeof mod.start === 'function') {
-        mod.start();
-      } else {
+      workers.ticketQueue.module = mod;
+      const startFn = mod.start || mod.startTicketQueue;
+      if (typeof startFn !== 'function') {
         throw new Error(
-          'ticketQueue.js não expõe bootstrap/startTicketQueue/start. ' +
+          'ticketQueue.js não expõe start/startTicketQueue. ' +
           `Exports disponíveis: ${Object.keys(mod).sort().join(', ')}`
         );
       }
-      console.log('[boot] worker de movimentações iniciado');
+      return startFn();
     })
+    .then(() => console.log('[boot] ✅ worker ticketQueue iniciado'))
     .catch((err) => {
-      workerLoadError = err;
-      console.error('[boot] ⚠️  worker NÃO carregou (backend segue funcionando):', err.message);
-      console.error('       Verifique /api/health/worker para detalhes.');
-      console.error('       Log do worker não aparecerá até restart com WORKER_ENABLED=true.');
+      workers.ticketQueue.error = err;
+      console.error('[boot] ⚠️  ticketQueue NÃO carregou (backend segue):', err.message);
     });
+
+  // ── linkHubBatchQueue (Link Hub) ─────────────────────────────────
+  if (process.env.LINKHUB_ENABLED === 'false') {
+    console.log('[boot] linkHubBatchQueue desativado (LINKHUB_ENABLED=false)');
+  } else {
+    workers.linkHubBatchQueue.promise = import('./services/linkHubBatchQueue.js')
+      .then((mod) => {
+        workers.linkHubBatchQueue.module = mod;
+        if (typeof mod.startLinkHubBatchQueue !== 'function') {
+          throw new Error(
+            'linkHubBatchQueue.js não expõe startLinkHubBatchQueue. ' +
+            `Exports disponíveis: ${Object.keys(mod).sort().join(', ')}`
+          );
+        }
+        return mod.startLinkHubBatchQueue();
+      })
+      .then(() => console.log('[boot] ✅ worker linkHubBatchQueue iniciado'))
+      .catch((err) => {
+        workers.linkHubBatchQueue.error = err;
+        console.error('[boot] ⚠️  linkHubBatchQueue NÃO carregou (backend segue):', err.message);
+      });
+  }
 }
 
 // ============================================================

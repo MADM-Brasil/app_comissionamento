@@ -1,21 +1,6 @@
 // backend/routes/metrics.js
 // ─────────────────────────────────────────────────────────────────────────────
 // Rotas de métricas com cache-first + stale-while-revalidate.
-//
-// Estratégia:
-//   • SQL é executado dentro de um `loader` puro (função sem efeitos).
-//   • cacheFirst(key, loader, opts) deduplica N requests simultâneos em 1 query
-//     (via singleflight) e serve stale em <5ms quando o cache expira.
-//   • Filtros fuzzy (applyColaboradorFilter, filterByNomesEquipe) são aplicados
-//     APÓS o cache — 1 entrada serve todos os usuários, cada um filtra o seu.
-//   • A cache key inclui TUDO que está no WHERE SQL. Colaborador NÃO entra
-//     porque é filtro em JS.
-// ─────────────────────────────────────────────────────────────────────────────
-//   • mode=producao (default) → filtra por coluna de data do evento
-//   • mode=safra              → INNER JOIN em core.deals e filtra por created_at
-//   mode ENTRA NA CACHE KEY. Safra e produção têm caches SEPARADOS.
-//
-// Compatibilidade com o frontend: 100% — mesmas URLs, mesmos payloads.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import express from 'express';
@@ -119,13 +104,7 @@ function filterByNomesEquipe(rows, nomesEquipe, keyCandidates = ['colaborador', 
   });
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// TTL adaptativo
-// ─────────────────────────────────────────────────────────────────────────────
-// Período que inclui hoje → dados mudam → cache curto
-// Período 100% passado → imutável → cache longo
-// ═════════════════════════════════════════════════════════════════════════════
-
+// ─── TTL adaptativo ─────────────────────────────────────────────────────────
 function ttlForPeriod(start, end) {
   const hoje = new Date().toISOString().slice(0, 10);
   const incluiHoje = end && end > hoje;
@@ -133,12 +112,6 @@ function ttlForPeriod(start, end) {
     ? { ttlMs: 90_000, staleMs: 600_000 }     // 1.5min / 10min
     : { ttlMs: 900_000, staleMs: 3_600_000 }; // 15min / 1h
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Validação do mode (safra vs produção)
-// ─────────────────────────────────────────────────────────────────────────────
-// Retorna o mode normalizado ou null se inválido.
-// ─────────────────────────────────────────────────────────────────────────────
 
 function normalizeMode(rawMode) {
   const mode = String(rawMode || 'producao').toLowerCase();
@@ -171,16 +144,7 @@ router.get('/emitidos', requireAuth, async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// ASSINADOS — safra vs produção
-// ─────────────────────────────────────────────────────────────────────────────
-// Query params:
-//   • start, end (obrigatórios)
-//   • equipe, produto, granularity (opcionais)
-//   • mode = 'producao' (default) | 'safra'
-//     - producao → filtra por data_assinatura (evento ocorreu no período)
-//     - safra    → INNER JOIN core.deals e filtra por created_at
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ASSINADOS ───────────────────────────────────────────────────────────────
 router.get('/assinados', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, produto, granularity, mode } = req.query;
@@ -193,7 +157,6 @@ router.get('/assinados', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    // mode entra na cache key → safra e produção têm caches separadas
     const key = metricCacheKey('assinados', { start, end, equipe, produto, granularity, mode: modeNorm });
     const rows = await cacheFirst(
       key,
@@ -213,7 +176,6 @@ router.get('/assinados', requireAuth, async (req, res) => {
 });
 
 // ─── ASSINADOS DIÁRIO POR EQUIPE ─────────────────────────────────────────────
-// (não usa mode — alimenta gráficos diários sem seletor safra/produção)
 router.get('/assinados-diario-por-equipe', requireAuth, async (req, res) => {
   try {
     const { inicio, fim, equipe } = req.query;
@@ -234,7 +196,6 @@ router.get('/assinados-diario-por-equipe', requireAuth, async (req, res) => {
 });
 
 // ─── ASSINADOS DIÁRIO POR COLABORADOR ────────────────────────────────────────
-// (não usa mode — alimenta gráficos diários sem seletor safra/produção)
 router.get('/assinados-diario-colaborador', requireAuth, async (req, res) => {
   try {
     const { inicio, fim } = req.query;
@@ -254,19 +215,11 @@ router.get('/assinados-diario-colaborador', requireAuth, async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// PROTOCOLADOS — safra vs produção
-// ─────────────────────────────────────────────────────────────────────────────
-// Query params:
-//   • start, end (obrigatórios)
-//   • equipe, produto, granularity (opcionais)
-//   • mode = 'producao' (default) | 'safra'
-//     - producao → filtra por data_ganho da view (quando o evento ocorreu)
-//     - safra    → INNER JOIN em core.deals e filtra por created_at
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── PROTOCOLADOS ────────────────────────────────────────────────────────────
 router.get('/protocolados', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, produto, granularity, mode } = req.query;
+    console.log('[PROTOCOLADOS] Recebido:', { start, end, mode });
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
 
     const modeNorm = normalizeMode(mode);
@@ -294,17 +247,7 @@ router.get('/protocolados', requireAuth, async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// GANHOS — safra vs produção
-// ─────────────────────────────────────────────────────────────────────────────
-// Query params:
-//   • start, end (obrigatórios)
-//   • equipe, produto, granularity, demanda (opcionais)
-//   • mode = 'producao' (default) | 'safra'
-//     - producao → filtra por data_ganho da view
-//     - safra    → INNER JOIN em core.deals e filtra por created_at
-//   • demanda = 'atual' → filtra deals assinados no mês corrente
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── GANHOS ──────────────────────────────────────────────────────────────────
 router.get('/ganhos', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, produto, granularity, demanda, mode } = req.query;
@@ -356,19 +299,13 @@ router.get('/perdidos', requireAuth, async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// LEADS RECEBIDOS — dois modos (série temporal vs agregado)
-// ─────────────────────────────────────────────────────────────────────────────
-// Com granularity (daily|weekly|monthly) → série temporal
-// Sem granularity → agregado por colaborador
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── LEADS RECEBIDOS ─────────────────────────────────────────────────────────
 router.get('/leads-recebidos', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, produto, granularity } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    // MODO 1 — SÉRIE TEMPORAL
     if (granularity) {
       const key = `leads-recebidos:gran:${start}:${end}:${equipe || 'todas'}:${produto || 'Todos'}:${granularity}`;
       const rows = await cacheFirst(
@@ -382,7 +319,6 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
       });
     }
 
-    // MODO 2 — AGREGADO POR COLABORADOR
     const key = `leads-recebidos:agg:${start}:${end}:${equipe || 'todas'}:${produto || 'Todos'}`;
     const rows = await cacheFirst(
       key,
@@ -399,13 +335,7 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// LIGAÇÕES
-// ─────────────────────────────────────────────────────────────────────────────
-// A query é cacheada SEM filtro de equipe/colaborador.
-// Filtros de equipe e colaborador são aplicados em JS pós-cache.
-// `resolveNomesPorEquipe` é cacheado internamente (1h) — sem SELECT * por request.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── LIGAÇÕES ────────────────────────────────────────────────────────────────
 router.get('/ligacoes', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, colaborador, granularity } = req.query;
@@ -484,12 +414,7 @@ router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// LEADS POR ETAPA
-// ─────────────────────────────────────────────────────────────────────────────
-// Mesma correção de timezone e is_deleted aplicada em /leads-recebidos,
-// para manter o total consistente entre as telas.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── LEADS POR ETAPA ─────────────────────────────────────────────────────────
 router.get('/leads/stages', requireAuth, async (req, res) => {
   try {
     const { start, end, equipe, produto } = req.query;
@@ -544,7 +469,6 @@ router.get('/weekly', requireAuth, async (req, res) => {
       );
       return res.json({ success: true, data: rows });
     } catch (innerErr) {
-      // Fallback gracioso: se a query falhar, devolve mock (comportamento original)
       console.error('Erro em /weekly (fallback mock):', innerErr.message);
       const mock = [
         { semana: '2026-05-04', vendas: 0, meta: 5 },
@@ -560,13 +484,7 @@ router.get('/weekly', requireAuth, async (req, res) => {
   }
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-// DEMANDA ATUAL / REPRIMIDA / RESUMO
-// ─────────────────────────────────────────────────────────────────────────────
-// As 3 rotas compartilham o MESMO dataset cacheado internamente por
-// loadDemanda(tipo, equipe, produto). Ou seja: /demanda-atual e /demanda-resumo
-// chamam loadDemanda({ tipo: 'atual' }) → 1 query serve as duas.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── DEMANDA ─────────────────────────────────────────────────────────────────
 router.get('/demanda-atual', requireAuth, async (req, res) => {
   try {
     const { equipe, produto } = req.query;

@@ -47,7 +47,7 @@ export async function checkIncentiveNotifications() {
     const usersResult = await pool.query(usersQuery);
     const users = usersResult.rows;
 
-    if (users.length === 0) return;
+    if (users.length === 0) return; 
 
     // 2. Métricas diárias por colaborador (assinados e ganhos de hoje)
     const dailyMetricsQuery = `

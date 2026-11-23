@@ -4,7 +4,7 @@ import express from 'express';
 const router = express.Router();
 
 // Conjunto de conexões SSE ativas
-const sseClients = new Set();
+const sseClients = new Set(); 
 
 /**
  * Envia uma notificação para todos os clientes conectados.
