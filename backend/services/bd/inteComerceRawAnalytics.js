@@ -1,3 +1,5 @@
+// backend/services/bd/inteComerceRawAnalytics.js
+
 import { createHash } from 'node:crypto';
 import db from './db.js';
 import { cached } from './inteComerceCache.js';
@@ -831,22 +833,17 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       legalQueryValues.push(dealIds);
       const productFragment = productParamIndex != null ? `AND UPPER(TRIM(produto)) = ANY($${productParamIndex}::text[])` : '';
 
-      // ── CORREÇÃO: em SAFRA, a view jurídica só deve contribuir para o
-      //    período da safra (data_ganho dentro de [inicio, fim_exclusivo)).
-      //    Em PRODUÇÃO mantemos o comportamento anterior (data_ganho OR deal_id
-      //    candidato), porque lá a "safra" não é o eixo.
+      // Este bloco só roda em PRODUÇÃO (useViews = true). A restrição de
+      // data_ganho da SAFRA fica no bloco `else` abaixo. Aqui o texto precisa
+      // usar TODOS os parâmetros de legalQueryValues ($1, $2, produto e
+      // dealIds) — senão o Postgres recusa: "bind message supplies N
+      // parameters, but prepared statement requires N-1".
       legalOutcomeResult = await client.query({
         text: `
           SELECT deal_id::text AS deal_id, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id
           FROM core.view_app_juridico_auditoria
           WHERE data_ganho IS NOT NULL
-            AND (
-              ${useViews
-                ? `(data_ganho >= $1::date AND data_ganho < $2::date)`
-                : `((data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment}) OR deal_id::text = ANY($${dealIdsParamIndex}::text[]))`
-              }
-            )
-            ${useViews && productFragment ? productFragment : ''}`,
+            AND ((data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment}) OR deal_id::text = ANY($${dealIdsParamIndex}::text[]))`,
         values: legalQueryValues,
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
