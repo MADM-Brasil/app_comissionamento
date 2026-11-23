@@ -333,10 +333,55 @@ export async function loadAssinadosTotal(params = {}) {
   return sumTotal(rows);
 }
 
-// ─── PROTOCOLADOS ──────────────────────────────────
+// ─── PROTOCOLADOS ────────────────────────────────────────────────────────────
+// SAFRA segue a consulta de referência "Protocolados Safra":
+//   • deal CRIADO no período       → d.data_criacao_deal ∈ [start, end)
+//   • deal GANHO no período        → d.data_ganho        ∈ [start, end)
+//   • deal não excluído            → d.is_deleted IS NOT TRUE
+//   • etapa jurídica = Protocolado → l.etapa = 'Protocolado'
+//   • etapa atual do deal          → d.etapa_id = '6669'
+//   • equipe vem de view_app_colaboradores com DISTINCT ON (nome), para que um
+//     colaborador cadastrado em mais de uma linha não duplique a contagem.
+// `end` é EXCLUSIVO (fim_exclusivo); a consulta de referência usa o último dia
+// inclusivo (ex.: 01/11 a 22/11 ⇔ start=2026-11-01, end=2026-11-23).
+// PRODUÇÃO mantém o filtro por data_ganho da view (buildPeriodFilter).
+export const PROTOCOLADO_ETAPA_ID = '6669';
+
+const COLABORADORES_UNICOS_JOIN = `LEFT JOIN (
+      SELECT DISTINCT ON (nome) nome, nome_equipe
+      FROM core.view_app_colaboradores
+      ORDER BY nome, nome_equipe
+    ) c ON l.responsavel_lead = c.nome`;
+
+function buildProtocoladosSafraFilter() {
+  return {
+    isSafra: true,
+    joinClause: `INNER JOIN core.deals d ON d.deal_id = l.deal_id`,
+    whereClause: `d.data_criacao_deal::date >= $1::date
+      AND d.data_criacao_deal::date <  $2::date
+      AND d.data_ganho::date        >= $1::date
+      AND d.data_ganho::date        <  $2::date
+      AND d.is_deleted IS NOT TRUE
+      AND l.etapa = 'Protocolado'
+      AND d.etapa_id = '${PROTOCOLADO_ETAPA_ID}'`,
+    // série diária da safra: dia de criação do deal (mesmo eixo da coorte)
+    dateColumn: `d.data_criacao_deal`,
+    needsAtTimeZone: false,
+    colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
+  };
+}
+
 export async function loadProtocolados({ start, end, equipe, produto, granularity, mode }) {
   const gran = mapGranularity(granularity);
-  const periodFilter = buildPeriodFilter(mode);
+  const isSafra = String(mode || '').toLowerCase() === 'safra';
+  const periodFilter = isSafra
+    ? buildProtocoladosSafraFilter()
+    : {
+        ...buildPeriodFilter(mode),
+        colaboradoresJoin: `LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome`,
+      };
+  // Em produção o filtro de etapa continua aqui; em safra já está no whereClause.
+  const etapaClause = isSafra ? '' : `AND l.etapa IN ('Protocolado')`;
 
   const dateExpr = gran
     ? (periodFilter.needsAtTimeZone
@@ -358,9 +403,9 @@ export async function loadProtocolados({ start, end, equipe, produto, granularit
   query += `
     FROM core.view_app_juridico_auditoria l
     ${periodFilter.joinClause}
-    LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
+    ${periodFilter.colaboradoresJoin}
     WHERE ${periodFilter.whereClause}
-      AND l.etapa IN ('Protocolado')
+      ${etapaClause}
   `;
 
   const params = [start, end];
