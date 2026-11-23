@@ -345,6 +345,10 @@ export async function loadAssinadosTotal(params = {}) {
 // `end` é EXCLUSIVO (fim_exclusivo); a consulta de referência usa o último dia
 // inclusivo (ex.: 01/11 a 22/11 ⇔ start=2026-11-01, end=2026-11-23).
 // PRODUÇÃO mantém o filtro por data_ganho da view (buildPeriodFilter).
+//
+// NOTA: diagnóstico em 2026-11-23 confirmou que a view core.view_app_juridico_auditoria
+// só contém o pipeline "Jurídico Auditoria de Ganho" — o FROM já é o filtro de funil.
+// O filtro de produção por data_ganho está alinhado com o esperado (693 no período).
 export const PROTOCOLADO_ETAPA_ID = '6669';
 
 const COLABORADORES_UNICOS_JOIN = `LEFT JOIN (
@@ -436,6 +440,18 @@ export async function loadProtocoladosTotal(params = {}) {
 }
 
 // ─── GANHOS ────────────────────────────────────────
+// IMPORTANTE (2026-11-23): a view core.view_app_juridico_auditoria já é
+// escopada ao pipeline "Jurídico Auditoria de Ganho" — NÃO existe coluna
+// funil_vendas nela. Filtrar por funil quebra a query (warmup falhava com
+// "column l.funil_vendas does not exist"). O FROM já é o filtro de funil.
+//
+// Etapas contam como ganho no período (confirmadas no DB em 2026-11-23):
+//   • 'Protocolado'        (693)
+//   • 'Ag Protocolo'       (67)
+//   • 'Venda ganha'        (hoje 0, mantido por compat futura)
+//   • 'Processo finalizado'(hoje 0, mantido por compat futura)
+// 'Venda perdida' fica de fora. Casing da view é variável ('Ag Protocolo'
+// vs 'AG PROTOCOLO' no sistema antigo), por isso LOWER(TRIM(...)).
 export async function loadGanhos({ start, end, equipe, produto, granularity, demanda, mode }) {
   const gran = mapGranularity(granularity);
   const somenteDemandaAtual = String(demanda || '').toLowerCase() === 'atual';
@@ -463,7 +479,12 @@ export async function loadGanhos({ start, end, equipe, produto, granularity, dem
     ${periodFilter.joinClause}
     LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
     WHERE ${periodFilter.whereClause}
-      AND l.etapa <> 'Venda perdida'
+      AND LOWER(TRIM(l.etapa)) IN (
+        'protocolado',
+        'ag protocolo',
+        'venda ganha',
+        'processo finalizado'
+      )
   `;
 
   if (somenteDemandaAtual) {

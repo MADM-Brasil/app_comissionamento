@@ -176,7 +176,7 @@ class TeamsNotificadorSuporte {
             title: '🔗 Validar caso no sistema',
             url: this.montarUrlCoordenador(idCaso),
         }];
-        if (dados.link) {
+        if (dados.link) { 
             actions.push({
                 type: 'Action.OpenUrl',
                 title: 'Ver card HubSpot',

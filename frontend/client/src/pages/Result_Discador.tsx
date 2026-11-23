@@ -307,9 +307,20 @@ export default function ResultDiscador() {
   const [sortKey, setSortKey] = useState<SortKey>("as");
   const [sortDir, setSortDir] = useState<1 | -1>(-1);
 
+  // [CORRIGIDO] Identificador da requisição mais recente.
+  // Sem isso, se o usuário troca o período A → B → C antes de A
+  // resolver, uma resposta atrasada de A ou B sobrescreve o resultado
+  // de C e a tela mostra dados de um período que não é o selecionado.
+  const reqIdRef = useRef(0);
+
   // ── Carregamento
   const reload = useCallback(async () => {
     if (!currentStartDate || !currentEndDate) return;
+
+    // [CORRIGIDO] Marca esta requisição como "a mais recente".
+    // Toda resposta/erro cujo reqId != reqIdRef.current é descartada.
+    const reqId = ++reqIdRef.current;
+
     setLoading(true);
     setError(null);
     try {
@@ -321,13 +332,24 @@ export default function ResultDiscador() {
         start: currentStartDate,
         end: inclusiveEnd.toISOString().slice(0, 10),
       });
+
+      // [CORRIGIDO] Descarta resposta obsoleta (usuário já trocou de período).
+      if (reqId !== reqIdRef.current) return;
+
       setRows(data);
     } catch (err: unknown) {
+      // [CORRIGIDO] Descarta erro obsoleto — não pinta a tela de vermelho
+      // por causa de um fetch antigo que falhou depois do novo ter tido sucesso.
+      if (reqId !== reqIdRef.current) return;
+
       console.error("Erro ao carregar resultado do discador:", err);
       setError(err instanceof Error ? err.message : "Falha ao carregar dados.");
       setRows([]);
     } finally {
-      setLoading(false);
+      // [CORRIGIDO] Só desliga o spinner se esta ainda for a requisição atual.
+      // Caso contrário, uma resposta atrasada esconderia o "carregando" da
+      // requisição nova enquanto ela ainda está em voo.
+      if (reqId === reqIdRef.current) setLoading(false);
     }
   }, [currentStartDate, currentEndDate]);
 

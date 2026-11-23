@@ -1,4 +1,33 @@
 // backend/services/linkHubBatchQueue.js
+//
+// Worker dedicado às movimentações originadas pelo Link Hub (crm_origem = 'HUBSPOT_LINK').
+//
+// ─── CORREÇÕES APLICADAS ────────────────────────────────────────────
+//   • NOTIFY_STATUSES agora inclui 'coordenador' e 'aviso' (antes só
+//     'suporte'/'bloqueado'). Sem isso, casos encaminhados ao coordenador
+//     e casos de divergência de dados nunca chegavam ao Teams.
+//   • `assunto` enviado ao Power Automate agora é 'Movimentacao' ou
+//     'Validacao_unidade_X'. Antes era 'MovimentacaoLinkHub', que NÃO
+//     existe em mapearAssuntoParaChave() e caía silenciosamente em
+//     'outros_casos' (ou era descartado pelo filtro do fluxo).
+//   • `status: 'bloqueado'` só vira 'coordenador' se houver unidade_id
+//     válida (1..5). Sem unidade, cai para 'suporte' (que não exige
+//     unidade no enviar()) em vez de estourar um `throw` interno e
+//     fazer a notificação desaparecer sem log visível.
+//   • `descricao` sempre ≥ 10 caracteres (requisito do enviar()).
+//   • Log explícito de sucesso/falha da notificação, com canal e
+//     assunto, para triagem rápida.
+//   • Fallback de `link` usa `partial.link` quando disponível.
+//
+// ─── FLUXO DE STATUS ────────────────────────────────────────────────
+//   pendente → processando → concluido | erro | suporte | bloqueado
+//
+// ─── COMPATIBILIDADE ────────────────────────────────────────────────
+//   • `startLinkHubBatchQueue`, `stopLinkHubBatchQueue`, `statusLinkHubBatchQueue`
+//   • Entrypoint standalone via `node backend/services/linkHubBatchQueue.js`
+//   • Requer que `ticketQueue.js` NÃO pegue crm_origem='HUBSPOT_LINK'
+//     (ajuste feito no claimLote do worker unificado), senão os dois
+//     workers disputam SKIP LOCKED e podem duplicar notificações.
 
 import { pool } from './bd/db.js';
 import {
@@ -48,8 +77,9 @@ const RULE_LABELS = Object.freeze({
     'Card posicionado em Isenção de IR Aposentadoria (Em Contato).',
 });
 
-// Status que disparam notificação no Teams.
-const NOTIFY_STATUSES = new Set(['suporte', 'bloqueado']);
+// [CORRIGIDO] Inclui 'coordenador' e 'aviso'. Todos os status que
+// exigem ação humana agora disparam notificação no Teams.
+const NOTIFY_STATUSES = new Set(['suporte', 'bloqueado', 'coordenador', 'aviso']);
 
 function isRetryableError(error) {
   if (error.retryable === false) return false;
@@ -60,7 +90,7 @@ function isRetryableError(error) {
   );
   if (status) return status === 429 || status >= 500;
   const normalizedMessage = message.toLowerCase();
-  return ![
+  return ![ 
     'não encontrado', 'nao encontrado', 'não permitida', 'nao permitida',
     'inválido', 'invalido', 'outra conta', 'mudou desde', 'mudou após',
     'sem acesso', 'própria equipe', 'propria equipe', 'somente supervisores',
@@ -80,9 +110,18 @@ function safeParse(value) {
   } catch { return {}; }
 }
 
+// [NOVO] Normaliza unidade_id para 1..5 (ou null). Usado para decidir
+// se o status enviado ao Teams pode ser 'coordenador' ou deve cair
+// para 'suporte'. O enviar() do teams_notificacoes exige unidade 1..5
+// quando status='coordenador', e falha com throw caso contrário.
+function normalizarUnidade(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= 5 ? n : null;
+}
+
 async function requesterUnitId(client, metadata) {
-  const storedUnit = Number(metadata?.unidade_id ?? metadata?.unidadeId);
-  if (Number.isInteger(storedUnit) && storedUnit >= 1 && storedUnit <= 5) return storedUnit;
+  const storedUnit = normalizarUnidade(metadata?.unidade_id ?? metadata?.unidadeId);
+  if (storedUnit != null) return storedUnit;
   const requesterEmail = String(metadata?.solicitante_email || '').trim();
   if (!requesterEmail) return null;
 
@@ -94,8 +133,7 @@ async function requesterUnitId(client, metadata) {
         LIMIT 1`,
       [requesterEmail]
     );
-    const unit = Number(result.rows[0]?.unidade_id);
-    return Number.isInteger(unit) && unit >= 1 && unit <= 5 ? unit : null;
+    return normalizarUnidade(result.rows[0]?.unidade_id);
   } catch (error) {
     console.error('[linkHubBatchQueue] Falha ao consultar unidade do solicitante:', error.message);
     return null;
@@ -123,7 +161,6 @@ function resolveRuleLabel(resultData) {
   if (pipelineFinal === String(HUBSPOT_PIPELINE_QUINQUENIO_ID)) {
     return { regra: 'reassigned_in_quinquenio', mensagem: RULE_LABELS.reassigned_in_quinquenio };
   }
-  // [ISENÇÃO IR]
   if (pipelineFinal === String(HUBSPOT_PIPELINE_ISENCAO_IR_ID)) {
     return { regra: 'reassigned_in_isencao_ir', mensagem: RULE_LABELS.reassigned_in_isencao_ir };
   }
@@ -271,7 +308,6 @@ async function markSuccess(client, ticket, resultData) {
     motivoOriginal: ticket.motivo_solicitacao || 'Movimentação Link Hub',
     observacao: [mensagem, coordinatorNote].filter(Boolean).join('\n'),
     observacao_solicitante: observacaoSolicitanteDe(observacao),
-    // [NOVO] Link clicável do card movimentado.
     link: resultData.link || hubspotRecordLink('deals', resultData.dealId || ticket.crm_lead_id),
     colaboradorDestinoNome: ticket.colaborador_destino_nome,
     validacaoFinal: true,
@@ -369,20 +405,51 @@ async function markFailure(client, ticket, error) {
     [supportStatus, ticket.ticket_id]
   );
 
+  // ── Notificação Teams (apenas status que exigem ação) ─────────────
   if (NOTIFY_STATUSES.has(statusFinal)) {
     try {
       const meta = ticket.metadados || {};
       const partial = error.partialResult || {};
-      const unidadeId = statusFinal === 'bloqueado'
+
+      // [CORRIGIDO] Unidade normalizada para 1..5 ou null.
+      // Antes, `meta.unidade_id` cru era repassado e podia quebrar
+      // a validação interna do enviar() sem que ninguém percebesse.
+      const unidadeBruta = (statusFinal === 'bloqueado' || statusFinal === 'coordenador')
         ? await requesterUnitId(client, meta)
         : (meta.unidade_id ?? meta.unidadeId ?? null);
+      const unidadeId = normalizarUnidade(unidadeBruta);
+
+      // [CORRIGIDO] Só vira 'coordenador' se houver unidade 1..5.
+      // Caso contrário, cai para 'suporte' (não exige unidade).
+      const querCoordenador =
+        statusFinal === 'bloqueado' || statusFinal === 'coordenador';
+      const podeCoordenador = querCoordenador && unidadeId != null;
+      const statusPayload = podeCoordenador ? 'coordenador' : 'suporte';
+
+      // [CORRIGIDO] Assunto roteável. Antes era 'MovimentacaoLinkHub',
+      // que não existe em mapearAssuntoParaChave() e caía em
+      // 'outros_casos' — ou era descartado pelo filtro do fluxo.
+      const assunto = podeCoordenador
+        ? `Validacao_unidade_${unidadeId}`
+        : 'Movimentacao';
+
+      if (querCoordenador && !podeCoordenador) {
+        console.warn(
+          `[linkHubBatchQueue] #${ticket.id_ticket_movimentacao} ` +
+          `status='${statusFinal}' sem unidade 1..5 — notificando como 'suporte'.`
+        );
+      }
+
+      // [CORRIGIDO] descrição sempre ≥ 10 caracteres.
+      const descricao =
+        `Falha ao movimentar card ${ticket.crm_lead_id || 'N/A'} | ` +
+        `Status: ${statusFinal} | Tentativas: ${tentativas}/${MAX_ATTEMPTS} | ` +
+        `Motivo: ${(error.message || 'não informado').slice(0, 200)}`;
+
       const notification = await teamsNotificador.enviar({
         titulo: 'Movimentação Link Hub — Falha',
-        assunto: 'MovimentacaoLinkHub',
-        descricao:
-          `Falha ao movimentar card ${ticket.crm_lead_id || 'N/A'} | ` +
-          `Status: ${statusFinal} | ` +
-          `Tentativas: ${tentativas}/${MAX_ATTEMPTS}`,
+        assunto,
+        descricao,
         solicitante: meta.solicitante_nome || meta.solicitante_email || 'N/A',
         solicitanteEmail: meta.solicitante_email || null,
         equipe: meta.origem_equipe || 'N/A',
@@ -390,22 +457,35 @@ async function markFailure(client, ticket, error) {
         cliente: `Deal ${ticket.crm_lead_id || 'N/A'}`,
         equipeDestino: meta.destino_equipe || 'N/A',
         assessorDestino: ticket.colaborador_destino_nome || 'N/A',
-        status: statusFinal === 'bloqueado' ? 'coordenador' : statusFinal,
-        unidadeId,
+        status: statusPayload,
+        unidadeId: podeCoordenador ? unidadeId : null,
         idTicketMovimentacao: ticket.id_ticket_movimentacao,
         idTicket: ticket.ticket_id,
         mensagem: observacaoTexto,
         pipeline: partial.previousPipeline || null,
         stage: partial.previousStage || null,
         dealId: ticket.crm_lead_id || null,
-        link: meta.link_hub || null,
+        link: partial.link || meta.link_hub || null,
         produto: observacao.produto || meta.produto || null,
       });
+
       if (!notification.success) {
-        console.error('Falha ao enviar notificação Teams (Link Hub):', notification.error);
+        console.error(
+          `[linkHubBatchQueue] ❌ Teams falhou #${ticket.id_ticket_movimentacao}:`,
+          notification.error,
+          '| canal=', notification.channel
+        );
+      } else {
+        console.log(
+          `[linkHubBatchQueue] ✅ Teams OK #${ticket.id_ticket_movimentacao} ` +
+          `(canal=${notification.channel}, assunto=${notification.assunto})`
+        );
       }
     } catch (notifErr) {
-      console.error('Erro ao enviar notificação Teams (Link Hub):', notifErr);
+      console.error(
+        `[linkHubBatchQueue] ❌ Exceção ao notificar Teams #${ticket.id_ticket_movimentacao}:`,
+        notifErr?.message || notifErr
+      );
     }
   }
 }
@@ -603,7 +683,9 @@ async function processLinkHubQueue() {
 export function startLinkHubBatchQueue(intervalMs = POLL_INTERVAL_MS) {
   if (running) {
     console.warn('[linkHubBatchQueue] startLinkHubBatchQueue ignorado — já rodando');
-    return { stop, status: statusLinkHubBatchQueue };
+    // [CORRIGIDO] `stop` não existe — é `stopLinkHubBatchQueue`.
+    // Como o nome difere da chave, precisa da forma explícita `stop:`.
+    return { stop: stopLinkHubBatchQueue, status: statusLinkHubBatchQueue };
   }
   running = true;
   stats.iniciado_em = new Date().toISOString();
@@ -628,7 +710,7 @@ export function startLinkHubBatchQueue(intervalMs = POLL_INTERVAL_MS) {
     `🔄 Fila de lotes Link Hub iniciada (poll=${intervalMs}ms, batch=${BATCH_SIZE}, ` +
     `lease=${PROCESSING_LEASE_MINUTES}min, max_attempts=${MAX_ATTEMPTS})`
   );
-  return { stop, status: statusLinkHubBatchQueue };
+  return { stop: stopLinkHubBatchQueue, status: statusLinkHubBatchQueue };
 }
 
 export async function stopLinkHubBatchQueue({ timeoutMs = 15_000 } = {}) {
