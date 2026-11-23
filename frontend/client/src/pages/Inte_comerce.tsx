@@ -213,13 +213,21 @@ function formatMotivo(raw: string | undefined | null): string {
   );
 }
 
-function getMonthPeriod(month: string, today: string) {
+// `maxDay` limita o período ao mesmo dia do mês de referência
+// (ex.: mês atual no dia 23 → comparação puxa apenas do dia 01 ao 23).
+function getMonthPeriod(month: string, today: string, maxDay?: number | null) {
   const [year, monthNumber] = month.split("-").map(Number);
   const start = `${month}-01`;
   const nextMonth = new Date(Date.UTC(year, monthNumber, 1)).toISOString().slice(0, 10);
   const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000)
     .toISOString().slice(0, 10);
-  return { start, end: nextMonth < tomorrow ? nextMonth : tomorrow };
+  let end = nextMonth < tomorrow ? nextMonth : tomorrow;
+  if (maxDay && maxDay > 0) {
+    const sameDayEnd = new Date(Date.UTC(year, monthNumber - 1, maxDay + 1))
+      .toISOString().slice(0, 10);
+    if (sameDayEnd < end) end = sameDayEnd;
+  }
+  return { start, end };
 }
 
 // ───────────────────────────────────────────────────────────
@@ -638,9 +646,19 @@ export default function Inte_commerce() {
     };
   }, [selectedMonth, today]);
 
+  // Último dia considerado no mês de referência quando ele ainda não terminou
+  // (mês atual). Mês completo → null (compara o mês inteiro).
+  const referenceDayLimit = useMemo(() => {
+    if (!reportPeriod.start || !reportPeriod.end || reportPeriod.unavailable) return null;
+    const [year, month] = selectedMonth.split("-").map(Number);
+    const nextMonth = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+    if (reportPeriod.end >= nextMonth) return null;
+    return new Date(Date.parse(`${reportPeriod.end}T00:00:00Z`) - 86_400_000).getUTCDate();
+  }, [reportPeriod, selectedMonth]);
+
   const comparisonPeriod = useMemo(
-    () => (comparisonMonth ? getMonthPeriod(comparisonMonth, today) : null),
-    [comparisonMonth, today],
+    () => (comparisonMonth ? getMonthPeriod(comparisonMonth, today, referenceDayLimit) : null),
+    [comparisonMonth, today, referenceDayLimit],
   );
 
   const [filters, setFilters] = useState<FiltersState>({
@@ -1302,7 +1320,9 @@ export default function Inte_commerce() {
   };
 
   const comparisonSectionTitle = viewMode === "safra" ? "Comparativo de Safra" : "Comparativo de Produção";
-  const comparisonSectionDescription = `Total de ${selectedMonth} × mês ${comparisonMonth}.`;
+  const comparisonSectionDescription = referenceDayLimit
+    ? `Dias 01 a ${String(referenceDayLimit).padStart(2, "0")} de ${selectedMonth} × mesmo intervalo de ${comparisonMonth}.`
+    : `Total de ${selectedMonth} × mês ${comparisonMonth}.`;
 
   const getCardLabel = (card: typeof STAT_CARDS[number]) => {
     if (card.key === "received" && viewMode === "producao") return "Leads Recebidos";

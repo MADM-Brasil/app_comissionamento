@@ -5,7 +5,9 @@ import db from './db.js';
 import { cached } from './inteComerceCache.js';
 import {
   loadAssinadosTotal,
+  loadGanhos,
   loadGanhosTotal,
+  loadProtocolados,
   loadProtocoladosTotal,
   loadEmitidosTotal,
   loadDesqualificadosTotal,
@@ -2105,6 +2107,223 @@ async function applyCanonicalStageCounts(result, params) {
   return 'banco_etapas';
 }
 
+// ─── GANHOS / PROTOCOLADOS (banco, consulta de referência) ──────────────────
+// A consulta de referência ("Protocolados Safra" / "Ganhos Safra") conta TODO
+// deal de core.view_app_juridico_auditoria cujo core.deals.created_at cai no
+// período — de qualquer CRM, com ou sem data_ganho, com ou sem assessor.
+//
+// O builder de eventos (buildComparisonResults) só enxerga deals:
+//   • com crm_origem = 'HUBSPOT';
+//   • com data_ganho preenchida na view;
+//   • com um assessor ATIVO atribuído depois da criação;
+//   • com o evento de ganho/protocolo ocorrendo DEPOIS do created_at.
+// Por isso Ganhos e Protocolados da Safra sempre saíam menores.
+//
+// Antes, o número do banco só era aplicado no `overview` e só quando o
+// HubSpot estava ativo e respondendo. Agora roda SEMPRE e atualiza todos os
+// blocos (visão geral, funil, comparação safra, diário, colaboradores, equipes).
+function toIsoDay(value) {
+  if (value == null) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    // pg converte `date` para meia-noite LOCAL → usar componentes locais
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return String(value).slice(0, 10);
+}
+
+function scopeNameSet(raw, params) {
+  const ids = stageScopeIds(params);
+  if (ids == null) return null;
+  const names = new Set();
+  for (const id of ids) {
+    const nome = raw?.collaboratorNames?.get(String(id));
+    if (nome) names.add(normalizeLabel(nome));
+  }
+  return names;
+}
+
+async function loadOutcomeRowsCached(label, loaderFn, params, granularity) {
+  try {
+    const rows = await cached(
+      metricCacheKey(`${label}-ref`, {
+        start: params.inicio, end: params.fim_exclusivo,
+        equipe: params.equipe, produto: params.produto,
+        mode: params.mode, granularity,
+      }),
+      () => loaderFn({
+        start: params.inicio,
+        end: params.fim_exclusivo,
+        equipe: params.equipe,
+        produto: params.produto,
+        mode: params.mode,
+        granularity,
+      }),
+      { forceRefresh: params.refresh === true }
+    );
+    if (Array.isArray(rows)) return rows;
+    console.error(`[BACKEND ERROR] [inte-comerce] ${label}-ref: load retornou ${typeof rows}, mantendo valores do builder`);
+  } catch (e) {
+    console.error(`[inte-comerce] ${label}-ref: loader falhou (${e?.message || e})`);
+  }
+  return null;
+}
+
+export async function applyCanonicalGanhosProtocolados(result, params, raw = null, loaders = { loadGanhos, loadProtocolados }) {
+  const isSafra = String(params.mode || '').toLowerCase() === 'safra';
+  const [ganhosRows, protRows] = await Promise.all([
+    loadOutcomeRowsCached('ganhos', loaders.loadGanhos, params, null),
+    loadOutcomeRowsCached('protocolados', loaders.loadProtocolados, params, null),
+  ]);
+  if (!ganhosRows && !protRows) return 'banco';
+
+  // Escopo de colaborador (filtro de colaborador / unidade) — a consulta de
+  // referência não filtra por pessoa, então filtramos aqui pelo nome.
+  const allowedNames = scopeNameSet(raw, params);
+  const inScope = (row) => allowedNames == null || allowedNames.has(normalizeLabel(row.colaborador));
+  const ganhos = (ganhosRows || []).filter(inScope);
+  const prots  = (protRows  || []).filter(inScope);
+
+  const sum = (rows) => rows.reduce((acc, r) => acc + num(r.total), 0);
+  const totalGanhos = ganhosRows ? sum(ganhos) : null;
+  const totalProt   = protRows   ? sum(prots)  : null;
+
+  const setPair = (obj) => {
+    if (!obj) return;
+    if (totalGanhos != null) obj.ganhos = totalGanhos;
+    if (totalProt   != null) obj.protocolados = totalProt;
+  };
+  setPair(result.overview);
+  setPair(result.funnel);
+  if (isSafra) setPair(result.safraComparison?.month);
+
+  if (result.strategic && totalGanhos != null) {
+    const assinados = num(result.overview?.assinados);
+    // assinados_que_ganharam vem do builder (precisa da ligação deal a deal);
+    // o % é recalculado só para não passar de 100%.
+    if (assinados > 0 && result.strategic.assinados_que_ganharam != null) {
+      result.strategic.pct_assinados_ate_ganhos =
+        Number((100 * Math.min(num(result.strategic.assinados_que_ganharam), assinados) / assinados).toFixed(2));
+    }
+  }
+
+  if (!isSafra) return 'canonical_metrics';
+
+  // ── Diário (por dia de criação do deal) e comparação do dia selecionado ──
+  const needsDaily = Array.isArray(result.daily) || (params.selected_day && params.selected_day_end);
+  if (needsDaily) {
+    const [gDaily, pDaily] = await Promise.all([
+      ganhosRows ? loadOutcomeRowsCached('ganhos', loaders.loadGanhos, params, 'daily') : null,
+      protRows   ? loadOutcomeRowsCached('protocolados', loaders.loadProtocolados, params, 'daily') : null,
+    ]);
+    const byDay = (rows) => {
+      const m = new Map();
+      for (const r of (rows || []).filter(inScope)) {
+        const day = toIsoDay(r.periodo); if (!day) continue;
+        m.set(day, (m.get(day) || 0) + num(r.total));
+      }
+      return m;
+    };
+    const gByDay = gDaily ? byDay(gDaily) : null;
+    const pByDay = pDaily ? byDay(pDaily) : null;
+
+    if (Array.isArray(result.daily)) {
+      for (const d of result.daily) {
+        if (gByDay) d.ganhos = gByDay.get(d.dia) || 0;
+        if (pByDay) d.protocolados = pByDay.get(d.dia) || 0;
+      }
+    }
+    if (result.safraComparison?.day && params.selected_day && params.selected_day_end) {
+      const sumRange = (m) => {
+        let acc = 0;
+        for (const [day, n] of m) if (day >= params.selected_day && day < params.selected_day_end) acc += n;
+        return acc;
+      };
+      if (gByDay) result.safraComparison.day.ganhos = sumRange(gByDay);
+      if (pByDay) result.safraComparison.day.protocolados = sumRange(pByDay);
+    }
+  }
+
+  // ── Colaboradores (por nome do responsável do lead) ──
+  if (Array.isArray(result.collaborators)) {
+    const byName = (rows) => {
+      const m = new Map();
+      for (const r of rows) {
+        const key = normalizeLabel(r.colaborador);
+        const acc = m.get(key) || { colaborador: r.colaborador, equipe: r.equipe, total: 0 };
+        acc.total += num(r.total);
+        m.set(key, acc);
+      }
+      return m;
+    };
+    const gByName = ganhosRows ? byName(ganhos) : null;
+    const pByName = protRows   ? byName(prots)  : null;
+    const used = new Set();
+    for (const c of result.collaborators) {
+      const key = normalizeLabel(c.colaborador);
+      const first = !used.has(key);
+      used.add(key);
+      if (gByName) c.ganhos = first ? num(gByName.get(key)?.total) : 0;
+      if (pByName) c.protocolados = first ? num(pByName.get(key)?.total) : 0;
+    }
+    const missing = new Map();
+    for (const m of [gByName, pByName]) {
+      if (!m) continue;
+      for (const [key, src] of m) if (!used.has(key) && !missing.has(key)) missing.set(key, src);
+    }
+    for (const [key, src] of missing) {
+      const g = num(gByName?.get(key)?.total), p = num(pByName?.get(key)?.total);
+      if (!g && !p) continue;
+      result.collaborators.push({
+        colaborador_id: null, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
+        recebimentos_deal_dia: 0, trabalhados: 0, em_contato: 0, coleta: 0,
+        emitidos: 0, assinados: 0, ganhos: g, protocolados: p,
+        pct_olos_pendente: null, pct_hubspot_pendente: null,
+      });
+    }
+  }
+
+  // ── Equipes ──
+  if (Array.isArray(result.teams)) {
+    const byTeam = (rows) => {
+      const m = new Map();
+      for (const r of rows) {
+        const key = normalizeTeamKey(r.equipe) || normalizeTeamKey(PLACEHOLDER_TEAM);
+        const acc = m.get(key) || { equipe: r.equipe || PLACEHOLDER_TEAM, total: 0 };
+        acc.total += num(r.total);
+        m.set(key, acc);
+      }
+      return m;
+    };
+    const gByTeam = ganhosRows ? byTeam(ganhos) : null;
+    const pByTeam = protRows   ? byTeam(prots)  : null;
+    const seen = new Set();
+    for (const t of result.teams) {
+      const key = normalizeTeamKey(t.equipe);
+      seen.add(key);
+      if (gByTeam) t.ganhos = num(gByTeam.get(key)?.total);
+      if (pByTeam) t.protocolados = num(pByTeam.get(key)?.total);
+    }
+    const keys = new Set([...(gByTeam?.keys() || []), ...(pByTeam?.keys() || [])]);
+    for (const key of keys) {
+      if (seen.has(key)) continue;
+      const g = num(gByTeam?.get(key)?.total), p = num(pByTeam?.get(key)?.total);
+      if (!g && !p) continue;
+      result.teams.push({
+        equipe: (gByTeam?.get(key) || pByTeam?.get(key)).equipe,
+        recebimentos_assessor_deal_dia: 0, deals_unicos_da_equipe: 0,
+        trabalhados: 0, em_contato: 0, coleta: 0,
+        emitidos: 0, assinados: 0, ganhos: g, protocolados: p,
+      });
+    }
+  }
+
+  return 'canonical_metrics';
+}
+
 export async function getInteComerceRawAnalytics(params) {
   const raw = await getRawEvents(params);
 
@@ -2158,12 +2377,15 @@ export async function getInteComerceRawAnalytics(params) {
   const fonteEtapas = await applyCanonicalStageCounts(result, params);
   // Assinados / Emitidos — depois das etapas (usa recebidos final no %)
   const fonteAssinaturas = await applyCanonicalAssinaturasFunil(result, params);
+  // Ganhos / Protocolados — SEMPRE da consulta de referência (com ou sem HubSpot)
+  const fonteResultados = await applyCanonicalGanhosProtocolados(result, params, raw);
   if (result.hubspot) {
     result.hubspot.fonte = {
       ...(result.hubspot.fonte || {}),
       recebidos: fonteEtapas, em_contato_crm: fonteEtapas,
       coleta: fonteEtapas,
       assinados: fonteAssinaturas, emitidos: fonteAssinaturas,
+      ganhos: fonteResultados, protocolados: fonteResultados,
     };
   }
 
@@ -2186,6 +2408,7 @@ export async function getInteComercePeriodSummary(params) {
   await applyCanonicalAssinados(full, params);
   await applyCanonicalStageCounts(full, params);
   await applyCanonicalAssinaturasFunil(full, params);
+  await applyCanonicalGanhosProtocolados(full, params, raw);
 
   const month = full.productionComparison?.month
     ? {

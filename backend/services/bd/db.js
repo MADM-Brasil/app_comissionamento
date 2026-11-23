@@ -10,21 +10,6 @@
 //   Uma query lenta de métricas não pode consumir os slots que servem
 //   /api/auth/me, /suporte/* e movimentação de leads. Isolar evita que um
 //   pico de dashboard derrube o sistema inteiro.
-//
-// ─────────────────────────────────────────────────────────────────────────────
-// ⚠️ SEMÂNTICA DO `query` (DEFAULT EXPORT)
-// ─────────────────────────────────────────────────────────────────────────────
-// O default export expõe `query` = **pool principal**.
-//
-// Quem precisa do analyticsPool deve usar explicitamente:
-//     import { analyticsQuery } from './db.js';
-//     await analyticsQuery(sql, params);
-//
-// Quem precisa do sessionsPool:
-//     import { sessionsQuery } from './db.js';
-//
-// Isso elimina o acoplamento escondido da versão anterior (onde `query`
-// apontava para o analyticsPool por conveniência do antigo metrics.js).
 // ─────────────────────────────────────────────────────────────────────────────
 
 import pkg from 'pg';
@@ -164,9 +149,6 @@ sessionsPool.on('error', (err) => {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // HELPERS DE QUERY (named exports)
-// ─────────────────────────────────────────────────────────────────────────────
-// Regra: cada helper roteia explicitamente. Nunca use `db.query` se você
-// sabe qual pool quer — prefira `query`/`analyticsQuery`/`sessionsQuery`.
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** Query no pool principal (API geral). */
@@ -183,9 +165,6 @@ export const sessionsQuery = (text, params) => sessionsPool.query(text, params);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // waitForDatabase
-// ─────────────────────────────────────────────────────────────────────────────
-// Em produção: retry infinito (orquestrador reinicia se travar).
-// Em dev: 6 tentativas (~30s) para falhar rápido e mostrar o erro real.
 // ═════════════════════════════════════════════════════════════════════════════
 
 export async function waitForDatabase({
@@ -215,9 +194,6 @@ export async function waitForDatabase({
 
 // ═════════════════════════════════════════════════════════════════════════════
 // withPoolClient — conexão dedicada com timeout duro
-// ═════════════════════════════════════════════════════════════════════════════
-// Use em qualquer lugar que precise de transação real. Garante que o client
-// seja liberado mesmo em erro e que a espera no connect() não seja infinita.
 // ═════════════════════════════════════════════════════════════════════════════
 
 export async function withPoolClient(fn, { timeoutMs = 15_000, label = 'db', which = 'api' } = {}) {
@@ -292,8 +268,6 @@ export async function pingDb(timeoutMs = 5000) {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // logDatabaseAccess — diagnóstico do boot
-// ─────────────────────────────────────────────────────────────────────────────
-// Não falha o boot se o usuário do banco não tiver permissões de catálogo.
 // ═════════════════════════════════════════════════════════════════════════════
 
 export const logDatabaseAccess = async () => {
@@ -319,10 +293,6 @@ export const logDatabaseAccess = async () => {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // closePool — encerramento gracioso
-// ─────────────────────────────────────────────────────────────────────────────
-// Chamado em SIGTERM/SIGINT pelo server.js. Fecha os 3 pools em paralelo.
-// Cada `end()` tem timeout de 15s para não travar o shutdown se o Postgres
-// estiver pendurado. Idempotente: chamadas subsequentes retornam imediatamente.
 // ═════════════════════════════════════════════════════════════════════════════
 
 let shuttingDown = false;
@@ -387,21 +357,6 @@ if (!boolEnv('DB_QUIET_BOOT', false)) {
     sessionsPool.options.query_timeout,
   );
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// EXPORT default
-// ─────────────────────────────────────────────────────────────────────────────
-// `query` aponta para o pool principal (main). Se você precisa do
-// analyticsPool, use explicitamente `analyticsQuery`.
-//
-// Files no projeto que fazem `import db from './db.js'`:
-//   • routes/colaboradores.js   → db.query         (main, correto)
-//   • routes/campanhas.js       → db.query         (main, correto)
-//   • services/bd/metricsLoaders.js → db.query     (VAI para main — ver ajuste)
-//
-// Se você quer isolamento das queries de métricas, ajuste metricsLoaders.js
-// para usar `analyticsQuery` explicitamente (1 import + find/replace).
-// ═════════════════════════════════════════════════════════════════════════════
 
 export default {
   pool,

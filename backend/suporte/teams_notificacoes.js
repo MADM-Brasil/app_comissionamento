@@ -49,15 +49,6 @@ class TeamsNotificadorSuporte {
         });
     }
 
-    /**
-     * [NOVO] Render defensivo de templates literais não avaliados.
-     *
-     * Se o caller passar uma string contendo `${variavel}` (aspas simples,
-     * template salvo em config, ou string vinda do banco), os `$` chegam
-     * literais até a notificação. Este helper substitui cada `${chave}`
-     * pelo valor correspondente em `vars`. Se a string não contém `\${...}`,
-     * é devolvida intacta (no-op quando o caller já está correto).
-     */
     renderTemplate(str, vars) {
         if (typeof str !== 'string' || !str) return str;
         if (!/\$\{\w+\}/.test(str)) return str;
@@ -67,10 +58,6 @@ class TeamsNotificadorSuporte {
         });
     }
 
-    /**
-     * URL que abre a aba "Visão Coordenador" já focada no caso.
-     * A página /suporte lê ?aba=coordenador&id=<id_ticket_movimentacao>.
-     */
     montarUrlCoordenador(idTicketMovimentacao) {
         const baseUrl = process.env.APP_PUBLIC_URL ||
             process.env.SUPPORT_PUBLIC_BASE_URL ||
@@ -83,11 +70,6 @@ class TeamsNotificadorSuporte {
         return sistemaUrl.href;
     }
 
-    /**
-     * [CORRIGIDO] Cartão de validação do coordenador já com os valores
-     * preenchidos no servidor. Nada de `${...}` chega ao Teams: o Power
-     * Automate deve apenas repassar `adaptiveCard` (ver README).
-     */
     criarCartaoValidacaoCoordenador(dados, assunto, unidadeId) {
         const valor = (v) => {
             const s = v === undefined || v === null ? '' : String(v).trim();
@@ -317,10 +299,6 @@ class TeamsNotificadorSuporte {
                 );
             }
 
-            // ─── [NOVO] Variáveis para o render defensivo ─────────────────
-            // Cobre tanto os nomes usados nos templates de bloqueio
-            // (equipeOrigem, unidade, pipeline, stage…) quanto os nomes
-            // originais recebidos em `dados` (equipe, unidadeId, …).
             const templateVars = {
                 cliente: dados.cliente,
                 telefone: dados.telefone,
