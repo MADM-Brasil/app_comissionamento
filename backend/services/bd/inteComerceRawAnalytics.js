@@ -1,5 +1,3 @@
-// backend/services/bd/inteComerceRawAnalytics.js
-
 import { createHash } from 'node:crypto';
 import db from './db.js';
 import { cached } from './inteComerceCache.js';
@@ -833,12 +831,22 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       legalQueryValues.push(dealIds);
       const productFragment = productParamIndex != null ? `AND UPPER(TRIM(produto)) = ANY($${productParamIndex}::text[])` : '';
 
+      // ── CORREÇÃO: em SAFRA, a view jurídica só deve contribuir para o
+      //    período da safra (data_ganho dentro de [inicio, fim_exclusivo)).
+      //    Em PRODUÇÃO mantemos o comportamento anterior (data_ganho OR deal_id
+      //    candidato), porque lá a "safra" não é o eixo.
       legalOutcomeResult = await client.query({
         text: `
           SELECT deal_id::text AS deal_id, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id
           FROM core.view_app_juridico_auditoria
           WHERE data_ganho IS NOT NULL
-            AND ((data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment}) OR deal_id::text = ANY($${dealIdsParamIndex}::text[]))`,
+            AND (
+              ${useViews
+                ? `(data_ganho >= $1::date AND data_ganho < $2::date)`
+                : `((data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment}) OR deal_id::text = ANY($${dealIdsParamIndex}::text[]))`
+              }
+            )
+            ${useViews && productFragment ? productFragment : ''}`,
         values: legalQueryValues,
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
@@ -868,8 +876,14 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
         });
       }
       legalOutcomeResult = await client.query({
-        text: `SELECT deal_id::text, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id FROM core.view_app_juridico_auditoria WHERE deal_id = ANY($1::bigint[]) AND data_ganho IS NOT NULL`,
-        values: [dealIds],
+        text: `
+          SELECT deal_id::text, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id
+          FROM core.view_app_juridico_auditoria
+          WHERE data_ganho IS NOT NULL
+            AND data_ganho >= $2::date
+            AND data_ganho <  $3::date
+            AND deal_id = ANY($1::bigint[])`,
+        values: [dealIds, inicio, fim_exclusivo],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
     }
@@ -1066,33 +1080,83 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       }
     }
 
+    // ── CORREÇÃO DE PROTOCOLADOS DE SAFRA ────────────────────────────────────
+    // Objetivo: em modo safra, "protocolado" deve significar "deal cujo
+    // data_ganho caiu no período e cuja etapa é Protocolado" — exatamente o
+    // mesmo critério do HubSpot (data_do_ganho + dealstage = Protocolado).
+    //
+    // Fontes:
+    //   1) core.deals.data_protocolo (data canônica do protocolo)
+    //   2) core.view_app_juridico_auditoria com etapa='Protocolado'
+    //
+    // Regras de dedup/atribuição:
+    //   - A chave de dedup é o deal_id CANÔNICO (resolvido via
+    //     dealMap / dealIdByHubspot / viewDealIdByHubspot), nunca o deal_id
+    //     cru da view (que pode ser o hubspot_deal_id).
+    //   - Em SAFRA, a fonte (2) só emite evento se data_ganho estiver dentro
+    //     de [inicio, fim_exclusivo) — já garantido pela query corrigida.
+    //   - Em PRODUÇÃO, mantém o comportamento anterior (data_protocolo OR view).
+    // ─────────────────────────────────────────────────────────────────────────
+
     const protocolEmittedForDeal = new Set();
+    const resolveCanonicalDealId = (rawDealId, rawHubspotId) => {
+      for (const candidate of [rawDealId, rawHubspotId]) {
+        if (candidate == null) continue;
+        const key = String(candidate);
+        if (dealMap.has(key))             return key;
+        if (dealIdByHubspot.has(key))     return dealIdByHubspot.get(key);
+        if (viewDealIdByHubspot.has(key)) return viewDealIdByHubspot.get(key);
+        if (legalDealIdSet.has(key))      return key;
+      }
+      if (rawDealId != null)    return String(rawDealId);
+      if (rawHubspotId != null) return String(rawHubspotId);
+      return null;
+    };
+
+    // Fonte 1 — data_protocolo do deal
     for (const deal of dealRows) {
       if (!deal.data_protocolo) continue;
       const protocolAt = timestamp(deal.data_protocolo); if (!protocolAt || protocolAt > asOf) continue;
+      // Em SAFRA, protocolado só conta se o ganho do deal está no período.
+      // (A query de candidatos já garante isso, mas reforçamos aqui para o
+      //  caso de deals que entraram por outra UNIÃO — ex.: assinatura, criação.)
+      if (!useViews) {
+        const g = deal.data_ganho ? timestamp(deal.data_ganho) : null;
+        if (!g || g < bounds.start || g >= bounds.end) continue;
+      }
       let collabId = null, team = null;
       const attribution = allEpisodes.get(deal.deal_id);
       if (attribution) { const assigned = attribution.attributionAt(protocolAt); collabId = assigned?.collaboratorId ?? null; team = assigned?.team ?? null; }
       events.push({ dealId: deal.deal_id, occurredAt: protocolAt, dateKey: utcDate(protocolAt), collaboratorId: collabId, team, type: 'PROTOCOLADO' });
-      protocolEmittedForDeal.add(deal.deal_id);
+      protocolEmittedForDeal.add(String(deal.deal_id));
     }
+
+    // Fonte 2 — view jurídica (etapa = Protocolado)
     for (const outcome of legalOutcomeResult.rows) {
       if (String(outcome.etapa ?? '').trim() !== 'Protocolado') continue;
-      let dealId = String(outcome.deal_id);
-      if (viewDealIdByHubspot.has(dealId)) dealId = viewDealIdByHubspot.get(dealId);
-      if (protocolEmittedForDeal.has(dealId)) continue;
       const occurredAt = timestamp(outcome.data_ganho); if (!occurredAt) continue;
+      // Em SAFRA, a query já restringe data_ganho à janela; reforço defensivo:
+      if (!useViews && (occurredAt < bounds.start || occurredAt >= bounds.end)) continue;
+
+      const dealId = resolveCanonicalDealId(outcome.deal_id, null);
+      if (dealId == null) continue;
+      if (protocolEmittedForDeal.has(String(dealId))) continue; // dedup por deal canônico
+
       let collabId = null, team = null;
       if (outcome.responsavel_lead_id) { const c = collaboratorMap.get(String(outcome.responsavel_lead_id)); if (c) { collabId = c.colaborador_id; team = c.nome_equipe; } }
       events.push({ dealId, occurredAt, dateKey: utcDate(outcome.data_ganho), collaboratorId: collabId, team, type: 'PROTOCOLADO' });
+      protocolEmittedForDeal.add(String(dealId));
     }
+
+    // Fonte de GANHO a partir da view jurídica (mantida como estava).
     for (const outcome of legalOutcomeResult.rows) {
       const etapaNorm = String(outcome.etapa ?? '').trim().toLowerCase();
       if (etapaNorm === 'venda perdida' || etapaNorm === 'perdida' || etapaNorm === 'perdido') continue;
       const occurredAt = timestamp(outcome.data_ganho); if (!occurredAt) continue;
+      // Reforço: em SAFRA, GANHO só conta se data_ganho caiu na janela.
+      if (!useViews && (occurredAt < bounds.start || occurredAt >= bounds.end)) continue;
       const dateKey = utcDate(outcome.data_ganho); if (!dateKey) continue;
-      let dealId = String(outcome.deal_id);
-      if (viewDealIdByHubspot.has(dealId)) dealId = viewDealIdByHubspot.get(dealId);
+      const dealId = resolveCanonicalDealId(outcome.deal_id, null) ?? String(outcome.deal_id);
       let collabId = null, team = null;
       if (outcome.responsavel_lead_id) { const c = collaboratorMap.get(String(outcome.responsavel_lead_id)); if (c) { collabId = c.colaborador_id; team = c.nome_equipe; } }
       if (!collabId) { const attribution = allEpisodes.get(dealId); if (attribution) { const assigned = attribution.attributionAt(occurredAt); collabId = assigned?.collaboratorId ?? null; team = assigned?.team ?? null; } }
@@ -2108,9 +2172,13 @@ async function applyCanonicalStageCounts(result, params) {
 }
 
 // ─── GANHOS / PROTOCOLADOS (banco, consulta de referência) ──────────────────
-// A consulta de referência ("Protocolados Safra" / "Ganhos Safra") conta TODO
-// deal de core.view_app_juridico_auditoria cujo core.deals.created_at cai no
-// período — de qualquer CRM, com ou sem data_ganho, com ou sem assessor.
+// As consultas de referência ficam em metricsLoaders (loadGanhos /
+// loadProtocolados) e contam deals de core.view_app_juridico_auditoria de
+// qualquer CRM, com ou sem assessor.
+//   • Protocolados Safra: deal criado no período (d.data_criacao_deal) E ganho
+//     no período (d.data_ganho), l.etapa = 'Protocolado', d.etapa_id = '6669',
+//     d.is_deleted IS NOT TRUE; equipe via DISTINCT ON (nome) dos colaboradores.
+//   • Ganhos Safra: deal criado no período (d.created_at), etapa <> Venda perdida.
 //
 // O builder de eventos (buildComparisonResults) só enxerga deals:
 //   • com crm_origem = 'HUBSPOT';
@@ -2149,7 +2217,8 @@ function scopeNameSet(raw, params) {
 async function loadOutcomeRowsCached(label, loaderFn, params, granularity) {
   try {
     const rows = await cached(
-      metricCacheKey(`${label}-ref`, {
+      // v2: critério de Protocolados Safra mudou — não reaproveitar cache antigo
+      metricCacheKey(`${label}-ref-v2`, {
         start: params.inicio, end: params.fim_exclusivo,
         equipe: params.equipe, produto: params.produto,
         mode: params.mode, granularity,
