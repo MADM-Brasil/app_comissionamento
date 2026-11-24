@@ -633,6 +633,18 @@ export default function Inte_commerce() {
   const [comparisonMonth, setComparisonMonth] = useState<string | null>(null);
   const [filtersReady, setFiltersReady] = useState(false);
 
+  // ─────────────────────────────────────────────────────────────
+  // OVERLAY DE CARREGAMENTO AO TROCAR SAFRA ↔ PRODUÇÃO
+  //   Marcado no clique do botão de modo e limpo no finally do
+  //   reloadData. Renderizado como `absolute inset-0` DENTRO do
+  //   wrapper `relative` do conteúdo — assim fica abaixo do
+  //   DashboardLayout (header/título) e do FilterBar, cobrindo
+  //   apenas a área dos gráficos/tabela/KPIs.
+  //   O card de loading é ancorado no TOPO do conteúdo (`items-start`
+  //   + `pt-4`), ficando logo abaixo do FilterBar.
+  // ─────────────────────────────────────────────────────────────
+  const [modeChangeInProgress, setModeChangeInProgress] = useState(false);
+
   const reportPeriod = useMemo(() => {
     const limits = getInteComerceDateLimits(new Date(`${today}T12:00:00`), 24);
     const [year, month] = selectedMonth.split("-").map(Number);
@@ -696,6 +708,7 @@ export default function Inte_commerce() {
     if (!reportPeriod.start || !reportPeriod.end) return;
     if (reportPeriod.unavailable) {
       setLoading(false);
+      setModeChangeInProgress(false);
       setOverview(EMPTY_OVERVIEW);
       setStrategic(EMPTY_STRATEGIC);
       setFunnel(EMPTY_FUNNEL);
@@ -847,6 +860,7 @@ export default function Inte_commerce() {
       }
     } finally {
       setLoading(false);
+      setModeChangeInProgress(false);
     }
   }, [
     reportPeriod, equipe, colaborador, colaboradorId, produto, filters.unidadeId,
@@ -870,6 +884,15 @@ export default function Inte_commerce() {
   useEffect(() => {
     console.log("[Inte_commerce] filters state changed:", filters, "filtersReady=", filtersReady);
   }, [filters, filtersReady]);
+
+  // ─────────────────────────────────────────────────────────────
+  // Troca de modo: aciona overlay imediatamente (antes do refetch)
+  // ─────────────────────────────────────────────────────────────
+  const handleViewModeChange = useCallback((mode: "safra" | "producao") => {
+    if (mode === viewMode) return;
+    setModeChangeInProgress(true);
+    setViewMode(mode);
+  }, [viewMode]);
 
   const handleFilterChange = useCallback((rawFilters: Partial<FiltersState>) => {
     setFiltersReady(true);
@@ -1343,7 +1366,7 @@ export default function Inte_commerce() {
             key={mode}
             type="button"
             aria-pressed={viewMode === mode}
-            onClick={() => setViewMode(mode)}
+            onClick={() => handleViewModeChange(mode)}
             className={cn(
               "px-2.5 py-1.5 text-[11px] font-semibold transition-colors",
               viewMode === mode ? "bg-blue-600 text-white" : "bg-white text-slate-600 hover:bg-slate-50",
@@ -1405,658 +1428,690 @@ export default function Inte_commerce() {
         className="mb-4"
       />
 
-      {hasComparison && (
-        <details className="card mb-4 mt-3 group">
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 [&::-webkit-details-marker]:hidden">
-            <div className="flex-1 min-w-0">
-              <h2 className="text-base font-bold text-slate-800">{comparisonSectionTitle}</h2>
-              <p className="mt-0.5 text-[11px] text-slate-500 truncate">{comparisonSectionDescription}</p>
-            </div>
-            <button
-              type="button"
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                handleExportComparison();
-              }}
-              disabled={comparisonTableRows.length === 0}
-              className="inline-flex items-center gap-1 px-2 py-1 border border-[#e2e8f0] rounded-md text-[11px] font-semibold text-[#475569] bg-white hover:bg-[#f1f5f9] disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Exportar comparativo em CSV"
-            >
-              <Download className="w-3 h-3" />
-              CSV
-            </button>
-            <ChevronDown size={15} className="shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
-          </summary>
-          <div className="overflow-x-auto border-t border-slate-100 [&_th]:py-1.5 [&_th]:text-[11px] [&_td]:py-1.5 [&_td]:text-[11px]">
-            <table className="simple-table w-full">
-              <thead>
-                <tr>
-                  <th>Indicador</th>
-                  <th className="text-right">
-                    Total {selectedMonth}{selectedMonth === today.slice(0, 7) ? " · até hoje" : ""}
-                  </th>
-                  <th className="text-right">Total {comparisonMonth}</th>
-                  <th className="text-right">Variação entre períodos</th>
-                </tr>
-              </thead>
-              <tbody>
-                {comparisonTableRows.map((r) => (
-                  <tr key={r.key}>
-                    <td className="font-semibold">{r.label}</td>
-                    <td className="text-right tabular-nums">{r.monthValue == null ? "—" : formatInt(r.monthValue)}</td>
-                    <td className="text-right tabular-nums">{r.comparedValue == null ? "—" : formatInt(r.comparedValue)}</td>
-                    <td className="text-right tabular-nums">
-                      {r.variation == null
-                        ? "—"
-                        : `${r.variation > 0 ? "+" : ""}${r.variation.toFixed(1).replace(".", ",")}%`}
-                    </td>
+      {/*
+        Container com posicionamento relativo. O overlay de
+        carregamento é `absolute inset-0` DENTRO deste wrapper,
+        ficando restrito à área de conteúdo (abaixo do header do
+        DashboardLayout e do FilterBar). O card de loading é
+        ancorado no TOPO do conteúdo (`items-start` + `pt-4`),
+        ficando logo abaixo do FilterBar.
+      */}
+      <div className="relative">
+        {hasComparison && (
+          <details className="card mb-4 mt-3 group">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 [&::-webkit-details-marker]:hidden">
+              <div className="flex-1 min-w-0">
+                <h2 className="text-base font-bold text-slate-800">{comparisonSectionTitle}</h2>
+                <p className="mt-0.5 text-[11px] text-slate-500 truncate">{comparisonSectionDescription}</p>
+              </div>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  handleExportComparison();
+                }}
+                disabled={comparisonTableRows.length === 0}
+                className="inline-flex items-center gap-1 px-2 py-1 border border-[#e2e8f0] rounded-md text-[11px] font-semibold text-[#475569] bg-white hover:bg-[#f1f5f9] disabled:opacity-50 disabled:cursor-not-allowed"
+                title="Exportar comparativo em CSV"
+              >
+                <Download className="w-3 h-3" />
+                CSV
+              </button>
+              <ChevronDown size={15} className="shrink-0 text-slate-400 transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="overflow-x-auto border-t border-slate-100 [&_th]:py-1.5 [&_th]:text-[11px] [&_td]:py-1.5 [&_td]:text-[11px]">
+              <table className="simple-table w-full">
+                <thead>
+                  <tr>
+                    <th>Indicador</th>
+                    <th className="text-right">
+                      Total {selectedMonth}{selectedMonth === today.slice(0, 7) ? " · até hoje" : ""}
+                    </th>
+                    <th className="text-right">Total {comparisonMonth}</th>
+                    <th className="text-right">Variação entre períodos</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {comparisonTableRows.map((r) => (
+                    <tr key={r.key}>
+                      <td className="font-semibold">{r.label}</td>
+                      <td className="text-right tabular-nums">{r.monthValue == null ? "—" : formatInt(r.monthValue)}</td>
+                      <td className="text-right tabular-nums">{r.comparedValue == null ? "—" : formatInt(r.comparedValue)}</td>
+                      <td className="text-right tabular-nums">
+                        {r.variation == null
+                          ? "—"
+                          : `${r.variation > 0 ? "+" : ""}${r.variation.toFixed(1).replace(".", ",")}%`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {comparisonError && (
+              <p className="border-t border-red-100 bg-red-50 px-4 py-1.5 text-[11px] text-red-700">
+                Não foi possível carregar o mês de comparação: {comparisonError}
+              </p>
+            )}
+          </details>
+        )}
+
+        {dataAsOf && (
+          <div className="mb-4 text-xs text-slate-500" role="status">
+            Dados consultados até {dateTimeBr(dataAsOf)}.
           </div>
-          {comparisonError && (
-            <p className="border-t border-red-100 bg-red-50 px-4 py-1.5 text-[11px] text-red-700">
-              Não foi possível carregar o mês de comparação: {comparisonError}
-            </p>
-          )}
-        </details>
-      )}
+        )}
 
-      {dataAsOf && (
-        <div className="mb-4 text-xs text-slate-500" role="status">
-          Dados consultados até {dateTimeBr(dataAsOf)}.
-        </div>
-      )}
-
-      {hasActiveFilters && (
-        <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
-          <span>📊</span>
-          <span>
-            Mostrando dados de:
-            {equipe !== "todas" && ` ${equipe}`}
-            {colaborador !== "todos" && ` - ${colaborador}`}
-            {produto !== "Todos" && ` - Produto: ${produto}`}
-          </span>
-        </div>
-      )}
-
-      {loading && (
-        <div className="mb-4 flex items-center gap-2 text-xs text-[#64748b]">
-          <Loader2 className="w-4 h-4 animate-spin" /> Carregando dados de Inte_commerce…
-        </div>
-      )}
-
-      {error && (
-        <div className="mb-4 bg-red-50 text-red-700 p-3 rounded-lg text-xs flex items-start gap-2">
-          <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-          <div>
-            <p className="font-semibold">Não foi possível carregar os dados.</p>
-            <p className="mt-0.5">{error}</p>
-            <button
-              type="button"
-              onClick={() => void reloadData()}
-              className="mt-2 px-3 py-1 bg-red-600 text-white rounded text-[11px] font-semibold hover:bg-red-700"
-            >
-              Tentar novamente
-            </button>
+        {hasActiveFilters && (
+          <div className="mb-4 px-4 py-2 bg-[#eff6ff] rounded-lg text-xs text-[#2F6FED] flex items-center gap-2 flex-wrap">
+            <span>📊</span>
+            <span>
+              Mostrando dados de:
+              {equipe !== "todas" && ` ${equipe}`}
+              {colaborador !== "todos" && ` - ${colaborador}`}
+              {produto !== "Todos" && ` - Produto: ${produto}`}
+            </span>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* 1) VISÃO GERAL */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div><h2 className="text-lg font-bold text-[#0f172a]">Visão geral do funil</h2></div>
-        </div>
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 xl:gap-6">
-          {STAT_CARDS.map((card) => (
-            <div key={card.key} className="card p-4 md:p-5 flex flex-col justify-between min-h-[110px]">
-              <div className="text-xs md:text-sm text-[#64748b] font-medium leading-tight min-h-[28px]">
-                {getCardLabel(card)}
-              </div>
-              <div
-                className={cn(
-                  "text-3xl md:text-4xl font-extrabold mt-2 tabular-nums leading-none",
-                  card.highlight === "signed" && "text-[#2F6FED]",
-                  card.highlight === "gained" && "text-[#16A34A]",
-                  card.highlight === "disq" && "text-[#DC2626]",
-                  !card.highlight && "text-[#0f172a]",
-                )}
+        {error && (
+          <div className="mb-4 bg-red-50 text-red-700 p-3 rounded-lg text-xs flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="font-semibold">Não foi possível carregar os dados.</p>
+              <p className="mt-0.5">{error}</p>
+              <button
+                type="button"
+                onClick={() => void reloadData()}
+                className="mt-2 px-3 py-1 bg-red-600 text-white rounded text-[11px] font-semibold hover:bg-red-700"
               >
-                {formatInt(aggregates[card.key])}
-              </div>
+                Tentar novamente
+              </button>
             </div>
-          ))}
-        </div>
-      </div>
+          </div>
+        )}
 
-      {/* 2) PERFORMANCE COMERCIAL */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div><h2 className="text-lg font-bold text-[#0f172a]">Performance Comercial</h2></div>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-          <div className="card p-5 relative overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-1 bg-[#407de5]" />
-            <h3 className="text-sm font-bold text-[#50627a]">Média de assinados / dia</h3>
-            <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
-              {avgSignedPerDay.toFixed(1).replace(".", ",")}
-            </div>
+        {/* 1) VISÃO GERAL */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div><h2 className="text-lg font-bold text-[#0f172a]">Visão geral do funil</h2></div>
           </div>
-          <div className="card p-5 relative overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-1 bg-[#1a9ac5]" />
-            <h3 className="text-sm font-bold text-[#50627a]">Conversão geral operacional</h3>
-            <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
-              {strategic.pct_recebidos_ate_assinados != null
-                ? `${strategic.pct_recebidos_ate_assinados.toFixed(1).replace(".", ",")}%`
-                : "—"}
-            </div>
-          </div>
-          <div className="card p-5 relative overflow-hidden">
-            <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
-            <h3 className="text-sm font-bold text-[#50627a]">
-              Conversão assinados → ganhos
-            </h3>
-            <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
-              {viewMode === "producao"
-                ? aggregates.signed > 0
-                  ? `${((aggregates.gained / aggregates.signed) * 100).toFixed(1).replace(".", ",")}%`
-                  : "—"
-                : strategic.pct_assinados_ate_ganhos != null
-                  ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
-                  : "—"}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <RecomendacoesCard filters={filters} colaboradores={collaborators} />
-
-      {/* 3) FUNIL + DESQUALIFICAÇÃO */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div>
-            <h2 className="text-lg font-bold text-[#0f172a]">
-              Progressão do funil Comercial e Desqualificação
-            </h2>
-          </div>
-        </div>
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
-          <div className="card p-5 lg:col-span-2 h-full flex flex-col">
-            <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-              <h3 className="text-sm font-bold text-[#0f172a]">Progressão do Funil Comercial</h3>
-              {comparisonFunnel && (
-                <div className="flex items-center gap-3 text-[10px] text-slate-500">
-                  <span className="flex items-center gap-1">
-                    <span className="inline-block w-3 h-1.5 rounded-full bg-slate-400/50" /> Comparação
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <span className="inline-block w-3 h-2.5 rounded-full bg-gradient-to-r from-[#3972e0] to-[#83adfa]" /> Referência
-                  </span>
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4 xl:gap-6">
+            {STAT_CARDS.map((card) => (
+              <div key={card.key} className="card p-4 md:p-5 flex flex-col justify-between min-h-[110px]">
+                <div className="text-xs md:text-sm text-[#64748b] font-medium leading-tight min-h-[28px]">
+                  {getCardLabel(card)}
                 </div>
-              )}
+                <div
+                  className={cn(
+                    "text-3xl md:text-4xl font-extrabold mt-2 tabular-nums leading-none",
+                    card.highlight === "signed" && "text-[#2F6FED]",
+                    card.highlight === "gained" && "text-[#16A34A]",
+                    card.highlight === "disq" && "text-[#DC2626]",
+                    !card.highlight && "text-[#0f172a]",
+                  )}
+                >
+                  {formatInt(aggregates[card.key])}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 2) PERFORMANCE COMERCIAL */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div><h2 className="text-lg font-bold text-[#0f172a]">Performance Comercial</h2></div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <div className="card p-5 relative overflow-hidden">
+              <div className="absolute inset-x-0 top-0 h-1 bg-[#407de5]" />
+              <h3 className="text-sm font-bold text-[#50627a]">Média de assinados / dia</h3>
+              <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
+                {avgSignedPerDay.toFixed(1).replace(".", ",")}
+              </div>
             </div>
-            <div className="flex-1 flex flex-col justify-between gap-2">
-              {FUNNEL_STAGES.map((stage, i) => {
-                const value = (funnel[stage.key] as number) || 0;
-                const base = funnel.recebidos;
-                const width = base ? Math.max(2, (value / base) * 100) : 2;
-                const compValue = comparisonFunnel ? ((comparisonFunnel[stage.key] as number) || 0) : null;
-                const compBase = comparisonFunnel?.recebidos;
-                const compWidth = comparisonFunnel && compBase
-                  ? Math.max(2, (compValue! / compBase) * 100)
-                  : 0;
-                const grid = comparisonFunnel
-                  ? "grid-cols-[110px_1fr_56px_56px_56px]"
-                  : "grid-cols-[110px_1fr_70px_70px]";
-                return (
-                  <div
-                    key={stage.key}
-                    className={cn("w-full grid items-center gap-3 text-xs py-1 px-1", grid)}
-                  >
-                      <span className="font-medium text-[#0f172a] text-left">{stage.label}</span>
-                      <div className="flex flex-col gap-0.5">
-                        {comparisonFunnel && (
-                          <div className="h-1.5 rounded-full bg-[#edf2f8] overflow-hidden">
-                            <div className="h-full rounded-full bg-slate-400/50" style={{ width: `${compWidth}%` }} />
-                          </div>
-                        )}
-                        <div className="h-2.5 rounded-full bg-[#edf2f8] overflow-hidden">
-                          <div className={cn("h-full rounded-full bg-gradient-to-r", stage.gradient)} style={{ width: `${width}%` }} />
-                        </div>
-                      </div>
-                      <span className="font-bold text-right text-[#0f172a] tabular-nums">{formatInt(value)}</span>
-                      {comparisonFunnel && (
-                        <span className="text-right text-slate-400 tabular-nums">{formatInt(compValue || 0)}</span>
-                      )}
-                      <span className="text-right text-[#94a3b8] tabular-nums">{pctOfPrevious(i)}</span>
+            <div className="card p-5 relative overflow-hidden">
+              <div className="absolute inset-x-0 top-0 h-1 bg-[#1a9ac5]" />
+              <h3 className="text-sm font-bold text-[#50627a]">Conversão geral operacional</h3>
+              <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
+                {strategic.pct_recebidos_ate_assinados != null
+                  ? `${strategic.pct_recebidos_ate_assinados.toFixed(1).replace(".", ",")}%`
+                  : "—"}
+              </div>
+            </div>
+            <div className="card p-5 relative overflow-hidden">
+              <div className="absolute inset-x-0 top-0 h-1 bg-[#189e79]" />
+              <h3 className="text-sm font-bold text-[#50627a]">
+                Conversão assinados → ganhos
+              </h3>
+              <div className="text-4xl font-black tracking-tight mt-3 tabular-nums text-[#0f172a]">
+                {viewMode === "producao"
+                  ? aggregates.signed > 0
+                    ? `${((aggregates.gained / aggregates.signed) * 100).toFixed(1).replace(".", ",")}%`
+                    : "—"
+                  : strategic.pct_assinados_ate_ganhos != null
+                    ? `${strategic.pct_assinados_ate_ganhos.toFixed(1).replace(".", ",")}%`
+                    : "—"}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <RecomendacoesCard filters={filters} colaboradores={collaborators} />
+
+        {/* 3) FUNIL + DESQUALIFICAÇÃO */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div>
+              <h2 className="text-lg font-bold text-[#0f172a]">
+                Progressão do funil Comercial e Desqualificação
+              </h2>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
+            <div className="card p-5 lg:col-span-2 h-full flex flex-col">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+                <h3 className="text-sm font-bold text-[#0f172a]">Progressão do Funil Comercial</h3>
+                {comparisonFunnel && (
+                  <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-3 h-1.5 rounded-full bg-slate-400/50" /> Comparação
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-3 h-2.5 rounded-full bg-gradient-to-r from-[#3972e0] to-[#83adfa]" /> Referência
+                    </span>
                   </div>
-                );
-              })}
-              <div
-                className={cn(
-                  "w-full grid items-center gap-3 text-xs border-t border-dashed border-[#e2e8f0] pt-3 mt-1 py-1 px-1",
-                  comparisonFunnel
-                    ? "grid-cols-[110px_1fr_56px_56px_56px]"
-                    : "grid-cols-[110px_1fr_70px_70px]",
                 )}
-              >
-                <span className="font-medium text-[#DC2626] text-left">↳ Desqualificados</span>
-                <div className="flex flex-col gap-0.5">
-                  {comparisonFunnel && (
-                    <div className="h-1.5 rounded-full bg-[#fef2f2] overflow-hidden">
+              </div>
+              <div className="flex-1 flex flex-col justify-between gap-2">
+                {FUNNEL_STAGES.map((stage, i) => {
+                  const value = (funnel[stage.key] as number) || 0;
+                  const base = funnel.recebidos;
+                  const width = base ? Math.max(2, (value / base) * 100) : 2;
+                  const compValue = comparisonFunnel ? ((comparisonFunnel[stage.key] as number) || 0) : null;
+                  const compBase = comparisonFunnel?.recebidos;
+                  const compWidth = comparisonFunnel && compBase
+                    ? Math.max(2, (compValue! / compBase) * 100)
+                    : 0;
+                  const grid = comparisonFunnel
+                    ? "grid-cols-[110px_1fr_56px_56px_56px]"
+                    : "grid-cols-[110px_1fr_70px_70px]";
+                  return (
+                    <div
+                      key={stage.key}
+                      className={cn("w-full grid items-center gap-3 text-xs py-1 px-1", grid)}
+                    >
+                        <span className="font-medium text-[#0f172a] text-left">{stage.label}</span>
+                        <div className="flex flex-col gap-0.5">
+                          {comparisonFunnel && (
+                            <div className="h-1.5 rounded-full bg-[#edf2f8] overflow-hidden">
+                              <div className="h-full rounded-full bg-slate-400/50" style={{ width: `${compWidth}%` }} />
+                            </div>
+                          )}
+                          <div className="h-2.5 rounded-full bg-[#edf2f8] overflow-hidden">
+                            <div className={cn("h-full rounded-full bg-gradient-to-r", stage.gradient)} style={{ width: `${width}%` }} />
+                          </div>
+                        </div>
+                        <span className="font-bold text-right text-[#0f172a] tabular-nums">{formatInt(value)}</span>
+                        {comparisonFunnel && (
+                          <span className="text-right text-slate-400 tabular-nums">{formatInt(compValue || 0)}</span>
+                        )}
+                        <span className="text-right text-[#94a3b8] tabular-nums">{pctOfPrevious(i)}</span>
+                    </div>
+                  );
+                })}
+                <div
+                  className={cn(
+                    "w-full grid items-center gap-3 text-xs border-t border-dashed border-[#e2e8f0] pt-3 mt-1 py-1 px-1",
+                    comparisonFunnel
+                      ? "grid-cols-[110px_1fr_56px_56px_56px]"
+                      : "grid-cols-[110px_1fr_70px_70px]",
+                  )}
+                >
+                  <span className="font-medium text-[#DC2626] text-left">↳ Desqualificados</span>
+                  <div className="flex flex-col gap-0.5">
+                    {comparisonFunnel && (
+                      <div className="h-1.5 rounded-full bg-[#fef2f2] overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-[#df8d93]/60"
+                          style={{
+                            width: `${
+                              comparisonFunnel.recebidos
+                                ? Math.max(2, (comparisonFunnel.desqualificados_saida / comparisonFunnel.recebidos) * 100)
+                                : 2
+                            }%`,
+                          }}
+                        />
+                      </div>
+                    )}
+                    <div className="h-2.5 rounded-full bg-[#fef2f2] overflow-hidden">
                       <div
-                        className="h-full rounded-full bg-[#df8d93]/60"
+                        className="h-full rounded-full bg-[#df8d93]"
                         style={{
                           width: `${
-                            comparisonFunnel.recebidos
-                              ? Math.max(2, (comparisonFunnel.desqualificados_saida / comparisonFunnel.recebidos) * 100)
+                            funnel.recebidos
+                              ? Math.max(2, (funnel.desqualificados_saida / funnel.recebidos) * 100)
                               : 2
                           }%`,
                         }}
                       />
                     </div>
-                  )}
-                  <div className="h-2.5 rounded-full bg-[#fef2f2] overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-[#df8d93]"
-                      style={{
-                        width: `${
-                          funnel.recebidos
-                            ? Math.max(2, (funnel.desqualificados_saida / funnel.recebidos) * 100)
-                            : 2
-                        }%`,
-                      }}
-                    />
                   </div>
-                </div>
-                <span className="font-bold text-right text-[#0f172a] tabular-nums">
-                  {formatInt(funnel.desqualificados_saida)}
-                </span>
-                {comparisonFunnel && (
-                  <span className="text-right text-slate-400 tabular-nums">
-                    {formatInt(comparisonFunnel.desqualificados_saida)}
+                  <span className="font-bold text-right text-[#0f172a] tabular-nums">
+                    {formatInt(funnel.desqualificados_saida)}
                   </span>
-                )}
-                <span className="text-right text-[#94a3b8] tabular-nums">
-                  {formatPct(funnel.desqualificados_saida, funnel.recebidos)}
-                </span>
+                  {comparisonFunnel && (
+                    <span className="text-right text-slate-400 tabular-nums">
+                      {formatInt(comparisonFunnel.desqualificados_saida)}
+                    </span>
+                  )}
+                  <span className="text-right text-[#94a3b8] tabular-nums">
+                    {formatPct(funnel.desqualificados_saida, funnel.recebidos)}
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
 
-          <div className="card p-5 h-full flex flex-col">
-            <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
-              <h3 className="text-sm font-bold text-[#0f172a]">Principais motivos de desqualificação</h3>
-            </div>
-            <div className="space-y-3 flex-1">
-              {mergedReasons.length === 0 && (
-                <p className="text-xs text-[#94a3b8]">
-                  {loading ? "Carregando motivos…" : "Nenhum motivo registrado no período."}
-                </p>
-              )}
-              {mergedReasons.map((reason) => {
-                const width = maxMergedReason
-                  ? Math.max(2, (reason.current / maxMergedReason) * 100)
-                  : 2;
-                const compWidth = maxMergedReason && hasComparison
-                  ? Math.max(2, (reason.comp / maxMergedReason) * 100)
-                  : 0;
-                const displayMotivo = formatMotivo(reason.motivo);
-                return (
-                  <div key={reason.motivo} className="grid grid-cols-[1fr_1.6fr_56px] items-center gap-3 text-xs">
-                    <span className="text-[#0f172a] font-medium leading-tight break-words min-w-0" title={displayMotivo}>
-                      {displayMotivo}
-                    </span>
-                    <div className="flex flex-col gap-0.5">
-                      {hasComparison && (
-                        <div className="h-1.5 rounded-full bg-[#edf1f7] overflow-hidden">
-                          <div className="h-full rounded-full bg-slate-400/50" style={{ width: `${compWidth}%` }} />
+            <div className="card p-5 h-full flex flex-col">
+              <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
+                <h3 className="text-sm font-bold text-[#0f172a]">Principais motivos de desqualificação</h3>
+              </div>
+              <div className="space-y-3 flex-1">
+                {mergedReasons.length === 0 && (
+                  <p className="text-xs text-[#94a3b8]">
+                    {loading ? "Carregando motivos…" : "Nenhum motivo registrado no período."}
+                  </p>
+                )}
+                {mergedReasons.map((reason) => {
+                  const width = maxMergedReason
+                    ? Math.max(2, (reason.current / maxMergedReason) * 100)
+                    : 2;
+                  const compWidth = maxMergedReason && hasComparison
+                    ? Math.max(2, (reason.comp / maxMergedReason) * 100)
+                    : 0;
+                  const displayMotivo = formatMotivo(reason.motivo);
+                  return (
+                    <div key={reason.motivo} className="grid grid-cols-[1fr_1.6fr_56px] items-center gap-3 text-xs">
+                      <span className="text-[#0f172a] font-medium leading-tight break-words min-w-0" title={displayMotivo}>
+                        {displayMotivo}
+                      </span>
+                      <div className="flex flex-col gap-0.5">
+                        {hasComparison && (
+                          <div className="h-1.5 rounded-full bg-[#edf1f7] overflow-hidden">
+                            <div className="h-full rounded-full bg-slate-400/50" style={{ width: `${compWidth}%` }} />
+                          </div>
+                        )}
+                        <div className="h-2 rounded-full bg-[#edf1f7] overflow-hidden">
+                          <div className="h-full rounded-full bg-[#d99362]" style={{ width: `${width}%` }} />
                         </div>
-                      )}
-                      <div className="h-2 rounded-full bg-[#edf1f7] overflow-hidden">
-                        <div className="h-full rounded-full bg-[#d99362]" style={{ width: `${width}%` }} />
+                      </div>
+                      <div className="text-right">
+                        {hasComparison && (
+                          <strong className="text-[10px] text-slate-400 tabular-nums">{formatInt(reason.comp)}</strong>
+                        )}<br/>
+                        <strong className="text-[#0f172a] tabular-nums">{formatInt(reason.current)}</strong>
                       </div>
                     </div>
-                    <div className="text-right">
-                      {hasComparison && (
-                        <strong className="text-[10px] text-slate-400 tabular-nums">{formatInt(reason.comp)}</strong>
-                      )}<br/>
-                      <strong className="text-[#0f172a] tabular-nums">{formatInt(reason.current)}</strong>
-                    </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
+              {reasons.length > 10 && (
+                <button
+                  type="button"
+                  aria-expanded={showAllReasons}
+                  aria-label={showAllReasons ? "Mostrar menos motivos" : "Mostrar todos os motivos"}
+                  title={showAllReasons ? "Mostrar menos" : "Mostrar todos os motivos"}
+                  onClick={() => setShowAllReasons((expanded) => !expanded)}
+                  className="mt-5 rounded px-2 py-1 text-sm font-bold text-[#2F6FED] hover:bg-[#eff6ff] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6FED]"
+                >
+                  {showAllReasons ? "Mostrar menos" : "..."}
+                </button>
+              )}
             </div>
-            {reasons.length > 10 && (
-              <button
-                type="button"
-                aria-expanded={showAllReasons}
-                aria-label={showAllReasons ? "Mostrar menos motivos" : "Mostrar todos os motivos"}
-                title={showAllReasons ? "Mostrar menos" : "Mostrar todos os motivos"}
-                onClick={() => setShowAllReasons((expanded) => !expanded)}
-                className="mt-5 rounded px-2 py-1 text-sm font-bold text-[#2F6FED] hover:bg-[#eff6ff] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6FED]"
-              >
-                {showAllReasons ? "Mostrar menos" : "..."}
-              </button>
+          </div>
+        </div>
+
+        {/* 4) TABELA DE PRODUÇÃO */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div><h2 className="text-lg font-bold text-[#0f172a]">Tabela de Produção comercial</h2></div>
+            <span className="badge info">
+              {formatInt(filteredTable.length)} {grouping === "person" ? "colaboradores" : "equipes"}
+            </span>
+          </div>
+          {tableError && (
+            <div className="mb-3 bg-amber-50 text-amber-800 p-3 rounded-lg text-xs flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="font-semibold">Não foi possível carregar a tabela.</p>
+                <p className="mt-0.5">{tableError}</p>
+              </div>
+            </div>
+          )}
+          <div className="card">
+            <div className="p-5 border-b border-[#e2e8f0]">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div><h3 className="text-sm font-bold text-[#0f172a]">Produção comercial</h3></div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex rounded-lg border border-[#e2e8f0] overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setGrouping("person")}
+                      className={cn(
+                        "px-3 py-1.5 text-xs font-semibold transition-colors",
+                        grouping === "person" ? "bg-[#eff6ff] text-[#2F6FED]" : "bg-white text-[#64748b] hover:bg-[#f8fafc]",
+                      )}
+                    >
+                      Por colaborador
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGrouping("team")}
+                      className={cn(
+                        "px-3 py-1.5 text-xs font-semibold border-l border-[#e2e8f0] transition-colors",
+                        grouping === "team" ? "bg-[#eff6ff] text-[#2F6FED]" : "bg-white text-[#64748b] hover:bg-[#f8fafc]",
+                      )}
+                    >
+                      Por equipe
+                    </button>
+                  </div>
+                  <input
+                    type="search"
+                    placeholder="Buscar colaborador / equipe"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    className="px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm bg-white min-w-[220px]"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleExportCsv}
+                    disabled={filteredTable.length === 0}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm font-semibold text-[#475569] bg-white hover:bg-[#f1f5f9] disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Exportar CSV
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+              <table className="simple-table w-full">
+                <thead className="sticky top-0 bg-white z-10">
+                  <tr>
+                    {[
+                      { key: "name", label: grouping === "person" ? "Colaborador" : "Equipe" },
+                      { key: "received", label: "Recebidos" },
+                      { key: "contact", label: "Em contato" },
+                      { key: "collection", label: "Coleta" },
+                      { key: "signed", label: "Assinados" },
+                      { key: "gained", label: viewMode === "safra" ? "Ganhos (safra)" : "Ganhos (produção)" },
+                      { key: "protocolados", label: viewMode === "safra" ? "Protocolados (safra)" : "Protocolados (produção)" },
+                      { key: "metaGanhosMensal", label: "Meta × Realizado" },
+                    ].map((col) => (
+                      <th
+                        key={col.key}
+                        onClick={() => {
+                          if (sortKey === col.key) setSortDir((d) => (d === 1 ? -1 : 1));
+                          else { setSortKey(col.key); setSortDir(-1); }
+                        }}
+                        className={cn(
+                          "cursor-pointer hover:text-[#2F6FED]",
+                          col.key !== "name" && "text-right",
+                        )}
+                      >
+                        {col.label}
+                        {sortKey === col.key && (sortDir === 1 ? " ↑" : " ↓")}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredTable.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="text-center py-8 text-[#64748b]">
+                        Nenhum {grouping === "person" ? "colaborador" : "equipe"} encontrado para os filtros selecionados.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredTable.map((row) => {
+                      const metaPct = row.metaGanhosMensal > 0
+                        ? Math.min(100, (row.gained / row.metaGanhosMensal) * 100)
+                        : 0;
+                      const metaColor =
+                        row.metaGanhosMensal === 0
+                          ? "#cbd5e1"
+                          : row.gained >= row.metaGanhosMensal
+                            ? "#16A34A"
+                            : row.gained >= row.metaGanhosMensal * 0.7
+                              ? "#2F6FED"
+                              : "#EA8C1D";
+                      return (
+                        <tr key={row.key}>
+                          <td>
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 rounded-full bg-[#e8effb] text-[#3c72bf] flex items-center justify-center text-[10px] font-bold flex-shrink-0">
+                                {(row.name || "?").split(" ").map((s: string) => s[0]).slice(0, 2).join("").toUpperCase()}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-[#0f172a] truncate">{row.name}</div>
+                                <div className="text-[11px] text-[#94a3b8] truncate">{row.team}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="text-right tabular-nums">{formatInt(row.received)}</td>
+                          <td className="text-right tabular-nums">{formatInt(row.worked)}</td>
+                          <td className="text-right tabular-nums">{formatInt(row.contact)}</td>
+                          <td className="text-right tabular-nums">{formatInt(row.collection)}</td>
+                          <td className="text-right tabular-nums font-bold text-[#0f172a]">{formatInt(row.signed)}</td>
+                          <td className="text-right tabular-nums">{formatInt(row.gained)}</td>
+                          <td className="text-right tabular-nums">{formatInt(row.protocolados)}</td>
+                          <td className="text-right">
+                            {row.metaGanhosMensal > 0 ? (
+                              <div className="inline-flex flex-col items-end gap-0.5 min-w-[90px]">
+                                <div className="text-[11px] tabular-nums text-[#0f172a]">
+                                  <span className="font-bold">{formatInt(row.gained)}</span>
+                                  <span className="text-slate-400"> / </span>
+                                  <span>{formatInt(row.metaGanhosMensal)}</span>
+                                </div>
+                                <div className="w-24 h-1.5 rounded-full bg-[#edf1f7] overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full transition-all"
+                                    style={{ width: `${metaPct}%`, background: metaColor }}
+                                  />
+                                </div>
+                                <span className="text-[10px] tabular-nums" style={{ color: metaColor }}>
+                                  {metaPct.toFixed(0)}%
+                                  {row.gained >= row.metaGanhosMensal ? " · Atingido" : ""}
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-slate-400">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        {/* 5) EVOLUÇÃO DIÁRIA (BarChart) */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div><h2 className="text-lg font-bold text-[#0f172a]">Recebidos × Assinados por dia</h2></div>
+          </div>
+          <div className="card p-5">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
+              {comparisonResult && (
+                <div className="flex items-center gap-3 text-[10px] text-slate-500">
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]/50" /> Recebidos (comp.)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]" /> Recebidos (ref.)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]/50" /> Assinados (comp.)
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]" /> Assinados (ref.)
+                  </span>
+                </div>
+              )}
+            </div>
+            {seriesData.length === 0 ? (
+              <div className="flex items-center justify-center h-[260px] text-[#94a3b8] text-sm">
+                {loading ? (<><Loader2 className="w-4 h-4 animate-spin mr-2" />Aguardando período…</>) : "Nenhum dado diário disponível no período."}
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={280}>
+                <BarChart data={seriesData} barGap={comparisonResult ? 1 : 2}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                  <XAxis dataKey="dayOfMonth" tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} width={30} />
+                  <Tooltip
+                    labelFormatter={(v) => `Dia ${v}`}
+                    formatter={(value: any, name: any) => {
+                      const labels: Record<string, string> = {
+                        received: viewMode === "producao" ? "Leads Recebidos" : "Recebidos",
+                        signed: "Assinados",
+                        gained: "Ganhos",
+                        receivedComp: viewMode === "producao" ? "Leads Recebidos (comparação)" : "Recebidos (comparação)",
+                        signedComp: "Assinados (comparação)",
+                      };
+                      return [formatInt(Number(value)), labels[name] || name];
+                    }}
+                    contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                  />
+                  <Legend
+                    wrapperStyle={{ fontSize: 11 }}
+                    formatter={(value) => {
+                      const labels: Record<string, string> = {
+                        received: viewMode === "producao" ? "Leads Recebidos" : "Recebidos",
+                        signed: "Assinados",
+                        gained: "Ganhos",
+                        receivedComp: "Recebidos (comparação)",
+                        signedComp: "Assinados (comparação)",
+                      };
+                      return labels[value] || value;
+                    }}
+                  />
+                  {comparisonResult && (
+                    <Bar dataKey="receivedComp" name="receivedComp" fill="#9bc1fb" fillOpacity={0.35} radius={[4, 4, 0, 0]} />
+                  )}
+                  {comparisonResult && (
+                    <Bar dataKey="signedComp" name="signedComp" fill="#2866dd" fillOpacity={0.35} radius={[4, 4, 0, 0]} />
+                  )}
+                  <Bar dataKey="received" name="received" fill="#9bc1fb" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="signed" name="signed" fill="#2866dd" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
             )}
           </div>
         </div>
-      </div>
 
-      {/* 4) TABELA DE PRODUÇÃO */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div><h2 className="text-lg font-bold text-[#0f172a]">Tabela de Produção comercial</h2></div>
-          <span className="badge info">
-            {formatInt(filteredTable.length)} {grouping === "person" ? "colaboradores" : "equipes"}
-          </span>
+        {/* 6) EVOLUÇÃO DIÁRIA (AreaChart) */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+            <div><h2 className="text-lg font-bold text-[#0f172a]">Evolução Diária</h2></div>
+          </div>
+          <div className="card p-5">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-4"></div>
+            {dailySeriesError && (
+              <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700">
+                Não foi possível carregar a série diária: {dailySeriesError}
+              </div>
+            )}
+            {dailyChartData.length === 0 ? (
+              <div className="flex items-center justify-center h-[320px] text-[#94a3b8] text-sm">
+                {loading ? (<><Loader2 className="w-4 h-4 animate-spin mr-2" />Aguardando período…</>) : "Nenhum dado diário disponível no período."}
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={320}>
+                <AreaChart data={dailyChartData}>
+                  <defs>
+                    <linearGradient id="colorLeadsInte" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#16A34A" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#16A34A" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="colorAssinadosInte" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#2F6FED" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#2F6FED" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="colorGanhosInte" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#EA8C1D" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#EA8C1D" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="colorProtocoladosInte" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="colorPerdidosInte" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#DC2626" stopOpacity={0.2} />
+                      <stop offset="95%" stopColor="#DC2626" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} width={30} />
+                  <Tooltip content={<EvolucaoTooltip />} />
+                  <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
+                  <Area type="monotone" dataKey="leads" stroke="#16A34A" strokeWidth={2} fill="url(#colorLeadsInte)" name="Leads" />
+                  <Area type="monotone" dataKey="assinados" stroke="#2F6FED" strokeWidth={2} fill="url(#colorAssinadosInte)" name="Assinados" />
+                  <Area
+                    type="monotone"
+                    dataKey="ganhos"
+                    stroke="#EA8C1D"
+                    strokeWidth={2}
+                    fill="url(#colorGanhosInte)"
+                    name={viewMode === "safra" ? "Ganhos (safra)" : "Ganhos (produção)"}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="protocolados"
+                    stroke="#8B5CF6"
+                    strokeWidth={2}
+                    fill="url(#colorProtocoladosInte)"
+                    name={viewMode === "safra" ? "Protocolados (safra)" : "Protocolados (produção)"}
+                  />
+                  <Area type="monotone" dataKey="perdidos" stroke="#DC2626" strokeWidth={2} fill="url(#colorPerdidosInte)" name="Perdidos" />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
         </div>
-        {tableError && (
-          <div className="mb-3 bg-amber-50 text-amber-800 p-3 rounded-lg text-xs flex items-start gap-2">
-            <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            <div>
-              <p className="font-semibold">Não foi possível carregar a tabela.</p>
-              <p className="mt-0.5">{tableError}</p>
+
+        {/*
+          OVERLAY DE CARREGAMENTO — ABAIXO DO DashboardLayout,
+          LOGO ABAIXO DO FilterBar
+          `absolute inset-0` dentro do wrapper `relative`:
+          cobre toda a área de conteúdo (KPIs, funil, tabela,
+          gráficos). O card de loading é ancorado no TOPO do
+          conteúdo via `items-start` + `pt-4`, ficando próximo
+          ao FilterBar — e não centralizado verticalmente.
+        */}
+        {(loading || modeChangeInProgress) && (
+          <div
+            className="absolute inset-0 z-30 flex items-start justify-center bg-white/80 backdrop-blur-sm pt-4"
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#e2e8f0] bg-white px-8 py-6 shadow-2xl">
+              <Loader2 className="h-10 w-10 animate-spin text-[#2F6FED]" />
+              <p className="text-sm font-semibold text-[#0f172a]">
+                Carregando {viewMode === "safra" ? "Safra" : "Produção"}...
+              </p>
+              <p className="text-center text-xs text-[#64748b]">
+                Aguarde enquanto atualizamos os gráficos, tabela e indicadores.
+              </p>
             </div>
           </div>
         )}
-        <div className="card">
-          <div className="p-5 border-b border-[#e2e8f0]">
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div><h3 className="text-sm font-bold text-[#0f172a]">Produção comercial</h3></div>
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex rounded-lg border border-[#e2e8f0] overflow-hidden">
-                  <button
-                    type="button"
-                    onClick={() => setGrouping("person")}
-                    className={cn(
-                      "px-3 py-1.5 text-xs font-semibold transition-colors",
-                      grouping === "person" ? "bg-[#eff6ff] text-[#2F6FED]" : "bg-white text-[#64748b] hover:bg-[#f8fafc]",
-                    )}
-                  >
-                    Por colaborador
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setGrouping("team")}
-                    className={cn(
-                      "px-3 py-1.5 text-xs font-semibold border-l border-[#e2e8f0] transition-colors",
-                      grouping === "team" ? "bg-[#eff6ff] text-[#2F6FED]" : "bg-white text-[#64748b] hover:bg-[#f8fafc]",
-                    )}
-                  >
-                    Por equipe
-                  </button>
-                </div>
-                <input
-                  type="search"
-                  placeholder="Buscar colaborador / equipe"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm bg-white min-w-[220px]"
-                />
-                <button
-                  type="button"
-                  onClick={handleExportCsv}
-                  disabled={filteredTable.length === 0}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 border border-[#e2e8f0] rounded-lg text-sm font-semibold text-[#475569] bg-white hover:bg-[#f1f5f9] disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  Exportar CSV
-                </button>
-              </div>
-            </div>
-          </div>
-          <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
-            <table className="simple-table w-full">
-              <thead className="sticky top-0 bg-white z-10">
-                <tr>
-                  {[
-                    { key: "name", label: grouping === "person" ? "Colaborador" : "Equipe" },
-                    { key: "received", label: "Recebidos" },
-                    { key: "contact", label: "Em contato" },
-                    { key: "collection", label: "Coleta" },
-                    { key: "signed", label: "Assinados" },
-                    { key: "gained", label: viewMode === "safra" ? "Ganhos (safra)" : "Ganhos (produção)" },
-                    { key: "protocolados", label: viewMode === "safra" ? "Protocolados (safra)" : "Protocolados (produção)" },
-                    { key: "metaGanhosMensal", label: "Meta × Realizado" },
-                  ].map((col) => (
-                    <th
-                      key={col.key}
-                      onClick={() => {
-                        if (sortKey === col.key) setSortDir((d) => (d === 1 ? -1 : 1));
-                        else { setSortKey(col.key); setSortDir(-1); }
-                      }}
-                      className={cn(
-                        "cursor-pointer hover:text-[#2F6FED]",
-                        col.key !== "name" && "text-right",
-                      )}
-                    >
-                      {col.label}
-                      {sortKey === col.key && (sortDir === 1 ? " ↑" : " ↓")}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTable.length === 0 ? (
-                  <tr>
-                    <td colSpan={9} className="text-center py-8 text-[#64748b]">
-                      Nenhum {grouping === "person" ? "colaborador" : "equipe"} encontrado para os filtros selecionados.
-                    </td>
-                  </tr>
-                ) : (
-                  filteredTable.map((row) => {
-                    const metaPct = row.metaGanhosMensal > 0
-                      ? Math.min(100, (row.gained / row.metaGanhosMensal) * 100)
-                      : 0;
-                    const metaColor =
-                      row.metaGanhosMensal === 0
-                        ? "#cbd5e1"
-                        : row.gained >= row.metaGanhosMensal
-                          ? "#16A34A"
-                          : row.gained >= row.metaGanhosMensal * 0.7
-                            ? "#2F6FED"
-                            : "#EA8C1D";
-                    return (
-                      <tr key={row.key}>
-                        <td>
-                          <div className="flex items-center gap-2">
-                            <div className="w-8 h-8 rounded-full bg-[#e8effb] text-[#3c72bf] flex items-center justify-center text-[10px] font-bold flex-shrink-0">
-                              {(row.name || "?").split(" ").map((s: string) => s[0]).slice(0, 2).join("").toUpperCase()}
-                            </div>
-                            <div className="min-w-0">
-                              <div className="text-sm font-semibold text-[#0f172a] truncate">{row.name}</div>
-                              <div className="text-[11px] text-[#94a3b8] truncate">{row.team}</div>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="text-right tabular-nums">{formatInt(row.received)}</td>
-                        <td className="text-right tabular-nums">{formatInt(row.worked)}</td>
-                        <td className="text-right tabular-nums">{formatInt(row.contact)}</td>
-                        <td className="text-right tabular-nums">{formatInt(row.collection)}</td>
-                        <td className="text-right tabular-nums font-bold text-[#0f172a]">{formatInt(row.signed)}</td>
-                        <td className="text-right tabular-nums">{formatInt(row.gained)}</td>
-                        <td className="text-right tabular-nums">{formatInt(row.protocolados)}</td>
-                        <td className="text-right">
-                          {row.metaGanhosMensal > 0 ? (
-                            <div className="inline-flex flex-col items-end gap-0.5 min-w-[90px]">
-                              <div className="text-[11px] tabular-nums text-[#0f172a]">
-                                <span className="font-bold">{formatInt(row.gained)}</span>
-                                <span className="text-slate-400"> / </span>
-                                <span>{formatInt(row.metaGanhosMensal)}</span>
-                              </div>
-                              <div className="w-24 h-1.5 rounded-full bg-[#edf1f7] overflow-hidden">
-                                <div
-                                  className="h-full rounded-full transition-all"
-                                  style={{ width: `${metaPct}%`, background: metaColor }}
-                                />
-                              </div>
-                              <span className="text-[10px] tabular-nums" style={{ color: metaColor }}>
-                                {metaPct.toFixed(0)}%
-                                {row.gained >= row.metaGanhosMensal ? " · Atingido" : ""}
-                              </span>
-                            </div>
-                          ) : (
-                            <span className="text-[11px] text-slate-400">—</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      {/* 5) EVOLUÇÃO DIÁRIA (BarChart) */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div><h2 className="text-lg font-bold text-[#0f172a]">Recebidos × Assinados por dia</h2></div>
-        </div>
-        <div className="card p-5">
-          <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
-            {comparisonResult && (
-              <div className="flex items-center gap-3 text-[10px] text-slate-500">
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]/50" /> Recebidos (comp.)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#9bc1fb]" /> Recebidos (ref.)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]/50" /> Assinados (comp.)
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="inline-block w-3 h-2 rounded-sm bg-[#2866dd]" /> Assinados (ref.)
-                </span>
-              </div>
-            )}
-          </div>
-          {seriesData.length === 0 ? (
-            <div className="flex items-center justify-center h-[260px] text-[#94a3b8] text-sm">
-              {loading ? (<><Loader2 className="w-4 h-4 animate-spin mr-2" />Aguardando período…</>) : "Nenhum dado diário disponível no período."}
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={280}>
-              <BarChart data={seriesData} barGap={comparisonResult ? 1 : 2}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="dayOfMonth" tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} width={30} />
-                <Tooltip
-                  labelFormatter={(v) => `Dia ${v}`}
-                  formatter={(value: any, name: any) => {
-                    const labels: Record<string, string> = {
-                      received: viewMode === "producao" ? "Leads Recebidos" : "Recebidos",
-                      signed: "Assinados",
-                      gained: "Ganhos",
-                      receivedComp: viewMode === "producao" ? "Leads Recebidos (comparação)" : "Recebidos (comparação)",
-                      signedComp: "Assinados (comparação)",
-                    };
-                    return [formatInt(Number(value)), labels[name] || name];
-                  }}
-                  contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                />
-                <Legend
-                  wrapperStyle={{ fontSize: 11 }}
-                  formatter={(value) => {
-                    const labels: Record<string, string> = {
-                      received: viewMode === "producao" ? "Leads Recebidos" : "Recebidos",
-                      signed: "Assinados",
-                      gained: "Ganhos",
-                      receivedComp: "Recebidos (comparação)",
-                      signedComp: "Assinados (comparação)",
-                    };
-                    return labels[value] || value;
-                  }}
-                />
-                {comparisonResult && (
-                  <Bar dataKey="receivedComp" name="receivedComp" fill="#9bc1fb" fillOpacity={0.35} radius={[4, 4, 0, 0]} />
-                )}
-                {comparisonResult && (
-                  <Bar dataKey="signedComp" name="signedComp" fill="#2866dd" fillOpacity={0.35} radius={[4, 4, 0, 0]} />
-                )}
-                <Bar dataKey="received" name="received" fill="#9bc1fb" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="signed" name="signed" fill="#2866dd" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-      </div>
-
-      {/* 6) EVOLUÇÃO DIÁRIA (AreaChart) */}
-      <div className="mb-6">
-        <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
-          <div><h2 className="text-lg font-bold text-[#0f172a]">Evolução Diária</h2></div>
-        </div>
-        <div className="card p-5">
-          <div className="flex items-center justify-between flex-wrap gap-2 mb-4"></div>
-          {dailySeriesError && (
-            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[11px] text-red-700">
-              Não foi possível carregar a série diária: {dailySeriesError}
-            </div>
-          )}
-          {dailyChartData.length === 0 ? (
-            <div className="flex items-center justify-center h-[320px] text-[#94a3b8] text-sm">
-              {loading ? (<><Loader2 className="w-4 h-4 animate-spin mr-2" />Aguardando período…</>) : "Nenhum dado diário disponível no período."}
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height={320}>
-              <AreaChart data={dailyChartData}>
-                <defs>
-                  <linearGradient id="colorLeadsInte" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#16A34A" stopOpacity={0.2} />
-                    <stop offset="95%" stopColor="#16A34A" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="colorAssinadosInte" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#2F6FED" stopOpacity={0.2} />
-                    <stop offset="95%" stopColor="#2F6FED" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="colorGanhosInte" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#EA8C1D" stopOpacity={0.2} />
-                    <stop offset="95%" stopColor="#EA8C1D" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="colorProtocoladosInte" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#8B5CF6" stopOpacity={0.2} />
-                    <stop offset="95%" stopColor="#8B5CF6" stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="colorPerdidosInte" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#DC2626" stopOpacity={0.2} />
-                    <stop offset="95%" stopColor="#DC2626" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} width={30} />
-                <Tooltip content={<EvolucaoTooltip />} />
-                <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
-                <Area type="monotone" dataKey="leads" stroke="#16A34A" strokeWidth={2} fill="url(#colorLeadsInte)" name="Leads" />
-                <Area type="monotone" dataKey="assinados" stroke="#2F6FED" strokeWidth={2} fill="url(#colorAssinadosInte)" name="Assinados" />
-                <Area
-                  type="monotone"
-                  dataKey="ganhos"
-                  stroke="#EA8C1D"
-                  strokeWidth={2}
-                  fill="url(#colorGanhosInte)"
-                  name={viewMode === "safra" ? "Ganhos (safra)" : "Ganhos (produção)"}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="protocolados"
-                  stroke="#8B5CF6"
-                  strokeWidth={2}
-                  fill="url(#colorProtocoladosInte)"
-                  name={viewMode === "safra" ? "Protocolados (safra)" : "Protocolados (produção)"}
-                />
-                <Area type="monotone" dataKey="perdidos" stroke="#DC2626" strokeWidth={2} fill="url(#colorPerdidosInte)" name="Perdidos" />
-              </AreaChart>
-            </ResponsiveContainer>
-          )}
-        </div>
       </div>
     </DashboardLayout>
   );
