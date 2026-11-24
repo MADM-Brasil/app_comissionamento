@@ -3,6 +3,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { Filter, Users, Briefcase, Search, X, Package, Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import { useAppStore } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
+import { ASSESSOR_PLUS_EMAILS, isAssessorPlusUser } from "@/lib/accessControl";
 import { cn } from "@/lib/utils";
 import { fetchCollaborators, fetchEquipes, API_BASE } from "@/lib/api";
 
@@ -20,6 +21,7 @@ interface FilterBarProps {
   showColaboradorFilter?: boolean;
   showProdutoFilter?: boolean;
   showUnitFilter?: boolean;
+  hideAssessorPlus?: boolean;
   className?: string;
   initialEquipe?: string;
   initialColaborador?: string;
@@ -28,6 +30,24 @@ interface FilterBarProps {
 }
 
 const normalize = (str: string): string => (str || '').trim().toLowerCase();
+const ASSESSOR_PLUS_EMAIL_SET = new Set(ASSESSOR_PLUS_EMAILS.map(normalize));
+
+// E-mails bloqueados da página de Comissões (ocultos apenas quando hideAssessorPlus=true)
+const COMISSOES_BLOCKED_EMAILS = [
+  'wallace.batista@madmbrasil.com.br',
+  'bianca.ferreira@madmbrasil.com.br',
+  'lilian.luz@madmbrasil.com.br',
+];
+const COMISSOES_BLOCKED_EMAIL_SET = new Set(COMISSOES_BLOCKED_EMAILS.map(normalize));
+
+const isAssessorPlusCollaborator = (colab: any): boolean => {
+  if (!colab) return false;
+  if (isAssessorPlusUser(colab)) return true;
+  const email = normalize(colab.email || "");
+  return Boolean(
+    email && (ASSESSOR_PLUS_EMAIL_SET.has(email) || COMISSOES_BLOCKED_EMAIL_SET.has(email)),
+  );
+};
 
 const normalizeKey = (str: string): string =>
   String(str || '')
@@ -167,6 +187,7 @@ export default function FilterBar({
   showColaboradorFilter = true,
   showProdutoFilter = true,
   showUnitFilter = true,
+  hideAssessorPlus = false,
   className,
   initialEquipe = "todas",
   initialColaborador = "todos",
@@ -462,6 +483,15 @@ export default function FilterBar({
   ]);
 
   useEffect(() => {
+    if (!hideAssessorPlus || !isReady || selectedColaborador === "todos") return;
+    const selected = collaborators.find((c) => c.name === selectedColaborador);
+    if (selected && isAssessorPlusCollaborator(selected)) {
+      setSelectedColaborador("todos");
+      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
+    }
+  }, [hideAssessorPlus, isReady, selectedColaborador, collaborators, setSelectedCollaboratorEmail]);
+
+  useEffect(() => {
     if (!isCoordenador || !escopoData) return;
 
     if (selectedEquipe !== 'todas'
@@ -591,6 +621,9 @@ export default function FilterBar({
     let filtered = [...collaborators];
     filtered = filtered.filter((c) => !isExcludedTeam(c.equipeNome));
     filtered = filtered.filter((c) => normalize(c.cargo) !== 'administrativo');
+    if (hideAssessorPlus) {
+      filtered = filtered.filter((c) => !isAssessorPlusCollaborator(c));
+    }
 
     if (isCoordenador) {
       if (!escopoData) {
@@ -644,6 +677,7 @@ export default function FilterBar({
     deveOcultarEquipesReservadas,
     showUnitFilter,
     selectedUnit,
+    hideAssessorPlus,
   ]);
 
   const colaboradoresParaSelect = useMemo(() => {
@@ -652,11 +686,14 @@ export default function FilterBar({
     if (exists) return filteredColaboradores;
     const selected = collaborators.find(c => c.name === selectedColaborador);
     if (!selected) return filteredColaboradores;
+    if (hideAssessorPlus && isAssessorPlusCollaborator(selected)) {
+      return filteredColaboradores;
+    }
     if (showUnitFilter && selectedUnit !== "todas" && selected.unidadeId !== selectedUnit) {
       return filteredColaboradores;
     }
     return [selected, ...filteredColaboradores];
-  }, [filteredColaboradores, selectedColaborador, collaborators, showUnitFilter, selectedUnit]);
+  }, [filteredColaboradores, selectedColaborador, collaborators, showUnitFilter, selectedUnit, hideAssessorPlus]);
 
   // ─── onFilterChangeRef para evitar stale closure ────────────────────────
   const onFilterChangeRef = useRef(onFilterChange);

@@ -10,6 +10,7 @@ import {
   type TabelaComissaoItem,
 } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
+import { ASSESSOR_PLUS_EMAILS, isAssessorPlusUser } from "@/lib/accessControl";
 import {
   DollarSign, Award, FileCheck, Target, Loader2, RefreshCw,
   FileText, Archive, XCircle, CalendarDays, TrendingUp,
@@ -104,6 +105,24 @@ const normalizeText = (text: string) => (text || "").trim().toLowerCase();
 const normalizeName = (text: string) =>
   normalizeText(text).normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const EXCLUDED_TEAMS_SET = new Set(EXCLUDED_TEAMS.map(normalizeName));
+const ASSESSOR_PLUS_EMAIL_SET = new Set(ASSESSOR_PLUS_EMAILS.map(normalizeName));
+
+// E-mails bloqueados da página de Comissões (ocultos da Visão Geral e da listagem)
+const COMISSOES_BLOCKED_EMAILS = [
+  'wallace.batista@madmbrasil.com.br',
+  'bianca.ferreira@madmbrasil.com.br',
+  'lilian.luz@madmbrasil.com.br',
+];
+const COMISSOES_BLOCKED_EMAIL_SET = new Set(COMISSOES_BLOCKED_EMAILS.map(normalizeName));
+
+function isAssessorPlusCollaborator(colaborador: any): boolean {
+  if (!colaborador) return false;
+  if (isAssessorPlusUser(colaborador)) return true;
+  const email = normalizeName(colaborador.email || "");
+  return Boolean(
+    email && (ASSESSOR_PLUS_EMAIL_SET.has(email) || COMISSOES_BLOCKED_EMAIL_SET.has(email)),
+  );
+}
 
 function getActiveCampaigns(campaigns: Campaign[]): CampaignLike[] {
   return (campaigns || []).filter((c) => c?.validacao_financeiro) as unknown as CampaignLike[];
@@ -157,6 +176,7 @@ const PRIORITY_STYLES: Record<
 };
 
 function getCommissionOverviewRole(colaborador: Collaborator): CommissionOverviewRole | null {
+  if (isAssessorPlusCollaborator(colaborador)) return null;
   const cargo = normalizeName(colaborador.cargo);
   const status = normalizeName(colaborador.status);
   if (!cargo || status === "inativo" || status === "desativado") return null;
@@ -1603,6 +1623,7 @@ export default function Comissoes() {
     const source = isCoordenadorUser ? scopedColabs : storeColabs;
 
     let filtered = source.filter((c) => {
+      if (isAssessorPlusCollaborator(c)) return false;
       if (filters.unidadeId != null && Number(c.unidadeId) !== filters.unidadeId) return false;
       if (EXCLUDED_TEAMS_SET.has(normalizeName(c.equipeNome))) return false;
       if (EXCLUDED_CARGOS.some((cargo) => normalizeName(c.cargo) === normalizeName(cargo)))
@@ -1612,7 +1633,7 @@ export default function Comissoes() {
     if (!canUseFilterBar) {
       if (currentUser && !filtered.some((c) => isSameColaborator(c, currentUser))) {
         const userColab = storeColabs.find((c) => isSameColaborator(c, currentUser));
-        if (userColab) filtered = [userColab, ...filtered];
+        if (userColab && !isAssessorPlusCollaborator(userColab)) filtered = [userColab, ...filtered];
       }
     } else {
       if (filters.equipe !== "todas")
@@ -3053,6 +3074,7 @@ export default function Comissoes() {
           key={filterBarKey}
           onFilterChange={handleFilterChange}
           showColaboradorFilter={true}
+          hideAssessorPlus={true}
           className="mb-6"
           onRefresh={handleRefresh}
         />
