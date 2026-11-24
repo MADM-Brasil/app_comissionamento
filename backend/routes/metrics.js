@@ -1,7 +1,3 @@
-// backend/routes/metrics.js
-// ─────────────────────────────────────────────────────────────────────────────
-// Rotas de métricas com cache-first + stale-while-revalidate.
-// ─────────────────────────────────────────────────────────────────────────────
 
 import express from 'express';
 import db from '../services/bd/db.js';
@@ -126,18 +122,28 @@ function normalizeMode(rawMode) {
 // ─── EMITIDOS ────────────────────────────────────────────────────────────────
 router.get('/emitidos', requireAuth, async (req, res) => {
   try {
-    const { start, end, equipe, produto, granularity } = req.query;
+    const { start, end, equipe, produto, granularity, mode } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
+
+    const modeNorm = normalizeMode(mode);
+    if (!modeNorm) {
+      return res.status(400).json({ success: false, error: "mode deve ser 'producao' ou 'safra'" });
+    }
+
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('emitidos', { start, end, equipe, produto, granularity });
+    const key = metricCacheKey('emitidos-v2', { start, end, equipe, produto, granularity, mode: modeNorm });
     const rows = await cacheFirst(
       key,
-      () => loadEmitidos({ start, end, equipe, produto, granularity }),
+      () => loadEmitidos({ start, end, equipe, produto, granularity, mode: modeNorm }),
       ttlForPeriod(start, end)
     );
 
-    res.json({ success: true, data: applyColaboradorFilter(rows, colaboradorNome, ['colaborador']) });
+    res.json({
+      success: true,
+      mode: modeNorm,
+      data: applyColaboradorFilter(rows, colaboradorNome, ['colaborador']),
+    });
   } catch (err) {
     console.error('Erro em /emitidos:', err);
     res.status(500).json({ success: false, error: err.message });
@@ -157,7 +163,7 @@ router.get('/assinados', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('assinados', { start, end, equipe, produto, granularity, mode: modeNorm });
+    const key = metricCacheKey('assinados-v2', { start, end, equipe, produto, granularity, mode: modeNorm });
     const rows = await cacheFirst(
       key,
       () => loadAssinados({ start, end, equipe, produto, granularity, mode: modeNorm }),
@@ -181,7 +187,7 @@ router.get('/assinados-diario-por-equipe', requireAuth, async (req, res) => {
     const { inicio, fim, equipe } = req.query;
     if (!inicio || !fim) return res.status(400).json({ success: false, error: 'inicio e fim obrigatórios' });
 
-    const key = `assinados-diario-eq:${inicio}:${fim}:${equipe || 'todas'}`;
+    const key = `assinados-diario-eq-v2:${inicio}:${fim}:${equipe || 'todas'}`;
     const rows = await cacheFirst(
       key,
       () => loadAssinadosDiarioPorEquipe({ inicio, fim, equipe }),
@@ -201,7 +207,7 @@ router.get('/assinados-diario-colaborador', requireAuth, async (req, res) => {
     const { inicio, fim } = req.query;
     if (!inicio || !fim) return res.status(400).json({ success: false, error: 'inicio e fim obrigatórios' });
 
-    const key = `assinados-diario-col:${inicio}:${fim}`;
+    const key = `assinados-diario-col-v2:${inicio}:${fim}`;
     const rows = await cacheFirst(
       key,
       () => loadAssinadosDiarioColaborador({ inicio, fim }),
@@ -229,7 +235,7 @@ router.get('/protocolados', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('protocolados', { start, end, equipe, produto, granularity, mode: modeNorm });
+    const key = metricCacheKey('protocolados-v2', { start, end, equipe, produto, granularity, mode: modeNorm });
     const rows = await cacheFirst(
       key,
       () => loadProtocolados({ start, end, equipe, produto, granularity, mode: modeNorm }),
@@ -260,7 +266,7 @@ router.get('/ganhos', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('ganhos', { start, end, equipe, produto, granularity, demanda, mode: modeNorm });
+    const key = metricCacheKey('ganhos-v4', { start, end, equipe, produto, granularity, demanda, mode: modeNorm });
     const rows = await cacheFirst(
       key,
       () => loadGanhos({ start, end, equipe, produto, granularity, demanda, mode: modeNorm }),
@@ -460,7 +466,7 @@ router.get('/weekly', requireAuth, async (req, res) => {
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
 
-    const key = `weekly:${start}:${end}`;
+    const key = `weekly-v2:${start}:${end}`;
     try {
       const rows = await cacheFirst(
         key,

@@ -3,9 +3,9 @@
 // Cache híbrido Redis + L1 (memória local) COM CIRCUIT BREAKER.
 
 // ─────────────────────────────────────────────────────────────────────────────
-
+import 'dotenv/config';
 import { redis } from './redis.js';
-
+ 
 const DEFAULT_TTL_MS = 60_000;
 const LOCAL_MAX_SIZE = 500;
 const LOCAL_MAX_ENTRY_BYTES = 512 * 1024;
@@ -38,6 +38,7 @@ const CB = {
   openDurationMs: 60_000,
   lastOpenLog: 0,
 };
+
 
 function circuitOpen() {
   const now = Date.now();
