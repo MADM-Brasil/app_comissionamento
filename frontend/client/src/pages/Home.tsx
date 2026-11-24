@@ -4,6 +4,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import FilterBar from "@/components/FilterBar";
 import { useAppStore, formatCurrency, Collaborator } from "@/lib/dataStore";
 import { useAccessControl } from "@/hooks/useAccessControl";
+import { isAssessorPlusUser, ASSESSOR_PLUS_EMAILS } from "@/lib/accessControl";
 import { calculator } from "@/lib/calculator";
 import { fetchDailyMetrics } from "@/lib/metrics";
 import {
@@ -142,6 +143,29 @@ function getFaixaProductType(colab: any): string {
   if (equipeNormalizada.includes('concomitante')) return 'CONCOMITANTE';
 
   return 'AUXILIO ACIDENTE';
+}
+
+// ============================================================
+// ASSESSOR PLUS — ocultação de valores sensíveis
+//   Mesma regra de Comissoes.tsx: considera assessor_plus do
+//   accessControl + a lista de e-mails bloqueados da página de
+//   Comissões. Usado para esconder a "Estimativa do Mês" na Home.
+// ============================================================
+const COMISSOES_BLOCKED_EMAILS = [
+  'wallace.batista@madmbrasil.com.br',
+  'bianca.ferreira@madmbrasil.com.br',
+  'lilian.luz@madmbrasil.com.br',
+];
+
+const ASSESSOR_PLUS_EMAIL_SET = new Set(
+  [...ASSESSOR_PLUS_EMAILS, ...COMISSOES_BLOCKED_EMAILS].map(normalize),
+);
+
+function isAssessorPlusCollaborator(colaborador: any): boolean {
+  if (!colaborador) return false;
+  if (isAssessorPlusUser(colaborador)) return true;
+  const email = normalize(colaborador.email || '');
+  return Boolean(email && ASSESSOR_PLUS_EMAIL_SET.has(email));
 }
 
 // ============================================================
@@ -788,6 +812,17 @@ export default function Home() {
       || null;
   }, [currentUser, collaborators]);
 
+  // ============================================================
+  // OCULTAÇÃO DE VALORES SENSÍVEIS — assessor_plus
+  //   Esconde o card "Estimativa do Mês" para colaboradores com
+  //   nível de acesso assessor_plus (e para os 3 e-mails bloqueados
+  //   na página de Comissões). A lógica é a mesma de Comissoes.tsx.
+  // ============================================================
+  const hideMonthlyEstimate = useMemo(
+    () => isAssessorPlusCollaborator(currentUserData || currentUser),
+    [currentUserData, currentUser],
+  );
+
   const userRank = useMemo(() => {
     if (!currentUserData) return 0;
     const found = globalRanking.find(item =>
@@ -867,6 +902,7 @@ export default function Home() {
   // ============================================================
   const userCommission = useMemo(() => {
     if (isCoordenadorUser) return 0;
+    if (hideMonthlyEstimate) return 0;
     if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) {
       return 0;
     }
@@ -893,7 +929,7 @@ export default function Home() {
       return result.totalCommission;
     }
     return 0;
-  }, [currentUserData, tabelaComissoes, dailyMetrics, isCoordenadorUser]);
+  }, [currentUserData, tabelaComissoes, dailyMetrics, isCoordenadorUser, hideMonthlyEstimate]);
 
   // ============================================================
   // METAS DE GANHOS
@@ -1134,6 +1170,8 @@ export default function Home() {
 
   // ============================================================
   // KPI CARDS
+  //   O card "Estimativa do Mês" é omitido quando o colaborador
+  //   logado é assessor_plus (ou está na lista de e-mails bloqueados).
   // ============================================================
   const kpiCards = [
     { label: "Estimativa do Mês", value: userCommission, target: comissaoTarget, unit: "R$", icon: DollarSign, color: "#2F6FED", simple: true },
@@ -1141,7 +1179,7 @@ export default function Home() {
     { label: "Ganhos", value: effectiveTotals.ganhos, target: totalTargetGanhos, unit: "", icon: FileCheck, color: "#16A34A", simple: false },
     { label: "Protocolados",value: effectiveTotals.ganhos, target: totalTargetGanhos, unit: "", icon: BarChart2, color: "#8B5CF6", simple: false },
     { label: "Taxa de Conversão", value: conversaoPercentual, target: 100, unit: "%", icon: TrendingUp, color: "#EA8C1D", simple: false },
-  ];
+  ].filter(card => !(hideMonthlyEstimate && card.label === "Estimativa do Mês"));
 
   const hasActiveFilters = filters.equipe !== "todas" || filters.colaborador !== "todos" || filters.produto !== "Todos";
   const firstName = currentUser?.nome?.split(" ")[0] || "Usuário";
@@ -1209,7 +1247,10 @@ export default function Home() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+          <div className={cn(
+            "grid grid-cols-2 md:grid-cols-3 gap-4 mb-6",
+            hideMonthlyEstimate ? "lg:grid-cols-4" : "lg:grid-cols-5",
+          )}>
             {kpiCards.map((kpi, i) => <KpiCard key={kpi.label} {...kpi} delay={i * 80} hideValues={hideValues} />)}
           </div>
 
