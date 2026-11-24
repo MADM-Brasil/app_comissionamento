@@ -70,8 +70,14 @@ class AccessControl {
     this.HOME_COMISSOES_ALLOWED_TEAMS = new Set(
       this.HOME_COMISSOES_ALLOWED_TEAM_NAMES.map((t) => this.normalize(t))
     );
+
+    // ─────────────────────────────────────────────────────────
+    // Bloqueio individual da página de Comissões.
+    // ─────────────────────────────────────────────────────────
     this.COMISSOES_BLOCKED_EMAILS = [
       'wallace.batista@madmbrasil.com.br',
+      'lilian.luz@madmbrasil.com.br',
+      'bianca.ferreira@madmbrasil.com.br',   
     ];
     this.COMISSOES_BLOCKED_EMAILS_SET = new Set(
       this.COMISSOES_BLOCKED_EMAILS.map((e) => this.normalize(e))
@@ -86,6 +92,19 @@ class AccessControl {
     ];
     this.ASSESSOR_PLUS_EMAILS_SET = new Set(
       this.ASSESSOR_PLUS_EMAILS.map((e) => this.normalize(e))
+    );
+
+    // ─────────────────────────────────────────────────────────
+    // [NOVO] Colaboradores liberados para as demais páginas
+    // com permissões/filtros do NÍVEL BASE (ASSESSOR).
+    // ─────────────────────────────────────────────────────────
+    this.FULL_ACCESS_EMAILS = [
+      'gabriela.moura@madmbrasil.com.br',
+      'bianca.ferreira@madmbrasil.com.br',
+      'irene.silva@madmbrasil.com.br',
+    ];
+    this.FULL_ACCESS_EMAILS_SET = new Set(
+      this.FULL_ACCESS_EMAILS.map((e) => this.normalize(e))
     );
 
     this.PERMISSIONS = {
@@ -217,7 +236,7 @@ class AccessControl {
 
   isUnit3HomeComissoesUser(user) {
     if (!user) return false;
-    const level = this.getEffectiveAccessLevel(user);
+    const level = this.getFunctionalAccessLevel(user);
     if (!this.HOME_COMISSOES_ALLOWED_LEVELS.includes(level)) return false;
     const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
     if (unidade === this.HOME_COMISSOES_ALLOWED_UNIT) return true;
@@ -242,6 +261,26 @@ class AccessControl {
     return this.getAccessLevel(user.cargo, user.status) === this.LEVELS.ASSESSOR;
   }
 
+  isFullAccessUser(user) {
+    if (!user?.email) return false;
+    return this.FULL_ACCESS_EMAILS_SET.has(this.normalize(user.email));
+  }
+
+  getBaseAccessLevel(user) {
+    return this.getAccessLevel(user?.cargo, user?.status);
+  }
+
+  getFunctionalAccessLevel(user) {
+    const effectiveLevel = this.getEffectiveAccessLevel(user);
+    if (
+      effectiveLevel === this.LEVELS.ASSESSOR_PLUS &&
+      this.isFullAccessUser(user)
+    ) {
+      return this.LEVELS.ASSESSOR;
+    }
+    return effectiveLevel;
+  }
+
   getEffectiveAccessLevel(user) {
     const baseLevel = this.getAccessLevel(user?.cargo, user?.status);
     if (baseLevel !== this.LEVELS.ASSESSOR) return baseLevel;
@@ -255,7 +294,7 @@ class AccessControl {
 
   canSeeHomeComissoes(user) {
     if (!user) return false;
-    const level = this.getEffectiveAccessLevel(user);
+    const level = this.getFunctionalAccessLevel(user);
     if (level >= this.LEVELS.ADMINISTRATIVO) return true;
     return this.isUnit3HomeComissoesUser(user);
   }
@@ -265,11 +304,18 @@ class AccessControl {
 
     if (this.isUnit3HomeComissoesUser(user)) return '/home';
 
-    const level = this.getEffectiveAccessLevel(user);
+    const effectiveLevel  = this.getEffectiveAccessLevel(user);
+    const functionalLevel = this.getFunctionalAccessLevel(user);
 
-    if (level === this.LEVELS.JURIDICO)      return '/suporte';
-    if (level === this.LEVELS.ASSESSOR_PLUS) return '/suporte';
-    if (level === this.LEVELS.SUPERVISAO)    return '/suporte';
+    const isFullAccessPlus =
+      effectiveLevel === this.LEVELS.ASSESSOR_PLUS &&
+      functionalLevel !== this.LEVELS.ASSESSOR_PLUS;
+
+    if (!isFullAccessPlus) {
+      if (effectiveLevel === this.LEVELS.JURIDICO)      return '/suporte';
+      if (effectiveLevel === this.LEVELS.ASSESSOR_PLUS) return '/suporte';
+      if (effectiveLevel === this.LEVELS.SUPERVISAO)    return '/suporte';
+    }
 
     return '/';
   }
@@ -279,7 +325,6 @@ class AccessControl {
   }
 
   setCargoLevel(cargo, level) {
-    // [ALTERADO] limite superior agora é 7 (SUPER_ADMIN).
     if (typeof level !== 'number' || level < 0 || level > 7) {
       throw new Error(`Nível inválido para "${cargo}": ${level}. Use 0–7.`);
     }
@@ -366,22 +411,40 @@ class AccessControl {
   }
 
   getUserPermissions(user) {
-    const level = this.getEffectiveAccessLevel(user);
-    const perms = this.PERMISSIONS[level];
+    const effectiveLevel  = this.getEffectiveAccessLevel(user);
+    const functionalLevel = this.getFunctionalAccessLevel(user);
+
+    let perms;
+    if (functionalLevel !== effectiveLevel) {
+      const basePerms = this.PERMISSIONS[functionalLevel];
+      const plusPerms = this.PERMISSIONS[effectiveLevel];
+      perms = {
+        ...basePerms,
+        canAccessSuporte:              plusPerms.canAccessSuporte,
+        canAccessSuporteBuscaCliente:  plusPerms.canAccessSuporteBuscaCliente,
+        canAccessSuporteMovimentar:    plusPerms.canAccessSuporteMovimentar,
+        canAccessSuporteReportar:      plusPerms.canAccessSuporteReportar,
+        canAccessSuporteSalesOps:      plusPerms.canAccessSuporteSalesOps,
+      };
+    } else {
+      perms = this.PERMISSIONS[effectiveLevel];
+    }
 
     const allowHomeComissoes = this.canSeeHomeComissoes(user);
-
-    // Bloqueio individual da página de Comissões.
     const bloqueadoComissoes = this.isComissoesBlockedByEmail(user);
 
     return {
-      level,
-      levelName: this.getLevelName(level),
+      level: effectiveLevel,
+      levelName: this.getLevelName(effectiveLevel),
+      functionalLevel,
+      functionalLevelName: this.getLevelName(functionalLevel),
+
       cargo: user?.cargo,
       grupo: user?.cargo,
       nome_equipe: user?.nome_equipe,
       unidade_id: user?.unidade_id,
       ...perms,
+
       canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
       canAccessComissoes:
         perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
@@ -404,7 +467,7 @@ class AccessControl {
 
   filterTeamData(teamMembers, currentUser) {
     if (!currentUser || !teamMembers) return [];
-    const userLevel = this.getEffectiveAccessLevel(currentUser);
+    const userLevel = this.getFunctionalAccessLevel(currentUser);
     if (userLevel >= this.LEVELS.COORDENADOR || userLevel === this.LEVELS.ASSESSOR_PLUS) {
       return teamMembers;
     }
@@ -421,7 +484,7 @@ class AccessControl {
     if (!user) {
       return { lockTeam: false, teamName: null, lockCollaborator: false, collaboratorName: null };
     }
-    const level = this.getEffectiveAccessLevel(user);
+    const level = this.getFunctionalAccessLevel(user);
     if (level === this.LEVELS.ASSESSOR) {
       return { lockTeam: true, teamName: user.nome_equipe ?? null, lockCollaborator: true, collaboratorName: user.nome ?? null };
     }
@@ -495,7 +558,7 @@ class AccessControl {
 
     const isSupervisor   = this.isSupervisor(requester.cargo, requester.status);
     const isCoordOrAbove = this.isCoordinatorOrAbove(requester.cargo, requester.status);
-    const isAssessorPlus = this.isAssessorPlusUser(requester);   // [NOVO]
+    const isAssessorPlus = this.isAssessorPlusUser(requester);
 
     if (!isSupervisor && !isCoordOrAbove && !isAssessorPlus) {
       return {
@@ -522,6 +585,11 @@ class AccessControl {
       return { status: 400, error: 'Equipe destino não corresponde à equipe do assessor.' };
     }
 
+    // ─────────────────────────────────────────────────────────
+    // Este bloco roda APENAS para supervisores. Coordenadores e
+    // ASSESSOR_PLUS não entram aqui — livres de restrição de
+    // unidade/equipe por este método.
+    // ─────────────────────────────────────────────────────────
     if (isSupervisor) {
       const requesterUnidade   = requester.unidade_id   != null ? Number(requester.unidade_id)   : null;
       const destinationUnidade = destination.unidade_id != null ? Number(destination.unidade_id) : null;
@@ -621,7 +689,6 @@ export const isSupportJuridico = (cargo, status) => instance.isJuridico(cargo, s
 export const canAccessSupport = (cargo, status) => instance.canAccessSupport(cargo, status);
 export const validateHubSpotMovementAccess = (params) => instance.validateHubSpotMovementAccess(params);
 
-// [NOVO] Bloqueio individual da página de Comissões
 export const COMISSOES_BLOCKED_EMAILS = [...instance.COMISSOES_BLOCKED_EMAILS];
 export const isComissoesBlockedByEmail = (user) => instance.isComissoesBlockedByEmail(user);
 
@@ -633,8 +700,12 @@ export const isHomeComissoesTeam = (user) => instance.isHomeComissoesTeam(user);
 export const canSeeHomeComissoes = (user) => instance.canSeeHomeComissoes(user);
 export const getDefaultLandingPage = (user) => instance.getDefaultLandingPage(user);
 
-// [NOVO] Assessor promovido por e-mail para ASSESSOR_PLUS
 export const ASSESSOR_PLUS_EMAILS = [...instance.ASSESSOR_PLUS_EMAILS];
 export const isAssessorPlusUser = (user) => instance.isAssessorPlusUser(user);
 export const getEffectiveAccessLevel = (user) => instance.getEffectiveAccessLevel(user);
 export const canAccessSupportByUser = (user) => instance.canAccessSupportByUser(user);
+
+export const FULL_ACCESS_EMAILS = [...instance.FULL_ACCESS_EMAILS];
+export const isFullAccessUser = (user) => instance.isFullAccessUser(user);
+export const getBaseAccessLevel = (user) => instance.getBaseAccessLevel(user);
+export const getFunctionalAccessLevel = (user) => instance.getFunctionalAccessLevel(user);
