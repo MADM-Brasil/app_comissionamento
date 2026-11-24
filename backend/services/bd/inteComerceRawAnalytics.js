@@ -13,6 +13,7 @@ import {
   loadDesqualificadosTotal,
   loadStageCounts,
   loadAssinaturasFunil,
+  resolveJuridicoEtapaLeadColumn,
   metricCacheKey,
 } from './metricsLoaders.js';
 
@@ -693,7 +694,9 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     const emContatoStageIds = await getEmContatoStageIds(client);
 
     const productVariantsUpper = produto ? (PRODUCT_VARIANTS[produto] || [produto]).map((p) => p.trim().toUpperCase()) : null;
-    const productFilterClause = productVariantsUpper ? 'AND UPPER(TRIM(produto)) = ANY($3::text[])' : '';
+    const productFilterClause = productVariantsUpper
+      ? 'AND UPPER(TRIM(produto)) = ANY($3::text[])'
+      : `AND UPPER(TRIM(produto)) NOT IN ('QUINQUENIO', 'QUINQUÊNIO')`;
     const productFilterValues = productVariantsUpper ? [productVariantsUpper] : [];
 
     const productIds = produto
@@ -755,9 +758,11 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     const dealResult = await client.query({
       text: `
         SELECT d.deal_id::text, d.hubspot_deal_id, d.data_ganho, d.data_protocolo,
+               d.data_ganho::date::text AS data_ganho_date,
                d.motivo_perda, d.produto_id::text,
                d.etapa_id::text AS current_etapa_id, d.pipeline_id::text AS current_pipeline_id,
-               d.data_distribuicao_comercial, d.created_at
+               d.data_distribuicao_comercial, d.created_at,
+               d.data_criacao_deal::date::text AS data_criacao_deal
         FROM core.deals d
         WHERE d.deal_id = ANY($1::bigint[])
           AND ($2::bigint[] IS NULL OR d.produto_id = ANY($2::bigint[]))
@@ -833,6 +838,8 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       legalQueryValues.push(dealIds);
       const productFragment = productParamIndex != null ? `AND UPPER(TRIM(produto)) = ANY($${productParamIndex}::text[])` : '';
 
+      const juridicoEtapaCol = await resolveJuridicoEtapaLeadColumn();
+
       // Este bloco só roda em PRODUÇÃO (useViews = true). A restrição de
       // data_ganho da SAFRA fica no bloco `else` abaixo. Aqui o texto precisa
       // usar TODOS os parâmetros de legalQueryValues ($1, $2, produto e
@@ -840,14 +847,14 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       // parameters, but prepared statement requires N-1".
       legalOutcomeResult = await client.query({
         text: `
-          SELECT deal_id::text AS deal_id, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id
+          SELECT deal_id::text AS deal_id, data_ganho, ${juridicoEtapaCol} AS etapa, responsavel_lead::text AS responsavel_lead_id
           FROM core.view_app_juridico_auditoria
           WHERE data_ganho IS NOT NULL
             AND ((data_ganho::date >= $1::date AND data_ganho::date <= $2::date ${productFragment}) OR deal_id::text = ANY($${dealIdsParamIndex}::text[]))`,
         values: legalQueryValues,
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
-    } else {
+        } else {
       signatureResult = await client.query({
         text: `
           SELECT assinatura_id::text, deal_id::text, hubspot_deal_id, data_emissao, data_assinatura, consultor_responsavel_assinatura_id::text, status_assinatura
@@ -874,12 +881,14 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       }
       legalOutcomeResult = await client.query({
         text: `
-          SELECT deal_id::text, data_ganho, etapa, responsavel_lead::text AS responsavel_lead_id
-          FROM core.view_app_juridico_auditoria
-          WHERE data_ganho IS NOT NULL
-            AND data_ganho >= $2::date
-            AND data_ganho <  $3::date
-            AND deal_id = ANY($1::bigint[])`,
+          SELECT v.deal_id::text AS deal_id, v.data_ganho, v.etapa,
+                 v.responsavel_lead::text AS responsavel_lead_id
+          FROM core.view_app_juridico_auditoria v
+          JOIN core.deals d ON d.deal_id = v.deal_id
+          WHERE d.data_ganho IS NOT NULL
+            AND d.data_ganho::date >= $2::date
+            AND d.data_ganho::date <  $3::date
+            AND v.deal_id = ANY($1::bigint[])`,
         values: [dealIds, inicio, fim_exclusivo],
         query_timeout: STATEMENT_TIMEOUT_MS + 3_000,
       });
@@ -996,7 +1005,14 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
   if (type === 'EM_CONTATO' && firstCreation && String(firstCreation.etapa_nova_id) === '6650'
       && eventAt.getTime() === timestamp(firstCreation.data_movimentacao)?.getTime()) continue;
   const assigned = attribution.attributionAt(eventAt);
-  events.push({ ... type });
+  events.push({
+    dealId: deal.deal_id,
+    occurredAt: eventAt,
+    dateKey: utcDate(eventAt),
+    collaboratorId: assigned?.collaboratorId ?? null,
+    team: assigned?.team ?? null,
+    type,
+  });
 }
     }
 
@@ -1128,9 +1144,9 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
       protocolEmittedForDeal.add(String(deal.deal_id));
     }
 
-    // Fonte 2 — view jurídica (etapa = Protocolado)
+    // Fonte 2 — view jurídica (etapa / etapa_lead = Protocolado)
     for (const outcome of legalOutcomeResult.rows) {
-      if (String(outcome.etapa ?? '').trim() !== 'Protocolado') continue;
+      if (String(outcome.etapa ?? '').trim().toLowerCase() !== 'protocolado') continue;
       const occurredAt = timestamp(outcome.data_ganho); if (!occurredAt) continue;
       // Em SAFRA, a query já restringe data_ganho à janela; reforço defensivo:
       if (!useViews && (occurredAt < bounds.start || occurredAt >= bounds.end)) continue;
@@ -1146,19 +1162,59 @@ async function loadRawEvents({ inicio, fim_exclusivo, produto, mode }) {
     }
 
     // Fonte de GANHO a partir da view jurídica (mantida como estava).
+      const fimInclusive = new Date(Date.parse(`${fim_exclusivo}T00:00:00Z`) - 86_400_000)
+      .toISOString().slice(0, 10);
+
     for (const outcome of legalOutcomeResult.rows) {
+      // v.etapa <> 'Venda perdida'
       const etapaNorm = String(outcome.etapa ?? '').trim().toLowerCase();
       if (etapaNorm === 'venda perdida' || etapaNorm === 'perdida' || etapaNorm === 'perdido') continue;
-      const occurredAt = timestamp(outcome.data_ganho); if (!occurredAt) continue;
-      // Reforço: em SAFRA, GANHO só conta se data_ganho caiu na janela.
-      if (!useViews && (occurredAt < bounds.start || occurredAt >= bounds.end)) continue;
-      const dateKey = utcDate(outcome.data_ganho); if (!dateKey) continue;
-      const dealId = resolveCanonicalDealId(outcome.deal_id, null) ?? String(outcome.deal_id);
-      let collabId = null, team = null;
-      if (outcome.responsavel_lead_id) { const c = collaboratorMap.get(String(outcome.responsavel_lead_id)); if (c) { collabId = c.colaborador_id; team = c.nome_equipe; } }
-      if (!collabId) { const attribution = allEpisodes.get(dealId); if (attribution) { const assigned = attribution.attributionAt(occurredAt); collabId = assigned?.collaboratorId ?? null; team = assigned?.team ?? null; } }
-      events.push({ dealId, occurredAt, dateKey, collaboratorId: collabId, team, type: 'GANHO' });
+
+      // v.responsavel_lead IS NOT NULL
+      if (outcome.responsavel_lead_id == null || String(outcome.responsavel_lead_id).trim() === '') continue;
+
+      // INNER JOIN — deal_id canônico em core.deals
+      const dealKey = String(outcome.deal_id);
+      if (!dealMap.has(dealKey)) continue;
+      const deal = dealMap.get(dealKey);
+
+      // d.data_ganho::date BETWEEN inicio AND fim — comparação em string YYYY-MM-DD
+      const ganhoDateStr = String(deal.data_ganho_date ?? '');
+      if (!ganhoDateStr || ganhoDateStr < inicio || ganhoDateStr > fimInclusive) continue;
+
+      // d.data_criacao_deal::date BETWEEN inicio AND fim (só em SAFRA)
+      if (!useViews) {
+        const criadoStr = String(deal.data_criacao_deal ?? '');
+        if (!criadoStr || criadoStr < inicio || criadoStr > fimInclusive) continue;
+      }
+
+      // d.etapa_id <> '6673'
+      if (String(deal.current_etapa_id ?? '') === '6673') continue;
+
+      // occurredAt vem do timestamp cru do deals (para atribuição/dia)
+      const occurredAt = timestamp(deal.data_ganho);
+      if (!occurredAt) continue;
+      const dateKey = utcDate(deal.data_ganho);
+      if (!dateKey) continue;
+
+      let collabId = null;
+      let team = null;
+      const c = collaboratorMap.get(String(outcome.responsavel_lead_id));
+      if (c) {
+        collabId = c.colaborador_id;
+        team = c.nome_equipe;
+      }
+      if (!collabId) {
+        const attribution = allEpisodes.get(dealKey);
+        if (attribution) {
+          const assigned = attribution.attributionAt(occurredAt);
+          collabId = assigned?.collaboratorId ?? null;
+          team = assigned?.team ?? null;
+        }
+      }
+      events.push({ dealId: dealKey, occurredAt, dateKey, collaboratorId: collabId, team, type: 'GANHO' });
     }
+
 
     await client.query('COMMIT');
     const collaboratorNames = new Map(collaboratorResult.rows.map((r) => [r.colaborador_id, r.nome]));
@@ -1173,7 +1229,7 @@ function rawCacheKey(params) {
   return createHash('sha256').update(`${params.inicio}|${params.fim_exclusivo}|${params.produto || ''}|${params.mode || ''}|${(params.colaborador_ids_escopo || []).slice().sort().join(',')}`).digest('hex');
 }
 async function getRawEvents(params) {
-  return cached(`inte-comerce-raw:${rawCacheKey(params)}`, () => loadRawEvents(params), { forceRefresh: params.refresh === true });
+  return cached(`inte-comerce-raw-v2:${rawCacheKey(params)}`, () => loadRawEvents(params), { forceRefresh: params.refresh === true });
 }
 
 function emptyResult() { 
@@ -1796,7 +1852,7 @@ async function canonicalTotal(label, loaderFn, params, extra = {}) {
 
 // assinados: visão geral + funil + estratégico + produção
 async function applyCanonicalAssinados(result, params) {
-  const val = await canonicalTotal('assinados', loadAssinadosTotal, params);
+  const val = await canonicalTotal('assinados-v2', loadAssinadosTotal, params, { mode: params.mode });
   if (val == null) return 'banco';
   result.overview.assinados = val;
   if (result.funnel) result.funnel.assinados = val;
@@ -1895,9 +1951,11 @@ async function mergeHubSpot(result, hs, params) {
   };
 
   fonte.assinados    = await applyCanonicalAssinados(result, params);
-  fonte.ganhos       = await applyCanonical('ganhos',       loadGanhosTotal,       result.overview, 'ganhos',       { mode: params.mode });
-  fonte.protocolados = await applyCanonical('protocolados', loadProtocoladosTotal, result.overview, 'protocolados', { mode: params.mode });
-  fonte.emitidos     = await applyCanonical('emitidos',     loadEmitidosTotal,     result.funnel,   'emitidos');
+  // v4 / v2: critérios de Produção (view_emitidos/view_assinados sem QUINQUENIO,
+  // view_app_juridico_auditoria etapa_lead) e Safra atualizados — invalida cache antigo
+  fonte.ganhos       = await applyCanonical('ganhos-v4',       loadGanhosTotal,       result.overview, 'ganhos',       { mode: params.mode });
+  fonte.protocolados = await applyCanonical('protocolados-v2', loadProtocoladosTotal, result.overview, 'protocolados', { mode: params.mode });
+  fonte.emitidos     = await applyCanonical('emitidos-v2',     loadEmitidosTotal,     result.funnel,   'emitidos',     { mode: params.mode });
   fonte.desqualificados = await applyCanonicalDesqualificados(result, params);
 
   result.strategic.recebidos  = result.overview.recebidos;
@@ -2000,10 +2058,11 @@ async function loadStageCountsCached(params) {
 const STAGE_KEYS = ['recebidos', 'em_contato', 'coleta'];
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 
-// Assinados e Emitidos do funil (core.assinaturas) — respeitam safra x produção
-// e o escopo (unidade / equipe / colaborador). Última palavra nesses números.
+// Assinados e Emitidos do funil — Produção lê core.view_emitidos /
+// core.view_assinados (produto <> 'QUINQUENIO'); Safra lê core.assinaturas +
+// core.deals (coorte). Última palavra nesses números.
 async function applyCanonicalAssinaturasFunil(result, params) {
-  const rows = await loadScopedCached('assinaturas-funil', loadAssinaturasFunil, params);
+  const rows = await loadScopedCached('assinaturas-funil-v2', loadAssinaturasFunil, params);
   if (!rows) return 'banco';
 
   let emitidos = 0, assinados = 0;
@@ -2019,22 +2078,66 @@ async function applyCanonicalAssinaturasFunil(result, params) {
   if (result.productionComparison?.month) result.productionComparison.month.assinados = assinados;
   if (result.safraComparison?.month) result.safraComparison.month.assinados = assinados;
 
+  // Atualiza também o comparativo do dia selecionado em Produção
+  if (result.productionComparison?.day && params.selected_day && params.selected_day_end) {
+    const dayRows = await loadScopedCached('assinaturas-funil-v2', loadAssinaturasFunil, {
+      ...params,
+      inicio: params.selected_day,
+      fim_exclusivo: params.selected_day_end,
+    });
+    if (dayRows) {
+      result.productionComparison.day.assinados = dayRows.reduce((acc, r) => acc + num(r.assinados), 0);
+    }
+  }
+
   if (Array.isArray(result.collaborators)) {
     const byId = new Map();
-    for (const r of rows) if (r.colaborador_id != null) byId.set(String(r.colaborador_id), r);
-    const used = new Set();
+    const byName = new Map();
+    for (const r of rows) {
+      if (r.colaborador_id != null) {
+        const id = String(r.colaborador_id);
+        const cur = byId.get(id) || { colaborador_id: id, colaborador: r.colaborador, equipe: r.equipe, emitidos: 0, assinados: 0 };
+        cur.emitidos += num(r.emitidos);
+        cur.assinados += num(r.assinados);
+        byId.set(id, cur);
+      } else {
+        const nameKey = normalizeLabel(r.colaborador);
+        const cur = byName.get(nameKey) || { colaborador_id: null, colaborador: r.colaborador, equipe: r.equipe, emitidos: 0, assinados: 0 };
+        cur.emitidos += num(r.emitidos);
+        cur.assinados += num(r.assinados);
+        byName.set(nameKey, cur);
+      }
+    }
+    const usedIds = new Set();
+    const usedNames = new Set();
     for (const c of result.collaborators) {
       const id = c.colaborador_id != null ? String(c.colaborador_id) : null;
-      const src = id && !used.has(id) ? byId.get(id) : null;
-      if (src) used.add(id);
+      const nameKey = normalizeLabel(c.colaborador);
+      let src = null;
+      if (id && !usedIds.has(id) && byId.has(id)) {
+        src = byId.get(id);
+        usedIds.add(id);
+      } else if (!usedNames.has(nameKey) && byName.has(nameKey)) {
+        src = byName.get(nameKey);
+        usedNames.add(nameKey);
+      }
       c.assinados = num(src?.assinados);
       c.emitidos = num(src?.emitidos);
     }
     for (const [id, src] of byId) {
-      if (used.has(id) || (!num(src.assinados) && !num(src.emitidos))) continue;
+      if (usedIds.has(id) || (!num(src.assinados) && !num(src.emitidos))) continue;
       result.collaborators.push({
         colaborador_id: id, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
-        recebimentos_deal_dia: 0, trabalhados: 0, em_contato: 0, coleta: 0, 
+        recebimentos_deal_dia: 0, trabalhados: 0, em_contato: 0, coleta: 0,
+        emitidos: num(src.emitidos), assinados: num(src.assinados), ganhos: 0, protocolados: 0,
+        pct_olos_pendente: null, pct_hubspot_pendente: null,
+      });
+    }
+    for (const [nameKey, src] of byName) {
+      if (usedNames.has(nameKey) || (!num(src.assinados) && !num(src.emitidos))) continue;
+      result.collaborators.push({
+        colaborador_id: null, colaborador: src.colaborador, equipe_atual: src.equipe || PLACEHOLDER_TEAM,
+        recebimentos_deal_dia: 0, trabalhados: 0, em_contato: 0, coleta: 0,
         emitidos: num(src.emitidos), assinados: num(src.assinados), ganhos: 0, protocolados: 0,
         pct_olos_pendente: null, pct_hubspot_pendente: null,
       });
@@ -2175,7 +2278,9 @@ async function applyCanonicalStageCounts(result, params) {
 //   • Protocolados Safra: deal criado no período (d.data_criacao_deal) E ganho
 //     no período (d.data_ganho), l.etapa = 'Protocolado', d.etapa_id = '6669',
 //     d.is_deleted IS NOT TRUE; equipe via DISTINCT ON (nome) dos colaboradores.
-//   • Ganhos Safra: deal criado no período (d.created_at), etapa <> Venda perdida.
+//   • Ganhos Safra: deal criado no período (d.data_criacao_deal) E ganho no
+//     período (d.data_ganho), d.etapa_id <> '6673', l.etapa <> 'Venda perdida',
+//     l.responsavel_lead IS NOT NULL, COUNT(DISTINCT deal_id).
 //
 // O builder de eventos (buildComparisonResults) só enxerga deals:
 //   • com crm_origem = 'HUBSPOT';
@@ -2214,8 +2319,8 @@ function scopeNameSet(raw, params) {
 async function loadOutcomeRowsCached(label, loaderFn, params, granularity) {
   try {
     const rows = await cached(
-      // v2: critério de Protocolados Safra mudou — não reaproveitar cache antigo
-      metricCacheKey(`${label}-ref-v2`, {
+      // v4: critérios de Produção (data_ganho::date, etapa_lead) e Safra atualizados
+      metricCacheKey(`${label}-ref-v4`, {
         start: params.inicio, end: params.fim_exclusivo,
         equipe: params.equipe, produto: params.produto,
         mode: params.mode, granularity,
@@ -2265,6 +2370,7 @@ export async function applyCanonicalGanhosProtocolados(result, params, raw = nul
   setPair(result.overview);
   setPair(result.funnel);
   if (isSafra) setPair(result.safraComparison?.month);
+  else setPair(result.productionComparison?.month);
 
   if (result.strategic && totalGanhos != null) {
     const assinados = num(result.overview?.assinados);
@@ -2276,9 +2382,7 @@ export async function applyCanonicalGanhosProtocolados(result, params, raw = nul
     }
   }
 
-  if (!isSafra) return 'canonical_metrics';
-
-  // ── Diário (por dia de criação do deal) e comparação do dia selecionado ──
+  // ── Diário (criação em Safra / data_ganho em Produção) e dia selecionado ──
   const needsDaily = Array.isArray(result.daily) || (params.selected_day && params.selected_day_end);
   if (needsDaily) {
     const [gDaily, pDaily] = await Promise.all([
@@ -2302,14 +2406,15 @@ export async function applyCanonicalGanhosProtocolados(result, params, raw = nul
         if (pByDay) d.protocolados = pByDay.get(d.dia) || 0;
       }
     }
-    if (result.safraComparison?.day && params.selected_day && params.selected_day_end) {
+    const dayComparisonTarget = isSafra ? result.safraComparison?.day : result.productionComparison?.day;
+    if (dayComparisonTarget && params.selected_day && params.selected_day_end) {
       const sumRange = (m) => {
         let acc = 0;
         for (const [day, n] of m) if (day >= params.selected_day && day < params.selected_day_end) acc += n;
         return acc;
       };
-      if (gByDay) result.safraComparison.day.ganhos = sumRange(gByDay);
-      if (pByDay) result.safraComparison.day.protocolados = sumRange(pByDay);
+      if (gByDay) dayComparisonTarget.ganhos = sumRange(gByDay);
+      if (pByDay) dayComparisonTarget.protocolados = sumRange(pByDay);
     }
   }
 

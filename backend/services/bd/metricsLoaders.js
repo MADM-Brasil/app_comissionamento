@@ -24,8 +24,17 @@ const PRODUCT_VARIANTS = {
   'Isenção de IR Aposentadoria': ['Isenção de IR Aposentadoria', 'Isencao de IR Aposentadoria'],
 };
 
-function buildProdutoClause(produto, columnExpr, startIdx) {
+const EXCLUDED_PROD_PRODUCTS_SQL = `('QUINQUENIO', 'QUINQUÊNIO')`;
+
+function buildProdutoClause(produto, columnExpr, startIdx, { excludeQuinquenio = false } = {}) {
   if (!produto || produto === 'Todos') {
+    if (excludeQuinquenio) {
+      return {
+        clause: ` AND UPPER(TRIM(${columnExpr})) NOT IN ${EXCLUDED_PROD_PRODUCTS_SQL}`,
+        params: [],
+        nextIdx: startIdx,
+      };
+    }
     return { clause: '', params: [], nextIdx: startIdx };
   }
   const variants = PRODUCT_VARIANTS[produto];
@@ -44,6 +53,36 @@ function buildProdutoClause(produto, columnExpr, startIdx) {
     params: [String(produto).trim().toLowerCase()],
     nextIdx: startIdx + 1,
   };
+}
+
+// Resolve dinamicamente se core.view_app_juridico_auditoria expõe `etapa_lead`
+// (consulta de referência de Produção) ou apenas `etapa`, evitando erro SQL
+// caso o nome da coluna varie entre ambientes.
+let cachedJuridicoEtapaLeadCol = null;
+let cachedJuridicoEtapaLeadAt = 0;
+const JURIDICO_COL_CACHE_TTL_MS = 10 * 60_000;
+
+export async function resolveJuridicoEtapaLeadColumn() {
+  const now = Date.now();
+  if (cachedJuridicoEtapaLeadCol && now - cachedJuridicoEtapaLeadAt < JURIDICO_COL_CACHE_TTL_MS) {
+    return cachedJuridicoEtapaLeadCol;
+  }
+  try {
+    const r = await analyticsQuery(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_schema = 'core'
+          AND table_name = 'view_app_juridico_auditoria'
+          AND column_name IN ('etapa_lead', 'etapa')`
+    );
+    const cols = new Set((r.rows || []).map(row => row.column_name));
+    cachedJuridicoEtapaLeadCol = cols.has('etapa_lead') ? 'etapa_lead' : 'etapa';
+    cachedJuridicoEtapaLeadAt = now;
+    return cachedJuridicoEtapaLeadCol;
+  } catch (err) {
+    console.warn('[metricsLoaders] falha ao inspecionar colunas de view_app_juridico_auditoria, usando etapa:', err?.message);
+    return cachedJuridicoEtapaLeadCol || 'etapa';
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -79,10 +118,10 @@ function buildPeriodFilter(mode, aliasedColumns = {}) {
   return {
     isSafra: false,
     joinClause: '',
-    whereClause: `(${viewAlias}.data_ganho AT TIME ZONE 'UTC')::date >= $1
-      AND (${viewAlias}.data_ganho AT TIME ZONE 'UTC')::date < $2`,
+    whereClause: `${viewAlias}.data_ganho::date >= $1::date
+      AND ${viewAlias}.data_ganho::date < $2::date`,
     dateColumn: `${viewAlias}.data_ganho`,
-    needsAtTimeZone: true,
+    needsAtTimeZone: false,
   };
 }
 
@@ -246,13 +285,78 @@ export async function resolveNomesPorEquipe(equipeNome) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ─── EMITIDOS ────────────────────────────────────────────────────────────────
-export async function loadEmitidos({ start, end, equipe, produto, granularity }) {
+// PRODUÇÃO segue a consulta de referência "Emitidos Produção":
+//   • FROM core.view_emitidos
+//   • data_emissao::date ∈ [start, end)
+//   • produto <> 'QUINQUENIO' (quando nenhum produto específico for selecionado)
+// SAFRA usa core.assinaturas + core.deals com coorte por d.data_criacao_deal.
+export async function loadEmitidos({ start, end, equipe, produto, granularity, mode }) {
   const gran = mapGranularity(granularity);
+  const isSafra = String(mode || '').toLowerCase() === 'safra';
+
+  if (isSafra) {
+    const params = [start, end];
+    let idx = 3;
+    let filters = '';
+    if (equipe && equipe !== 'todas') {
+      filters += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
+      params.push(equipe); idx++;
+    }
+    const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+    filters += prod.clause;
+    params.push(...prod.params);
+
+    const dateExpr = gran ? `(DATE_TRUNC('${gran}', b.data_criacao_deal))::date` : null;
+    const query = `
+      WITH base AS (
+        SELECT
+          a.assinatura_id,
+          a.produto_id,
+          COALESCE(d1.deal_id, d2.deal_id)                     AS deal_id,
+          COALESCE(d1.data_criacao_deal, d2.data_criacao_deal) AS data_criacao_deal,
+          COALESCE(a.consultor_responsavel_emissao_id,
+                   a.consultor_responsavel_assinatura_id,
+                   d1.closer_id, d1.responsavel_id,
+                   d2.closer_id, d2.responsavel_id)            AS dono_id,
+          a.data_emissao
+        FROM core.assinaturas a
+        LEFT JOIN core.deals d1 ON d1.deal_id = a.deal_id
+        LEFT JOIN core.deals d2
+          ON a.deal_id IS NULL
+         AND d2.hubspot_deal_id = a.hubspot_deal_id
+         AND d2.crm_origem = 'HUBSPOT'
+         AND d2.is_deleted IS NOT TRUE
+        WHERE a.tipo_emissao = 'ORIGINAL'
+          AND a.data_cancelamento IS NULL
+          AND a.data_emissao IS NOT NULL
+      )
+      SELECT
+        COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
+        COALESCE(c.nome_equipe, '')                           AS equipe${gran ? `,
+        ${dateExpr} AS periodo` : ''},
+        COUNT(DISTINCT COALESCE(b.deal_id::text, 'assinatura:' || b.assinatura_id::text))::int AS total
+      FROM base b
+      LEFT JOIN core.colaboradores c ON c.colaborador_id = b.dono_id
+      LEFT JOIN core.produtos pr     ON pr.produto_id    = b.produto_id
+      WHERE b.data_criacao_deal IS NOT NULL
+        AND b.data_criacao_deal::date >= $1::date
+        AND b.data_criacao_deal::date <  $2::date
+        AND b.data_emissao::date      >= $1::date
+        AND b.data_emissao::date      <  $2::date${filters}
+      GROUP BY colaborador, c.nome_equipe${gran ? `, ${dateExpr}` : ''}
+      ORDER BY ${gran ? 'periodo, colaborador' : 'colaborador'}
+    `;
+    const result = await analyticsQuery(query, params);
+    const label = `emitidos:${gran || 'agg'}:safra`;
+    warnIfLarge(result.rows, label);
+    return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
+  }
+
   let query = gran
     ? `SELECT
          COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável') as colaborador,
          COALESCE(e.equipe_responsavel_emissao, '') as equipe,
-         (DATE_TRUNC('${gran}', e.data_emissao) AT TIME ZONE 'UTC')::date as periodo,
+         (DATE_TRUNC('${gran}', e.data_emissao))::date as periodo,
          COUNT(*)::int as total`
     : `SELECT
          COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável') as colaborador,
@@ -260,8 +364,8 @@ export async function loadEmitidos({ start, end, equipe, produto, granularity })
          COUNT(*)::int as total`;
   query += `
     FROM core.view_emitidos e
-    WHERE (e.data_emissao AT TIME ZONE 'UTC')::date >= $1
-      AND (e.data_emissao AT TIME ZONE 'UTC')::date < $2
+    WHERE e.data_emissao::date >= $1::date
+      AND e.data_emissao::date <  $2::date
   `;
   const params = [start, end];
   let idx = 3;
@@ -269,16 +373,16 @@ export async function loadEmitidos({ start, end, equipe, produto, granularity })
     query += ` AND LOWER(TRIM(e.equipe_responsavel_emissao)) = LOWER(TRIM($${idx}))`;
     params.push(equipe); idx++;
   }
-  const prod = buildProdutoClause(produto, 'e.produto', idx);
+  const prod = buildProdutoClause(produto, 'e.produto', idx, { excludeQuinquenio: true });
   query += prod.clause;
   params.push(...prod.params);
   query += gran
     ? ` GROUP BY colaborador, e.equipe_responsavel_emissao,
-         (DATE_TRUNC('${gran}', e.data_emissao) AT TIME ZONE 'UTC')::date
+         (DATE_TRUNC('${gran}', e.data_emissao))::date
          ORDER BY periodo, colaborador`
     : ` GROUP BY colaborador, e.equipe_responsavel_emissao ORDER BY colaborador`;
   const result = await analyticsQuery(query, params);
-  const label = `emitidos:${gran || 'agg'}`;
+  const label = `emitidos:${gran || 'agg'}:prod`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
@@ -290,22 +394,87 @@ export async function loadEmitidosTotal(params = {}) {
 }
 
 // ─── ASSINADOS ───────────────────────────────────────────────────────────────
-export async function loadAssinados({ start, end, equipe, produto, granularity }) {
+// PRODUÇÃO segue a consulta de referência "Assinados Produção":
+//   • FROM core.view_assinados
+//   • data_assinatura::date ∈ [start, end)
+//   • produto <> 'QUINQUENIO' (quando nenhum produto específico for selecionado)
+// SAFRA usa core.assinaturas + core.deals com coorte por d.data_criacao_deal.
+export async function loadAssinados({ start, end, equipe, produto, granularity, mode }) {
   const gran = mapGranularity(granularity);
+  const isSafra = String(mode || '').toLowerCase() === 'safra';
+
+  if (isSafra) {
+    const params = [start, end];
+    let idx = 3;
+    let filters = '';
+    if (equipe && equipe !== 'todas') {
+      filters += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
+      params.push(equipe); idx++;
+    }
+    const prod = buildProdutoClause(produto, 'pr.nome_produto', idx);
+    filters += prod.clause;
+    params.push(...prod.params);
+
+    const dateExpr = gran ? `(DATE_TRUNC('${gran}', b.data_criacao_deal))::date` : null;
+    const query = `
+      WITH base AS (
+        SELECT
+          a.assinatura_id,
+          a.produto_id,
+          COALESCE(d1.deal_id, d2.deal_id)                     AS deal_id,
+          COALESCE(d1.data_criacao_deal, d2.data_criacao_deal) AS data_criacao_deal,
+          COALESCE(a.consultor_responsavel_assinatura_id,
+                   d1.closer_id, d1.responsavel_id,
+                   d2.closer_id, d2.responsavel_id)            AS dono_id,
+          a.data_assinatura
+        FROM core.assinaturas a
+        LEFT JOIN core.deals d1 ON d1.deal_id = a.deal_id
+        LEFT JOIN core.deals d2
+          ON a.deal_id IS NULL
+         AND d2.hubspot_deal_id = a.hubspot_deal_id
+         AND d2.crm_origem = 'HUBSPOT'
+         AND d2.is_deleted IS NOT TRUE
+        WHERE a.tipo_emissao = 'ORIGINAL'
+          AND a.data_cancelamento IS NULL
+          AND a.data_assinatura IS NOT NULL
+          AND UPPER(TRIM(COALESCE(a.status_assinatura, ''))) = 'ASSINADO'
+      )
+      SELECT
+        COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
+        COALESCE(c.nome_equipe, '')                           AS equipe${gran ? `,
+        ${dateExpr} AS periodo` : ''},
+        COUNT(DISTINCT COALESCE(b.deal_id::text, 'assinatura:' || b.assinatura_id::text))::int AS total
+      FROM base b
+      LEFT JOIN core.colaboradores c ON c.colaborador_id = b.dono_id
+      LEFT JOIN core.produtos pr     ON pr.produto_id    = b.produto_id
+      WHERE b.data_criacao_deal IS NOT NULL
+        AND b.data_criacao_deal::date >= $1::date
+        AND b.data_criacao_deal::date <  $2::date
+        AND b.data_assinatura::date   >= $1::date
+        AND b.data_assinatura::date   <  $2::date${filters}
+      GROUP BY colaborador, c.nome_equipe${gran ? `, ${dateExpr}` : ''}
+      ORDER BY ${gran ? 'periodo, colaborador' : 'colaborador'}
+    `;
+    const result = await analyticsQuery(query, params);
+    const label = `assinados:${gran || 'agg'}:safra`;
+    warnIfLarge(result.rows, label);
+    return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
+  }
+
   let query = gran
     ? `SELECT
          COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável') as colaborador,
-         equipe_responsavel_assinatura as equipe,
-         (DATE_TRUNC('${gran}', data_assinatura) AT TIME ZONE 'UTC')::date as periodo,
+         COALESCE(equipe_responsavel_assinatura, '') as equipe,
+         (DATE_TRUNC('${gran}', data_assinatura))::date as periodo,
          COUNT(*)::int as total`
     : `SELECT
          COALESCE(NULLIF(TRIM(consultor_responsavel_assinatura), ''), 'Sem responsável') as colaborador,
-         equipe_responsavel_assinatura as equipe,
+         COALESCE(equipe_responsavel_assinatura, '') as equipe,
          COUNT(*)::int as total`;
   query += `
     FROM core.view_assinados
-    WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1
-      AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
+    WHERE data_assinatura::date >= $1::date
+      AND data_assinatura::date <  $2::date
   `;
   const params = [start, end];
   let idx = 3;
@@ -313,16 +482,16 @@ export async function loadAssinados({ start, end, equipe, produto, granularity }
     query += ` AND LOWER(TRIM(equipe_responsavel_assinatura)) = LOWER(TRIM($${idx}))`;
     params.push(equipe); idx++;
   }
-  const prod = buildProdutoClause(produto, 'produto', idx);
+  const prod = buildProdutoClause(produto, 'produto', idx, { excludeQuinquenio: true });
   query += prod.clause;
   params.push(...prod.params);
   query += gran
     ? ` GROUP BY colaborador, equipe_responsavel_assinatura,
-         (DATE_TRUNC('${gran}', data_assinatura) AT TIME ZONE 'UTC')::date
+         (DATE_TRUNC('${gran}', data_assinatura))::date
          ORDER BY periodo, colaborador`
     : ` GROUP BY colaborador, equipe_responsavel_assinatura ORDER BY colaborador`;
   const result = await analyticsQuery(query, params);
-  const label = `assinados:${gran || 'agg'}`;
+  const label = `assinados:${gran || 'agg'}:prod`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
@@ -378,14 +547,16 @@ function buildProtocoladosSafraFilter() {
 export async function loadProtocolados({ start, end, equipe, produto, granularity, mode }) {
   const gran = mapGranularity(granularity);
   const isSafra = String(mode || '').toLowerCase() === 'safra';
+  const etapaColProd = isSafra ? 'etapa' : await resolveJuridicoEtapaLeadColumn();
   const periodFilter = isSafra
     ? buildProtocoladosSafraFilter()
     : {
         ...buildPeriodFilter(mode),
-        colaboradoresJoin: `LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome`,
+        colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
       };
-  // Em produção o filtro de etapa continua aqui; em safra já está no whereClause.
-  const etapaClause = isSafra ? '' : `AND l.etapa IN ('Protocolado')`;
+  // Em produção segue "Protocolados Produção": data_ganho::date no período e
+  // etapa_lead = 'Protocolado' (com fallback para etapa se etapa_lead não existir).
+  const etapaClause = isSafra ? '' : `AND LOWER(TRIM(l.${etapaColProd})) = 'protocolado'`;
 
   const dateExpr = gran
     ? (periodFilter.needsAtTimeZone
@@ -445,17 +616,57 @@ export async function loadProtocoladosTotal(params = {}) {
 // funil_vendas nela. Filtrar por funil quebra a query (warmup falhava com
 // "column l.funil_vendas does not exist"). O FROM já é o filtro de funil.
 //
-// Etapas contam como ganho no período (confirmadas no DB em 2026-11-23):
-//   • 'Protocolado'        (693)
-//   • 'Ag Protocolo'       (67)
-//   • 'Venda ganha'        (hoje 0, mantido por compat futura)
-//   • 'Processo finalizado'(hoje 0, mantido por compat futura)
-// 'Venda perdida' fica de fora. Casing da view é variável ('Ag Protocolo'
-// vs 'AG PROTOCOLO' no sistema antigo), por isso LOWER(TRIM(...)).
+// SAFRA segue a consulta de referência "Ganhos Safra" (2026-11-24):
+//   • deal CRIADO no período       → d.data_criacao_deal ∈ [start, end)
+//   • deal GANHO no período        → d.data_ganho        ∈ [start, end)
+//   • etapa atual do deal          → d.etapa_id <> '6673'
+//   • etapa jurídica               → l.etapa <> 'Venda perdida' (qualquer outra conta)
+//   • assessor preenchido          → l.responsavel_lead IS NOT NULL
+//   • contagem                     → COUNT(DISTINCT l.deal_id)
+//   • equipe via DISTINCT ON (nome) dos colaboradores (não duplica a contagem).
+// `end` é EXCLUSIVO (fim_exclusivo); a consulta de referência usa o último dia
+// inclusivo (ex.: BETWEEN 01/11 e 23/11 ⇔ start=2026-11-01, end=2026-11-24).
+//
+// PRODUÇÃO mantém o critério anterior: data_ganho da view no período e etapas
+// confirmadas no DB em 2026-11-23 ('Protocolado', 'Ag Protocolo', 'Venda ganha',
+// 'Processo finalizado'). Casing da view é variável, por isso LOWER(TRIM(...)).
+export const GANHO_SAFRA_ETAPA_ID_EXCLUIDA = '6673';
+
+function buildGanhosSafraFilter() {
+  return {
+    isSafra: true,
+    joinClause: `INNER JOIN core.deals d ON d.deal_id = l.deal_id`,
+    whereClause: `d.data_criacao_deal::date >= $1::date
+      AND d.data_criacao_deal::date <  $2::date
+      AND d.data_ganho::date        >= $1::date
+      AND d.data_ganho::date        <  $2::date
+      AND d.etapa_id <> '${GANHO_SAFRA_ETAPA_ID_EXCLUIDA}'
+      AND LOWER(TRIM(l.etapa)) <> 'venda perdida'
+      AND l.responsavel_lead IS NOT NULL`,
+    // série diária da safra: dia de criação do deal (mesmo eixo da coorte)
+    dateColumn: `d.data_criacao_deal`,
+    needsAtTimeZone: false,
+    colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
+    etapaClause: '',
+    countExpr: 'COUNT(DISTINCT l.deal_id)::int',
+  };
+}
+
 export async function loadGanhos({ start, end, equipe, produto, granularity, demanda, mode }) {
   const gran = mapGranularity(granularity);
   const somenteDemandaAtual = String(demanda || '').toLowerCase() === 'atual';
-  const periodFilter = buildPeriodFilter(mode);
+  const isSafra = String(mode || '').toLowerCase() === 'safra';
+  const etapaColProd = isSafra ? 'etapa' : await resolveJuridicoEtapaLeadColumn();
+  const periodFilter = isSafra
+    ? buildGanhosSafraFilter()
+    : {
+        ...buildPeriodFilter(mode),
+        colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
+        // PRODUÇÃO segue "Ganhos Produção": data_ganho::date no período e
+        // etapa_lead <> 'Venda Perdida' (case-insensitive; fallback para etapa).
+        etapaClause: `AND LOWER(TRIM(l.${etapaColProd})) <> 'venda perdida'`,
+        countExpr: 'COUNT(*)::int',
+      };
 
   const dateExpr = gran
     ? (periodFilter.needsAtTimeZone
@@ -468,23 +679,18 @@ export async function loadGanhos({ start, end, equipe, produto, granularity, dem
          COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
          COALESCE(c.nome_equipe, '') as equipe,
          ${dateExpr} as periodo,
-         COUNT(*)::int as total`
+         ${periodFilter.countExpr} as total`
     : `SELECT
          COALESCE(NULLIF(TRIM(l.responsavel_lead), ''), 'Sem responsável') as colaborador,
          COALESCE(c.nome_equipe, '') as equipe,
-         COUNT(*)::int as total`;
+         ${periodFilter.countExpr} as total`;
 
   query += `
     FROM core.view_app_juridico_auditoria l
     ${periodFilter.joinClause}
-    LEFT JOIN core.view_app_colaboradores c ON l.responsavel_lead = c.nome
+    ${periodFilter.colaboradoresJoin}
     WHERE ${periodFilter.whereClause}
-      AND LOWER(TRIM(l.etapa)) IN (
-        'protocolado',
-        'ag protocolo',
-        'venda ganha',
-        'processo finalizado'
-      )
+      ${periodFilter.etapaClause}
   `;
 
   if (somenteDemandaAtual) {
@@ -954,12 +1160,13 @@ export async function loadLeadsStagesCatalog({ start, end }) {
 export async function loadWeekly({ start, end }) {
   const query = `
     SELECT
-      (DATE_TRUNC('week', data_assinatura) AT TIME ZONE 'UTC')::date as semana,
+      (DATE_TRUNC('week', data_assinatura))::date as semana,
       COUNT(*)::int as vendas
     FROM core.view_assinados
-    WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1
-      AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
-    GROUP BY (DATE_TRUNC('week', data_assinatura) AT TIME ZONE 'UTC')::date
+    WHERE data_assinatura::date >= $1::date
+      AND data_assinatura::date <  $2::date
+      AND UPPER(TRIM(produto)) NOT IN ${EXCLUDED_PROD_PRODUCTS_SQL}
+    GROUP BY (DATE_TRUNC('week', data_assinatura))::date
     ORDER BY semana
   `;
   const result = await analyticsQuery(query, [start, end]);
@@ -974,11 +1181,12 @@ export async function loadWeekly({ start, end }) {
 export async function loadAssinadosDiarioPorEquipe({ inicio, fim, equipe }) {
   let query = `
     SELECT equipe_responsavel_assinatura as equipe,
-           (data_assinatura AT TIME ZONE 'UTC')::date as dia,
+           data_assinatura::date as dia,
            COUNT(*)::int as total
     FROM core.view_assinados
-    WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1
-      AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
+    WHERE data_assinatura::date >= $1::date
+      AND data_assinatura::date <  $2::date
+      AND UPPER(TRIM(produto)) NOT IN ${EXCLUDED_PROD_PRODUCTS_SQL}
   `;
   const params = [inicio, fim];
   if (equipe && equipe !== 'todas') {
@@ -1001,12 +1209,13 @@ export async function loadAssinadosDiarioPorEquipe({ inicio, fim, equipe }) {
 // ─── ASSINADOS DIÁRIO POR COLABORADOR ────────────────────────────────────────
 export async function loadAssinadosDiarioColaborador({ inicio, fim }) {
   const query = `
-    SELECT (data_assinatura AT TIME ZONE 'UTC')::date as dia,
+    SELECT data_assinatura::date as dia,
            consultor_responsavel_assinatura as colaborador,
            COUNT(*)::int as total
     FROM core.view_assinados
-    WHERE (data_assinatura AT TIME ZONE 'UTC')::date >= $1
-      AND (data_assinatura AT TIME ZONE 'UTC')::date < $2
+    WHERE data_assinatura::date >= $1::date
+      AND data_assinatura::date <  $2::date
+      AND UPPER(TRIM(produto)) NOT IN ${EXCLUDED_PROD_PRODUCTS_SQL}
     GROUP BY dia, consultor_responsavel_assinatura
     ORDER BY dia, consultor_responsavel_assinatura
   `;
@@ -1179,21 +1388,107 @@ export async function loadStageCounts({ start, end, equipe, produto, mode, colab
 }
 
 
-// ─── ASSINADOS / EMITIDOS DO FUNIL (core.assinaturas, safra x produção) ──────
-
+// ─── ASSINADOS / EMITIDOS DO FUNIL (safra x produção) ────────────────────────
+// PRODUÇÃO segue as consultas de referência:
+//   • core.view_emitidos  (data_emissao::date ∈ [start, end), produto <> 'QUINQUENIO')
+//   • core.view_assinados (data_assinatura::date ∈ [start, end), produto <> 'QUINQUENIO')
+// SAFRA segue a coorte por d.data_criacao_deal em core.assinaturas + core.deals.
 export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, colaboradorIds = null }) {
   if (Array.isArray(colaboradorIds) && colaboradorIds.length === 0) return [];
 
   const isSafra = String(mode || '').toLowerCase() === 'safra';
+
+  if (!isSafra) {
+    const params = [start, end];
+    let idx = 3;
+    let emitidosFilters = '';
+    let assinadosFilters = '';
+
+    if (equipe && equipe !== 'todas') {
+      emitidosFilters += ` AND LOWER(TRIM(COALESCE(NULLIF(TRIM(e.equipe_responsavel_emissao), ''), c.nome_equipe, ''))) = LOWER(TRIM($${idx}))`;
+      assinadosFilters += ` AND LOWER(TRIM(COALESCE(NULLIF(TRIM(a.equipe_responsavel_assinatura), ''), c.nome_equipe, ''))) = LOWER(TRIM($${idx}))`;
+      params.push(equipe); idx++;
+    }
+    if (Array.isArray(colaboradorIds)) {
+      emitidosFilters += ` AND c.colaborador_id::text = ANY($${idx}::text[])`;
+      assinadosFilters += ` AND c.colaborador_id::text = ANY($${idx}::text[])`;
+      params.push(colaboradorIds.map(String)); idx++;
+    }
+    const prodEmit = buildProdutoClause(produto, 'e.produto', idx, { excludeQuinquenio: true });
+    const prodAssin = buildProdutoClause(produto, 'a.produto', idx, { excludeQuinquenio: true });
+    emitidosFilters += prodEmit.clause;
+    assinadosFilters += prodAssin.clause;
+    params.push(...prodEmit.params);
+
+    const query = `
+      WITH colaboradores_unicos AS (
+        SELECT DISTINCT ON (LOWER(TRIM(nome)))
+          colaborador_id,
+          nome,
+          nome_equipe
+        FROM core.colaboradores
+        WHERE nome IS NOT NULL AND TRIM(nome) <> ''
+        ORDER BY LOWER(TRIM(nome)), colaborador_id
+      ),
+      emitidos_base AS (
+        SELECT
+          c.colaborador_id::text                                                   AS colaborador_id,
+          COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável') AS colaborador,
+          COALESCE(NULLIF(TRIM(e.equipe_responsavel_emissao), ''), c.nome_equipe, '')    AS equipe,
+          COUNT(*)::int                                                            AS emitidos,
+          0::int                                                                   AS assinados
+        FROM core.view_emitidos e
+        LEFT JOIN colaboradores_unicos c
+          ON LOWER(TRIM(c.nome)) = LOWER(TRIM(e.consultor_responsavel_emissao))
+        WHERE e.data_emissao::date >= $1::date
+          AND e.data_emissao::date <  $2::date${emitidosFilters}
+        GROUP BY c.colaborador_id,
+                 COALESCE(NULLIF(TRIM(e.consultor_responsavel_emissao), ''), 'Sem responsável'),
+                 COALESCE(NULLIF(TRIM(e.equipe_responsavel_emissao), ''), c.nome_equipe, '')
+      ),
+      assinados_base AS (
+        SELECT
+          c.colaborador_id::text                                                      AS colaborador_id,
+          COALESCE(NULLIF(TRIM(a.consultor_responsavel_assinatura), ''), 'Sem responsável') AS colaborador,
+          COALESCE(NULLIF(TRIM(a.equipe_responsavel_assinatura), ''), c.nome_equipe, '')    AS equipe,
+          0::int                                                                      AS emitidos,
+          COUNT(*)::int                                                               AS assinados
+        FROM core.view_assinados a
+        LEFT JOIN colaboradores_unicos c
+          ON LOWER(TRIM(c.nome)) = LOWER(TRIM(a.consultor_responsavel_assinatura))
+        WHERE a.data_assinatura::date >= $1::date
+          AND a.data_assinatura::date <  $2::date${assinadosFilters}
+        GROUP BY c.colaborador_id,
+                 COALESCE(NULLIF(TRIM(a.consultor_responsavel_assinatura), ''), 'Sem responsável'),
+                 COALESCE(NULLIF(TRIM(a.equipe_responsavel_assinatura), ''), c.nome_equipe, '')
+      )
+      SELECT
+        colaborador_id,
+        colaborador,
+        equipe,
+        SUM(emitidos)::int  AS emitidos,
+        SUM(assinados)::int AS assinados
+      FROM (
+        SELECT * FROM emitidos_base
+        UNION ALL
+        SELECT * FROM assinados_base
+      ) u
+      GROUP BY colaborador_id, colaborador, equipe
+      ORDER BY assinados DESC, colaborador
+    `;
+
+    const result = await analyticsQuery(query, params);
+    const label = 'assinaturas-funil:producao';
+    warnIfLarge(result.rows, label);
+    return capRows(result.rows, CAP_AGG, label);
+  }
+
   const params = [start, end];
   let idx = 3;
-  let filters = '';
-  if (isSafra) {
-    filters += `
+  let filters = `
       AND b.data_criacao_deal IS NOT NULL
       AND b.data_criacao_deal::date >= $1::date
       AND b.data_criacao_deal::date <  $2::date`;
-  }
   if (equipe && equipe !== 'todas') {
     filters += ` AND LOWER(TRIM(c.nome_equipe)) = LOWER(TRIM($${idx}))`;
     params.push(equipe); idx++;
@@ -1238,8 +1533,8 @@ export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, 
                       b.dono_deal_id) AS dono_id
       FROM base b
       WHERE b.data_emissao IS NOT NULL
-        AND (b.data_emissao AT TIME ZONE 'UTC')::date >= $1::date
-        AND (b.data_emissao AT TIME ZONE 'UTC')::date <  $2::date
+        AND b.data_emissao::date >= $1::date
+        AND b.data_emissao::date <  $2::date
       UNION ALL
       SELECT b.*, 'assinados' AS tipo,
              COALESCE(b.consultor_responsavel_assinatura_id,
@@ -1247,8 +1542,8 @@ export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, 
       FROM base b
       WHERE b.data_assinatura IS NOT NULL
         AND UPPER(TRIM(COALESCE(b.status_assinatura, ''))) = 'ASSINADO'
-        AND (b.data_assinatura AT TIME ZONE 'UTC')::date >= $1::date
-        AND (b.data_assinatura AT TIME ZONE 'UTC')::date <  $2::date
+        AND b.data_assinatura::date >= $1::date
+        AND b.data_assinatura::date <  $2::date
     )
     SELECT
       c.colaborador_id::text                                AS colaborador_id,
@@ -1267,7 +1562,7 @@ export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, 
   `;
 
   const result = await analyticsQuery(query, params);
-  const label = `assinaturas-funil:${isSafra ? 'safra' : 'producao'}`;
+  const label = 'assinaturas-funil:safra';
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_AGG, label);
 }
