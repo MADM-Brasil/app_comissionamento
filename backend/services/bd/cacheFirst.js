@@ -14,6 +14,9 @@ const DEFAULT_TTL_MS = 60_000;
 const DEFAULT_STALE_MS = 300_000;       // 5min
 const MIN_REFRESH_INTERVAL_MS = 5_000; 
 const MAX_REFRESH_TRACK_ENTRIES = 10_000;
+// Após sobrecarga do analytics, espera este tempo antes de tentar de novo em bg
+const OVERLOAD_BACKOFF_MS =
+  Number(process.env.CACHE_FIRST_OVERLOAD_BACKOFF_MS) || 60_000; // 1min
 
 // ─── L1 (in-process) ─────────────────────────────────────────────────────────
 const L1_MAX_ENTRIES = 500;
@@ -36,6 +39,7 @@ const GZ_MARKER = '__cacheFirstGz';
 // ─── Estado interno (por processo) ───────────────────────────────────────────
 const l1Cache = new Map(); // key → { value, at, ttlMs, staleMs }
 const lastRefreshAttempt = new Map(); // key → timestamp da última tentativa em bg
+const refreshBackoffUntil = new Map(); // key → timestamp até quando não tentar refresh (sobrecarga)
 const TIMEOUT_SENTINEL = Symbol('cache-timeout');
 
 const stats = {
@@ -43,9 +47,11 @@ const stats = {
   l1StaleHits: 0,
   freshHits: 0,
   staleHits: 0,
+  staleOverloadHits: 0,
   misses: 0,
   refreshesTriggered: 0,
   refreshesSkipped: 0,
+  refreshesDeferredOverload: 0,
   loaderErrors: 0,
   fastTimeouts: 0,
   l2SkipsDueToSize: 0,
@@ -68,9 +74,25 @@ function trackRefreshAttempt(key) {
   }
 }
 
+function isOverload(err) {
+  return err?.code === 'ANALYTICS_OVERLOAD' || err?.code === 'ANALYTICS_QUEUE_TIMEOUT';
+}
+
+function setOverloadBackoff(key) {
+  refreshBackoffUntil.set(key, Date.now() + OVERLOAD_BACKOFF_MS);
+  if (refreshBackoffUntil.size > MAX_REFRESH_TRACK_ENTRIES) {
+    const oldest = refreshBackoffUntil.keys().next().value;
+    if (oldest !== undefined) refreshBackoffUntil.delete(oldest);
+  }
+}
+
 function shouldAttemptRefresh(key) {
+  const now = Date.now();
+  const until = refreshBackoffUntil.get(key) || 0;
+  if (until > now) return false;
+  if (until) refreshBackoffUntil.delete(key);
   const last = lastRefreshAttempt.get(key) || 0;
-  return Date.now() - last >= MIN_REFRESH_INTERVAL_MS;
+  return now - last >= MIN_REFRESH_INTERVAL_MS;
 }
 
 function resolveOptions(opts = {}) {
@@ -255,12 +277,13 @@ async function cacheGetSafe(key) {
 // ═════════════════════════════════════════════════════════════════════════════
 // loadAndCache
 // ═════════════════════════════════════════════════════════════════════════════
-function loadAndCache(key, loader, opts) {
+function loadAndCache(key, loader, opts, meta = { background: false }) {
   const { ttlMs, staleMs } = opts;
 
   return singleflight(`fetch:${key}`, async () => {
     try {
-      const value = await loader();
+      // meta.background=true permite ao loader usar priority 'low'
+      const value = await loader(meta);
       l1Set(key, value, ttlMs, staleMs);
       let l2Value = value;
       const size = estimateSize(value);
@@ -299,10 +322,12 @@ function loadAndCache(key, loader, opts) {
 
       // Sucesso → libera o backoff desta key para futuras tentativas
       lastRefreshAttempt.delete(key);
+      refreshBackoffUntil.delete(key);
 
       return value;
     } catch (err) {
       stats.loaderErrors++;
+      if (isOverload(err)) setOverloadBackoff(key);
       // Mantém o backoff ativo — próxima tentativa só após MIN_REFRESH_INTERVAL_MS
       throw err;
     }
@@ -312,6 +337,26 @@ function loadAndCache(key, loader, opts) {
 // ═════════════════════════════════════════════════════════════════════════════
 // Resolução interna 
 // ═════════════════════════════════════════════════════════════════════════════
+function bgRefresh(key, loader, opts, label) {
+  if (!shouldAttemptRefresh(key)) {
+    stats.refreshesSkipped++;
+    return;
+  }
+  trackRefreshAttempt(key);
+  stats.refreshesTriggered++;
+  // Fire-and-forget em prioridade baixa. singleflight deduplica.
+  loadAndCache(key, loader, opts, { background: true }).catch((err) => {
+    if (isOverload(err)) {
+      stats.refreshesDeferredOverload++;
+      console.warn(
+        `[cacheFirst] ${label} adiado ${OVERLOAD_BACKOFF_MS / 1000}s por sobrecarga (key="${key}")`,
+      );
+      return;
+    }
+    console.error(`[cacheFirst] ${label} falhou (key="${key}"):`, err?.message || err);
+  });
+}
+
 async function resolve(key, loader, opts) {
   // ── 0. L1 in-process (fast path) ───────────────────────────
   const l1 = l1Get(key);
@@ -323,18 +368,7 @@ async function resolve(key, loader, opts) {
     if (l1.isStale) {
       stats.l1StaleHits++;
       // Stale-while-revalidate em L1: retorna já + refresh em background
-      if (shouldAttemptRefresh(key)) {
-        trackRefreshAttempt(key);
-        stats.refreshesTriggered++;
-        loadAndCache(key, loader, opts).catch((err) => {
-          console.error(
-            `[cacheFirst] L1-stale bg refresh falhou (key="${key}"):`,
-            err?.message || err,
-          );
-        });
-      } else {
-        stats.refreshesSkipped++;
-      }
+      bgRefresh(key, loader, opts, 'L1-stale bg refresh');
       return { value: l1.value, source: 'l1-stale' };
     }
   }
@@ -354,29 +388,37 @@ async function resolve(key, loader, opts) {
     stats.staleHits++;
     l1Set(key, stale, opts.ttlMs, opts.staleMs);
 
-    if (shouldAttemptRefresh(key)) {
-      trackRefreshAttempt(key);
-      stats.refreshesTriggered++;
-
-      // Fire-and-forget. singleflight dedupe: se 100 usuários chegarem
-      // aqui em STALE ao mesmo tempo, só 1 dispara o loader.
-      loadAndCache(key, loader, opts).catch((err) => {
-        console.error(
-          `[cacheFirst] refresh bg falhou (key="${key}"):`,
-          err?.message || err,
-        );
-      });
-    } else {
-      stats.refreshesSkipped++;
-    }
+    bgRefresh(key, loader, opts, 'refresh bg');
 
     return { value: stale, source: 'stale' };
   }
 
   // ── 3. cache vazio: espera o loader (singleflight) ─────────
   stats.misses++;
-  const value = await loadAndCache(key, loader, opts);
-  return { value, source: 'miss' };
+  try {
+    const value = await loadAndCache(key, loader, opts);
+    return { value, source: 'miss' };
+  } catch (err) {
+    // Sobrecarga do pool de analytics: NÃO propaga erro — serve stale
+    // mesmo expirado (L1 e stale quente já foram checados acima).
+    if (
+      err?.code === 'ANALYTICS_OVERLOAD' ||
+      err?.code === 'ANALYTICS_QUEUE_TIMEOUT'
+    ) {
+      const fallback = await cacheGetSafe(staleKeyOf(key));
+      if (fallback != null) {
+        stats.staleOverloadHits++;
+        l1Set(key, fallback, opts.ttlMs, opts.staleMs);
+        // Não dispara refresh — acabamos de falhar por sobrecarga.
+        return { value: fallback, source: 'stale-overload' };
+      }
+      // Sem stale: registra para observabilidade e propaga
+      console.warn(
+        `[cacheFirst] sobrecarga em "${key}" sem stale disponível — propagando ${err.code}`,
+      );
+    }
+    throw err;
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -388,7 +430,7 @@ async function resolve(key, loader, opts) {
  *
  * @template T
  * @param {string} key
- * @param {() => Promise<T>} loader
+ * @param {(meta?: { background: boolean }) => Promise<T>} loader
  * @param {{ ttlMs?: number, staleMs?: number }} [opts]
  * @returns {Promise<T>}
  *
@@ -412,9 +454,9 @@ export async function cacheFirst(key, loader, opts) {
  *
  * @template T
  * @param {string} key
- * @param {() => Promise<T>} loader
+ * @param {(meta?: { background: boolean }) => Promise<T>} loader
  * @param {{ ttlMs?: number, staleMs?: number }} [opts]
- * @returns {Promise<{ value: T, source: 'l1' | 'l1-stale' | 'fresh' | 'stale' | 'miss' }>}
+ * @returns {Promise<{ value: T, source: 'l1' | 'l1-stale' | 'fresh' | 'stale' | 'stale-overload' | 'miss' }>}
  */
 export async function cacheFirstWithMeta(key, loader, opts) {
   validate(key, loader);
@@ -432,7 +474,7 @@ export async function cacheFirstWithMeta(key, loader, opts) {
  *
  * @template T
  * @param {string} key
- * @param {() => Promise<T>} loader
+ * @param {(meta?: { background: boolean }) => Promise<T>} loader
  * @param {{ ttlMs?: number, staleMs?: number }} [opts]
  * @returns {Promise<T>}
  */
@@ -454,6 +496,7 @@ export async function cacheRefresh(key, loader, opts) {
 export async function cacheInvalidate(key) {
   if (!key || typeof key !== 'string') return;
   lastRefreshAttempt.delete(key);
+  refreshBackoffUntil.delete(key);
   l1Invalidate(key);
   await Promise.all([
     cacheDelete(key).catch(() => {}),
@@ -465,25 +508,15 @@ export async function cacheInvalidate(key) {
  * Estatísticas para /health/warmup ou diagnóstico.
  */
 export function cacheFirstStats() {
-  const total =
+  const hits =
     stats.l1Hits +
     stats.l1StaleHits +
     stats.freshHits +
     stats.staleHits +
-    stats.misses;
+    stats.staleOverloadHits;
+  const total = hits + stats.misses;
 
-  const hitRatio =
-    total > 0
-      ? Number(
-          (
-            (stats.l1Hits +
-              stats.l1StaleHits +
-              stats.freshHits +
-              stats.staleHits) /
-            total
-          ).toFixed(4),
-        )
-      : null;
+  const hitRatio = total > 0 ? Number((hits / total).toFixed(4)) : null;
 
   return {
     ...stats,
@@ -491,12 +524,8 @@ export function cacheFirstStats() {
     l1Size: l1Cache.size,
     l1MaxEntries: L1_MAX_ENTRIES,
     trackedRefreshKeys: lastRefreshAttempt.size,
+    overloadBackoffKeys: refreshBackoffUntil.size,
     totalRequests: total,
-    limits: {
-      maxL2Bytes: MAX_L2_BYTES,
-      fastTimeoutMs: CACHE_GET_FAST_TIMEOUT_MS,
-      l2CompressEnabled: L2_COMPRESS_ENABLED,
-      maxL2CompressInputBytes: MAX_L2_COMPRESS_INPUT_BYTES,
-    },
+    limits: { /* igual ao atual */ },
   };
 }

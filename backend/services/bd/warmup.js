@@ -2,67 +2,48 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Scheduler de warmup de cache.
 //
-// Cada job:
-//   • Roda UMA vez logo após o boot (após delay + jitter, para não colidir
-//     com os outros jobs no mesmo segundo).
-//   • Repete a cada `intervalMs` com ±jitter (carga espalhada no DB).
-//   • Tem HARD TIMEOUT — job travado não bloqueia o loop.
-//   • Aplica BACKOFF EXPONENCIAL em falhas consecutivas (até 10× o interval).
-//   • Respeita limite GLOBAL DE CONCORRÊNCIA (semáforo).
-//   • É AGENDADO APÓS o término da execução anterior — sem sobreposição.
+// **NOVO PADRÃO (recomendado)**: registre `loader` como `() => loadX({ ...params,
+// forceRefresh: true, priority: 'low' })`. O próprio loader (via cacheFirst)
+// gerencia TTL/L1/L2 e refaz o pipeline. O warmup vira um "orquestrador"
+// puro — só agenda, timeout, backoff e observabilidade.
 //
-// Ciclo de vida:
-//   registerWarmup(name, cfg)   → registra + agenda primeira execução
-//   runWarmupNow(name)          → força execução imediata (ops/migração)
-//   getWarmupStatus()           → snapshot para /health/warmup
-//   stopAllWarmup({ drainMs })  → interrompe agendamento + aguarda in-flight
-//   resetWarmupScheduler()      → limpa estado (para testes)
+// **LEGACY**: se você ainda tem um loader "cru" (que NÃO usa cacheFirst),
+// registre com `cacheMode: 'cacheRefresh'` para que o warmup envolva com
+// `cacheRefresh(job.key, job.loader, { ttlMs, staleMs })` como antes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { cacheRefresh } from './cacheFirst.js';
 
-// ─── Configuração global (sobrescreva via registerWarmup) ────────────────────
 const GLOBAL = {
   initialDelayMs: 2_000,
   initialDelayJitterMs: 1_000,
-  intervalJitterPct: 0.10, // ±10% no intervalMs
+  intervalJitterPct: 0.10,
   jobTimeoutMs: 60_000,
   maxConcurrent: 5,
   maxBackoffMultiplier: 10,
 };
 
-// ─── Estado ──────────────────────────────────────────────────────────────────
-const jobs = new Map();         // name → job
-const timers = new Map();       // name → timeout handle
-const slotQueue = [];           // waiters do semáforo global
+const jobs = new Map();
+const timers = new Map();
+const slotQueue = [];
 let globalRunning = 0;
 let shuttingDown = false;
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Semáforo global (protege o DB de N jobs simultâneos)
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Semáforo global ──────────────────────────────────────────────────────────
 async function acquireSlot() {
   if (globalRunning < GLOBAL.maxConcurrent) {
     globalRunning++;
     return;
   }
   await new Promise(resolve => slotQueue.push(resolve));
-  // Slot foi transferido diretamente — não precisa incrementar.
 }
-
 function releaseSlot() {
   const next = slotQueue.shift();
-  if (next) {
-    // Transfere o slot direto — globalRunning fica inalterado
-    next();
-  } else {
-    globalRunning--;
-  }
+  if (next) next();
+  else globalRunning--;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Timeout com limpeza correta (não vaza timer nem deixa promise órfã)
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Timeout ──────────────────────────────────────────────────────────────────
 function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -74,25 +55,18 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Cálculo do próximo interval (base + backoff)
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Backoff ──────────────────────────────────────────────────────────────────
 function computeCurrentInterval(job) {
   if (job.consecutiveFailures === 0) return job.intervalMs;
-  const multiplier = Math.min(job.consecutiveFailures, 5); // até 32×
+  const multiplier = Math.min(job.consecutiveFailures, 5);
   const backoffMs = job.intervalMs * Math.pow(2, multiplier);
   const cap = job.intervalMs * GLOBAL.maxBackoffMultiplier;
   return Math.min(backoffMs, cap);
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Execução de um job (isolada — não mexe no agendamento)
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Execução de um job ───────────────────────────────────────────────────────
 async function executeJob(job) {
-  if (job.running) {
-    // Já em execução (manual trigger durante run agendado) — ignora
-    return;
-  }
+  if (job.running) return;
   if (shuttingDown) return;
 
   job.running = true;
@@ -101,14 +75,14 @@ async function executeJob(job) {
 
   const started = Date.now();
   try {
-    await withTimeout(
-      cacheRefresh(job.key, job.loader, {
-        ttlMs: job.ttlMs,
-        staleMs: job.staleMs,
-      }),
-      job.timeoutMs,
-      `job=${job.name}`
-    );
+    const work = job.cacheMode === 'cacheRefresh'
+      ? cacheRefresh(job.key, job.loader, {
+          ttlMs: job.ttlMs ?? 60_000,
+          staleMs: job.staleMs ?? 300_000,
+        })
+      : job.loader(); // ← loader self-cached (forceRefresh+low já embutido)
+
+    await withTimeout(work, job.timeoutMs, `job=${job.name}`);
 
     job.lastRunAt = Date.now();
     job.lastDurationMs = job.lastRunAt - started;
@@ -132,16 +106,12 @@ async function executeJob(job) {
   }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// Agendamento recursivo (próximo run só depois do atual terminar)
-// ═════════════════════════════════════════════════════════════════════════════
+// ── Agendamento recursivo ────────────────────────────────────────────────────
 function scheduleNext(job) {
   if (shuttingDown) return;
-
   const base = computeCurrentInterval(job);
   const jitter = base * (Math.random() * 2 - 1) * GLOBAL.intervalJitterPct;
   const delay = Math.max(1_000, Math.round(base + jitter));
-
   const timer = setTimeout(() => {
     executeJob(job).finally(() => scheduleNext(job));
   }, delay);
@@ -154,18 +124,37 @@ function scheduleNext(job) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Registra um job. Se já existir, é substituído (registrar de novo é
- * idempotente — útil em hot-reload de dev).
+ * Registra um job.
+ *
+ * Novo padrão (loaders self-cached):
+ *   registerWarmup('emitidos:prod', {
+ *     key: 'emitidos:prod',           // label de observabilidade
+ *     loader: () => loadEmitidos({
+ *       start, end, equipe, produto, mode: 'producao',
+ *       forceRefresh: true, priority: 'low',
+ *     }),
+ *     intervalMs: 120_000,
+ *   });
+ *
+ * Legacy (loader cru, sem cacheFirst interno):
+ *   registerWarmup('raw', {
+ *     key: 'raw:...',
+ *     loader: () => db.query(sql),
+ *     ttlMs: 60_000, staleMs: 300_000,
+ *     intervalMs: 60_000,
+ *     cacheMode: 'cacheRefresh',
+ *   });
  *
  * @param {string} name
  * @param {{
  *   key: string,
  *   loader: () => Promise<any>,
- *   ttlMs: number,
- *   staleMs?: number,
  *   intervalMs: number,
  *   timeoutMs?: number,
  *   enabled?: boolean,
+ *   cacheMode?: 'loader' | 'cacheRefresh',   // default: 'loader'
+ *   ttlMs?: number,                          // obrigatório só em 'cacheRefresh'
+ *   staleMs?: number,                        // idem
  * }} cfg
  */
 export function registerWarmup(name, cfg) {
@@ -184,14 +173,16 @@ export function registerWarmup(name, cfg) {
   if (!Number.isFinite(cfg.intervalMs) || cfg.intervalMs <= 0) {
     throw new Error(`[warmup:${name}] intervalMs inválido`);
   }
-  if (!Number.isFinite(cfg.ttlMs) || cfg.ttlMs <= 0) {
-    throw new Error(`[warmup:${name}] ttlMs inválido`);
-  }
-  if (cfg.enabled === false) {
-    return;
+
+  const cacheMode = cfg.cacheMode ?? 'loader';
+  if (cacheMode === 'cacheRefresh') {
+    if (!Number.isFinite(cfg.ttlMs) || cfg.ttlMs <= 0) {
+      throw new Error(`[warmup:${name}] ttlMs é obrigatório com cacheMode='cacheRefresh'`);
+    }
   }
 
-  // Cancela o anterior se já existia (hot-reload)
+  if (cfg.enabled === false) return;
+
   const previous = jobs.get(name);
   if (previous) {
     const t = timers.get(name);
@@ -203,12 +194,12 @@ export function registerWarmup(name, cfg) {
     name,
     key: cfg.key,
     loader: cfg.loader,
-    ttlMs: cfg.ttlMs,
-    staleMs: cfg.staleMs ?? Math.max(cfg.ttlMs * 5, 300_000),
+    cacheMode,
+    ttlMs: cfg.ttlMs ?? null,
+    staleMs: cfg.staleMs ?? null,
     intervalMs: cfg.intervalMs,
     timeoutMs: cfg.timeoutMs ?? GLOBAL.jobTimeoutMs,
 
-    // Estado observável
     running: false,
     runCount: 0,
     successCount: 0,
@@ -222,9 +213,7 @@ export function registerWarmup(name, cfg) {
 
   jobs.set(name, job);
 
-  // Primeira execução: delay + jitter inicial para espalhar o boot
-  const initialDelay =
-    GLOBAL.initialDelayMs + Math.random() * GLOBAL.initialDelayJitterMs;
+  const initialDelay = GLOBAL.initialDelayMs + Math.random() * GLOBAL.initialDelayJitterMs;
   const timer = setTimeout(() => {
     executeJob(job).finally(() => scheduleNext(job));
   }, initialDelay);
@@ -232,41 +221,12 @@ export function registerWarmup(name, cfg) {
   timers.set(name, timer);
 }
 
-/**
- * Força execução imediata (ignora agendamento e backoff).
- * Útil após migração de dados ou intervenção de ops.
- *
- * @param {string} name
- * @returns {Promise<void>}
- */
 export async function runWarmupNow(name) {
   const job = jobs.get(name);
-  if (!job) {
-    throw new Error(`[warmup] job desconhecido: ${name}`);
-  }
+  if (!job) throw new Error(`[warmup] job desconhecido: ${name}`);
   await executeJob(job);
 }
 
-/**
- * Status completo — use em /health/warmup.
- *
- * @returns {Array<{
- *   name: string,
- *   key: string,
- *   intervalMs: number,
- *   currentIntervalMs: number,
- *   health: 'healthy' | 'degraded' | 'failing' | 'running' | 'idle',
- *   lastRunAt: string | null,
- *   ageMs: number | null,
- *   lastDurationMs: number,
- *   lastError: string | null,
- *   consecutiveFailures: number,
- *   runCount: number,
- *   successCount: number,
- *   failureCount: number,
- *   running: boolean,
- * }>}
- */
 export function getWarmupStatus() {
   const now = Date.now();
   const out = [];
@@ -285,6 +245,7 @@ export function getWarmupStatus() {
     out.push({
       name: job.name,
       key: job.key,
+      cacheMode: job.cacheMode,
       intervalMs: job.intervalMs,
       currentIntervalMs: computeCurrentInterval(job),
       health,
@@ -299,55 +260,29 @@ export function getWarmupStatus() {
       running: job.running,
     });
   }
-  // Ordena por "mais problemáticos primeiro"
   const order = { failing: 0, degraded: 1, running: 2, idle: 3, healthy: 4 };
   out.sort((a, b) => (order[a.health] ?? 9) - (order[b.health] ?? 9));
   return out;
 }
 
-/**
- * Encerra o scheduler.
- *
- * - Cancela todos os timers (nenhum job novo é agendado)
- * - Aguarda jobs em execução terminarem até `drainMs`
- * - Após o drain, libera as referências
- *
- * Deve ser chamado no SIGTERM/SIGINT do server.js.
- *
- * @param {{ drainMs?: number }} [opts]
- * @returns {Promise<void>}
- */
 export async function stopAllWarmup({ drainMs = 5_000 } = {}) {
   shuttingDown = true;
   console.log('[warmup] iniciando shutdown...');
-
-  // 1. Cancela todos os timers
   for (const timer of timers.values()) clearTimeout(timer);
   timers.clear();
-
-  // 2. Aguarda in-flight terminarem (com timeout)
   const start = Date.now();
   while (Date.now() - start < drainMs) {
-    const stillRunning = [...jobs.values()].some(j => j.running);
-    if (!stillRunning) break;
+    if (![...jobs.values()].some(j => j.running)) break;
     await new Promise(r => setTimeout(r, 100));
   }
-
   const stragglers = [...jobs.values()].filter(j => j.running).length;
   if (stragglers > 0) {
-    console.warn(
-      `[warmup] ${stragglers} job(s) ainda em execução após ${drainMs}ms de drain — prosseguindo`
-    );
+    console.warn(`[warmup] ${stragglers} job(s) ainda em execução após ${drainMs}ms`);
   }
-
   jobs.clear();
   console.log('[warmup] scheduler encerrado');
 }
 
-/**
- * Reset completo (apenas para testes).
- * NÃO use em produção.
- */
 export function resetWarmupScheduler() {
   for (const timer of timers.values()) clearTimeout(timer);
   timers.clear();

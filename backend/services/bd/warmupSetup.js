@@ -1,9 +1,5 @@
 // backend/services/bd/warmupSetup.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Registra os jobs de warmup. Objetivo: manter as combinações "quentes"
-// (mês atual, semana atual, hoje, mês anterior × todos × Todos) sempre
-// no cache Redis. O usuário nunca paga uma query lenta.
-//
 
 import { registerWarmup } from './warmup.js';
 import {
@@ -196,7 +192,7 @@ function validateWarmupKeysAgainstRoutes() {
     {
       name: 'metricCacheKey(emitidos)',
       produced: metricCacheKey('emitidos', { start: fakePeriod.start, end: fakePeriod.end }),
-      expected: /^emitidos:end=2026-02-01:start=2026-01-01$/,
+      expected: /^v2:emitidos:end=2026-02-01:start=2026-01-01$/,
     },
     {
       name: 'leadsRecebidosGran',
