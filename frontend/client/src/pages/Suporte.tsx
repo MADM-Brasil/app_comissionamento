@@ -1219,7 +1219,7 @@ function MovimentacaoTab() {
             >
               <UserPlus className={cn("w-5 h-5 mt-0.5 flex-shrink-0", modoEscolhido === "criar" ? "text-[#2F6FED]" : "text-[#64748b]")} />
               <div>
-                <div className="text-sm font-semibold text-[#0f172a]">Criar Lead</div>
+                <div className="text-sm font-semibold text-[#0f172a]">Movimentar Lead</div>
                 <div className="text-xs text-[#64748b] mt-0.5">Informe os dados do cliente para cadastrar e movimentar um novo lead.</div>
               </div>
             </button>
@@ -1229,7 +1229,7 @@ function MovimentacaoTab() {
               <p className="mt-1 text-xs text-[#64748b]">
                 {movimentacaoEmMassa
                   ? "Modo de alteração por link hub: Os links são lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado. Pode ser feito o ajuste "
-                  : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso não o localize vai cadastra-lo(Caso todos os dados necessários estejam preenchidos)."}
+                  : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso ele localize o card e valide que o card atende aos critérios estipulados fará a movimentação. Caso não o localize vai cadastra-lo (Para cadastro o campo e-mail é obrigatório)."}
               </p>
 
               {restringirDestinoAoTimeSupervisor && (

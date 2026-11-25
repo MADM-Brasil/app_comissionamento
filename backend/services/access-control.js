@@ -95,7 +95,7 @@ class AccessControl {
     );
 
     // ─────────────────────────────────────────────────────────
-    // [NOVO] Colaboradores liberados para as demais páginas
+    //  Colaboradores liberados para as demais páginas
     // com permissões/filtros do NÍVEL BASE (ASSESSOR).
     // ─────────────────────────────────────────────────────────
     this.FULL_ACCESS_EMAILS = [
