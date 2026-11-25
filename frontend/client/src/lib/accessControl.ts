@@ -327,7 +327,7 @@ const HOME_COMISSOES_ALLOWED_TEAMS = new Set(
 // ─────────────────────────────────────────────────────────────
 export const COMISSOES_BLOCKED_EMAILS: readonly string[] = [
   'wallace.batista@madmbrasil.com.br',
-  'bianca.ferreira@madmbrasil.com.br',   // [NOVO]
+  'bianca.ferreira@madmbrasil.com.br',
 ];
 const COMISSOES_BLOCKED_EMAILS_SET = new Set(
   COMISSOES_BLOCKED_EMAILS.map(normalize),
@@ -363,7 +363,7 @@ export function getEffectiveAccessLevel(user?: User | null): Level {
 }
 
 // ─────────────────────────────────────────────────────────────
-// [NOVO] FULL_ACCESS — colaboradores liberados a ver AS DEMAIS
+//  FULL_ACCESS — colaboradores liberados a ver AS DEMAIS
 // PÁGINAS (Home, Ranking, etc.) com as permissões e filtros do
 // NÍVEL BASE. O Suporte continua no nível efetivo.
 // ─────────────────────────────────────────────────────────────
@@ -577,7 +577,6 @@ export function getUserPermissions(user?: User | null) {
       perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
 
     canAccessRanking: perms.canAccessRanking && !restrito,
-
     canAccessReports: perms.canAccessReports,
     canAccessConfiguration: perms.canAccessConfiguration,
     canViewTeam: perms.canViewTeam,
