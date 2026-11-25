@@ -2104,7 +2104,7 @@ export default function Inte_commerce() {
             <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#e2e8f0] bg-white px-8 py-6 shadow-2xl">
               <Loader2 className="h-10 w-10 animate-spin text-[#2F6FED]" />
               <p className="text-sm font-semibold text-[#0f172a]">
-                Carregando {viewMode === "safra" ? "Safra" : "Produção"}...
+                Carregando modo {viewMode === "safra" ? "Safra" : "Produção"}...
               </p>
               <p className="text-center text-xs text-[#64748b]">
                 Aguarde enquanto atualizamos os gráficos, tabela e indicadores.
