@@ -740,7 +740,7 @@ async function stopWorker() {
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[shutdown] ${signal} recebido — encerrando graciosamente...`);
+  console.log(`[shutdown] ${signal} recebido — encerrando...`);
 
   // 1) Para de aceitar novas conexões HTTP
   if (server) {

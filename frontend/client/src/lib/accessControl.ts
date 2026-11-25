@@ -709,7 +709,6 @@ function getMenuItems(permissions: {
   }
 
   // ASSESSOR_PLUS "puro" tem todas as flags false exceto Suporte
-  // → produz [{ id: 'suporte' }].
   // ASSESSOR_PLUS com FULL_ACCESS_EMAILS tem permissões herdadas
   // de ASSESSOR nas páginas gerais + Suporte elevado.
   if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });

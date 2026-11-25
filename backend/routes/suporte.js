@@ -1,61 +1,4 @@
 // backend/routes/suporte.js
-// Fluxo unificado: movimentações normais (CRM) e por Link Hub (HUBSPOT_LINK)
-// compartilham a mesma tabela app_comissionamento.tickets_movimentacao_lead.
-// Nenhuma tabela adicional é necessária.
-//
-// ─── FILA DE PROCESSAMENTO ──────────────────────────────────────────
-// Fluxo canônico (worker executa `ticketQueue.js` / `linkHubBatchQueue.js`):
-//
-//   POST /ticket-movimentacao        → status 'pendente'  (na fila)
-//   PATCH /tickets-movimentacao/:id  → status 'pendente'  (se reprocessar_apos_edicao=true)
-//   POST /movimentacoes-linkhub/lotes → status 'pendente'
-//                    ↓
-//   worker: SELECT ... WHERE status_mapeamento='pendente'
-//           FOR UPDATE SKIP LOCKED  (permite N workers concorrentes)
-//                    ↓
-//           status 'processando'  + _worker.processando_desde=NOW()
-//                    ↓
-//           chamada HubSpot (fora da transação)
-//                    ↓
-//           status 'concluido' | 'erro' | 'suporte' | 'aviso' | ...
-//           _worker.processando_desde = NULL
-//
-// Casos SEM responsável (`colaborador_destino_nome` vazio) NÃO entram em
-// 'pendente' — worker não tem para quem mover. São mantidos em 'suporte'
-// até que um Coordenador/Supervisor atribua destino via PATCH. O PATCH
-// com `reprocessar_apos_edicao: true` enfileira no mesmo commit.
-//
-// ─── CONCORRÊNCIA ───────────────────────────────────────────────────
-//   • PATCH /reprocessar usam SELECT ... FOR UPDATE — serializa múltiplos
-//     operadores no mesmo ticket (last-write-wins, sem corrupção).
-//   • PATCH rejeita alteração de destino/status quando o worker está
-//     com lease ativo (_worker.processando_desde < STALE_PROCESSANDO_MS).
-//   • `expected_updated_at` opcional (optimistic locking) avisa o usuário
-//     quando outro operador já alterou o caso.
-//   • Worker DEVE usar FOR UPDATE SKIP LOCKED — caso contrário dois
-//     workers pegam o mesmo ticket.
-//
-// ─── PRODUTO E ROTEAMENTO DE PIPELINE ───────────────────────────────
-//   - Produto resolvido por equipe via resolveTeamProduct.
-//   - Gravado em tickets_suporte.metadados.produto E em
-//     tickets_movimentacao_lead.observacao_sales_ops.produto.
-//   - Worker lê dessas fontes e delega ao hubspot.js para decidir
-//     pipeline/etapa. Esta camada NÃO decide pipeline.
-//
-// ─── STATUS "coordenador" ───────────────────────────────────────────
-//   Emitido pelo worker quando hubspot.js sinaliza bloqueio por prazo
-//   mínimo (requiresCoordinator: true). Coordenador autoriza o
-//   reprocessamento com bypass via POST /:id/reprocessar-coordenador,
-//   que grava `bypass_regra_temporal` no metadata.
-//
-// ─── RECUPERAÇÃO DE "processando" ÓRFÃO ─────────────────────────────
-//   Tickets em 'processando' com atualizado_em / _worker.processando_desde
-//   além de STALE_PROCESSANDO_MS são tratados como órfãos (worker morreu
-//   sem liberar o lock). /reprocessar e /reprocessar-coordenador detectam
-//   esse estado e reenfileiram — sem isso, um único ticket preso trava
-//   a fila inteira.
-//
-// Autenticação de sessão e proteção CSRF devem ser montadas antes deste router.
 
 import express from 'express';
 import { createHash, randomUUID } from 'crypto';
@@ -1825,10 +1768,12 @@ router.patch('/tickets-suporte/:id', asyncRoute(async (req, res) => {
       sets.push(`descricao = $${params.length}`);
     }
     if (hasStatus) {
-      params.push(status);
-      sets.push(`status = $${params.length}`);
-      sets.push(`concluido_em = CASE WHEN $${params.length} = 'Concluído' THEN NOW() ELSE NULL END`);
+    params.push(status);
+    const p = `$${params.length}::varchar`;
+    sets.push(`status = ${p}`);
+    sets.push(`concluido_em = CASE WHEN ${p} = 'Concluído' THEN NOW() ELSE NULL END`);
     }
+
 
     const metadadosAtual = parseJsonObject(ticketAtual.metadados);
     const metadadosNovos = { ...metadadosAtual };

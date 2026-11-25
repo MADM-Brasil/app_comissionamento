@@ -101,12 +101,12 @@ export const analyticsPool = new Pool({
   ...dbConfig,
   max: numericEnv('DB_ANALYTICS_POOL_MAX', 3),
   idleTimeoutMillis: numericEnv('DB_ANALYTICS_IDLE_TIMEOUT_MS', 60_000),
-  connectionTimeoutMillis: numericEnv('DB_ANALYTICS_CONNECTION_TIMEOUT_MS', 15_000),
+  connectionTimeoutMillis: numericEnv('DB_ANALYTICS_CONNECTION_TIMEOUT_MS', 5_000),
   keepAlive: true,
   keepAliveInitialDelayMillis: 10_000,
   application_name: 'madm-analytics',
-  statement_timeout: numericEnv('DB_ANALYTICS_STATEMENT_TIMEOUT_MS', 180_000),
-  query_timeout: numericEnv('DB_ANALYTICS_QUERY_TIMEOUT_MS', 180_000),
+  statement_timeout: numericEnv('DB_ANALYTICS_STATEMENT_TIMEOUT_MS', 20_000),
+  query_timeout: numericEnv('DB_ANALYTICS_QUERY_TIMEOUT_MS', 20_000),
 });
 
 analyticsPool.on('connect', (client) => {

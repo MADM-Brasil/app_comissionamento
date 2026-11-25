@@ -20,19 +20,25 @@ class TeamsNotificadorSuporte {
         });
     }
 
+    semAcento(str) {
+        return String(str || '')
+            .trim()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '');
+    }
+
     mapearAssuntoParaChave(assunto) {
-        const normalizado = (assunto || '').trim();
+        const normalizado = this.semAcento(assunto);
         const mapa = {
             'Discadora': 'casos_discadora',
             'CRM': 'casos_crm',
             'Dash': 'casos_bd_dash',
             'Reversao': 'casos_bd_dash',
-            'Reversão': 'casos_bd_dash',
             'Acesso': 'casos_acessos',
             'Acessos': 'casos_acessos',
             'Outro': 'outros_casos',
             'Movimentacao': 'casos_suporte',
-            'Movimentação': 'casos_suporte',
+            'MovimentacaoLinkHub': 'casos_suporte',
         };
         return mapa[normalizado] || 'outros_casos';
     }
@@ -194,6 +200,68 @@ class TeamsNotificadorSuporte {
         };
     }
 
+    criarCartaoReporte(dados, assunto) {
+        const valor = (v) => {
+            const s = v === undefined || v === null ? '' : String(v).trim();
+            return s || '—';
+        };
+        const fact = (title, value) => ({ title, value: valor(value) });
+
+        const body = [
+            {
+                type: 'TextBlock',
+                text: valor(dados.titulo || assunto),
+                weight: 'Bolder',
+                size: 'Medium',
+                wrap: true,
+            },
+            {
+                type: 'TextBlock',
+                text: valor(dados.descricao),
+                wrap: true,
+                maxLines: 12,
+            },
+            {
+                type: 'FactSet',
+                spacing: 'Medium',
+                facts: [
+                    fact('🏷️ Assunto', assunto),
+                    fact('🧑 Solicitante', dados.solicitante),
+                    fact('🏢 Equipe', dados.equipe),
+                    fact('🕒 Registro', dados.dataHora),
+                ],
+            },
+        ];
+
+        if (dados.anexosMarkdown && dados.anexosMarkdown !== 'Nenhum anexo') {
+            body.push({
+                type: 'TextBlock',
+                text: `📎 ${dados.anexosMarkdown}`,
+                wrap: true,
+                isSubtle: true,
+                size: 'Small',
+            });
+        }
+
+        const actions = [];
+        if (dados.link) {
+            actions.push({
+                type: 'Action.OpenUrl',
+                title: 'Ver card HubSpot',
+                url: dados.link,
+            });
+        }
+
+        return {
+            type: 'AdaptiveCard',
+            $schema: 'http://adaptivecards.io/schemas/adaptive-card.json',
+            version: '1.4',
+            msteams: { width: 'Full' },
+            body,
+            ...(actions.length ? { actions } : {}),
+        };
+    }
+
     criarCartaoMovimentacao(dados, assunto) {
         const fact = (title, value) => ({
             title,
@@ -337,11 +405,18 @@ class TeamsNotificadorSuporte {
             };
 
             // [CORRIGIDO] Cartão montado no servidor, com valores reais.
+            // [CORRIGIDO] Sempre devolve um cartão. Antes, assunto de
+            // Reporte caía em `null` e o payload ia sem adaptiveCardJson,
+            // deixando o campo "Cartão adaptável" do fluxo vazio →
+            // "message body is invalid JSON".
             const adaptiveCard = casoCoordenador
                 ? this.criarCartaoValidacaoCoordenador(dadosRenderizados, assunto, unidadeId)
-                : assunto.toLowerCase().startsWith('movimentacao')
+                : this.semAcento(assunto).toLowerCase().startsWith('movimentacao')
                     ? this.criarCartaoMovimentacao({ ...dadosRenderizados, unidadeId }, assunto)
-                    : null;
+                    : this.criarCartaoReporte(
+                        { ...dadosRenderizados, dataHora: this.formatarDataHora() },
+                        assunto
+                    );
 
             // Monta o JSON raiz exatamente como o Power Automate espera
             const payload = {
@@ -377,14 +452,9 @@ class TeamsNotificadorSuporte {
                 equipeOrigem: dados.equipe || null,
                 unidade: casoCoordenador ? unidadeId : (dados.unidadeId || null),
                 urlValidacao: casoCoordenador ? this.montarUrlCoordenador(dados.idTicketMovimentacao) : null,
-                ...(adaptiveCard
-                    ? {
-                        adaptiveCard,
-                        // Mesmo cartão como texto, para o campo "Adaptive Card"
-                        // do Power Automate (que espera uma string JSON).
-                        adaptiveCardJson: JSON.stringify(adaptiveCard),
-                    }
-                    : {}),
+                // [CORRIGIDO] Sempre enviado — o fluxo lê esta string.
+                adaptiveCard,
+                adaptiveCardJson: JSON.stringify(adaptiveCard),
             };
 
             const response = await fetch(webhookUrl, {
