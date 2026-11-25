@@ -1,10 +1,6 @@
 // backend/routes/discador.js
 import express from 'express';
-import { cacheFirst } from '../services/bd/cacheFirst.js';
-import {
-  metricCacheKey,
-  loadDiscadorResultado,
-} from '../services/bd/metricsLoaders.js';
+import { loadDiscadorResultado } from '../services/bd/metricsLoaders.js';
 
 const router = express.Router();
 
@@ -37,14 +33,11 @@ router.get('/resultado', async (req, res) => {
   const period = parsePeriod(req, res);
   if (!period) return;
 
-  const cacheKey = metricCacheKey('discador-resultado', period);
-
   try {
-    const rows = await cacheFirst(
-      cacheKey,
-      () => loadDiscadorResultado(period),
-      { ttlMs: 120_000, staleMs: 900_000 }, // 2 min fresco / 15 min stale
-    );
+    // loadDiscadorResultado já usa cacheFirst com esta MESMA key.
+    // Envolver de novo em cacheFirst aqui fazia a requisição esperar por
+    // ela mesma (trava) e a página nunca recebia os dados.
+    const rows = await loadDiscadorResultado(period);
     res.json(rows);
   } catch (err) {
     console.error('[discador/resultado]', err);
