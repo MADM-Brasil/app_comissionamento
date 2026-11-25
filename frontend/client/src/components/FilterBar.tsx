@@ -237,7 +237,8 @@ export default function FilterBar({
     ?? (currentUser as any)?.unidadeId
     ?? null;
   const userUnidade = userUnidadeRaw != null ? Number(userUnidadeRaw) : null;
-  const isUnitRestricted = userLevel < LEVELS.ADMINISTRATIVO && userUnidade !== 4;
+  // Coordenadores não ficam presos à própria unidade.
+  const isUnitRestricted = userLevel < LEVELS.ADMINISTRATIVO && !isCoordenador && userUnidade !== 4;
   const initialUnit = isUnitRestricted
     ? userUnidade ?? "todas"
     : initialStored.unidadeId ?? "todas";
@@ -702,7 +703,7 @@ export default function FilterBar({
   }, [onFilterChange]);
 
   // ─── notifyParent ───────────────────────────────────────────────────────
-  // Chamado APENAS pelo apply inicial (1x) e pelo botão "Atualizar Dados".
+
   const notifyParent = (
     equipe: string,
     colaborador: string,
@@ -860,7 +861,6 @@ export default function FilterBar({
       setSelectedProduto("Todos");
       if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
     }
-    // ❌ notifyParent removido — aplica só no botão "Atualizar Dados"
   };
 
   // ─── handleRefresh: ÚNICO ponto que aplica filtros ao pai ──────────────
