@@ -427,7 +427,6 @@ class TeamsNotificadorSuporte {
                 equipe: dados.equipe || 'Não informada',
                 dataHora: this.formatarDataHora(),
                 anexosMarkdown: dados.anexosMarkdown || 'Nenhum anexo',
-                // Campos extras para movimentação
                 cliente: dados.cliente || null,
                 telefone: dados.telefone || null,
                 equipeDestino: dados.equipeDestino || null,
@@ -445,14 +444,11 @@ class TeamsNotificadorSuporte {
                 produto: dados.produto || null,
                 regra: dados.regra || null,
                 notesLastUpdated: dados.notesLastUpdated || null,
-                // [CORRIGIDO] Campos que o cartão do coordenador usa e que
-                // antes não eram enviados (por isso apareciam como ${...}).
                 idTicketMovimentacao: dados.idTicketMovimentacao ?? null,
                 idTicket: dados.idTicket ?? null,
                 equipeOrigem: dados.equipe || null,
                 unidade: casoCoordenador ? unidadeId : (dados.unidadeId || null),
                 urlValidacao: casoCoordenador ? this.montarUrlCoordenador(dados.idTicketMovimentacao) : null,
-                // [CORRIGIDO] Sempre enviado — o fluxo lê esta string.
                 adaptiveCard,
                 adaptiveCardJson: JSON.stringify(adaptiveCard),
             };

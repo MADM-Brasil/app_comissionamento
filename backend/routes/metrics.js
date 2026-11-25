@@ -1,9 +1,7 @@
 
 import express from 'express';
 import db from '../services/bd/db.js';
-import { cacheFirst } from '../services/bd/cacheFirst.js';
 import {
-  metricCacheKey,
   resolveNomesPorEquipe,
   loadEmitidos,
   loadAssinados,
@@ -100,15 +98,6 @@ function filterByNomesEquipe(rows, nomesEquipe, keyCandidates = ['colaborador', 
   });
 }
 
-// ─── TTL adaptativo ─────────────────────────────────────────────────────────
-function ttlForPeriod(start, end) {
-  const hoje = new Date().toISOString().slice(0, 10);
-  const incluiHoje = end && end > hoje;
-  return incluiHoje
-    ? { ttlMs: 90_000, staleMs: 600_000 }     // 1.5min / 10min
-    : { ttlMs: 900_000, staleMs: 3_600_000 }; // 15min / 1h
-}
-
 function normalizeMode(rawMode) {
   const mode = String(rawMode || 'producao').toLowerCase();
   if (!['producao', 'safra'].includes(mode)) return null;
@@ -132,12 +121,7 @@ router.get('/emitidos', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('emitidos-v2', { start, end, equipe, produto, granularity, mode: modeNorm });
-    const rows = await cacheFirst(
-      key,
-      () => loadEmitidos({ start, end, equipe, produto, granularity, mode: modeNorm }),
-      ttlForPeriod(start, end)
-    );
+    const rows = await loadEmitidos({ start, end, equipe, produto, granularity, mode: modeNorm });
 
     res.json({
       success: true,
@@ -163,12 +147,7 @@ router.get('/assinados', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('assinados-v2', { start, end, equipe, produto, granularity, mode: modeNorm });
-    const rows = await cacheFirst(
-      key,
-      () => loadAssinados({ start, end, equipe, produto, granularity, mode: modeNorm }),
-      ttlForPeriod(start, end)
-    );
+    const rows = await loadAssinados({ start, end, equipe, produto, granularity, mode: modeNorm });
 
     res.json({
       success: true,
@@ -187,12 +166,7 @@ router.get('/assinados-diario-por-equipe', requireAuth, async (req, res) => {
     const { inicio, fim, equipe } = req.query;
     if (!inicio || !fim) return res.status(400).json({ success: false, error: 'inicio e fim obrigatórios' });
 
-    const key = `assinados-diario-eq-v2:${inicio}:${fim}:${equipe || 'todas'}`;
-    const rows = await cacheFirst(
-      key,
-      () => loadAssinadosDiarioPorEquipe({ inicio, fim, equipe }),
-      { ttlMs: 180_000, staleMs: 900_000 }
-    );
+    const rows = await loadAssinadosDiarioPorEquipe({ inicio, fim, equipe });
 
     res.json({ success: true, data: rows });
   } catch (err) {
@@ -207,12 +181,7 @@ router.get('/assinados-diario-colaborador', requireAuth, async (req, res) => {
     const { inicio, fim } = req.query;
     if (!inicio || !fim) return res.status(400).json({ success: false, error: 'inicio e fim obrigatórios' });
 
-    const key = `assinados-diario-col-v2:${inicio}:${fim}`;
-    const rows = await cacheFirst(
-      key,
-      () => loadAssinadosDiarioColaborador({ inicio, fim }),
-      { ttlMs: 180_000, staleMs: 900_000 }
-    );
+    const rows = await loadAssinadosDiarioColaborador({ inicio, fim });
 
     res.json({ success: true, data: rows });
   } catch (err) {
@@ -235,12 +204,7 @@ router.get('/protocolados', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('protocolados-v2', { start, end, equipe, produto, granularity, mode: modeNorm });
-    const rows = await cacheFirst(
-      key,
-      () => loadProtocolados({ start, end, equipe, produto, granularity, mode: modeNorm }),
-      ttlForPeriod(start, end)
-    );
+    const rows = await loadProtocolados({ start, end, equipe, produto, granularity, mode: modeNorm });
 
     res.json({
       success: true,
@@ -266,12 +230,7 @@ router.get('/ganhos', requireAuth, async (req, res) => {
 
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('ganhos-v4', { start, end, equipe, produto, granularity, demanda, mode: modeNorm });
-    const rows = await cacheFirst(
-      key,
-      () => loadGanhos({ start, end, equipe, produto, granularity, demanda, mode: modeNorm }),
-      ttlForPeriod(start, end)
-    );
+    const rows = await loadGanhos({ start, end, equipe, produto, granularity, demanda, mode: modeNorm });
 
     res.json({
       success: true,
@@ -291,12 +250,7 @@ router.get('/perdidos', requireAuth, async (req, res) => {
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = metricCacheKey('perdidos', { start, end, equipe, produto, granularity });
-    const rows = await cacheFirst(
-      key,
-      () => loadPerdidos({ start, end, equipe, produto, granularity }),
-      ttlForPeriod(start, end)
-    );
+    const rows = await loadPerdidos({ start, end, equipe, produto, granularity });
 
     res.json({ success: true, data: applyColaboradorFilter(rows, colaboradorNome, ['colaborador']) });
   } catch (err) {
@@ -313,24 +267,14 @@ router.get('/leads-recebidos', requireAuth, async (req, res) => {
     const colaboradorNome = await resolveColaboradorNome(req);
 
     if (granularity) {
-      const key = `leads-recebidos:gran:${start}:${end}:${equipe || 'todas'}:${produto || 'Todos'}:${granularity}`;
-      const rows = await cacheFirst(
-        key,
-        () => loadLeadsRecebidosGran({ start, end, equipe, produto, granularity }),
-        { ttlMs: 90_000, staleMs: 600_000 }
-      );
+      const rows = await loadLeadsRecebidosGran({ start, end, equipe, produto, granularity });
       return res.json({
         success: true,
         data: applyColaboradorFilter(rows, colaboradorNome, ['colaborador']),
       });
     }
 
-    const key = `leads-recebidos:agg:${start}:${end}:${equipe || 'todas'}:${produto || 'Todos'}`;
-    const rows = await cacheFirst(
-      key,
-      () => loadLeadsRecebidosAgg({ start, end, equipe, produto }),
-      { ttlMs: 180_000, staleMs: 1_200_000 }
-    );
+    const rows = await loadLeadsRecebidosAgg({ start, end, equipe, produto });
     return res.json({
       success: true,
       data: applyColaboradorFilter(rows, colaboradorNome, ['colaborador']),
@@ -347,12 +291,7 @@ router.get('/ligacoes', requireAuth, async (req, res) => {
     const { start, end, equipe, colaborador, granularity } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
 
-    const key = `ligacoes:${start}:${end}:${granularity || 'none'}`;
-    let rows = await cacheFirst(
-      key,
-      () => loadLigacoes({ start, end, granularity }),
-      { ttlMs: 300_000, staleMs: 1_800_000 }
-    );
+    let rows = await loadLigacoes({ start, end, granularity });
 
     if (equipe && equipe !== 'todas') {
       const nomesEquipe = await resolveNomesPorEquipe(equipe);
@@ -372,12 +311,7 @@ router.get('/ligacoes/tabulacoes', requireAuth, async (req, res) => {
     const { start, end, equipe, colaborador, categoria } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
 
-    const key = `ligacoes-tab:${start}:${end}:${categoria || ''}`;
-    let filtered = await cacheFirst(
-      key,
-      () => loadLigacoesTabulacoes({ start, end, categoria }),
-      { ttlMs: 300_000, staleMs: 1_800_000 }
-    );
+    let filtered = await loadLigacoesTabulacoes({ start, end, categoria });
 
     if (equipe && equipe !== 'todas') {
       const nomesEquipe = await resolveNomesPorEquipe(equipe);
@@ -406,12 +340,7 @@ router.get('/ligacoes-produtivas', requireAuth, async (req, res) => {
     const { start, end, equipe, colaborador } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
 
-    const key = `ligacoes-prod:${start}:${end}:${equipe || 'todas'}:${colaborador || ''}`;
-    const rows = await cacheFirst(
-      key,
-      () => loadLigacoesProdutivas({ start, end, equipe, colaborador }),
-      { ttlMs: 300_000, staleMs: 1_800_000 }
-    );
+    const rows = await loadLigacoesProdutivas({ start, end, equipe, colaborador });
 
     res.json({ success: true, total: Number(rows[0]?.total) || 0 });
   } catch (err) {
@@ -427,12 +356,7 @@ router.get('/leads/stages', requireAuth, async (req, res) => {
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
     const colaboradorNome = await resolveColaboradorNome(req);
 
-    const key = `leads-stages:${start}:${end}:${equipe || 'todas'}:${produto || 'Todos'}`;
-    const rows = await cacheFirst(
-      key,
-      () => loadLeadsStages({ start, end, equipe, produto }),
-      { ttlMs: 180_000, staleMs: 900_000 }
-    );
+    const rows = await loadLeadsStages({ start, end, equipe, produto });
 
     res.json({ success: true, data: applyColaboradorFilter(rows, colaboradorNome, ['colaborador']) });
   } catch (err) {
@@ -446,12 +370,7 @@ router.get('/leads/stages/catalog', requireAuth, async (req, res) => {
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
 
-    const key = `leads-stages-catalog:${start}:${end}`;
-    const rows = await cacheFirst(
-      key,
-      () => loadLeadsStagesCatalog({ start, end }),
-      { ttlMs: 600_000, staleMs: 3_600_000 }
-    );
+    const rows = await loadLeadsStagesCatalog({ start, end });
 
     res.json({ success: true, data: rows });
   } catch (err) {
@@ -466,13 +385,8 @@ router.get('/weekly', requireAuth, async (req, res) => {
     const { start, end } = req.query;
     if (!start || !end) return res.status(400).json({ success: false, error: 'start e end obrigatórios' });
 
-    const key = `weekly-v2:${start}:${end}`;
     try {
-      const rows = await cacheFirst(
-        key,
-        () => loadWeekly({ start, end }),
-        { ttlMs: 300_000, staleMs: 1_800_000 }
-      );
+      const rows = await loadWeekly({ start, end });
       return res.json({ success: true, data: rows });
     } catch (innerErr) {
       console.error('Erro em /weekly (fallback mock):', innerErr.message);

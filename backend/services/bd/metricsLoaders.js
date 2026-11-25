@@ -1,11 +1,43 @@
 // backend/services/bd/metricsLoaders.js
 
-import db, { analyticsQuery } from './db.js';
-import { cacheFirst } from './cacheFirst.js';
+import db from './db.js';
+import { analyticsQuery } from './analyticsSemaphore.js';
+import { cacheFirst, cacheRefresh } from './cacheFirst.js';
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// TTLs DE CACHE (explícitos por loader; NÃO alteram o default global)
+// ─────────────────────────────────────────────────────────────────────────────
+// Calibragem seguiu o plano:
+//   • dashboard "quente"          → 3min fresco / 15min stale
+//   • loaders de leads/stages     → 2min / 10min
+//   • loaders pesados (funil,dem) → 5min / 30min  ou  10min / 30min
+//   • resolveNomesPorEquipe       → 2h / 4h
+// ═════════════════════════════════════════════════════════════════════════════
+
+const TTL_DASHBOARD = Object.freeze({ ttlMs: 180_000, staleMs: 900_000 });     // 3min / 15min
+const TTL_LEADS     = Object.freeze({ ttlMs: 120_000, staleMs: 600_000 });     // 2min / 10min
+const TTL_HEAVY     = Object.freeze({ ttlMs: 300_000, staleMs: 1_800_000 });   // 5min / 30min
+const TTL_DEMANDA   = Object.freeze({ ttlMs: 600_000, staleMs: 1_800_000 });   // 10min / 30min
+const TTL_EQUIPE    = Object.freeze({ ttlMs: 7_200_000, staleMs: 14_400_000 }); // 2h / 4h
+const TTL_DISC      = Object.freeze({ ttlMs: 180_000, staleMs: 900_000 });     // 3min / 15min
 
 // ═════════════════════════════════════════════════════════════════════════════
 // HELPERS DE SQL
 // ═════════════════════════════════════════════════════════════════════════════
+
+function loadCached(key, loaderFn, ttlOpts, { forceRefresh } = {}) {
+  return forceRefresh
+    ? cacheRefresh(key, loaderFn, ttlOpts)
+    : cacheFirst(key, loaderFn, ttlOpts);
+}
+
+function withLoaderPriority(options, meta) {
+  return {
+    ...options,
+    priority: meta?.background ? 'low' : (options.priority ?? 'high'),
+  };
+}
 
 function normalize(str) {
   return (str || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -27,7 +59,8 @@ const PRODUCT_VARIANTS = {
 const EXCLUDED_PROD_PRODUCTS_SQL = `('QUINQUENIO', 'QUINQUÊNIO')`;
 
 function buildProdutoClause(produto, columnExpr, startIdx, { excludeQuinquenio = false } = {}) {
-  if (!produto || produto === 'Todos') {
+  const produtoNorm = normalize(String(produto ?? ''));
+  if (!produtoNorm || ['todos', 'todas', 'all', 'geral'].includes(produtoNorm)) {
     if (excludeQuinquenio) {
       return {
         clause: ` AND UPPER(TRIM(${columnExpr})) NOT IN ${EXCLUDED_PROD_PRODUCTS_SQL}`,
@@ -55,9 +88,9 @@ function buildProdutoClause(produto, columnExpr, startIdx, { excludeQuinquenio =
   };
 }
 
-// Resolve dinamicamente se core.view_app_juridico_auditoria expõe `etapa_lead`
-// (consulta de referência de Produção) ou apenas `etapa`, evitando erro SQL
-// caso o nome da coluna varie entre ambientes.
+// ═════════════════════════════════════════════════════════════════════════════
+// Resolve dinamicamente a coluna de etapa em core.view_app_juridico_auditoria
+// ═════════════════════════════════════════════════════════════════════════════
 let cachedJuridicoEtapaLeadCol = null;
 let cachedJuridicoEtapaLeadAt = 0;
 const JURIDICO_COL_CACHE_TTL_MS = 10 * 60_000;
@@ -68,12 +101,16 @@ export async function resolveJuridicoEtapaLeadColumn() {
     return cachedJuridicoEtapaLeadCol;
   }
   try {
+    // Bootstrap — prioridade baixa. Se o pool estiver saturado, isto pode
+    // esperar/falhar sem impactar telas (há fallback para 'etapa').
     const r = await analyticsQuery(
       `SELECT column_name
          FROM information_schema.columns
         WHERE table_schema = 'core'
           AND table_name = 'view_app_juridico_auditoria'
-          AND column_name IN ('etapa_lead', 'etapa')`
+          AND column_name IN ('etapa_lead', 'etapa')`,
+      [],
+      'low',
     );
     const cols = new Set((r.rows || []).map(row => row.column_name));
     cachedJuridicoEtapaLeadCol = cols.has('etapa_lead') ? 'etapa_lead' : 'etapa';
@@ -86,16 +123,7 @@ export async function resolveJuridicoEtapaLeadColumn() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// FILTRO SAFRA vs PRODUÇÃO (usado em loadGanhos e loadProtocolados)
-// ─────────────────────────────────────────────────────────────────────────────
-// Safra:      coorte por core.deals.created_at (quando o deal foi criado)
-// Produção:   filtro por data_ganho da view (quando o evento ocorreu)
-//
-// Retorna as três peças que variam entre os dois modos:
-//   • joinClause:  '' ou "INNER JOIN core.deals d ON ..."
-//   • whereClause: a expressão de filtro de período ($1 e $2)
-//   • dateColumn:  a coluna de data a ser usada em SELECT/GROUP BY (gran)
-//   • needsAtTimeZone: true se a coluna for timestamptz (data_ganho)
+// FILTRO SAFRA vs PRODUÇÃO
 // ═════════════════════════════════════════════════════════════════════════════
 
 function buildPeriodFilter(mode, aliasedColumns = {}) {
@@ -127,20 +155,12 @@ function buildPeriodFilter(mode, aliasedColumns = {}) {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // PROTEÇÃO CONTRA PAYLOAD GIGANTE
-// ─────────────────────────────────────────────────────────────────────────────
-// Limites calibrados para não truncar em uso normal:
-//   • Série temporal (gran): 253 colaboradores × 31 dias = 7.843 linhas
-//     → cap de 10.000 dá 27% de folga
-//   • Agregado por colaborador: ~2.000–4.000 linhas; cap de 8.000 é folgado
-//   • Detalhe (demanda): uma linha por deal → cap de 20.000
-//
-// Se o log mostrar "TRUNCANDO", é sinal de query retornando linhas demais.
 // ═════════════════════════════════════════════════════════════════════════════
 
 const CAP_SERIES = 10_000;
 const CAP_AGG = 8_000;
 const CAP_DETAIL = 20_000;
-const WARN_BYTES_THRESHOLD = 2 * 1024 * 1024; // 2 MB
+const WARN_BYTES_THRESHOLD = 2 * 1024 * 1024;
 
 function capRows(rows, limit, label) {
   if (!Array.isArray(rows)) return rows;
@@ -170,9 +190,7 @@ function warnIfLarge(rows, label) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// HELPERS ESCALARES — soma `total` de um Array<{ total }>
-// Usados pelos wrappers load*Total para consumidores que só precisam do
-// agregado do período (ex.: inteComerceRawAnalytics.mergeHubSpot).
+// HELPERS ESCALARES
 // ═════════════════════════════════════════════════════════════════════════════
 
 function sumTotal(rows) {
@@ -189,7 +207,7 @@ function sumTotal(rows) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// QUALIFICATIONS (usado por /ligacoes* e /ligacoes/tabulacoes)
+// QUALIFICATIONS
 // ═════════════════════════════════════════════════════════════════════════════
 
 export const QUALIFICATIONS = {
@@ -224,21 +242,30 @@ export const QUALIFICATIONS = {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-// CACHE KEY 
+// CACHE KEY (agora com serialização determinística de arrays)
 // ═════════════════════════════════════════════════════════════════════════════
 
 export function metricCacheKey(tipo, params) {
-  const parts = [tipo];
+  // v2: invalida o cache antigo (que ainda excluía Quinquênio no filtro "Todos")
+  const parts = ['v2', tipo];
   const keys = Object.keys(params || {}).sort();
   for (const k of keys) {
     const v = params[k];
-    if (v !== undefined && v !== null && v !== '') parts.push(`${k}=${v}`);
+    if (v === undefined || v === null || v === '') continue;
+    if (Array.isArray(v)) {
+      // Ordena para que a mesma combinação em ordem diferente gere a MESMA key.
+      // (ex.: colaboradorIds=['b','a'] e ['a','b'] compartilham cache)
+      const serialized = JSON.stringify([...v].map(String).sort());
+      parts.push(`${k}=${serialized}`);
+    } else {
+      parts.push(`${k}=${v}`);
+    }
   }
   return parts.join(':');
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// resolveNomesPorEquipe — CACHEADO (1h fresco / 2h stale)
+// resolveNomesPorEquipe — CACHEADO (2h fresco / 4h stale)
 // ═════════════════════════════════════════════════════════════════════════════
 
 const STOPWORDS_EQUIPE = new Set([
@@ -258,11 +285,13 @@ export async function resolveNomesPorEquipe(equipeNome) {
 
   return cacheFirst(
     `equipe-membros:${equipeNome}`,
-    async () => {
+    async (meta) => {
       const r = await analyticsQuery(
         `SELECT nome, nome_equipe
            FROM core.view_app_colaboradores
-          WHERE nome IS NOT NULL`
+          WHERE nome IS NOT NULL`,
+        [],
+        meta?.background ? 'low' : 'high',
       );
       const filtroTokens = tokenizeEquipe(equipeNome);
       if (filtroTokens.length === 0) return [];
@@ -276,21 +305,26 @@ export async function resolveNomesPorEquipe(equipeNome) {
         .map(row => row.nome)
         .filter(Boolean);
     },
-    { ttlMs: 3_600_000, staleMs: 7_200_000 } // 1h / 2h
+    TTL_EQUIPE,
   );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// LOADERS PUROS
+// EMITIDOS
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── EMITIDOS ────────────────────────────────────────────────────────────────
-// PRODUÇÃO segue a consulta de referência "Emitidos Produção":
-//   • FROM core.view_emitidos
-//   • data_emissao::date ∈ [start, end)
-//   • produto <> 'QUINQUENIO' (quando nenhum produto específico for selecionado)
-// SAFRA usa core.assinaturas + core.deals com coorte por d.data_criacao_deal.
-export async function loadEmitidos({ start, end, equipe, produto, granularity, mode }) {
+export async function loadEmitidos(options = {}) {
+  const { priority, forceRefresh, ...cacheParams } = options;
+  const key = metricCacheKey('emitidos', cacheParams);
+  return loadCached(
+    key,
+    (meta) => loadEmitidosUncached(withLoaderPriority(options, meta)),
+    TTL_DASHBOARD,
+    { forceRefresh },
+  );
+}
+
+async function loadEmitidosUncached({ start, end, equipe, produto, granularity, mode, priority = 'high' }) {
   const gran = mapGranularity(granularity);
   const isSafra = String(mode || '').toLowerCase() === 'safra';
 
@@ -346,7 +380,7 @@ export async function loadEmitidos({ start, end, equipe, produto, granularity, m
       GROUP BY colaborador, c.nome_equipe${gran ? `, ${dateExpr}` : ''}
       ORDER BY ${gran ? 'periodo, colaborador' : 'colaborador'}
     `;
-    const result = await analyticsQuery(query, params);
+    const result = await analyticsQuery(query, params, priority);
     const label = `emitidos:${gran || 'agg'}:safra`;
     warnIfLarge(result.rows, label);
     return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
@@ -373,7 +407,7 @@ export async function loadEmitidos({ start, end, equipe, produto, granularity, m
     query += ` AND LOWER(TRIM(e.equipe_responsavel_emissao)) = LOWER(TRIM($${idx}))`;
     params.push(equipe); idx++;
   }
-  const prod = buildProdutoClause(produto, 'e.produto', idx, { excludeQuinquenio: true });
+  const prod = buildProdutoClause(produto, 'e.produto', idx, { excludeQuinquenio: false });
   query += prod.clause;
   params.push(...prod.params);
   query += gran
@@ -381,25 +415,32 @@ export async function loadEmitidos({ start, end, equipe, produto, granularity, m
          (DATE_TRUNC('${gran}', e.data_emissao))::date
          ORDER BY periodo, colaborador`
     : ` GROUP BY colaborador, e.equipe_responsavel_emissao ORDER BY colaborador`;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `emitidos:${gran || 'agg'}:prod`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
 export async function loadEmitidosTotal(params = {}) {
   const rows = await loadEmitidos({ ...params, granularity: null });
   return sumTotal(rows);
 }
 
-// ─── ASSINADOS ───────────────────────────────────────────────────────────────
-// PRODUÇÃO segue a consulta de referência "Assinados Produção":
-//   • FROM core.view_assinados
-//   • data_assinatura::date ∈ [start, end)
-//   • produto <> 'QUINQUENIO' (quando nenhum produto específico for selecionado)
-// SAFRA usa core.assinaturas + core.deals com coorte por d.data_criacao_deal.
-export async function loadAssinados({ start, end, equipe, produto, granularity, mode }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// ASSINADOS
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadAssinados(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('assinados', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadAssinadosUncached(withLoaderPriority(options, meta)),
+    TTL_DASHBOARD,
+  );
+}
+
+async function loadAssinadosUncached({ start, end, equipe, produto, granularity, mode, priority = 'high' }) {
   const gran = mapGranularity(granularity);
   const isSafra = String(mode || '').toLowerCase() === 'safra';
 
@@ -455,7 +496,7 @@ export async function loadAssinados({ start, end, equipe, produto, granularity, 
       GROUP BY colaborador, c.nome_equipe${gran ? `, ${dateExpr}` : ''}
       ORDER BY ${gran ? 'periodo, colaborador' : 'colaborador'}
     `;
-    const result = await analyticsQuery(query, params);
+    const result = await analyticsQuery(query, params, priority);
     const label = `assinados:${gran || 'agg'}:safra`;
     warnIfLarge(result.rows, label);
     return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
@@ -482,7 +523,7 @@ export async function loadAssinados({ start, end, equipe, produto, granularity, 
     query += ` AND LOWER(TRIM(equipe_responsavel_assinatura)) = LOWER(TRIM($${idx}))`;
     params.push(equipe); idx++;
   }
-  const prod = buildProdutoClause(produto, 'produto', idx, { excludeQuinquenio: true });
+  const prod = buildProdutoClause(produto, 'produto', idx, { excludeQuinquenio: false });
   query += prod.clause;
   params.push(...prod.params);
   query += gran
@@ -490,34 +531,21 @@ export async function loadAssinados({ start, end, equipe, produto, granularity, 
          (DATE_TRUNC('${gran}', data_assinatura))::date
          ORDER BY periodo, colaborador`
     : ` GROUP BY colaborador, equipe_responsavel_assinatura ORDER BY colaborador`;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `assinados:${gran || 'agg'}:prod`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// Wrapper escalar
 export async function loadAssinadosTotal(params = {}) {
   const rows = await loadAssinados({ ...params, granularity: null });
   return sumTotal(rows);
 }
 
-// ─── PROTOCOLADOS ────────────────────────────────────────────────────────────
-// SAFRA segue a consulta de referência "Protocolados Safra":
-//   • deal CRIADO no período       → d.data_criacao_deal ∈ [start, end)
-//   • deal GANHO no período        → d.data_ganho        ∈ [start, end)
-//   • deal não excluído            → d.is_deleted IS NOT TRUE
-//   • etapa jurídica = Protocolado → l.etapa = 'Protocolado'
-//   • etapa atual do deal          → d.etapa_id = '6669'
-//   • equipe vem de view_app_colaboradores com DISTINCT ON (nome), para que um
-//     colaborador cadastrado em mais de uma linha não duplique a contagem.
-// `end` é EXCLUSIVO (fim_exclusivo); a consulta de referência usa o último dia
-// inclusivo (ex.: 01/11 a 22/11 ⇔ start=2026-11-01, end=2026-11-23).
-// PRODUÇÃO mantém o filtro por data_ganho da view (buildPeriodFilter).
-//
-// NOTA: diagnóstico em 2026-11-23 confirmou que a view core.view_app_juridico_auditoria
-// só contém o pipeline "Jurídico Auditoria de Ganho" — o FROM já é o filtro de funil.
-// O filtro de produção por data_ganho está alinhado com o esperado (693 no período).
+// ═════════════════════════════════════════════════════════════════════════════
+// PROTOCOLADOS
+// ═════════════════════════════════════════════════════════════════════════════
+
 export const PROTOCOLADO_ETAPA_ID = '6669';
 
 const COLABORADORES_UNICOS_JOIN = `LEFT JOIN (
@@ -537,14 +565,23 @@ function buildProtocoladosSafraFilter() {
       AND d.is_deleted IS NOT TRUE
       AND l.etapa = 'Protocolado'
       AND d.etapa_id = '${PROTOCOLADO_ETAPA_ID}'`,
-    // série diária da safra: dia de criação do deal (mesmo eixo da coorte)
     dateColumn: `d.data_criacao_deal`,
     needsAtTimeZone: false,
     colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
   };
 }
 
-export async function loadProtocolados({ start, end, equipe, produto, granularity, mode }) {
+export async function loadProtocolados(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('protocolados', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadProtocoladosUncached(withLoaderPriority(options, meta)),
+    TTL_DASHBOARD,
+  );
+}
+
+async function loadProtocoladosUncached({ start, end, equipe, produto, granularity, mode, priority = 'high' }) {
   const gran = mapGranularity(granularity);
   const isSafra = String(mode || '').toLowerCase() === 'safra';
   const etapaColProd = isSafra ? 'etapa' : await resolveJuridicoEtapaLeadColumn();
@@ -554,8 +591,6 @@ export async function loadProtocolados({ start, end, equipe, produto, granularit
         ...buildPeriodFilter(mode),
         colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
       };
-  // Em produção segue "Protocolados Produção": data_ganho::date no período e
-  // etapa_lead = 'Protocolado' (com fallback para etapa se etapa_lead não existir).
   const etapaClause = isSafra ? '' : `AND LOWER(TRIM(l.${etapaColProd})) = 'protocolado'`;
 
   const dateExpr = gran
@@ -598,38 +633,21 @@ export async function loadProtocolados({ start, end, equipe, produto, granularit
          ORDER BY periodo, colaborador`
     : ` GROUP BY colaborador, c.nome_equipe ORDER BY colaborador`;
 
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `protocolados:${gran || 'agg'}:${periodFilter.isSafra ? 'safra' : 'prod'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
 export async function loadProtocoladosTotal(params = {}) {
   const rows = await loadProtocolados({ ...params, granularity: null });
   return sumTotal(rows);
 }
 
-// ─── GANHOS ────────────────────────────────────────
-// IMPORTANTE (2026-11-23): a view core.view_app_juridico_auditoria já é
-// escopada ao pipeline "Jurídico Auditoria de Ganho" — NÃO existe coluna
-// funil_vendas nela. Filtrar por funil quebra a query (warmup falhava com
-// "column l.funil_vendas does not exist"). O FROM já é o filtro de funil.
-//
-// SAFRA segue a consulta de referência "Ganhos Safra" (2026-11-24):
-//   • deal CRIADO no período       → d.data_criacao_deal ∈ [start, end)
-//   • deal GANHO no período        → d.data_ganho        ∈ [start, end)
-//   • etapa atual do deal          → d.etapa_id <> '6673'
-//   • etapa jurídica               → l.etapa <> 'Venda perdida' (qualquer outra conta)
-//   • assessor preenchido          → l.responsavel_lead IS NOT NULL
-//   • contagem                     → COUNT(DISTINCT l.deal_id)
-//   • equipe via DISTINCT ON (nome) dos colaboradores (não duplica a contagem).
-// `end` é EXCLUSIVO (fim_exclusivo); a consulta de referência usa o último dia
-// inclusivo (ex.: BETWEEN 01/11 e 23/11 ⇔ start=2026-11-01, end=2026-11-24).
-//
-// PRODUÇÃO mantém o critério anterior: data_ganho da view no período e etapas
-// confirmadas no DB em 2026-11-23 ('Protocolado', 'Ag Protocolo', 'Venda ganha',
-// 'Processo finalizado'). Casing da view é variável, por isso LOWER(TRIM(...)).
+// ═════════════════════════════════════════════════════════════════════════════
+// GANHOS
+// ═════════════════════════════════════════════════════════════════════════════
+
 export const GANHO_SAFRA_ETAPA_ID_EXCLUIDA = '6673';
 
 function buildGanhosSafraFilter() {
@@ -643,7 +661,6 @@ function buildGanhosSafraFilter() {
       AND d.etapa_id <> '${GANHO_SAFRA_ETAPA_ID_EXCLUIDA}'
       AND LOWER(TRIM(l.etapa)) <> 'venda perdida'
       AND l.responsavel_lead IS NOT NULL`,
-    // série diária da safra: dia de criação do deal (mesmo eixo da coorte)
     dateColumn: `d.data_criacao_deal`,
     needsAtTimeZone: false,
     colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
@@ -652,7 +669,17 @@ function buildGanhosSafraFilter() {
   };
 }
 
-export async function loadGanhos({ start, end, equipe, produto, granularity, demanda, mode }) {
+export async function loadGanhos(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('ganhos', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadGanhosUncached(withLoaderPriority(options, meta)),
+    TTL_DASHBOARD,
+  );
+}
+
+async function loadGanhosUncached({ start, end, equipe, produto, granularity, demanda, mode, priority = 'high' }) {
   const gran = mapGranularity(granularity);
   const somenteDemandaAtual = String(demanda || '').toLowerCase() === 'atual';
   const isSafra = String(mode || '').toLowerCase() === 'safra';
@@ -662,8 +689,6 @@ export async function loadGanhos({ start, end, equipe, produto, granularity, dem
     : {
         ...buildPeriodFilter(mode),
         colaboradoresJoin: COLABORADORES_UNICOS_JOIN,
-        // PRODUÇÃO segue "Ganhos Produção": data_ganho::date no período e
-        // etapa_lead <> 'Venda Perdida' (case-insensitive; fallback para etapa).
         etapaClause: `AND LOWER(TRIM(l.${etapaColProd})) <> 'venda perdida'`,
         countExpr: 'COUNT(*)::int',
       };
@@ -717,20 +742,32 @@ export async function loadGanhos({ start, end, equipe, produto, granularity, dem
          ORDER BY periodo, colaborador`
     : ` GROUP BY colaborador, c.nome_equipe ORDER BY colaborador`;
 
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `ganhos:${gran || 'agg'}:${periodFilter.isSafra ? 'safra' : 'prod'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
 export async function loadGanhosTotal(params = {}) {
   const rows = await loadGanhos({ ...params, granularity: null });
   return sumTotal(rows);
 }
 
-// ─── PERDIDOS ────────────────────────────────────────────────────────────────
-export async function loadPerdidos({ start, end, equipe, produto, granularity }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// PERDIDOS
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadPerdidos(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('perdidos', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadPerdidosUncached(withLoaderPriority(options, meta)),
+    TTL_DASHBOARD,
+  );
+}
+
+async function loadPerdidosUncached({ start, end, equipe, produto, granularity, priority = 'high' }) {
   const gran = mapGranularity(granularity);
   let query = gran
     ? `SELECT
@@ -763,32 +800,35 @@ export async function loadPerdidos({ start, end, equipe, produto, granularity })
          (DATE_TRUNC('${gran}', l.data_perda) AT TIME ZONE 'UTC')::date
          ORDER BY periodo, colaborador`
     : ` GROUP BY colaborador, c.nome_equipe ORDER BY colaborador`;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `perdidos:${gran || 'agg'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
 export async function loadPerdidosTotal(params = {}) {
   const rows = await loadPerdidos({ ...params, granularity: null });
   return sumTotal(rows);
 }
 
-// ─── DESQUALIFICADOS (banco, com mode safra/produção) ─────────────────────────────────────────────────
-// Negócios que ENTRARAM na etapa 6659 dentro do período E continuam nela hoje.
-//   • h.etapa_nova_id = 6659  → a movimentação que levou o negócio à etapa
-//   • d.etapa_id      = 6659  → o negócio ainda está desqualificado hoje
-//   • DISTINCT ON (d.deal_id) + ORDER BY data_movimentacao DESC
-//       → a entrada MAIS RECENTE de cada negócio, uma linha por deal
-//   • responsável/equipe: COALESCE(d.closer_id, d.responsavel_id), o mesmo
-//       critério de leads-recebidos
+// ═════════════════════════════════════════════════════════════════════════════
+// DESQUALIFICADOS
+// ═════════════════════════════════════════════════════════════════════════════
+
 export const DESQ_ETAPA_ID = 6659;
 
-export async function loadDesqualificados({ start, end, equipe, produto, granularity, mode }) {
+export async function loadDesqualificados(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('desqualificados', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadDesqualificadosUncached(withLoaderPriority(options, meta)),
+    TTL_DASHBOARD,
+  );
+}
+
+async function loadDesqualificadosUncached({ start, end, equipe, produto, granularity, mode, priority = 'high' }) {
   const gran = mapGranularity(granularity);
-  // SAFRA    → também exige que o negócio tenha sido CRIADO no período.
-  // PRODUÇÃO → só a entrada na etapa 6659 no período (ignora a criação).
   const isSafra = String(mode || '').toLowerCase() === 'safra';
   const safraClause = isSafra
     ? `
@@ -836,20 +876,32 @@ export async function loadDesqualificados({ start, end, equipe, produto, granula
         GROUP BY colaborador, equipe
         ORDER BY colaborador`;
 
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `desqualificados:${gran || 'agg'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// Wrapper escalar — devolve `number` (soma `total` do período inteiro)
 export async function loadDesqualificadosTotal(params = {}) {
   const rows = await loadDesqualificados({ ...params, granularity: null });
   return sumTotal(rows);
 }
 
-// ─── LEADS RECEBIDOS — série temporal ────────────────────────────────────────
-export async function loadLeadsRecebidosGran({ start, end, equipe, produto, granularity }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// LEADS RECEBIDOS — série temporal
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadLeadsRecebidosGran(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('leads-recebidos-gran', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadLeadsRecebidosGranUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadLeadsRecebidosGranUncached({ start, end, equipe, produto, granularity, priority = 'high' }) {
   const gran = mapGranularity(granularity);
   let query = `
     SELECT
@@ -884,14 +936,27 @@ export async function loadLeadsRecebidosGran({ start, end, equipe, produto, gran
       (DATE_TRUNC('${gran}', d.data_distribuicao_comercial))::date,
       COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável')
   `;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `leads-recebidos:gran:${gran}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_SERIES, label);
 }
 
-// ─── LEADS RECEBIDOS — agregado por colaborador ──────────────────────────────
-export async function loadLeadsRecebidosAgg({ start, end, equipe, produto }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// LEADS RECEBIDOS — agregado por colaborador
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadLeadsRecebidosAgg(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('leads-recebidos-agg', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadLeadsRecebidosAggUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadLeadsRecebidosAggUncached({ start, end, equipe, produto, priority = 'high' }) {
   let query = `
     WITH assinatura_por_deal AS (
       SELECT deal_id,
@@ -978,14 +1043,27 @@ export async function loadLeadsRecebidosAgg({ start, end, equipe, produto }) {
     GROUP BY colaborador_id, colaborador, nome_equipe, unidade_id, pipeline, etapa, produto
     ORDER BY colaborador, pipeline, etapa
   `;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = 'leads-recebidos:agg';
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_AGG, label);
 }
 
-// ─── LIGAÇÕES ────────────────────────────────────────────────────────────────
-export async function loadLigacoes({ start, end, granularity }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// LIGAÇÕES
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadLigacoes(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('ligacoes', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadLigacoesUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadLigacoesUncached({ start, end, granularity, priority = 'high' }) {
   const gran = mapGranularity(granularity);
   let query = gran
     ? `SELECT
@@ -1026,14 +1104,27 @@ export async function loadLigacoes({ start, end, granularity }) {
   query += gran
     ? ` GROUP BY (DATE_TRUNC('${gran}', call_date) AT TIME ZONE 'UTC')::date, agent_name, equipe, campaign_name ORDER BY periodo, colaborador`
     : ` GROUP BY agent_name, equipe, campaign_name ORDER BY colaborador`;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `ligacoes:${gran || 'agg'}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, gran ? CAP_SERIES : CAP_AGG, label);
 }
 
-// ─── LIGAÇÕES — tabulações ───────────────────────────────────────────────────
-export async function loadLigacoesTabulacoes({ start, end, categoria }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// LIGAÇÕES — tabulações
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadLigacoesTabulacoes(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('ligacoes-tab', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadLigacoesTabulacoesUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadLigacoesTabulacoesUncached({ start, end, categoria, priority = 'high' }) {
   const categories = {
     productive:   QUALIFICATIONS.productive,
     appointments: QUALIFICATIONS.appointments,
@@ -1059,14 +1150,27 @@ export async function loadLigacoesTabulacoes({ start, end, categoria }) {
     ORDER BY total DESC, tabulacao
   `;
   const params = [start, end, qualifications.map(v => v.trim().toLowerCase())];
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = `ligacoes-tab:${categoria}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_AGG, label);
 }
 
-// ─── LIGAÇÕES PRODUTIVAS ─────────────────────────────────────────────────────
-export async function loadLigacoesProdutivas({ start, end, equipe, colaborador }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// LIGAÇÕES PRODUTIVAS (retorna Array<{ total }> — cache com TTL curto)
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadLigacoesProdutivas(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('ligacoes-produtivas', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadLigacoesProdutivasUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadLigacoesProdutivasUncached({ start, end, equipe, colaborador, priority = 'high' }) {
   let query = `
     SELECT COUNT(*)::int AS total
     FROM madm.view_base_olos_temp
@@ -1086,12 +1190,25 @@ export async function loadLigacoesProdutivas({ start, end, equipe, colaborador }
     query += ` AND LOWER(TRIM(agent_name)) = LOWER(TRIM($${idx}))`;
     params.push(colaborador);
   }
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   return result.rows;
 }
 
-// ─── LEADS POR ETAPA ─────────────────────────────────────────────────────────
-export async function loadLeadsStages({ start, end, equipe, produto }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// LEADS POR ETAPA
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadLeadsStages(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('leads-stages', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadLeadsStagesUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadLeadsStagesUncached({ start, end, equipe, produto, priority = 'high' }) {
   let query = `
     SELECT
       COALESCE(NULLIF(TRIM(c.nome), ''), 'Sem responsável') AS colaborador,
@@ -1128,14 +1245,27 @@ export async function loadLeadsStages({ start, end, equipe, produto }) {
       COALESCE(p.nome_pipeline, 'Sem pipeline')
     ORDER BY colaborador, etapa_lead
   `;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = 'leads-stages';
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_AGG, label);
 }
 
-// ─── CATÁLOGO DE ETAPAS ──────────────────────────────────────────────────────
-export async function loadLeadsStagesCatalog({ start, end }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// CATÁLOGO DE ETAPAS
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadLeadsStagesCatalog(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('leads-stages-catalog', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadLeadsStagesCatalogUncached(withLoaderPriority(options, meta)),
+    TTL_HEAVY,
+  );
+}
+
+async function loadLeadsStagesCatalogUncached({ start, end, priority = 'high' }) {
   const query = `
     SELECT DISTINCT
       COALESCE(p.nome_pipeline, 'Sem pipeline')  AS pipeline,
@@ -1152,12 +1282,25 @@ export async function loadLeadsStagesCatalog({ start, end }) {
       AND d.data_distribuicao_comercial::date <  $2::date
     ORDER BY pipeline, etapa, produto
   `;
-  const result = await analyticsQuery(query, [start, end]);
+  const result = await analyticsQuery(query, [start, end], priority);
   return result.rows;
 }
 
-// ─── PERFORMANCE SEMANAL ─────────────────────────────────────────────────────
-export async function loadWeekly({ start, end }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// PERFORMANCE SEMANAL
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadWeekly(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('weekly', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadWeeklyUncached(withLoaderPriority(options, meta)),
+    TTL_HEAVY,
+  );
+}
+
+async function loadWeeklyUncached({ start, end, priority = 'high' }) {
   const query = `
     SELECT
       (DATE_TRUNC('week', data_assinatura))::date as semana,
@@ -1169,7 +1312,7 @@ export async function loadWeekly({ start, end }) {
     GROUP BY (DATE_TRUNC('week', data_assinatura))::date
     ORDER BY semana
   `;
-  const result = await analyticsQuery(query, [start, end]);
+  const result = await analyticsQuery(query, [start, end], priority);
   return result.rows.map(row => ({
     semana: row.semana,
     vendas: row.vendas,
@@ -1177,8 +1320,21 @@ export async function loadWeekly({ start, end }) {
   }));
 }
 
-// ─── ASSINADOS DIÁRIO POR EQUIPE ─────────────────────────────────────────────
-export async function loadAssinadosDiarioPorEquipe({ inicio, fim, equipe }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// ASSINADOS DIÁRIO POR EQUIPE
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadAssinadosDiarioPorEquipe(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('assinados-diario-eq', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadAssinadosDiarioPorEquipeUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadAssinadosDiarioPorEquipeUncached({ inicio, fim, equipe, priority = 'high' }) {
   let query = `
     SELECT equipe_responsavel_assinatura as equipe,
            data_assinatura::date as dia,
@@ -1194,7 +1350,7 @@ export async function loadAssinadosDiarioPorEquipe({ inicio, fim, equipe }) {
     params.push(equipe);
   }
   query += ` GROUP BY equipe_responsavel_assinatura, dia ORDER BY dia, equipe_responsavel_assinatura`;
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = 'assinados-diario-eq';
   warnIfLarge(result.rows, label);
   const capped = capRows(result.rows, CAP_SERIES, label);
@@ -1206,8 +1362,21 @@ export async function loadAssinadosDiarioPorEquipe({ inicio, fim, equipe }) {
   }));
 }
 
-// ─── ASSINADOS DIÁRIO POR COLABORADOR ────────────────────────────────────────
-export async function loadAssinadosDiarioColaborador({ inicio, fim }) {
+// ═════════════════════════════════════════════════════════════════════════════
+// ASSINADOS DIÁRIO POR COLABORADOR
+// ═════════════════════════════════════════════════════════════════════════════
+
+export async function loadAssinadosDiarioColaborador(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('assinados-diario-col', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadAssinadosDiarioColaboradorUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadAssinadosDiarioColaboradorUncached({ inicio, fim, priority = 'high' }) {
   const query = `
     SELECT data_assinatura::date as dia,
            consultor_responsavel_assinatura as colaborador,
@@ -1215,11 +1384,10 @@ export async function loadAssinadosDiarioColaborador({ inicio, fim }) {
     FROM core.view_assinados
     WHERE data_assinatura::date >= $1::date
       AND data_assinatura::date <  $2::date
-      AND UPPER(TRIM(produto)) NOT IN ${EXCLUDED_PROD_PRODUCTS_SQL}
     GROUP BY dia, consultor_responsavel_assinatura
     ORDER BY dia, consultor_responsavel_assinatura
   `;
-  const result = await analyticsQuery(query, [inicio, fim]);
+  const result = await analyticsQuery(query, [inicio, fim], priority);
   const label = 'assinados-diario-col';
   warnIfLarge(result.rows, label);
   const capped = capRows(result.rows, CAP_SERIES, label);
@@ -1231,10 +1399,20 @@ export async function loadAssinadosDiarioColaborador({ inicio, fim }) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// DEMANDA — CACHEADO INTERNAMENTE (compartilhado entre 3 rotas)
-// ─────────────────────────────────────────────────────────────────────────────
+// DEMANDA — 10min fresco / 30min stale
+// ═════════════════════════════════════════════════════════════════════════════
 
-async function loadDemandaUncached({ tipo, equipe, produto }) {
+export async function loadDemanda(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('demanda', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadDemandaUncached(withLoaderPriority(options, meta)),
+    TTL_DEMANDA,
+  );
+}
+
+async function loadDemandaUncached({ tipo, equipe, produto, priority = 'high' }) {
   const baseSelect = `
     SELECT
       c.nome AS colaborador,
@@ -1276,22 +1454,16 @@ async function loadDemandaUncached({ tipo, equipe, produto }) {
   query += prod.clause;
   params.push(...prod.params);
   query += ` ORDER BY a.data_assinatura DESC`;
-  const result = await analyticsQuery(query, params);
+  // Em telas ativas usa a prioridade da requisição; em refresh usa prioridade baixa.
+  const result = await analyticsQuery(query, params, priority);
   const label = `demanda:${tipo}`;
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_DETAIL, label);
 }
- 
-export async function loadDemanda({ tipo, equipe, produto }) {
-  const key = `demanda:${tipo}:${equipe || 'todas'}:${produto || 'Todos'}`;
-  return cacheFirst(
-    key,
-    () => loadDemandaUncached({ tipo, equipe, produto }),
-    { ttlMs: 300_000, staleMs: 1_800_000 } // 5min / 30min
-  );
-}
 
-// ─── QUANTIDADE DE CARDS POR ETAPA (Recebidos / Em contato / Coleta / Validação Sup) ───
+// ═════════════════════════════════════════════════════════════════════════════
+// QUANTIDADE DE CARDS POR ETAPA
+// ═════════════════════════════════════════════════════════════════════════════
 
 export const STAGE_COUNT_ETAPAS = Object.freeze({
   em_contato:           Object.freeze([6650, 8594, 14105]),
@@ -1306,18 +1478,25 @@ function etapaList(ids) {
   }).join(', ');
 }
 
-/**
- * @param {object}   p
- * @param {string}   p.start          data inicial (inclusiva, YYYY-MM-DD)
- * @param {string}   p.end            data final (exclusiva, YYYY-MM-DD)
- * @param {string}  [p.equipe]        filtra por c.nome_equipe
- * @param {string}  [p.produto]       filtra por core.produtos.nome_produto
- * @param {string}  [p.mode]          'safra' aplica o filtro de criação do deal
- * @param {string[]|null} [p.colaboradorIds] null = conta inteira; [] = escopo vazio
- * @returns {Promise<Array<{colaborador_id:string|null, colaborador:string, equipe:string,
- *   recebidos:number, em_contato:number, coleta:number,}>>}
- */
-export async function loadStageCounts({ start, end, equipe, produto, mode, colaboradorIds = null }) {
+export async function loadStageCounts(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('stage-counts', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadStageCountsUncached(withLoaderPriority(options, meta)),
+    TTL_LEADS,
+  );
+}
+
+async function loadStageCountsUncached({
+  start,
+  end,
+  equipe,
+  produto,
+  mode,
+  colaboradorIds = null,
+  priority = 'high',
+}) {
   if (Array.isArray(colaboradorIds) && colaboradorIds.length === 0) return [];
 
   const isSafra = String(mode || '').toLowerCase() === 'safra';
@@ -1381,19 +1560,35 @@ export async function loadStageCounts({ start, end, equipe, produto, mode, colab
     ORDER BY recebidos DESC, colaborador
   `;
 
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = 'stage-counts';
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_AGG, label);
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ASSINADOS / EMITIDOS DO FUNIL (safra x produção)
+// ═════════════════════════════════════════════════════════════════════════════
 
-// ─── ASSINADOS / EMITIDOS DO FUNIL (safra x produção) ────────────────────────
-// PRODUÇÃO segue as consultas de referência:
-//   • core.view_emitidos  (data_emissao::date ∈ [start, end), produto <> 'QUINQUENIO')
-//   • core.view_assinados (data_assinatura::date ∈ [start, end), produto <> 'QUINQUENIO')
-// SAFRA segue a coorte por d.data_criacao_deal em core.assinaturas + core.deals.
-export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, colaboradorIds = null }) {
+export async function loadAssinaturasFunil(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('assinaturas-funil', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadAssinaturasFunilUncached(withLoaderPriority(options, meta)),
+    TTL_HEAVY,
+  );
+}
+
+async function loadAssinaturasFunilUncached({
+  start,
+  end,
+  equipe,
+  produto,
+  mode,
+  colaboradorIds = null,
+  priority = 'high',
+}) {
   if (Array.isArray(colaboradorIds) && colaboradorIds.length === 0) return [];
 
   const isSafra = String(mode || '').toLowerCase() === 'safra';
@@ -1414,8 +1609,8 @@ export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, 
       assinadosFilters += ` AND c.colaborador_id::text = ANY($${idx}::text[])`;
       params.push(colaboradorIds.map(String)); idx++;
     }
-    const prodEmit = buildProdutoClause(produto, 'e.produto', idx, { excludeQuinquenio: true });
-    const prodAssin = buildProdutoClause(produto, 'a.produto', idx, { excludeQuinquenio: true });
+    const prodEmit = buildProdutoClause(produto, 'e.produto', idx, { excludeQuinquenio: false });
+    const prodAssin = buildProdutoClause(produto, 'a.produto', idx, { excludeQuinquenio: false });
     emitidosFilters += prodEmit.clause;
     assinadosFilters += prodAssin.clause;
     params.push(...prodEmit.params);
@@ -1477,7 +1672,7 @@ export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, 
       ORDER BY assinados DESC, colaborador
     `;
 
-    const result = await analyticsQuery(query, params);
+    const result = await analyticsQuery(query, params, priority);
     const label = 'assinaturas-funil:producao';
     warnIfLarge(result.rows, label);
     return capRows(result.rows, CAP_AGG, label);
@@ -1561,29 +1756,35 @@ export async function loadAssinaturasFunil({ start, end, equipe, produto, mode, 
     ORDER BY assinados DESC, colaborador
   `;
 
-  const result = await analyticsQuery(query, params);
+  const result = await analyticsQuery(query, params, priority);
   const label = 'assinaturas-funil:safra';
   warnIfLarge(result.rows, label);
   return capRows(result.rows, CAP_AGG, label);
 }
 
-// ─── DISCADOR × ASSINATURAS ──────────────────────────────────────────────────
-// Chave de nome usada em TODOS os cruzamentos por nome: sem acento, maiúscula,
-// espaços colapsados. Antes o cruzamento era só UPPER(TRIM()), então
-// "João  Silva" (OLOS) × "Joao Silva" (CRM) não batiam e a linha ficava sem
-// equipe/unidade.
+// ═════════════════════════════════════════════════════════════════════════════
+// DISCADOR × ASSINATURAS
+// ═════════════════════════════════════════════════════════════════════════════
+
 const SQL_ACENTOS = 'ÁÀÂÃÄáàâãäÉÈÊËéèêëÍÌÎÏíìîïÓÒÔÕÖóòôõöÚÙÛÜúùûüÇçÑñ';
 const SQL_SEM_ACENTOS = 'AAAAAaaaaaEEEEeeeeIIIIiiiiOOOOOoooooUUUUuuuuCcNn';
 const sqlNameKey = (expr) =>
   `UPPER(REGEXP_REPLACE(TRIM(TRANSLATE(COALESCE(${expr}, ''), '${SQL_ACENTOS}', '${SQL_SEM_ACENTOS}')), '\\s+', ' ', 'g'))`;
 
-// Telefone só com dígitos, sem zeros à esquerda e sem DDI 55.
-// Antes era igualdade exata (a.telefone = o.number): "+55 (11) 9..." ×
-// "119..." não cruzava e a assinatura sumia do relatório.
 const sqlPhoneKey = (expr) =>
   `REGEXP_REPLACE(REGEXP_REPLACE(REGEXP_REPLACE(COALESCE(${expr}::text, ''), '\\D', '', 'g'), '^0+', ''), '^55(?=\\d{10,11}$)', '')`;
 
-export async function loadDiscadorResultado({ start, end }) {
+export async function loadDiscadorResultado(options = {}) {
+  const { priority, ...cacheParams } = options;
+  const key = metricCacheKey('discador-resultado', cacheParams);
+  return cacheFirst(
+    key,
+    (meta) => loadDiscadorResultadoUncached(withLoaderPriority(options, meta)),
+    TTL_DISC,
+  );
+}
+
+async function loadDiscadorResultadoUncached({ start, end, priority = 'high' }) {
   const query = `
     WITH periodo AS MATERIALIZED (
       SELECT $1::date AS inicio, $2::date AS fim
@@ -1647,7 +1848,6 @@ export async function loadDiscadorResultado({ start, end }) {
       FROM classificacao
     ),
 
-    -- CTE de discagens: filtro de período sargável, uso de classificacao_norm
     base AS (
       SELECT
         COALESCE(NULLIF(TRIM(o.agent_name),''),'(sem agente)')      AS agent_name,
@@ -1733,11 +1933,6 @@ export async function loadDiscadorResultado({ start, end }) {
         l.call_date DESC NULLS LAST
     ),
 
-    -- Crédito da assinatura: agente da última ligação para o telefone.
-    -- Se esse agente NÃO existe no cadastro de colaboradores (login do OLOS
-    -- diferente do nome, agente vazio etc.), o crédito vai para o consultor
-    -- responsável pela assinatura — assim ela ganha equipe/unidade e não some
-    -- quando se filtra por unidade/equipe.
     assinaturas_atribuidas AS (
       SELECT
         au.deal_id,
@@ -1813,11 +2008,10 @@ export async function loadDiscadorResultado({ start, end }) {
     ORDER BY 1, 2
   `;
 
-  const result = await analyticsQuery(query, [start, end]);
+  const result = await analyticsQuery(query, [start, end], priority);
   const label = 'discador-resultado';
   warnIfLarge(result.rows, label);
 
-  // Postgres devolve bigint como string no driver `pg`.
   const rows = result.rows.map((r) => ({
     agent_name: r.agent_name,
     campaign_name: r.campaign_name,
@@ -1837,8 +2031,6 @@ export async function loadDiscadorResultado({ start, end }) {
     periodo_fim: r.periodo_fim,
   }));
 
-  // NÃO truncar: o frontend soma estas linhas. Cortar em CAP_AGG (8.000)
-  // fazia assinaturas sumirem em períodos longos.
   if (rows.length > CAP_AGG) {
     console.warn(`[loader:${label}] ${rows.length} linhas (acima de ${CAP_AGG}) — retornando todas.`);
   }

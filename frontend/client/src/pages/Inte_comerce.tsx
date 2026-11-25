@@ -1939,7 +1939,7 @@ export default function Inte_commerce() {
           </div>
         </div>
 
-        {/* 5) EVOLUÇÃO DIÁRIA (BarChart) */}
+        {/* 5) EVOLUÇÃO DIÁRIA */}
         <div className="mb-6">
           <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
             <div><h2 className="text-lg font-bold text-[#0f172a]">Recebidos × Assinados por dia</h2></div>
@@ -2085,15 +2085,6 @@ export default function Inte_commerce() {
           </div>
         </div>
 
-        {/*
-          OVERLAY DE CARREGAMENTO — ABAIXO DO DashboardLayout,
-          LOGO ABAIXO DO FilterBar
-          `absolute inset-0` dentro do wrapper `relative`:
-          cobre toda a área de conteúdo (KPIs, funil, tabela,
-          gráficos). O card de loading é ancorado no TOPO do
-          conteúdo via `items-start` + `pt-4`, ficando próximo
-          ao FilterBar — e não centralizado verticalmente.
-        */}
         {(loading || modeChangeInProgress) && (
           <div
             className="absolute inset-0 z-30 flex items-start justify-center bg-white/80 backdrop-blur-sm pt-4"
