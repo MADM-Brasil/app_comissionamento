@@ -182,8 +182,8 @@ class AccessControl {
       },
 
       [this.LEVELS.COORDENADOR]: {
-        canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: false,
-        canAccessReports: false, canAccessConfiguration: false, canViewTeam: false,
+        canAccessDashboard: true, canAccessComissoes: true, canAccessRanking: true,
+        canAccessReports: true, canAccessConfiguration: true, canViewTeam: true,
         canEditConfiguration: false, canEditBonus: false, canGenerateNextMonth: false,
         canExportData: true, filterLocked: false, lockedTeam: false,
         lockedCollaborator: false,
