@@ -160,4 +160,3 @@ export const METRICS: Record<MetricKey, MetricDef> = {
   d: { label: 'Acionamentos', get: (t) => t.d, format: intFmt },
   qr: { label: 'Queda', get: (t) => (t.d > 0 ? t.qd / t.d : 0), format: pctFmt },
 };
-
