@@ -1229,7 +1229,7 @@ function MovimentacaoTab() {
               <p className="mt-1 text-xs text-[#64748b]">
                 {movimentacaoEmMassa
                   ? "Modo de alteração por link hub: Os links são lidos diretamente e os cards da HubSpot terão o responsável do card alterado para o colaborador selecionado. Pode ser feito o ajuste "
-                  : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso ele localize o card atendendo ao critério fará a movimentação. Caso não o localize vai cadastra-lo (Para cadastro todos os dados obrigatórios precisam estar preenchidos)."}
+                  : "Modo individual: informe os dados do cliente para registrar a movimentação, sistema fará a busca do card e caso ele localize o card e valide que o card atende aos critérios estipulados fará a movimentação. Caso não o localize vai cadastra-lo (Para cadastro o campo e-mail é obrigatório)."}
               </p>
 
               {restringirDestinoAoTimeSupervisor && (
