@@ -48,13 +48,37 @@ export async function fetchResultadoDiscador(
   search.set('start', params.start);
   search.set('end', params.end);
 
-  const res = await fetch(`${API_BASE}/discador/resultado?${search.toString()}`, {
-    headers: { Accept: 'application/json' },
-  });
+  // A API autentica por sessão (cookie). Sem `credentials: 'include'` o
+  // navegador não envia o cookie e o backend responde 401 (Não autenticado).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 90_000);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/discador/resultado?${search.toString()}`, {
+      headers: { Accept: 'application/json' },
+      credentials: 'include',
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') {
+      throw new Error('O servidor demorou demais para responder. Tente novamente em instantes.');
+    }
+    throw new Error('Não foi possível conectar ao servidor.');
+  } finally {
+    clearTimeout(timer);
+  }
+  if (res.status === 401) {
+    throw new Error('Sessão expirada. Faça login novamente.');
+  }
   if (!res.ok) {
     throw new Error(`Erro ${res.status} ao carregar resultado do discador.`);
   }
-  return (await res.json()) as DiscadorRow[];
+  const body: unknown = await res.json();
+  // Aceita tanto um array puro quanto { success, data: [...] }.
+  if (Array.isArray(body)) return body as DiscadorRow[];
+  const data = (body as { data?: unknown; rows?: unknown })?.data ?? (body as { rows?: unknown })?.rows;
+  if (Array.isArray(data)) return data as DiscadorRow[];
+  throw new Error('Resposta inesperada do servidor ao carregar o discador.');
 }
 
 // ============================================================
@@ -137,20 +161,3 @@ export const METRICS: Record<MetricKey, MetricDef> = {
   qr: { label: 'Queda', get: (t) => (t.d > 0 ? t.qd / t.d : 0), format: pctFmt },
 };
 
-/* ============================================================
- * CONSULTA SQL DE REFERÊNCIA (executada no backend)
- * ------------------------------------------------------------
- * A query abaixo roda no endpoint /discador/resultado.
- * Mantida aqui apenas como documentação — ver "Pasted text.txt".
- *
- * Destaques:
- *  - Período: 1º dia do mês corrente → hoje (fuso America/Sao_Paulo).
- *  - CTE equipes_excluidas: filtra equipes fora do escopo.
- *  - CTE classificacao: mapeia qualification_name para
- *      cpc_sem_negocio / cpc_a / mudo / queda_ligacao.
- *  - CTE assinaturas_*: cruza discador × assinaturas por telefone.
- *  - FULL OUTER JOIN garante que agentes só com assinatura também
- *    apareçam (assinados sem discagem).
- *  - Filtro final remove colaboradores cujas equipes são todas
- *    excluídas.
- * ============================================================ */
