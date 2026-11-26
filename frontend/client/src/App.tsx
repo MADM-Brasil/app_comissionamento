@@ -200,7 +200,7 @@ function Router() {
       {/* Comercial */}
       <Route path="/inte_comerce">
         <PeriodProvider>
-          <ProtectedRouteWithPermission minimumLevel={LEVELS.COORDENADOR}>
+          <ProtectedRouteWithPermission permission="canAccessDashboard">
             <Inte_comerce />
           </ProtectedRouteWithPermission>
         </PeriodProvider>

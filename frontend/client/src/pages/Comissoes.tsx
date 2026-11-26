@@ -310,6 +310,8 @@ const CAMPGANHOS_DIA_2026 = "CAMPGANHOS_DIA_2026";
 const CAMPGANHOS_MEN_2026 = "CAMPGANHOS_MEN_2026";
 const CAMPGANHOS_SEM_2026_SUPER = "CAMPGANHOS_SEM_2026_SUPER";
 const CAMPGANHOS_MEN_2026_SUPER = "CAMPGANHOS_MEN_2026_SUPER";
+const CAMPGANHOS_5_DIAS_2026 = "CAMPGANHOS_5_DIAS_2026";
+const CAMPANHA_5DIAS_DURACAO = 5;
 
 interface CampGanhosFaixa {
   faixa_min: number;
@@ -329,6 +331,14 @@ interface CampGanhosSemana {
   dias: string[];
 }
 
+interface Campanha5DiasJanela {
+  inicio: string;
+  fim: string;
+  ganhos: number;
+  valor: number;
+  dias: string[];
+}
+
 interface CampGanhosResult {
   ativo: boolean;
   estimativa_dia: number;
@@ -336,7 +346,7 @@ interface CampGanhosResult {
   comissao_mes_assessor: number;
   comissao_mes_supervisor: number;
   ganhos_mes: number;
-  detalhes: { dias: CampGanhosDia[]; semanas: CampGanhosSemana[] };
+  detalhes: { dias: CampGanhosDia[]; semanas: CampGanhosSemana[]; campanha_5dias: Campanha5DiasJanela[] };
 }
 
 const EMPTY_CAMPGANHOS_RESULT: CampGanhosResult = {
@@ -346,7 +356,7 @@ const EMPTY_CAMPGANHOS_RESULT: CampGanhosResult = {
   comissao_mes_assessor: 0,
   comissao_mes_supervisor: 0,
   ganhos_mes: 0,
-  detalhes: { dias: [], semanas: [] },
+  detalhes: { dias: [], semanas: [], campanha_5dias: [] },
 };
 
 function isCampGanhos2026Active(campaigns: Campaign[]): boolean {
@@ -514,6 +524,36 @@ function formatWeekRange(weekKey: string): string {
   return `${fmt(monday)} — ${fmt(sunday)}`;
 }
 
+
+// ============================================================
+//  CAMPGANHOS_5_DIAS_2026 — substitui CAMPGANHOS_DIA_2026 quando ativa.
+//  Janela de 5 dias corridos a partir da data_publicacao; os ganhos
+//  da janela são somados e avaliados pelas faixas da tabela_comissoes.
+// ============================================================
+function addDaysKey(dateKey: string, n: number): string {
+  const d = new Date(`${dateKey}T00:00:00`);
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function extractJanelas5Dias(campaigns: Campaign[]) {
+  const porInicio = new Map<string, Campaign[]>();
+  for (const c of campaigns || []) {
+    if ((c.tipo || "").trim().toUpperCase() !== CAMPGANHOS_5_DIAS_2026) continue;
+    if (!c.validacao_financeiro) continue;
+    const inicio = String(c.data_publicacao || "").slice(0, 10);
+    if (!inicio) continue;
+    if (!porInicio.has(inicio)) porInicio.set(inicio, []);
+    porInicio.get(inicio)!.push(c);
+  }
+  return Array.from(porInicio.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([inicio]) => ({
+      inicio,
+      fim: addDaysKey(inicio, CAMPANHA_5DIAS_DURACAO - 1),
+    }));
+}
+
 function calcularCampGanhos2026(
   dailyMetrics: Array<{ date: string; ganhos?: number }>,
   campaigns: Campaign[],
@@ -527,6 +567,7 @@ function calcularCampGanhos2026(
   const faixasMes = extractFaixas(campaigns, CAMPGANHOS_MEN_2026, commissionBands, true);
   const faixasSemSuper = extractFaixas(campaigns, CAMPGANHOS_SEM_2026_SUPER, commissionBands, true);
   const faixasMesSuper = extractSupervisorMonthlyCampaignBands(campaigns, commissionBands);
+  const faixas5Dias = extractFaixas([], CAMPGANHOS_5_DIAS_2026, commissionBands, true);
 
   const dias: CampGanhosDia[] = [];
   let estimativa_dia = 0;
@@ -552,6 +593,24 @@ function calcularCampGanhos2026(
     entry.dias.push(dateKey);
   }
 
+  // Campanha 5 dias ativa: dias cobertos deixam de usar a faixa diária
+  const diasCobertos = new Set<string>();
+  const campanha_5dias: Campanha5DiasJanela[] = extractJanelas5Dias(campaigns).map((j) => {
+    const diasJanela = dias.filter(
+      (d) => d.date >= j.inicio && d.date <= j.fim && !diasCobertos.has(d.date),
+    );
+    diasJanela.forEach((d) => diasCobertos.add(d.date));
+    const ganhos = diasJanela.reduce((s, d) => s + d.ganhos, 0);
+    return { inicio: j.inicio, fim: j.fim, ganhos, dias: diasJanela.map((d) => d.date), valor: calcFaixaValue(faixas5Dias, ganhos) };
+  });
+  for (const d of dias) {
+    if (diasCobertos.has(d.date)) {
+      estimativa_dia -= d.valor;
+      d.valor = 0;
+    }
+  }
+  estimativa_dia += campanha_5dias.reduce((s, j) => s + j.valor, 0);
+
   const semanas: CampGanhosSemana[] = Array.from(semanasMap.values())
     .sort((a, b) => a.weekKey.localeCompare(b.weekKey))
     .map((w) => ({
@@ -572,7 +631,7 @@ function calcularCampGanhos2026(
     comissao_mes_assessor,
     comissao_mes_supervisor,
     ganhos_mes,
-    detalhes: { dias, semanas },
+    detalhes: { dias, semanas, campanha_5dias },
   };
 }
 
@@ -1209,7 +1268,7 @@ export default function Comissoes() {
     loadWeeklyPerformanceData,
     loadRawMetrics,
     hideValues,
-    tabelaComissoes,
+    tabelaComissoes, 
     campaigns,
   } = useAppStore();
 
@@ -1997,8 +2056,29 @@ export default function Comissoes() {
             return date <= today && (Number(day.ganhos) || 0) >= dailyGoalMinimum;
           }).length;
 
+    // CAMPGANHOS_5_DIAS_2026 ativa hoje: substitui a faixa de meta diária
+    const janela5Dias = isAssessor
+      ? campGanhos2026.detalhes.campanha_5dias.find((j) => today >= j.inicio && today <= j.fim)
+      : undefined;
+    const card5Dias = janela5Dias
+      ? {
+          tipo: CAMPGANHOS_5_DIAS_2026,
+          label: `Faixa de 5 dias · ${janela5Dias.inicio.slice(8, 10)}/${janela5Dias.inicio.slice(5, 7)} a ${janela5Dias.fim.slice(8, 10)}/${janela5Dias.fim.slice(5, 7)} · Campanha Ativa`,
+          gainsLabel: "Ganhos nos 5 dias",
+          gains: janela5Dias.ganhos,
+          progress: getTierProgress(
+            extractFaixas([], CAMPGANHOS_5_DIAS_2026, tabelaComissoes, true),
+            janela5Dias.ganhos,
+          ),
+          daysWithGoalMet: null,
+          monthValue: janela5Dias.valor,
+          monthValueLabel: "Estimativa da comissão da faixa de 5 dias",
+          color: "#EA8C1D",
+        }
+      : null;
+
     return [
-      {
+      card5Dias ?? {
         tipo: periodType,
         label: isAssessor
           ? "Faixa de meta diária · Campanha Ativa"
@@ -2706,6 +2786,18 @@ export default function Comissoes() {
       const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
       if (currentRole === "assessor") {
+        const janela5Dias = campGanhos2026.detalhes.campanha_5dias.find(
+          (j) => todayKey >= j.inicio && todayKey <= j.fim,
+        );
+        if (janela5Dias) {
+          return {
+            label: "Estimativa 5 Dias (Campanha)",
+            value: janela5Dias.valor,
+            icon: TrendingUp,
+            color: "#16A34A",
+            isCurrency: true as const,
+          };
+        }
         return {
           label: "Estimativa Dia (Campanha)",
           value: campGanhos2026.detalhes.dias.find((day) => day.date === todayKey)?.valor ?? 0,
@@ -4141,12 +4233,30 @@ export default function Comissoes() {
                             </>
                           ) : (
                             <>
-                              <p>
-                                <b>Estimativa Dia (CAMPGANHOS_DIA_2026):</b> Valor pago no dia,
-                                nessa campanha cards ganhos que são de demanda reprimida não são
-                                incluidos, valide com o supervisor os ganhos realizados fora de
-                                demanda reprimida e a frequência de atingimento da meta.
-                              </p>
+                              {(() => {
+                                const now = new Date();
+                                const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+                                const janela5DiasAtiva = campGanhos2026.detalhes.campanha_5dias.find(
+                                  (j) => todayKey >= j.inicio && todayKey <= j.fim,
+                                );
+                                if (janela5DiasAtiva) {
+                                  return (
+                                    <p>
+                                      <b>Estimativa 5 Dias (CAMPGANHOS_5_DIAS_2026):</b>{" "}
+                                      Valor pago pela soma dos ganhos nos 5 dias da campanha ({janela5DiasAtiva.inicio.slice(8, 10)}/{janela5DiasAtiva.inicio.slice(5, 7)} a{" "}
+                                      {janela5DiasAtiva.fim.slice(8, 10)}/{janela5DiasAtiva.fim.slice(5, 7)}), conforme as faixas da campanha. Nessa campanha cards ganhos que são de demanda reprimida não são incluidos, valide com o supervisor os ganhos realizados fora de demanda reprimida.
+                                    </p>
+                                  );
+                                }
+                                return (
+                                  <p>
+                                    <b>Estimativa Dia (CAMPGANHOS_DIA_2026):</b> Valor pago no dia,
+                                    nessa campanha cards ganhos que são de demanda reprimida não são
+                                    incluidos, valide com o supervisor os ganhos realizados fora de
+                                    demanda reprimida e a frequência de atingimento da meta.
+                                  </p>
+                                );
+                              })()}
                               <p>
                                 <b>Comissão Mensal (CAMPGANHOS_MEN_2026):</b> Valor pago no mês,
                                 nessa campanha cards ganhos que são de demanda reprimida não são

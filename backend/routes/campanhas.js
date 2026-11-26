@@ -57,6 +57,7 @@ const GRUPOS_CAMPANHAS = {
     'CAMPGANHOS_MEN_2026',
     'CAMPGANHOS_SEM_2026_SUPER',
     'CAMPGANHOS_MEN_2026_SUPER',
+    'CAMPGANHOS_5_DIAS_2026',
   ],
 };
 
@@ -105,6 +106,7 @@ const CAMPGANHOS_2026_TIPOS = [
   'CAMPGANHOS_MEN_2026',
   'CAMPGANHOS_SEM_2026_SUPER',
   'CAMPGANHOS_MEN_2026_SUPER',
+  'CAMPGANHOS_5_DIAS_2026',
 ];
 const CAMPGANHOS_2026_TIPOS_SET = new Set(CAMPGANHOS_2026_TIPOS);
 
@@ -149,7 +151,8 @@ function extractFaixasFromRows(rows, tipo) {
     if ((row.tipo || '').toUpperCase() !== tipo) continue;
 
     const faixa_min = Number(row.multiplicador);
-    if (!Number.isFinite(faixa_min)) continue;
+    // multiplicador 0 = registro só de ativação (faixas na tabela_comissoes)
+    if (!Number.isFinite(faixa_min) || faixa_min <= 0) continue;
 
     const parsed = parseFaixaDescricao(row.descricao);
     if (!parsed) {
@@ -201,7 +204,106 @@ function getWeekKey(dateStr) {
   return `${y}-${m}-${dd}`;
 }
 
-function calcularCampGanhos2026(dailyData, faixasPorTipo) {
+
+// ============================================================
+// CAMPGANHOS_5_DIAS_2026 — substitui CAMPGANHOS_DIA_2026 quando ativa
+// ------------------------------------------------------------
+// Cada data_publicacao (validada) abre uma janela de 5 dias corridos:
+// [data_publicacao, data_publicacao + 4]. Os ganhos dos dias da janela
+// são SOMADOS e avaliados pelas faixas de app_comissionamento.tabela_comissoes
+// (tipo = CAMPGANHOS_5_DIAS_2026). O registro só ativa a janela.
+// Dias dentro da janela NÃO recebem o valor da faixa diária.
+// ============================================================
+const CAMPANHA_5DIAS_TIPO = 'CAMPGANHOS_5_DIAS_2026';
+const CAMPANHA_5DIAS_DURACAO = 5;
+
+function addDaysKey(dateKey, n) {
+  const d = new Date(`${dateKey}T00:00:00`);
+  d.setDate(d.getDate() + n);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function extractJanelas5Dias(rows) {
+  const porInicio = new Map();
+  for (const row of rows || []) {
+    if ((row.tipo || '').toUpperCase() !== CAMPANHA_5DIAS_TIPO) continue;
+    if (!row.validacao_financeiro) continue;
+    const pub = row.data_publicacao instanceof Date
+      ? row.data_publicacao.toISOString().slice(0, 10)
+      : String(row.data_publicacao || '').slice(0, 10);
+    if (!pub) continue;
+    if (!porInicio.has(pub)) porInicio.set(pub, []);
+    porInicio.get(pub).push(row);
+  }
+  return Array.from(porInicio.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([inicio]) => ({
+      inicio,
+      fim: addDaysKey(inicio, CAMPANHA_5DIAS_DURACAO - 1),
+    }));
+}
+
+// Faixas definidas em app_comissionamento.tabela_comissoes
+async function buscarFaixasTabela(tipos) {
+  const { rows } = await db.query(
+    `SELECT tipo, faixa_min, faixa_max, valor_comissao
+       FROM app_comissionamento.tabela_comissoes
+      WHERE UPPER(TRIM(tipo)) = ANY($1::text[])`,
+    [tipos]
+  );
+  const porTipo = Object.fromEntries(tipos.map(t => [t, []]));
+  for (const r of rows) {
+    const tipo = String(r.tipo || '').trim().toUpperCase();
+    const faixa_min = Number(r.faixa_min);
+    if (!porTipo[tipo] || !Number.isFinite(faixa_min)) continue;
+    const max = Number(r.faixa_max);
+    porTipo[tipo].push({
+      faixa_min,
+      faixa_max: r.faixa_max != null && Number.isFinite(max) && max > 0 ? max : null,
+      valor_comissao: Number(r.valor_comissao) || 0,
+    });
+  }
+  for (const faixas of Object.values(porTipo)) {
+    faixas.sort((a, b) => a.faixa_min - b.faixa_min);
+    for (let i = 0; i < faixas.length; i++) {
+      if (faixas[i].faixa_max == null && i < faixas.length - 1) {
+        faixas[i].faixa_max = faixas[i + 1].faixa_min - 1;
+      }
+    }
+  }
+  return porTipo;
+}
+
+// Faixas do registro (legado) ou, se não houver, da tabela_comissoes
+async function montarFaixasPorTipo(rows) {
+  const tabela = await buscarFaixasTabela(CAMPGANHOS_2026_TIPOS);
+  const porTipo = {};
+  for (const tipo of CAMPGANHOS_2026_TIPOS) {
+    const doRegistro = tipo === CAMPANHA_5DIAS_TIPO ? [] : extractFaixasFromRows(rows, tipo);
+    porTipo[tipo] = doRegistro.length ? doRegistro : tabela[tipo] || [];
+  }
+  return porTipo;
+}
+
+function calcularCampanha5Dias(dias, janelas, faixas5Dias = []) {
+  const diasCobertos = new Set();
+  const resultado = [];
+  for (const j of janelas || []) {
+    const diasJanela = dias.filter(d => d.date >= j.inicio && d.date <= j.fim && !diasCobertos.has(d.date));
+    diasJanela.forEach(d => diasCobertos.add(d.date));
+    const ganhos = diasJanela.reduce((s, d) => s + d.ganhos, 0);
+    resultado.push({
+      inicio: j.inicio,
+      fim: j.fim,
+      ganhos,
+      dias: diasJanela.map(d => d.date),
+      valor: calcFaixaGanhosValue(faixas5Dias, ganhos),
+    });
+  }
+  return { janelas: resultado, diasCobertos };
+}
+
+function calcularCampGanhos2026(dailyData, faixasPorTipo, janelas5Dias = []) {
   const dias = [];
 
   for (const day of dailyData || []) {
@@ -211,7 +313,14 @@ function calcularCampGanhos2026(dailyData, faixasPorTipo) {
     const valor = calcFaixaGanhosValue(faixasPorTipo.CAMPGANHOS_DIA_2026, ganhos);
     dias.push({ date: dateKey, ganhos, valor });
   }
-  const estimativa_dia = dias.reduce((s, d) => s + d.valor, 0);
+  // Campanha 5 dias ativa: substitui a faixa diária nos dias cobertos
+  const camp5 = calcularCampanha5Dias(dias, janelas5Dias, faixasPorTipo[CAMPANHA_5DIAS_TIPO]);
+  for (const d of dias) {
+    if (camp5.diasCobertos.has(d.date)) { d.valor = 0; d.campanha_5dias = true; }
+  }
+  const estimativa_dia =
+    dias.reduce((s, d) => s + d.valor, 0) +
+    camp5.janelas.reduce((s, j) => s + j.valor, 0);
 
   const semanasMap = new Map();
   for (const day of dias) {
@@ -249,7 +358,7 @@ function calcularCampGanhos2026(dailyData, faixasPorTipo) {
     estimativa_semana,
     comissao_mes_assessor,
     comissao_mes_supervisor,
-    detalhes: { dias, semanas, ganhos_mes },
+    detalhes: { dias, semanas, ganhos_mes, campanha_5dias: camp5.janelas },
   };
 }
 
@@ -407,19 +516,7 @@ router.post('/', requireAuth, async (req, res) => {
       const isParent = tipoUp === CAMPGANHOS_2026_PARENT;
       const faixaMin = Number(multiplicador);
 
-      if (!isParent && !Number.isFinite(faixaMin)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Para faixas CAMPGANHOS_*, `multiplicador` deve conter o faixa_min.',
-        });
-      }
-      if (!isParent && !parseFaixaDescricao(descricao)) {
-        return res.status(400).json({
-          success: false,
-          error:
-            'Descrição da faixa inválida. Use JSON {"valor": X, "max": Y}, "X|Y" ou "X".',
-        });
-      }
+      // Faixas vêm de app_comissionamento.tabela_comissoes; o registro só ativa.
 
       const result = await db.query(
         `INSERT INTO app_comissionamento.registro_campanhas 
@@ -432,7 +529,7 @@ router.post('/', requireAuth, async (req, res) => {
       const superAdminEmails = await getSuperAdminEmails();
       for (const adminEmail of superAdminEmails) {
         broadcastNotification({
-          tipo: 'warning',
+          tipo: 'warning', 
           titulo: 'Nova campanha registrada',
           mensagem: `Campanha de ${tipo} registrada e aguardando validação financeira.`,
           destinatario: adminEmail,
@@ -578,10 +675,7 @@ router.get('/campganhos-2026/faixas', requireAuth, async (req, res) => {
 
     const result = await db.query(query, params);
 
-    const faixasPorTipo = Object.fromEntries(CAMPGANHOS_2026_TIPOS.map(t => [t, []]));
-    for (const tipo of CAMPGANHOS_2026_TIPOS) {
-      faixasPorTipo[tipo] = extractFaixasFromRows(result.rows, tipo);
-    }
+    const faixasPorTipo = await montarFaixasPorTipo(result.rows);
 
     res.json({ success: true, grupo: 'ganhos', ativo: true, data: faixasPorTipo });
   } catch (err) {
@@ -688,11 +782,8 @@ router.post('/aplicar', requireAuth, async (req, res) => {
     // ============================================================
     let campGanhos2026 = null;
     if (campGanhosAtiva) {
-      const faixasPorTipo = Object.fromEntries(CAMPGANHOS_2026_TIPOS.map(t => [t, []]));
-      for (const tipo of CAMPGANHOS_2026_TIPOS) {
-        faixasPorTipo[tipo] = extractFaixasFromRows(rows, tipo);
-      }
-      campGanhos2026 = calcularCampGanhos2026(dailyData, faixasPorTipo);
+      const faixasPorTipo = await montarFaixasPorTipo(rows);
+      campGanhos2026 = calcularCampGanhos2026(dailyData, faixasPorTipo, extractJanelas5Dias(rows));
     }
 
     // ============================================================
