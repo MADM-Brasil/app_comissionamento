@@ -2063,7 +2063,7 @@ export default function Comissoes() {
     const card5Dias = janela5Dias
       ? {
           tipo: CAMPGANHOS_5_DIAS_2026,
-          label: `Faixa de 5 dias · ${janela5Dias.inicio.slice(8, 10)}/${janela5Dias.inicio.slice(5, 7)} a ${janela5Dias.fim.slice(8, 10)}/${janela5Dias.fim.slice(5, 7)} · Campanha Ativa`,
+          label: `Faixa de 5 dias · ${janela5Dias.inicio.slice(8, 10)}/${janela5Dias.inicio.slice(5, 7)} a ${janela5Dias.fim.slice(8, 10)}/${janela5Dias.fim.slice(5, 7)}`,
           gainsLabel: "Ganhos nos 5 dias",
           gains: janela5Dias.ganhos,
           progress: getTierProgress(
@@ -2093,7 +2093,7 @@ export default function Comissoes() {
       },
       {
         tipo: monthType,
-        label: "Faixa mensal · Campanha Ativa",
+        label: "Faixa mensal da Campanha",
         gainsLabel: "Ganhos no mês",
         gains: monthGains,
         progress: getTierProgress(monthBands, monthGains),
