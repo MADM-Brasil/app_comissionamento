@@ -13,7 +13,7 @@ import {
   fetchCollaborators, fetchEquipes, API_BASE
 } from "@/lib/api";
 import {
-  fetchEmitidos, fetchAssinados, fetchGanhos, fetchPerdidos, fetchProtocolados
+  fetchEmitidos, fetchAssinados, fetchGanhos, fetchPerdidos, fetchProtocolados 
 } from "@/lib/metrics";
 import { recalculateHierarchyWeights } from "@/lib/metrics";
 import { useAccessControl } from "@/hooks/useAccessControl";
@@ -39,6 +39,7 @@ const CAMPGANHOS_BAND_TYPES = [
   "CAMPGANHOS_MEN_2026",
   "CAMPGANHOS_SEM_2026_SUPER",
   "CAMPGANHOS_MEN_2026_SUPER",
+  "CAMPGANHOS_5_DIAS_2026",
 ];
 
 function formatCampanhaDescricao(tipo: string, descricao: string): string {
@@ -160,8 +161,6 @@ export default function Configuration() {
 
   const [campanhaCategoria, setCampanhaCategoria] = useState<string>("outros");
   const [campanhaMultiplicador, setCampanhaMultiplicador] = useState<number>(3.0);
-  const [campanhaValorFaixa, setCampanhaValorFaixa] = useState<number>(0);
-  const [campanhaFaixaMax, setCampanhaFaixaMax] = useState<number | ''>('');
   const [campanhaProduto, setCampanhaProduto] = useState<string>("Todos");
   const [campanhaDescricao, setCampanhaDescricao] = useState<string>("");
 
@@ -189,18 +188,16 @@ export default function Configuration() {
   const isAssinados = campanhaCategoria === "Assinados";
   const isProgressiva = campanhaCategoria === "Progressiva";
   const isCampGanhosParent = campanhaCategoria === "CAMPGANHOS_2026";
-  const isCampGanhosFaixa = CAMPGANHOS_BAND_TYPES.includes(campanhaCategoria);
-  const isCampGanhos = isCampGanhosParent || isCampGanhosFaixa;
+  // Faixas de todas as CAMPGANHOS já estão em tabela_comissoes: registro só ativa.
+  const isCampGanhos = isCampGanhosParent || CAMPGANHOS_BAND_TYPES.includes(campanhaCategoria);
 
   useEffect(() => {
     if (isAssinados) {
       setCampanhaMultiplicador(3);
     } else if (isProgressiva) {
       setCampanhaMultiplicador(3);
-    } else if (isCampGanhosParent) {
+    } else if (isCampGanhos) {
       setCampanhaMultiplicador(0);
-    } else if (isCampGanhosFaixa) {
-      setCampanhaMultiplicador(1);
     } else {
       if (campanhaMultiplicador === 1.0) {
         setCampanhaMultiplicador(2.0);
@@ -718,20 +715,16 @@ export default function Configuration() {
 
   const handleRegistrarCampanha = async () => {
     try {
-      if (isCampGanhosFaixa && (campanhaMultiplicador < 1 || campanhaValorFaixa <= 0)) {
-        toast.error('Informe o mínimo de ganhos e um valor de comissão maior que zero.');
-        return;
-      }
       const headers = await getCsrfHeaders();
       const body = {
         tipo: campanhaCategoria,
-        multiplicador: isCampGanhosParent ? 0 : campanhaMultiplicador,
+        multiplicador: isCampGanhos ? 0 : campanhaMultiplicador,
         produto: isCampGanhos ? 'Todos' : campanhaProduto,
         data_publicacao: new Date().toISOString().slice(0, 10),
         descricao: isCampGanhosParent
           ? 'Ativação da campanha mensal de ganhos'
-          : isCampGanhosFaixa
-            ? JSON.stringify({ valor: campanhaValorFaixa, max: campanhaFaixaMax || null })
+          : isCampGanhos
+            ? `Ativação ${campanhaCategoria}`
             : campanhaDescricao || 'Sem descrição',
       };
 
@@ -745,8 +738,6 @@ export default function Configuration() {
       if (data.success) {
         toast.success('Campanha registrada com sucesso!');
         setCampanhaDescricao('');
-        setCampanhaValorFaixa(0);
-        setCampanhaFaixaMax('');
         await loadCampanhas();
       } else {
         throw new Error(data.error || 'Erro ao registrar campanha');
@@ -913,35 +904,26 @@ export default function Configuration() {
                       <option value="CAMPGANHOS_MEN_2026">CAMPGANHOS_MEN_2026</option>
                       <option value="CAMPGANHOS_SEM_2026_SUPER">CAMPGANHOS_SEM_2026_SUPER</option>
                       <option value="CAMPGANHOS_MEN_2026_SUPER">CAMPGANHOS_MEN_2026_SUPER</option>
+                      <option value="CAMPGANHOS_5_DIAS_2026">CAMPGANHOS_5_DIAS_2026 · 5 dias (substitui diário)</option>
                     </optgroup>
                   </select>
                 </div>
                 <div>
                   <label htmlFor="campanhaMultiplicador" className="block text-xs font-medium text-[#64748b] mb-1">
-                    {isCampGanhosParent
+                    {isCampGanhos
                       ? "Ativação da campanha"
-                      : isCampGanhosFaixa
-                        ? "Faixa mínima de ganhos"
-                        : isAssinados
+                      : isAssinados
                           ? "Assinados por gol"
                           : isProgressiva
                             ? "Meta mínima de assinados"
                             : "Multiplicador (1.5 – 2.0)"}
                   </label>
-                  {isCampGanhosParent ? (
+                  {isCampGanhos ? (
                     <div className="px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-[#f8fafc] text-[#64748b]">
-                      A ativação será aprovada separadamente.
+                      {isCampGanhosParent
+                        ? "A ativação será aprovada separadamente."
+                        : "Faixas já definidas na tabela de comissões."}
                     </div>
-                  ) : isCampGanhosFaixa ? (
-                    <input
-                      id="campanhaMultiplicador"
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={campanhaMultiplicador}
-                      onChange={(e) => setCampanhaMultiplicador(parseInt(e.target.value) || 1)}
-                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-                    />
                   ) : isAssinados ? (
                     <input
                       id="campanhaMultiplicador"
@@ -993,38 +975,6 @@ export default function Configuration() {
                 </div>
               </div>
 
-              {isCampGanhosFaixa && (
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label htmlFor="campanhaValorFaixa" className="block text-xs font-medium text-[#64748b] mb-1">
-                      Comissão da faixa (R$)
-                    </label>
-                    <input
-                      id="campanhaValorFaixa"
-                      type="number"
-                      min={0.01}
-                      step={0.01}
-                      value={campanhaValorFaixa || ''}
-                      onChange={(e) => setCampanhaValorFaixa(parseFloat(e.target.value) || 0)}
-                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="campanhaFaixaMax" className="block text-xs font-medium text-[#64748b] mb-1">
-                      Faixa máxima (opcional)
-                    </label>
-                    <input
-                      id="campanhaFaixaMax"
-                      type="number"
-                      min={campanhaMultiplicador}
-                      step={1}
-                      value={campanhaFaixaMax}
-                      onChange={(e) => setCampanhaFaixaMax(e.target.value ? parseInt(e.target.value) : '')}
-                      className="w-full px-3 py-2 text-sm rounded-lg border border-[#e2e8f0] bg-white focus:outline-none focus:ring-2 focus:ring-[#2F6FED]/20"
-                    />
-                  </div>
-                </div>
-              )}
 
               {!isCampGanhos && <div className="mt-4">
                 <label htmlFor="campanhaDescricao" className="block text-xs font-medium text-[#64748b] mb-1">

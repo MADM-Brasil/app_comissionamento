@@ -62,6 +62,22 @@ const stats = {
 };
 
 // ─── Helpers internos ────────────────────────────────────────────────────────
+// Resultado vazio (sem linhas) — não deve virar cache "bom", senão
+// uma consulta que voltou vazia durante sobrecarga fica servindo 0
+// e o refresh em bg nunca consegue substituir.
+function isEmptyValue(v) {
+  if (v == null) return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'object') {
+    if (isCompressedEnvelope(v)) return false;
+    for (const k of ['rows', 'data', 'items', 'series', 'result']) {
+      if (Array.isArray(v[k])) return v[k].length === 0;
+    }
+    return Object.keys(v).length === 0;
+  }
+  return false;
+}
+
 function staleKeyOf(key) {
   return STALE_PREFIX + key;
 }
@@ -305,6 +321,12 @@ function loadAndCache(key, loader, opts, meta = { background: false }) {
         }
       }
 
+      // Não persiste vazio no L2/stale: evita "travar" métricas em 0.
+      if (isEmptyValue(value)) {
+        l1Invalidate(key);
+        l2Value = null;
+      }
+
       if (l2Value != null) {
         try {
           await cacheSetMany([
@@ -360,7 +382,7 @@ function bgRefresh(key, loader, opts, label) {
 async function resolve(key, loader, opts) {
   // ── 0. L1 in-process (fast path) ───────────────────────────
   const l1 = l1Get(key);
-  if (l1) {
+  if (l1 && !isEmptyValue(l1.value)) {
     if (l1.isFresh) {
       stats.l1Hits++;
       return { value: l1.value, source: 'l1' };
@@ -375,7 +397,7 @@ async function resolve(key, loader, opts) {
 
   // ── 1. cache fresco (Redis) ────────────────────────────────
   const fresh = await cacheGetSafe(key);
-  if (fresh != null) {
+  if (fresh != null && !isEmptyValue(fresh)) {
     stats.freshHits++;
     // Popula L1 para próximo request evitar Redis
     l1Set(key, fresh, opts.ttlMs, opts.staleMs);
@@ -384,7 +406,7 @@ async function resolve(key, loader, opts) {
 
   // ── 2. cache stale + refresh em background ─────────────────
   const stale = await cacheGetSafe(staleKeyOf(key));
-  if (stale != null) {
+  if (stale != null && !isEmptyValue(stale)) {
     stats.staleHits++;
     l1Set(key, stale, opts.ttlMs, opts.staleMs);
 
@@ -406,7 +428,7 @@ async function resolve(key, loader, opts) {
       err?.code === 'ANALYTICS_QUEUE_TIMEOUT'
     ) {
       const fallback = await cacheGetSafe(staleKeyOf(key));
-      if (fallback != null) {
+      if (fallback != null && !isEmptyValue(fallback)) {
         stats.staleOverloadHits++;
         l1Set(key, fallback, opts.ttlMs, opts.staleMs);
         // Não dispara refresh — acabamos de falhar por sobrecarga.

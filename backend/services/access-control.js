@@ -96,7 +96,7 @@ class AccessControl {
 
     // ─────────────────────────────────────────────────────────
     //  Colaboradores liberados para as demais páginas
-    // com permissões/filtros do NÍVEL BASE (ASSESSOR).
+    // com permissões/filtros do NÍVEL BASE.
     // ─────────────────────────────────────────────────────────
     this.FULL_ACCESS_EMAILS = [
       'gabriela.moura@madmbrasil.com.br',
