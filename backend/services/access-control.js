@@ -271,15 +271,21 @@ class AccessControl {
   }
 
   getFunctionalAccessLevel(user) {
-    const effectiveLevel = this.getEffectiveAccessLevel(user);
+  if (!user) return this.LEVELS.NONE;
+
+  const effectiveLevel = this.getEffectiveAccessLevel(user);
+
+  if (this.isFullAccessUser(user)) {
     if (
-      effectiveLevel === this.LEVELS.ASSESSOR_PLUS &&
-      this.isFullAccessUser(user)
+      effectiveLevel === this.LEVELS.ASSESSOR_PLUS ||
+      effectiveLevel < this.LEVELS.ASSESSOR
     ) {
       return this.LEVELS.ASSESSOR;
     }
-    return effectiveLevel;
   }
+
+  return effectiveLevel;
+}
 
   getEffectiveAccessLevel(user) {
     const baseLevel = this.getAccessLevel(user?.cargo, user?.status);
@@ -293,11 +299,12 @@ class AccessControl {
   }
 
   canSeeHomeComissoes(user) {
-    if (!user) return false;
-    const level = this.getFunctionalAccessLevel(user);
-    if (level >= this.LEVELS.ADMINISTRATIVO) return true;
-    return this.isUnit3HomeComissoesUser(user);
-  }
+  if (!user) return false;
+  if (this.isFullAccessUser(user)) return true;
+  const level = this.getFunctionalAccessLevel(user);
+  if (level >= this.LEVELS.ADMINISTRATIVO) return true;
+  return this.isUnit3HomeComissoesUser(user);
+}
 
   getDefaultLandingPage(user) {
     if (!user) return '/login';
@@ -448,6 +455,7 @@ class AccessControl {
       canAccessDashboard: perms.canAccessDashboard && allowHomeComissoes,
       canAccessComissoes:
         perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
+      canAccessReports: this.isFullAccessUser(user) ? true : perms.canAccessReports,
     };
   }
 
@@ -508,13 +516,24 @@ class AccessControl {
     };
   }
 
-  getMenuItems(permissions) {
+   getMenuItems(permissions) {
     const items = [];
+
+    // JURIDICO "puro": apenas "Suporte".
+    // FULL_ACCESS com cargo JURIDICO é promovido a ASSESSOR em
+    // getFunctionalAccessLevel, portanto NÃO deve cair neste curto-circuito.
+    const isJuridicoPuro =
+      permissions.level === this.LEVELS.JURIDICO &&
+      !permissions.canAccessDashboard &&
+      !permissions.canAccessReports;
+
     if (
-      permissions.level === this.LEVELS.JURIDICO ||
+      isJuridicoPuro ||
       (permissions.canAccessSuporte && !permissions.canAccessDashboard)
     ) {
-      if (permissions.canAccessSuporte) items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
+      if (permissions.canAccessSuporte) {
+        items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
+      }
       return items;
     }
 
@@ -528,7 +547,7 @@ class AccessControl {
     if (permissions.canAccessConfiguration) items.push({ id: 'configuration', label: 'Configurações', link: '/configuration' });
     return items;
   }
-
+  
   async getActiveSupportUser(email, db = pool) {
     if (!email) return null;
     const result = await db.query(
