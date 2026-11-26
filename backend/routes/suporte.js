@@ -97,7 +97,7 @@ const HO_UNIDADE_ID = 4;
 
 // Unidades em que o supervisor fica travado à própria equipe também no
 // fluxo CRM (aba "Movimentar", modo individual). Coordenador/Admin seguem
-// sem restrição. Link Hub continua travado para qualquer supervisor.
+// sem restrição. Link Hub (Alterar Responsável) segue a mesma regra.
 const UNIDADES_TRAVADAS_EQUIPE = new Set([2, 3, 4, 5]);
 
 // Equipes que impõem trava de destino para supervisores que PERTENCEM a elas
@@ -922,7 +922,10 @@ router.post('/movimentacoes-linkhub/lotes', requireNonJuridico, asyncRoute(async
   }
   const items = [...byDeal.values()];
 
-  const destination = await destinationFor(req, true, { enforceDestinationSameTeam: true });
+  // Mesma regra do Movimentar Lead: unidade 1 escolhe equipes da própria unidade; unidades 2–5 e equipes reservadas seguem travadas.
+  const destination = await destinationFor(req, true, {
+    enforceDestinationSameTeam: supervisorDeveTravarEquipe(req.supportActor),
+  });
   const actor = req.supportActor;
 
   const produto = resolveTeamProduct(destination.team, req.body.produto);
@@ -1364,7 +1367,7 @@ router.patch('/tickets-movimentacao/:id', asyncRoute(async (req, res) => {
       destinationName: nome,
       destinationEmail: emailDestino,
       destinationTeam: equipe,
-      enforceDestinationSameTeam: isSupervisor,
+      enforceDestinationSameTeam: isSupervisor && supervisorDeveTravarEquipe(req.supportActor),
     });
     if (access.error) throw fail(access.status || 403, access.error);
     if (!access.destination) throw fail(500, 'A validação do destino não retornou o colaborador.');
