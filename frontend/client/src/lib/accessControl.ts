@@ -324,9 +324,11 @@ const HOME_COMISSOES_ALLOWED_TEAMS = new Set(
 // ------------------------------------------------------------
 // Lista de e-mails que NÃO podem acessar /comissoes mesmo
 // estando em HOME_COMISSOES_ALLOWED_TEAM_NAMES.
+// Deve estar em sincronia com o backend (access-control.js).
 // ─────────────────────────────────────────────────────────────
 export const COMISSOES_BLOCKED_EMAILS: readonly string[] = [
   'wallace.batista@madmbrasil.com.br',
+  'lilian.luz@madmbrasil.com.br',
   'bianca.ferreira@madmbrasil.com.br',
 ];
 const COMISSOES_BLOCKED_EMAILS_SET = new Set(
@@ -387,18 +389,26 @@ export function getBaseAccessLevel(user?: User | null): Level {
  * Nível "funcional" — usado para decidir permissões e filtros
  * FORA do Suporte.
  *
- * Se o usuário é ASSESSOR_PLUS **e** está em FULL_ACCESS_EMAILS,
- * ele é rebaixado para ASSESSOR nas páginas gerais (Suporte
- * continua com o nível elevado).
+ * Para usuários em FULL_ACCESS_EMAILS:
+ *   - ASSESSOR_PLUS → ASSESSOR (comportamento original, mantém
+ *     Suporte elevado via getUserPermissions).
+ *   - JURIDICO / NONE → ASSESSOR (para conseguirem acessar as
+ *     páginas gerais Home, Ranking, etc.).
  */
 export function getFunctionalAccessLevel(user?: User | null): Level {
+  if (!user) return LEVELS.NONE;
+
   const effectiveLevel = getEffectiveAccessLevel(user);
-  if (
-    effectiveLevel === LEVELS.ASSESSOR_PLUS &&
-    isFullAccessUser(user)
-  ) {
-    return LEVELS.ASSESSOR;
+
+  if (isFullAccessUser(user)) {
+    if (
+      effectiveLevel === LEVELS.ASSESSOR_PLUS ||
+      effectiveLevel < LEVELS.ASSESSOR
+    ) {
+      return LEVELS.ASSESSOR;
+    }
   }
+
   return effectiveLevel;
 }
 
@@ -423,14 +433,14 @@ export function isUnit3HomeComissoesUser(user?: User | null): boolean {
 /** Alias retrocompatível. */
 export const isUnit3AssessorOrSupervisor = isUnit3HomeComissoesUser;
 
-/**
- * Regra consolidada: quem pode ver Home e Comissões.
- * (Obs.: esta função NÃO aplica COMISSOES_BLOCKED_EMAILS — o bloqueio
- *  individual é aplicado em getUserPermissions, que é o ponto que
- *  alimenta o guard e o menu.)
- */
 export function canSeeHomeComissoes(user?: User | null): boolean {
   if (!user) return false;
+
+  // FULL_ACCESS: liberado explicitamente para ver as páginas
+  // gerais (Home/Comissões — esta última sujeita a
+  // COMISSOES_BLOCKED_EMAILS, aplicado depois em getUserPermissions).
+  if (isFullAccessUser(user)) return true;
+
   const level = getFunctionalAccessLevel(user);
   if (level >= LEVELS.ADMINISTRATIVO) return true;
   return isUnit3HomeComissoesUser(user);
@@ -468,8 +478,11 @@ export const RESTRICTED_ASSESSOR_ALLOWED_PATHS: readonly string[] = [
 
 export function isAssessorRestrito(user?: User | null): boolean {
   if (!user) return false;
+  if (isFullAccessUser(user)) return false; // FULL_ACCESS não é restrito
+
   const level = getFunctionalAccessLevel(user);
   if (level !== LEVELS.ASSESSOR) return false;
+
   const unidade = user.unidade_id != null ? Number(user.unidade_id) : null;
   if (unidade != null && RESTRICTED_ASSESSOR_UNITS.includes(unidade)) return true;
   return isHomeComissoesTeam(user);
@@ -577,7 +590,9 @@ export function getUserPermissions(user?: User | null) {
       perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
 
     canAccessRanking: perms.canAccessRanking && !restrito,
-    canAccessReports: perms.canAccessReports,
+    // FULL_ACCESS: libera Relatórios mesmo que o nível base (ASSESSOR)
+    // não tenha essa permissão por padrão.
+    canAccessReports: isFullAccessUser(user) ? true : perms.canAccessReports,
     canAccessConfiguration: perms.canAccessConfiguration,
     canViewTeam: perms.canViewTeam,
     canEditConfiguration: perms.canEditConfiguration,
@@ -699,17 +714,25 @@ function getMenuItems(permissions: {
 }): MenuItem[] {
   const items: MenuItem[] = [];
 
-  // JURIDICO: apenas "Suporte".
-  if (permissions.level === LEVELS.JURIDICO) {
+  // JURIDICO "puro": apenas "Suporte".
+  // Observação: FULL_ACCESS com cargo JURIDICO é promovido a
+  // ASSESSOR em getFunctionalAccessLevel, portanto NÃO cai aqui
+  // (seu `permissions.level` continua JURIDICO, mas isso é apenas
+  // informativo; usamos as flags booleanas abaixo). Para evitar
+  // que o menu fique só com "Suporte", checamos se há permissão
+  // de dashboard/relatórios antes de curto-circuitar.
+  const isJuridicoPuro =
+    permissions.level === LEVELS.JURIDICO &&
+    !permissions.canAccessDashboard &&
+    !permissions.canAccessReports;
+
+  if (isJuridicoPuro) {
     if (permissions.canAccessSuporte) {
       items.push({ id: 'suporte', label: 'Suporte', link: '/suporte' });
     }
     return items;
   }
 
-  // ASSESSOR_PLUS "puro" tem todas as flags false exceto Suporte
-  // ASSESSOR_PLUS com FULL_ACCESS_EMAILS tem permissões herdadas
-  // de ASSESSOR nas páginas gerais + Suporte elevado.
   if (permissions.canAccessDashboard) items.push({ id: 'dashboard', label: 'Home', link: '/' });
   if (permissions.canAccessComissoes) items.push({ id: 'comissoes', label: 'Comissões', link: '/comissoes' });
   if (permissions.canViewTeam || permissions.canAccessReports) {
