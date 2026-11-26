@@ -677,7 +677,7 @@ function MovimentacaoTab() {
   const unidadeTravadaPorEquipe = isSupervisor && !!supervisorTeam && isEquipeTravadaDestino(supervisorTeam);
   const unidadeTravada = unidadeTravadaPorUnidade || unidadeTravadaPorEquipe;
   const deveOcultarEquipesReservadas = isSupervisor && unidadeSupervisor === 1 && !unidadeTravadaPorEquipe;
-  const restringirDestinoAoTimeSupervisor = isSupervisor && !!supervisorTeam && (movimentacaoEmMassa || unidadeTravada);
+  const restringirDestinoAoTimeSupervisor = isSupervisor && !!supervisorTeam && unidadeTravada; // Alterar Responsável segue a regra do Movimentar Lead
 
   const equipesDisponiveis = useMemo(() => {
     if (!escopo) return [];
@@ -689,7 +689,7 @@ function MovimentacaoTab() {
 
   useEffect(() => {
     if (!isSupervisor || !supervisorTeam) return;
-    if (movimentacaoEmMassa || unidadeTravada) {
+    if (unidadeTravada) {
       setEquipe(supervisorTeam);
       return;
     }

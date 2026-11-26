@@ -1,33 +1,4 @@
 // backend/services/linkHubBatchQueue.js
-//
-// Worker dedicado às movimentações originadas pelo Link Hub (crm_origem = 'HUBSPOT_LINK').
-//
-// ─── CORREÇÕES APLICADAS ────────────────────────────────────────────
-//   • NOTIFY_STATUSES agora inclui 'coordenador' e 'aviso' (antes só
-//     'suporte'/'bloqueado'). Sem isso, casos encaminhados ao coordenador
-//     e casos de divergência de dados nunca chegavam ao Teams.
-//   • `assunto` enviado ao Power Automate agora é 'Movimentacao' ou
-//     'Validacao_unidade_X'. Antes era 'MovimentacaoLinkHub', que NÃO
-//     existe em mapearAssuntoParaChave() e caía silenciosamente em
-//     'outros_casos' (ou era descartado pelo filtro do fluxo).
-//   • `status: 'bloqueado'` só vira 'coordenador' se houver unidade_id
-//     válida (1..5). Sem unidade, cai para 'suporte' (que não exige
-//     unidade no enviar()) em vez de estourar um `throw` interno e
-//     fazer a notificação desaparecer sem log visível.
-//   • `descricao` sempre ≥ 10 caracteres (requisito do enviar()).
-//   • Log explícito de sucesso/falha da notificação, com canal e
-//     assunto, para triagem rápida.
-//   • Fallback de `link` usa `partial.link` quando disponível.
-//
-// ─── FLUXO DE STATUS ────────────────────────────────────────────────
-//   pendente → processando → concluido | erro | suporte | bloqueado
-//
-// ─── COMPATIBILIDADE ────────────────────────────────────────────────
-//   • `startLinkHubBatchQueue`, `stopLinkHubBatchQueue`, `statusLinkHubBatchQueue`
-//   • Entrypoint standalone via `node backend/services/linkHubBatchQueue.js`
-//   • Requer que `ticketQueue.js` NÃO pegue crm_origem='HUBSPOT_LINK'
-//     (ajuste feito no claimLote do worker unificado), senão os dois
-//     workers disputam SKIP LOCKED e podem duplicar notificações.
 
 import { pool } from './bd/db.js';
 import {
@@ -577,7 +548,7 @@ async function handleLinkHubTicket(ticket, client) {
     sourceTeam: sourceOwner?.nome_equipe || null,
     sourceUnitId: sourceOwner?.unidade_id ?? null,
     enforceSourceTeam: true,
-    enforceDestinationSameTeam: true,
+    enforceDestinationSameTeam: false, // supervisor pode escolher outras equipes da mesma unidade
   });
   if (access.error) {
     const error = new Error(access.error);
