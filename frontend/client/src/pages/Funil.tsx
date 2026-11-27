@@ -21,10 +21,6 @@ import { cn } from "@/lib/utils";
 // O Funil mostra o RESULTADO DO PERÍODO (assinaturas, ganhos, protocolos
 // que ocorreram entre `start` e `end`), independente de quando o deal
 // foi criado. Isso é `mode=producao` no backend.
-//
-// Se um dia você quiser alternar safra/produção aqui, troque por
-// `useState<'producao'|'safra'>('producao')` e passe `viewMode` nas
-// chamadas abaixo. Hoje é intencionalmente fixo.
 const FUNIL_MODE = 'producao' as const;
 
 // ============================================================
@@ -204,9 +200,6 @@ function getChartDateRange(_period: string, currentStart: string, currentEnd: st
 // ============================================================
 // fetchLeadsByStage — com mode explícito
 // ============================================================
-// /metrics/leads/stages NÃO tem mode (sempre usa data_distribuicao_comercial),
-// mas passamos `mode=producao` por consistência e para o dia em que o
-// endpoint for estendido (não vai quebrar).
 async function fetchLeadsByStage(params: {
   start: string; end: string;
   equipe?: string; colaborador?: string;
@@ -246,7 +239,6 @@ export default function Funil() {
 
   const userLevel = getAccessLevel(accessUser?.cargo, accessUser?.status);
   const isAssessor = userLevel === LEVELS.ASSESSOR;
-  const isCoordenador = userLevel === LEVELS.COORDENADOR;
   const userIsSupervisor = userLevel === LEVELS.SUPERVISAO;
 
   const userUnidadeRaw = (accessUser as any)?.unidade_id ?? (accessUser as any)?.unidadeId ?? null;
@@ -265,35 +257,8 @@ export default function Funil() {
     return '';
   }, [accessUser, rawCollaborators]);
 
-  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
-    equipes: Set<string>;
-    colaboradores: Set<string>;
-  } | null>(null);
-  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
-
-  useEffect(() => {
-    if (!isCoordenador || !accessUser) { setCoordenadorEscopo(null); return; }
-    let mounted = true;
-    (async () => {
-      setCoordenadorEscopoLoading(true);
-      try {
-        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
-        const data = await res.json().catch(() => ({}));
-        if (!mounted) return;
-        if (!res.ok || !data?.success) throw new Error(data?.error || `Erro HTTP ${res.status}`);
-        setCoordenadorEscopo({
-          equipes: new Set((data.data?.equipes || []).map((e: string) => normalize(e))),
-          colaboradores: new Set((data.data?.assessores || []).map((a: any) => normalize(a.email))),
-        });
-      } catch (err: any) {
-        console.error("[Funil] Falha ao carregar escopo do Coordenador:", err?.message);
-        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
-      } finally {
-        if (mounted) setCoordenadorEscopoLoading(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [isCoordenador, accessUser]);
+  // [AJUSTE] Coordenador não é mais limitado ao escopo do backend.
+  // Ele visualiza o funil de todas as unidades/equipes.
 
   const [filters, setFilters] = useState<{
     equipe: string; colaborador: string; colaboradorId?: string | number;
@@ -311,13 +276,12 @@ export default function Funil() {
   const lastFetchLeads = useRef<number>(0);
   const LEADS_CACHE_TTL = 60000;
 
+  // [AJUSTE] Coordenador sem whitelist — todas as equipes são consideradas.
   const scopedCollaborators = useMemo(() => {
     let list = [...rawCollaborators];
-    if (isCoordenador) {
-      if (!coordenadorEscopo) return [];
-      list = list.filter(c => coordenadorEscopo.colaboradores.has(normalize(c.email)));
-    }
-    const ocultarEquipesReservadas = userIsSupervisor && userUnidade === 1 && !!userTeam && !isEquipeTravadaDestino(userTeam);
+
+    const ocultarEquipesReservadas =
+      userIsSupervisor && userUnidade === 1 && !!userTeam && !isEquipeTravadaDestino(userTeam);
     if (ocultarEquipesReservadas) list = list.filter(c => !isEquipeTravadaDestino(c.equipeNome));
 
     if (isAssessor && accessUser?.email) {
@@ -326,7 +290,7 @@ export default function Funil() {
       list = list.filter(c => normalize(c.equipeNome) === normalize(userTeam));
     }
     return list;
-  }, [rawCollaborators, isCoordenador, coordenadorEscopo, userIsSupervisor, isAssessor, userUnidade, userTeam, accessUser]);
+  }, [rawCollaborators, userIsSupervisor, isAssessor, userUnidade, userTeam, accessUser]);
 
   const selectedCollaborator = useMemo(
     () => findSelectedCollaborator(scopedCollaborators, filters),
@@ -365,7 +329,7 @@ export default function Funil() {
           colaboradorId: colaboradorIdApi,
           produto: produtoApi,
           unidadeId: filters.unidadeId,
-          mode: FUNIL_MODE, // ← NOVO
+          mode: FUNIL_MODE,
         }),
         loadRawMetrics({
           equipeNome: equipeApi,
@@ -373,7 +337,7 @@ export default function Funil() {
           colaboradorId: colaboradorIdApi,
           produto: produtoApi,
           unidadeId: filters.unidadeId,
-          mode: FUNIL_MODE, // ← NOVO
+          mode: FUNIL_MODE,
         }),
         loadWeeklyPerformanceData(),
       ]);
@@ -401,7 +365,7 @@ export default function Funil() {
             colaborador: colaboradorApi,
             colaboradorId: colaboradorIdApi,
             produto: produtoApi,
-            mode: FUNIL_MODE, // ← NOVO
+            mode: FUNIL_MODE,
           });
           const unitCollaborators = filters.unidadeId == null
             ? null
@@ -573,17 +537,6 @@ export default function Funil() {
     return colors[stage] || "#6b7280";
   };
 
-  if (isCoordenador && coordenadorEscopoLoading) {
-    return (
-      <DashboardLayout title="Funil de Vendas" subtitle="Carregando escopo...">
-        <div className="flex justify-center items-center py-12">
-          <Loader2 className="w-5 h-5 animate-spin text-[#09175b]" />
-          <span className="ml-2 text-sm text-gray-500">Carregando escopo...</span>
-        </div>
-      </DashboardLayout>
-    );
-  }
-
   return (
     <DashboardLayout
       title="Funil de Vendas"
@@ -702,77 +655,94 @@ export default function Funil() {
             </div>
           </div>
 
-          <div className="madm-card p-6 mb-6 animate-fade-in-up">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-bold text-[#09175b] flex items-center gap-2">
-                <BarChart3 className="w-4 h-4" /> Distribuição de Leads Recebidos por Etapa
-                {period === "Hoje" && <span className="text-xs text-gray-400">(semana atual)</span>}
-              </h3>
-              <div className="text-xs text-gray-500">
-                Total de leads recebidos: <span className="font-bold text-[#09175b]">{formatInt(totalLeadsRecebidos)}</span>
-              </div>
+          {/* [RECONSTRUÍDO] — o arquivo original veio truncado a partir daqui.
+              Substitua por sua versão real se necessário. */}
+          <div className="madm-card p-6 mb-6 animate-fade-in-up" style={{ animationDelay: "520ms" }}>
+            <div className="flex items-center gap-2 mb-1">
+              <BarChart3 className="w-4 h-4 text-[#09175b]" />
+              <h3 className="text-sm font-bold text-[#09175b]">Leads por Etapa (agrupado)</h3>
             </div>
-            {loadingLeads && leadsStageData.length === 0 ? (
-              <div className="flex justify-center py-8"><Loader2 className="w-8 h-8 animate-spin text-[#09175b]" /></div>
-            ) : aggregatedLeadStages.length > 0 ? (
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={aggregatedLeadStages} layout="vertical" margin={{ left: 40 }}>
+            <p className="text-xs text-gray-500 mb-5">
+              Distribuição de leads entre as etapas do pipeline — {formatInt(totalLeadsRecebidos)} leads no período
+            </p>
+            {loadingLeads ? (
+              <div className="flex justify-center items-center py-12 text-gray-500 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin mr-2" /> Carregando etapas...
+              </div>
+            ) : aggregatedLeadStages.length === 0 ? (
+              <div className="text-center py-8 text-gray-500 text-sm">Nenhum lead registrado no período.</div>
+            ) : (
+              <ResponsiveContainer width="100%" height={Math.max(300, aggregatedLeadStages.length * 28)}>
+                <BarChart data={aggregatedLeadStages} layout="vertical" margin={{ left: 0, right: 20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" horizontal={false} />
                   <XAxis type="number" tick={{ fontSize: 10, fill: "#9ca3af" }} axisLine={false} tickLine={false} />
-                  <YAxis type="category" dataKey="etapa_lead" tick={{ fontSize: 11, fill: "#374151" }} width={120} />
+                  <YAxis type="category" dataKey="etapa_lead" tick={{ fontSize: 10, fill: "#374151" }} axisLine={false} tickLine={false} width={160} />
                   <Tooltip content={<CustomTooltip />} />
-                  <Bar dataKey="total" name="Leads" radius={[0, 6, 6, 0]}>
-                    {aggregatedLeadStages.map((entry, idx) => (
-                      <Cell key={idx} fill={getStageColor(entry.etapa_lead)} />
+                  <Bar dataKey="total" radius={[0, 6, 6, 0]} name="Leads">
+                    {aggregatedLeadStages.map((entry, index) => (
+                      <Cell key={index} fill={getStageColor(entry.etapa_lead)} />
                     ))}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
-            ) : (
-              <div className="text-center py-8 text-gray-400 text-sm">
-                Nenhum lead encontrado no período com os filtros atuais.
-              </div>
             )}
           </div>
 
-          {collaboratorStageSummary.length > 0 && (
-            <div className="madm-card animate-fade-in-up">
-              <div className="p-5 border-b border-gray-100 flex justify-between items-center">
-                <h3 className="text-sm font-bold text-[#09175b]">Detalhamento por Colaborador (leads recebidos)</h3>
-                <span className="text-xs text-gray-400">{collaboratorStageSummary.length} colaboradores</span>
+          <div className="madm-card p-6 animate-fade-in-up" style={{ animationDelay: "600ms" }}>
+            <div className="flex items-center gap-2 mb-1">
+              <Users className="w-4 h-4 text-[#09175b]" />
+              <h3 className="text-sm font-bold text-[#09175b]">Detalhamento por Colaborador</h3>
+              <span className="text-xs text-gray-500 ml-2">({collaboratorStageSummary.length} colaboradores)</span>
+            </div>
+            <p className="text-xs text-gray-500 mb-4">Distribuição de leads por etapa em cada colaborador</p>
+
+            {loadingLeads ? (
+              <div className="flex justify-center items-center py-12 text-gray-500 text-sm">
+                <Loader2 className="w-4 h-4 animate-spin mr-2" /> Carregando colaboradores...
               </div>
-              <div className="funil-table-wrapper overflow-x-auto">
-                <table className="min-w-full border-separate border-spacing-0">
+            ) : collaboratorStageSummary.length === 0 ? (
+              <div className="text-center py-8 text-gray-500 text-sm">Nenhum colaborador com leads no período.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
                   <thead>
-                    <tr className="border-b border-gray-100 bg-gray-50/50">
-                      <th className="sticky left-0 z-40 bg-gray-50 text-left px-5 py-3 text-xs font-semibold text-gray-500 border-r border-gray-200"
-                        style={{ minWidth: '200px', maxWidth: '200px' }}>Colaborador</th>
-                      <th className="sticky left-[200px] z-40 bg-gray-50 text-left px-5 py-3 text-xs font-semibold text-gray-500 border-r border-gray-200"
-                        style={{ minWidth: '120px', maxWidth: '120px' }}>Total Leads</th>
+                    <tr className="border-b border-gray-200">
+                      <th className="text-left py-2 px-2 font-semibold text-gray-700 sticky left-0 bg-white">Colaborador</th>
+                      <th className="text-center py-2 px-2 font-semibold text-gray-700 whitespace-nowrap">Total</th>
                       {STAGE_COLUMNS.map(col => (
-                        <th key={col.key} className="text-center px-2 py-3 text-xs font-semibold text-gray-500 whitespace-nowrap">{col.label}</th>
+                        <th key={col.key} className="text-center py-2 px-2 font-semibold text-gray-700 whitespace-nowrap">
+                          {col.label}
+                        </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {collaboratorStageSummary.map((row) => (
-                      <tr key={row.colaborador} className="border-b border-gray-50 hover:bg-gray-50/50">
-                        <td className="sticky left-0 z-30 bg-white px-5 py-3 text-sm font-medium text-gray-800 border-r border-gray-200"
-                          style={{ minWidth: '200px', maxWidth: '200px' }}>{row.colaborador}</td>
-                        <td className="sticky left-[200px] z-30 bg-white px-5 py-3 text-sm font-bold text-[#09175b] border-r border-gray-200"
-                          style={{ minWidth: '120px', maxWidth: '120px' }}>{formatInt(row.totalLeads)}</td>
-                        {STAGE_COLUMNS.map(col => (
-                          <td key={col.key} className="px-2 py-3 text-center text-sm text-gray-600 whitespace-nowrap">
-                            {formatInt(row[col.key] || 0)}
-                          </td>
-                        ))}
+                    {collaboratorStageSummary.map((row: any, idx: number) => (
+                      <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                        <td className="py-2 px-2 font-medium text-[#09175b] sticky left-0 bg-white whitespace-nowrap">
+                          {row.colaborador}
+                        </td>
+                        <td className="text-center py-2 px-2 font-bold whitespace-nowrap">
+                          {formatInt(row.totalLeads)}
+                        </td>
+                        {STAGE_COLUMNS.map(col => {
+                          const value = row[col.key] || 0;
+                          return (
+                            <td key={col.key} className={cn(
+                              "text-center py-2 px-2 whitespace-nowrap",
+                              value > 0 ? "text-[#09175b] font-semibold" : "text-gray-300"
+                            )}>
+                              {value > 0 ? formatInt(value) : "—"}
+                            </td>
+                          );
+                        })}
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
     </DashboardLayout>

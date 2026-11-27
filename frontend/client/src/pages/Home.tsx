@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link } from "wouter";
-import { toast } from "sonner";
 import {
   fetchEmitidos,
   fetchAssinados,
@@ -147,9 +146,6 @@ function getFaixaProductType(colab: any): string {
 
 // ============================================================
 // ASSESSOR PLUS — ocultação de valores sensíveis
-//   Mesma regra de Comissoes.tsx: considera assessor_plus do
-//   accessControl + a lista de e-mails bloqueados da página de
-//   Comissões. Usado para esconder a "Estimativa do Mês" na Home.
 // ============================================================
 const COMISSOES_BLOCKED_EMAILS = [
   'wallace.batista@madmbrasil.com.br',
@@ -193,11 +189,6 @@ const isDesativado = (c: any) => {
 
 const isSupervisorCargo = (cargo?: string | null): boolean =>
   (cargo || '').toLowerCase().trim().startsWith('supervisor');
-
-const isAggregatedCargo = (cargo?: string | null): boolean => {
-  const c = normalize(cargo || '');
-  return c === 'supervisor' || c === 'coordenador' || c === 'administrativo';
-};
 
 function findSelectedCollaborator(
   collaborators: any[],
@@ -279,9 +270,6 @@ function getDailyChartDateRangeUTC(period: string, currentStart: string, current
   return { start: currentStart, end: currentEnd };
 }
 
-// Semana exibida no gráfico "Performance semanal", conforme o filtro de período:
-// Mês -> semana atual | Semana -> semana filtrada | Hoje/Dia -> semana daquele dia
-// Período manual -> 7 dias a partir da data início
 function getPerformanceWeekRangeUTC(period: string, currentStart?: string | null): { start: string; end: string } {
   const p = (period || '').toLowerCase();
   const isMonth = p === 'mês' || p === 'mes' || p === 'mensal';
@@ -449,33 +437,6 @@ export default function Home() {
   // ─────────────────────────────────────────────────────────────
   const userLevel = getAccessLevel();
   const isCoordenadorUser = userLevel === LEVELS.COORDENADOR;
-  const userUnidadeId: number | null = (() => {
-    const raw = (currentUser as any)?.unidade_id ?? (currentUser as any)?.unidadeId ?? null;
-    return raw != null ? Number(raw) : null;
-  })();
-
-  // ─────────────────────────────────────────────────────────────
-  // ESCOPO DO COORDENADOR (usado para KPIs/totais/gráficos)
-  // ─────────────────────────────────────────────────────────────
-  const scopedCollaborators = useMemo<Collaborator[]>(() => {
-    if (!isCoordenadorUser) return collaborators;
-    if (userUnidadeId == null) return [];
-    return collaborators.filter((c: any) => {
-      const rawUid = c.unidadeId ?? c.unidade_id ?? null;
-      return rawUid != null && Number(rawUid) === userUnidadeId;
-    });
-  }, [collaborators, isCoordenadorUser, userUnidadeId]);
-
-  const equipesDaUnidade = useMemo<Set<string> | null>(() => {
-    if (!isCoordenadorUser) return null;
-    const set = new Set<string>();
-    scopedCollaborators.forEach((c) => {
-      const eq = c?.equipeNome;
-      if (typeof eq === 'string' && eq.length > 0) set.add(eq);
-    });
-    return set;
-  }, [isCoordenadorUser, scopedCollaborators]);
-
   const canUseFilterBar =
     hasPermission("canViewTeam") || canAccessReports || isCoordenadorUser;
 
@@ -494,10 +455,10 @@ export default function Home() {
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
 
   // ============================================================
-  // FILTRO AUXILIAR DE UNIDADE — normalizado + fallback por colaborador
+  // FILTRO AUXILIAR DE UNIDADE — apenas manual (via FilterBar)
   // ============================================================
   const filterByUnitIfNeeded = useCallback((rows: any[]): any[] => {
-    const targetUnitId = filters.unidadeId ?? (isCoordenadorUser ? userUnidadeId : null);
+    const targetUnitId = filters.unidadeId ?? null;
     if (targetUnitId == null) return rows;
     const unitCollaborators = collaborators.filter((c) => {
       const rawUnitId = c.unidadeId ?? (c as any).unidade_id;
@@ -523,13 +484,13 @@ export default function Home() {
 
       return false;
     });
-  }, [filters.unidadeId, isCoordenadorUser, userUnidadeId, collaborators]);
+  }, [filters.unidadeId, collaborators]);
 
   // ============================================================
   // ESCOPO DO RANKING POR NÍVEL DE ACESSO
   //   • Assessor:                    apenas o próprio usuário
   //   • Supervisor:                  apenas a própria equipe
-  //   • Coordenador:                 apenas colaboradores da própria unidade
+  //   • Coordenador:                 todos (liberado)
   //   • Administrativo / Super Admin: todos
   // ============================================================
   const rankingScope = useMemo<Collaborator[]>(() => {
@@ -552,29 +513,20 @@ export default function Home() {
       return allCollaborators.filter(c => normalize(c.equipeNome) === normalize(team));
     }
 
-    if (userLevel === LEVELS.COORDENADOR && userUnidadeId != null) {
-      return allCollaborators.filter(c => {
-        const raw = (c as any).unidadeId ?? (c as any).unidade_id ?? null;
-        return raw != null && Number(raw) === userUnidadeId;
-      });
-    }
-
     return allCollaborators;
   }, [
     allCollaborators,
     currentUser,
     userLevel,
-    userUnidadeId,
     LEVELS.NONE,
     LEVELS.ASSESSOR,
     LEVELS.SUPERVISAO,
-    LEVELS.COORDENADOR,
   ]);
 
   const rankingScopeLabel = useMemo(() => {
     if (userLevel === LEVELS.ASSESSOR)   return "Ranking individual";
     if (userLevel === LEVELS.SUPERVISAO) return "Top 3 da equipe";
-    if (userLevel === LEVELS.COORDENADOR) return "Top 3 da unidade";
+    if (userLevel === LEVELS.COORDENADOR) return "Top 3 do mês";
     return "Top 3 do mês";
   }, [userLevel, LEVELS.ASSESSOR, LEVELS.SUPERVISAO, LEVELS.COORDENADOR]);
 
@@ -703,7 +655,10 @@ export default function Home() {
       const datesChanged = currentStartDate !== lastDatesRef.current.start || currentEndDate !== lastDatesRef.current.end;
       if (datesChanged) await loadRankingData();
 
-      if (currentUser && !isCoordenadorUser) {
+      // [AJUSTE] Coordenador passa a carregar as próprias métricas diárias
+      // como qualquer outro perfil (antes era excluído e `userCommission`
+      // retornava 0). Assim a "Estimativa do Mês" também aparece para ele.
+      if (currentUser) {
         const allColabs = useAppStore.getState().collaborators;
         const userColab = allColabs.find(c => isSameColaborator(c, currentUser));
         if (userColab && typeof userColab.name === 'string') {
@@ -736,51 +691,25 @@ export default function Home() {
       setRefreshing(false);
       setLoading(false);
     }
-  }, [currentStartDate, currentEndDate, filters, getChartFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData, currentUser, isCoordenadorUser, filterByUnitIfNeeded]);
+  }, [currentStartDate, currentEndDate, filters, getChartFilterParams, loadCollaboratorsAndMetrics, loadRawMetrics, loadWeeklyPerformanceData, loadRankingData, currentUser, filterByUnitIfNeeded]);
 
   // ============================================================
-  // HANDLER DO FILTRO
+  // HANDLER DO FILTRO — sem restrições por unidade
   // ============================================================
   const handleFilterChange = useCallback((rawFilters: typeof filters) => {
-    let newFilters = rawFilters;
-
-    if (isCoordenadorUser && userUnidadeId != null) {
-      const selColab = collaborators.find(
-        (c) =>
-          (newFilters.colaboradorId != null && String(c.id) === String(newFilters.colaboradorId)) ||
-          (newFilters.colaborador && newFilters.colaborador !== "todos" && c.name === newFilters.colaborador),
-      );
-      if (selColab) {
-        const rawUid = (selColab as any).unidadeId ?? (selColab as any).unidade_id ?? null;
-        const uid = rawUid != null ? Number(rawUid) : null;
-        if (uid == null || uid !== userUnidadeId) {
-          toast.error("Você só pode visualizar colaboradores da sua unidade.");
-          newFilters = { ...newFilters, colaborador: "todos", colaboradorId: undefined };
-        }
-      }
-      if (typeof newFilters.equipe === 'string' && newFilters.equipe !== "todas") {
-        const equipeAlvo = newFilters.equipe;
-        const teamInUnit = scopedCollaborators.some(c => c.equipeNome === equipeAlvo);
-        if (!teamInUnit) {
-          toast.error("Equipe fora do escopo da sua unidade.");
-          newFilters = { ...newFilters, equipe: "todas" };
-        }
-      }
-    }
-
     setFilters(prev => {
       if (
-        prev.equipe === newFilters.equipe &&
-        prev.colaborador === newFilters.colaborador &&
-        String(prev.colaboradorId ?? "") === String(newFilters.colaboradorId ?? "") &&
-        prev.produto === newFilters.produto
-        && prev.unidadeId === newFilters.unidadeId
+        prev.equipe === rawFilters.equipe &&
+        prev.colaborador === rawFilters.colaborador &&
+        String(prev.colaboradorId ?? "") === String(rawFilters.colaboradorId ?? "") &&
+        prev.produto === rawFilters.produto &&
+        prev.unidadeId === rawFilters.unidadeId
       ) {
         return prev;
       }
-      return newFilters;
+      return rawFilters;
     });
-  }, [isCoordenadorUser, userUnidadeId, collaborators, scopedCollaborators]);
+  }, []);
 
   const handleRefresh = useCallback(async () => {
     await reloadData(true);
@@ -805,8 +734,6 @@ export default function Home() {
   // ============================================================
   // CÁLCULOS DERIVADOS
   // ============================================================
-  // ⚠️ Agora usa `rankingScope` (filtrado por nível de acesso),
-  // não `allCollaborators` (que é sempre global).
   const globalRanking = useMemo(() => {
     const eligible = rankingScope.filter(c => {
       if (isDesativado(c)) return false;
@@ -839,9 +766,6 @@ export default function Home() {
 
   // ============================================================
   // OCULTAÇÃO DE VALORES SENSÍVEIS — assessor_plus
-  //   Esconde o card "Estimativa do Mês" para colaboradores com
-  //   nível de acesso assessor_plus (e para os 3 e-mails bloqueados
-  //   na página de Comissões). A lógica é a mesma de Comissoes.tsx.
   // ============================================================
   const hideMonthlyEstimate = useMemo(
     () => isAssessorPlusCollaborator(currentUserData || currentUser),
@@ -873,8 +797,8 @@ export default function Home() {
   // FILTRO DE COLABORADORES (base para metas/totais)
   // ============================================================
   const filteredCollaborators = useMemo(() => {
-    const targetUnitId = filters.unidadeId ?? (isCoordenadorUser ? userUnidadeId : null);
-    const base = (isCoordenadorUser ? scopedCollaborators : collaborators).filter((c) => {
+    const targetUnitId = filters.unidadeId ?? null;
+    const base = collaborators.filter((c) => {
       if (targetUnitId == null) return true;
       const rawUnitId = c.unidadeId ?? (c as any).unidade_id;
       return rawUnitId != null && Number(rawUnitId) === targetUnitId;
@@ -887,7 +811,7 @@ export default function Home() {
       if (filters.colaborador !== "todos" && c.name !== filters.colaborador) return false;
       return true;
     });
-  }, [collaborators, scopedCollaborators, isCoordenadorUser, userUnidadeId, filters.equipe, filters.colaborador, filters.unidadeId, isSupervisorSelected, supervisorSelectedTeam]);
+  }, [collaborators, filters.equipe, filters.colaborador, filters.unidadeId, isSupervisorSelected, supervisorSelectedTeam]);
 
   const displayCollaborators = useMemo(() => filteredCollaborators.filter(c => {
     if (isDesativado(c)) return false;
@@ -895,19 +819,8 @@ export default function Home() {
     return cargo !== 'supervisor' && cargo !== 'coordenador' && cargo !== 'administrativo';
   }), [filteredCollaborators]);
 
-  const totals = useMemo(() => {
-    if (isCoordenadorUser) {
-      const leaf = scopedCollaborators.filter(c => !isAggregatedCargo(c.cargo));
-      return {
-        emitidos: leaf.reduce((s, c) => s + (Number(c.emitidos) || 0), 0),
-        assinados: leaf.reduce((s, c) => s + (Number(c.assinados) || 0), 0),
-        protocolados: leaf.reduce((s, c) => s + (Number(c.protocolados) || 0), 0),
-        ganhos: leaf.reduce((s, c) => s + (Number(c.ganhos) || 0), 0),
-        perdidos: leaf.reduce((s, c) => s + (Number(c.perdidos) || 0), 0),
-      };
-    }
-    return rawMetrics;
-  }, [isCoordenadorUser, scopedCollaborators, rawMetrics]);
+  // [AJUSTE] Todos os perfis (incluindo Coordenador) usam `rawMetrics`.
+  const totals = rawMetrics;
 
   const effectiveTotals = useMemo(() => {
     if (!isSpecialGroup) return totals;
@@ -917,7 +830,6 @@ export default function Home() {
   const periodKey = period === 'Hoje' ? 'diario' : period === 'Semana' ? 'semanal' : 'mensal';
 
   const isGlobalView =
-    !isCoordenadorUser &&
     filters.equipe === "todas" &&
     filters.colaborador === "todos" &&
     !isSupervisorSelected;
@@ -926,7 +838,6 @@ export default function Home() {
   // COMISSÃO DO USUÁRIO LOGADO
   // ============================================================
   const userCommission = useMemo(() => {
-    if (isCoordenadorUser) return 0;
     if (hideMonthlyEstimate) return 0;
     if (!currentUserData || !tabelaComissoes || tabelaComissoes.length === 0) {
       return 0;
@@ -954,7 +865,7 @@ export default function Home() {
       return result.totalCommission;
     }
     return 0;
-  }, [currentUserData, tabelaComissoes, dailyMetrics, isCoordenadorUser, hideMonthlyEstimate]);
+  }, [currentUserData, tabelaComissoes, dailyMetrics, hideMonthlyEstimate]);
 
   // ============================================================
   // METAS DE GANHOS
@@ -1247,15 +1158,6 @@ export default function Home() {
                   <> - Equipe <b>{supervisorSelectedTeam}</b> (agregado)</>
                 )}
                 {filters.produto !== "Todos" && ` - Produto: ${filters.produto}`}
-              </span>
-            </div>
-          )}
-
-          {isCoordenadorUser && userUnidadeId != null && (
-            <div className="mb-4 px-4 py-2 bg-[#f5f3ff] rounded-lg text-xs text-[#8B5CF6] flex items-center gap-2 flex-wrap">
-              <span>🔒</span>
-              <span>
-                Visão da sua unidade (<b>unidade {userUnidadeId}</b>) — {scopedCollaborators.length} colaboradores em {equipesDaUnidade ? equipesDaUnidade.size : 0} equipes.
               </span>
             </div>
           )}
