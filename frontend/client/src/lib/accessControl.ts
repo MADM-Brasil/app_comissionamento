@@ -370,14 +370,17 @@ export function getEffectiveAccessLevel(user?: User | null): Level {
 // NÍVEL BASE. O Suporte continua no nível efetivo.
 // ─────────────────────────────────────────────────────────────
 export const FULL_ACCESS_EMAILS: readonly string[] = [
-  'gabriela.moura@madmbrasil.com.br',
+  'felipe.uzuelli@madmbrasil.com.br',
   'bianca.ferreira@madmbrasil.com.br',
   'irene.silva@madmbrasil.com.br',
 ];
 const FULL_ACCESS_EMAILS_SET = new Set(FULL_ACCESS_EMAILS.map(normalize));
 
 export function isFullAccessUser(user?: User | null): boolean {
-  if (!user?.email) return false;
+  if (!user) return false;
+  // Todo coordenador tem o mesmo acesso de FULL_ACCESS, sem precisar do e-mail na lista.
+  if (getAccessLevel(user.cargo, user.status) === LEVELS.COORDENADOR) return true;
+  if (!user.email) return false;
   return FULL_ACCESS_EMAILS_SET.has(normalize(user.email));
 }
 
@@ -385,16 +388,6 @@ export function getBaseAccessLevel(user?: User | null): Level {
   return getAccessLevel(user?.cargo, user?.status);
 }
 
-/**
- * Nível "funcional" — usado para decidir permissões e filtros
- * FORA do Suporte.
- *
- * Para usuários em FULL_ACCESS_EMAILS:
- *   - ASSESSOR_PLUS → ASSESSOR (comportamento original, mantém
- *     Suporte elevado via getUserPermissions).
- *   - JURIDICO / NONE → ASSESSOR (para conseguirem acessar as
- *     páginas gerais Home, Ranking, etc.).
- */
 export function getFunctionalAccessLevel(user?: User | null): Level {
   if (!user) return LEVELS.NONE;
 
@@ -590,8 +583,6 @@ export function getUserPermissions(user?: User | null) {
       perms.canAccessComissoes && allowHomeComissoes && !bloqueadoComissoes,
 
     canAccessRanking: perms.canAccessRanking && !restrito,
-    // FULL_ACCESS: libera Relatórios mesmo que o nível base (ASSESSOR)
-    // não tenha essa permissão por padrão.
     canAccessReports: isFullAccessUser(user) ? true : perms.canAccessReports,
     canAccessConfiguration: perms.canAccessConfiguration,
     canViewTeam: perms.canViewTeam,
@@ -714,13 +705,6 @@ function getMenuItems(permissions: {
 }): MenuItem[] {
   const items: MenuItem[] = [];
 
-  // JURIDICO "puro": apenas "Suporte".
-  // Observação: FULL_ACCESS com cargo JURIDICO é promovido a
-  // ASSESSOR em getFunctionalAccessLevel, portanto NÃO cai aqui
-  // (seu `permissions.level` continua JURIDICO, mas isso é apenas
-  // informativo; usamos as flags booleanas abaixo). Para evitar
-  // que o menu fique só com "Suporte", checamos se há permissão
-  // de dashboard/relatórios antes de curto-circuitar.
   const isJuridicoPuro =
     permissions.level === LEVELS.JURIDICO &&
     !permissions.canAccessDashboard &&

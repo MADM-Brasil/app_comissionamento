@@ -1335,15 +1335,7 @@ export default function Comissoes() {
   const [extratoLoading, setExtratoLoading] = useState(false);
   const extratoRequest = useRef(0);
 
-  const scopedColabs = useMemo(() => {
-    if (!isCoordenadorUser) return storeColabs;
-    if (userUnidadeId == null) return [];
-    return storeColabs.filter((c: any) => {
-      const uid = c.unidadeId ?? c.unidade_id ?? null;
-      return uid != null && Number(uid) === userUnidadeId;
-    });
-  }, [storeColabs, isCoordenadorUser, userUnidadeId]);
-
+  const scopedColabs = storeColabs;
   // ============================================================
   //  RELOAD
   // ============================================================
@@ -1590,53 +1582,19 @@ export default function Comissoes() {
     await reloadData(true);
   }, [reloadData]);
 
-  const handleFilterChange = useCallback(
-    (rawFilters: any) => {
-      let newFilters = rawFilters;
-
-      if (isCoordenadorUser && userUnidadeId != null) {
-        const selColab = storeColabs.find(
-          (c) =>
-            (newFilters.colaboradorId != null &&
-              String(c.id) === String(newFilters.colaboradorId)) ||
-            (newFilters.colaborador &&
-              newFilters.colaborador !== "todos" &&
-              c.name === newFilters.colaborador),
-        );
-
-        if (selColab) {
-          const uid = (selColab as any).unidadeId ?? (selColab as any).unidade_id;
-          if (uid == null || Number(uid) !== userUnidadeId) {
-            toast.error("Você só pode visualizar colaboradores da sua unidade.");
-            newFilters = { ...newFilters, colaborador: "todos", colaboradorId: undefined };
-          }
-        }
-
-        if (newFilters.equipe && newFilters.equipe !== "todas") {
-          const equipeNoEscopo = scopedColabs.some(
-            (c) => c.equipeNome === newFilters.equipe,
-          );
-          if (!equipeNoEscopo) {
-            toast.error("Equipe fora do escopo da sua unidade.");
-            newFilters = { ...newFilters, equipe: "todas" };
-          }
-        }
-      }
-
-      setFilters((prev) => {
-        if (
-          prev.equipe === newFilters.equipe &&
-          prev.colaborador === newFilters.colaborador &&
-          String(prev.colaboradorId ?? "") === String(newFilters.colaboradorId ?? "") &&
-          prev.produto === newFilters.produto
-        ) {
-          return prev;
-        }
-        return newFilters;
-      });
-    },
-    [isCoordenadorUser, userUnidadeId, storeColabs, scopedColabs],
-  );
+  const handleFilterChange = useCallback((rawFilters: any) => {
+  setFilters((prev) => {
+    if (
+      prev.equipe === rawFilters.equipe &&
+      prev.colaborador === rawFilters.colaborador &&
+      String(prev.colaboradorId ?? "") === String(rawFilters.colaboradorId ?? "") &&
+      prev.produto === rawFilters.produto
+    ) {
+      return prev;
+    }
+    return rawFilters;
+  });
+}, []);
 
   const handleSelectFromOverview = useCallback((item: CommissionOverviewItem) => {
     if (item.role === "coordenador") {
@@ -1679,36 +1637,30 @@ export default function Comissoes() {
   }, [currentStartDate, currentEndDate, filters, currentUser]);
 
   const filteredColabs = useMemo(() => {
-    const source = isCoordenadorUser ? scopedColabs : storeColabs;
+  let filtered = storeColabs.filter((c) => {
+    if (isAssessorPlusCollaborator(c)) return false;
+    if (filters.unidadeId != null && Number(c.unidadeId) !== filters.unidadeId) return false;
+    if (EXCLUDED_TEAMS_SET.has(normalizeName(c.equipeNome))) return false;
+    if (EXCLUDED_CARGOS.some((excluded) => normalizeName(c.cargo) === normalizeName(excluded)))
+      return false;
+    return true;
+  });
 
-    let filtered = source.filter((c) => {
-      if (isAssessorPlusCollaborator(c)) return false;
-      if (filters.unidadeId != null && Number(c.unidadeId) !== filters.unidadeId) return false;
-      if (EXCLUDED_TEAMS_SET.has(normalizeName(c.equipeNome))) return false;
-      if (EXCLUDED_CARGOS.some((cargo) => normalizeName(c.cargo) === normalizeName(cargo)))
-        return false;
-      return true;
-    });
-    if (!canUseFilterBar) {
-      if (currentUser && !filtered.some((c) => isSameColaborator(c, currentUser))) {
-        const userColab = storeColabs.find((c) => isSameColaborator(c, currentUser));
-        if (userColab && !isAssessorPlusCollaborator(userColab)) filtered = [userColab, ...filtered];
-      }
-    } else {
-      if (filters.equipe !== "todas")
-        filtered = filtered.filter((c) => c.equipeNome === filters.equipe);
-      if (filters.colaborador !== "todos")
-        filtered = filtered.filter((c) => c.name === filters.colaborador);
+  if (!canUseFilterBar) {
+    if (currentUser && !filtered.some((c) => isSameColaborator(c, currentUser))) {
+      const userColab = storeColabs.find((c) => isSameColaborator(c, currentUser));
+      if (userColab && !isAssessorPlusCollaborator(userColab))
+        filtered = [userColab, ...filtered];
     }
-    return filtered;
-  }, [
-    storeColabs,
-    scopedColabs,
-    isCoordenadorUser,
-    currentUser,
-    filters,
-    canUseFilterBar,
-  ]);
+  } else {
+    if (filters.equipe !== "todas")
+      filtered = filtered.filter((c) => c.equipeNome === filters.equipe);
+    if (filters.colaborador !== "todos")
+      filtered = filtered.filter((c) => c.name === filters.colaborador);
+  }
+
+  return filtered;
+}, [storeColabs, currentUser, filters, canUseFilterBar]);
 
   const userColab = useMemo(() => {
     if (canUseFilterBar) {
@@ -2178,8 +2130,6 @@ export default function Comissoes() {
     let comissaoAssinados = 0;
     let comissaoGols = 0;
     let comissaoCampGanhos2026 = 0;
-    // [AJUSTE] Para supervisor, os totais exibidos nos cards
-    // ("Seus Números") passam a refletir a equipe, não o supervisor.
     let supervisorTeamAssinados = 0;
     let supervisorTeamGanhos = 0;
     let supervisorTeamProtocolados = 0;

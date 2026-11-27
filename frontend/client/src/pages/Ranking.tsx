@@ -16,7 +16,6 @@ import {
   fetchProtocolados,
   fetchGanhos,
   fetchPerdidos,
-  API_BASE,
 } from "@/lib/api";
 import madm_dashboard_growth from "@/components/img/madm-dashboard-growth.png";
 
@@ -210,7 +209,6 @@ export default function Ranking() {
   const userLevel = getAccessLevel(accessUser?.cargo, accessUser?.status);
   const isAssessor = userLevel === LEVELS.ASSESSOR;
   const isSupervisor = userLevel === LEVELS.SUPERVISAO;
-  const isCoordenador = userLevel === LEVELS.COORDENADOR;
 
   // Unidade do usuário — aceita unidade_id ou unidadeId.
   const userUnidadeRaw = (accessUser as any)?.unidade_id
@@ -237,48 +235,6 @@ export default function Ranking() {
   ]);
   const [selectedProduct, setSelectedProduct] = useState<string>("Todos");
   const [selectedTeam, setSelectedTeam] = useState<string>("todas");
-
-  // ============================================================
-  //  ESCOPO DO COORDENADOR (whitelist via /suporte/escopo)
-  // ============================================================
-  const [coordenadorEscopo, setCoordenadorEscopo] = useState<{
-    equipes: Set<string>;
-    colaboradores: Set<string>;
-  } | null>(null);
-  const [coordenadorEscopoLoading, setCoordenadorEscopoLoading] = useState(false);
-
-  useEffect(() => {
-    if (!isCoordenador || !accessUser) {
-      setCoordenadorEscopo(null);
-      return;
-    }
-    let mounted = true;
-    (async () => {
-      setCoordenadorEscopoLoading(true);
-      try {
-        const res = await fetch(`${API_BASE}/suporte/escopo`, { credentials: "include" });
-        const data = await res.json().catch(() => ({}));
-        if (!mounted) return;
-        if (!res.ok || !data?.success) {
-          throw new Error(data?.error || `Erro HTTP ${res.status}`);
-        }
-        const equipes = new Set<string>(
-          (data.data?.equipes || []).map((e: string) => normalize(e))
-        );
-        const colaboradores = new Set<string>(
-          (data.data?.assessores || []).map((a: any) => normalize(a.email))
-        );
-        setCoordenadorEscopo({ equipes, colaboradores });
-      } catch (err: any) {
-        console.error("[Ranking] Falha ao carregar escopo do Coordenador:", err?.message);
-        if (mounted) setCoordenadorEscopo({ equipes: new Set(), colaboradores: new Set() });
-      } finally {
-        if (mounted) setCoordenadorEscopoLoading(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, [isCoordenador, accessUser]);
-
   const initialLoadDone = useRef(false);
   const lastDatesRef = useRef({ start: currentStartDate, end: currentEndDate });
   const lastFiltersRef = useRef({ product: selectedProduct, team: selectedTeam, type: rankingType });
@@ -415,12 +371,6 @@ export default function Ranking() {
       .map((eq) => eq.nome)
       .filter((nome) => !isExcludedTeam(nome));
 
-    // Coordenador: apenas equipes da própria unidade.
-    if (isCoordenador) {
-      if (!coordenadorEscopo) equipeNomes = [];
-      else equipeNomes = equipeNomes.filter((nome) => coordenadorEscopo.equipes.has(normalize(nome)));
-    }
-
     // Regra da Tatiane: supervisor unidade 1 fora da Tatiane não vê a Tatiane.
     const ocultarEquipesReservadas = isSupervisor
       && userUnidade === 1
@@ -436,7 +386,7 @@ export default function Ranking() {
     }
 
     return ["todas", ...equipeNomes];
-  }, [equipeConfigs, isCoordenador, coordenadorEscopo, isSupervisor, userUnidade, userTeam]);
+  }, [equipeConfigs, isSupervisor, userUnidade, userTeam]);
 
   useEffect(() => {
     if (selectedTeam === "todas") return;
@@ -460,12 +410,6 @@ export default function Ranking() {
       if (isExcludedTeam(c.equipeNome)) return false;
       return true;
     });
-
-    // Coordenador: whitelist de e-mails da própria unidade.
-    if (isCoordenador) {
-      if (!coordenadorEscopo) return [];
-      filtered = filtered.filter(c => coordenadorEscopo.colaboradores.has(normalize(c.email)));
-    }
 
     // Regra da Tatiane: ocultar para supervisor de unidade 1 fora dela.
     const ocultarEquipesReservadas = isSupervisor
@@ -511,8 +455,6 @@ export default function Ranking() {
     selectedTeam,
     isAssessor,
     isSupervisor,
-    isCoordenador,
-    coordenadorEscopo,
     userUnidade,
     userTeam,
     accessUser,
@@ -635,7 +577,7 @@ export default function Ranking() {
   };
 
   // Bloqueio de render enquanto o escopo do Coordenador ainda carrega.
-  if ((loading && allCollaborators.length === 0) || (isCoordenador && coordenadorEscopoLoading)) {
+  if (loading && allCollaborators.length === 0) {
     return (
       <DashboardLayout title="Ranking" subtitle="Carregando dados...">
         <div className="flex items-center justify-center h-64">
