@@ -492,26 +492,6 @@ export default function FilterBar({
     }
   }, [hideAssessorPlus, isReady, selectedColaborador, collaborators, setSelectedCollaboratorEmail]);
 
-  useEffect(() => {
-    if (!isCoordenador || !escopoData) return;
-
-    if (selectedEquipe !== 'todas'
-        && !escopoData.equipes.has(normalize(selectedEquipe))) {
-      setSelectedEquipe('todas');
-      setSelectedColaborador('todos');
-      if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
-      return;
-    }
-
-    if (selectedColaborador !== 'todos') {
-      const colab = collaborators.find(c => c.name === selectedColaborador);
-      if (!colab || !escopoData.colaboradores.has(normalize(colab.email))) {
-        setSelectedColaborador('todos');
-        if (setSelectedCollaboratorEmail) setSelectedCollaboratorEmail(null);
-      }
-    }
-  }, [isCoordenador, escopoData, selectedEquipe, selectedColaborador, collaborators, setSelectedCollaboratorEmail]);
-
   // Sync equipe ⇄ produto: só roda quando equipe é específica.
   useEffect(() => {
     if (!isReady || !hasAppliedRestrictions) return;
@@ -586,14 +566,6 @@ export default function FilterBar({
       nomes = nomes.filter((nome) => unitTeams.has(normalize(nome)));
     }
 
-    if (isCoordenador) {
-      if (!escopoData) {
-        nomes = [];
-      } else {
-        nomes = nomes.filter((nome) => escopoData.equipes.has(normalize(nome)));
-      }
-    }
-
     if (deveOcultarEquipesReservadas) {
       nomes = nomes.filter((nome) => !isEquipeTravadaDestino(nome));
     }
@@ -610,10 +582,8 @@ export default function FilterBar({
     selectedUnit,
     isAssessor,
     isSupervisor,
-    isCoordenador,
     currentUser,
     userTeam,
-    escopoData,
     deveOcultarEquipesReservadas,
   ]);
 
@@ -624,16 +594,6 @@ export default function FilterBar({
     filtered = filtered.filter((c) => normalize(c.cargo) !== 'administrativo');
     if (hideAssessorPlus) {
       filtered = filtered.filter((c) => !isAssessorPlusCollaborator(c));
-    }
-
-    if (isCoordenador) {
-      if (!escopoData) {
-        filtered = [];
-      } else {
-        filtered = filtered.filter((c) =>
-          escopoData.colaboradores.has(normalize(c.email))
-        );
-      }
     }
 
     if (showUnitFilter && selectedUnit !== "todas") {
@@ -669,12 +629,10 @@ export default function FilterBar({
     selectedEquipe,
     isAssessor,
     isSupervisor,
-    isCoordenador,
     currentUser,
     searchTerm,
     isReady,
     userTeam,
-    escopoData,
     deveOcultarEquipesReservadas,
     showUnitFilter,
     selectedUnit,

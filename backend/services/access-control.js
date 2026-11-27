@@ -99,7 +99,7 @@ class AccessControl {
     // com permissões/filtros do NÍVEL BASE.
     // ─────────────────────────────────────────────────────────
     this.FULL_ACCESS_EMAILS = [
-      'gabriela.moura@madmbrasil.com.br',
+      'felipe.uzuelli@madmbrasil.com.br',
       'bianca.ferreira@madmbrasil.com.br',
       'irene.silva@madmbrasil.com.br',
     ];
@@ -262,7 +262,10 @@ class AccessControl {
   }
 
   isFullAccessUser(user) {
-    if (!user?.email) return false;
+    if (!user) return false;
+    // Todo coordenador tem o mesmo acesso de FULL_ACCESS, sem precisar do e-mail na lista.
+    if (this.getAccessLevel(user.cargo, user.status) === this.LEVELS.COORDENADOR) return true;
+    if (!user.email) return false;
     return this.FULL_ACCESS_EMAILS_SET.has(this.normalize(user.email));
   }
 
@@ -519,9 +522,6 @@ class AccessControl {
    getMenuItems(permissions) {
     const items = [];
 
-    // JURIDICO "puro": apenas "Suporte".
-    // FULL_ACCESS com cargo JURIDICO é promovido a ASSESSOR em
-    // getFunctionalAccessLevel, portanto NÃO deve cair neste curto-circuito.
     const isJuridicoPuro =
       permissions.level === this.LEVELS.JURIDICO &&
       !permissions.canAccessDashboard &&
@@ -710,7 +710,7 @@ export const validateHubSpotMovementAccess = (params) => instance.validateHubSpo
 
 export const COMISSOES_BLOCKED_EMAILS = [...instance.COMISSOES_BLOCKED_EMAILS];
 export const isComissoesBlockedByEmail = (user) => instance.isComissoesBlockedByEmail(user);
-
+ 
 export const HOME_COMISSOES_ALLOWED_UNIT = 3;
 export const HOME_COMISSOES_ALLOWED_TEAM_NAMES = [...instance.HOME_COMISSOES_ALLOWED_TEAM_NAMES];
 export const isUnit3HomeComissoesUser = (user) => instance.isUnit3HomeComissoesUser(user);
