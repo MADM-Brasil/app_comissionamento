@@ -2153,7 +2153,7 @@ export default function Comissoes() {
       monthValue: (progress.current?.valor_comissao || 0) + goalsCommission,
       monthValueLabel: "Comissão normal prevista",
       color: "#16A34A",
-    };
+    }; 
   }, [
     userColab,
     campaignDailyMetrics,

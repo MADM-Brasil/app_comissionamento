@@ -279,6 +279,22 @@ function getDailyChartDateRangeUTC(period: string, currentStart: string, current
   return { start: currentStart, end: currentEnd };
 }
 
+// Semana exibida no gráfico "Performance semanal", conforme o filtro de período:
+// Mês -> semana atual | Semana -> semana filtrada | Hoje/Dia -> semana daquele dia
+// Período manual -> 7 dias a partir da data início
+function getPerformanceWeekRangeUTC(period: string, currentStart?: string | null): { start: string; end: string } {
+  const p = (period || '').toLowerCase();
+  const isMonth = p === 'mês' || p === 'mes' || p === 'mensal';
+  const startDate = currentStart ? parseUTCDate(String(currentStart)) : new Date(NaN);
+  if (isMonth || isNaN(startDate.getTime())) return getCurrentWeekDatesUTC();
+  const isWeekOrDay = p === 'semana' || p === 'semanal' || p === 'hoje' || p === 'dia' || p === 'diario';
+  const first = isWeekOrDay ? getUTCMonday(startDate) : new Date(startDate);
+  first.setUTCHours(0, 0, 0, 0);
+  const last = new Date(first);
+  last.setUTCDate(first.getUTCDate() + 6);
+  return { start: formatUTCDate(first), end: formatUTCDate(last) };
+}
+
 function isWeekdayUTC(dateStr: string): boolean {
   const date = parseUTCDate(dateStr);
   if (isNaN(date.getTime())) return false;
@@ -609,13 +625,22 @@ export default function Home() {
     setRankingLoading(true);
     try {
       const collabs = await fetchCollaborators();
-      if (!collabs || collabs.length === 0) { setAllCollaborators([]); setMetricsData({}); setRankingLoading(false); return; }
+      if (!collabs || collabs.length === 0) { console.warn('[Home] ranking: fetchCollaborators retornou vazio'); setAllCollaborators([]); setMetricsData({}); setRankingLoading(false); return; }
       const endInclusive = new Date(currentEndDate + "T23:59:59");
       const endExclusive = new Date(endInclusive); endExclusive.setDate(endExclusive.getDate() + 1);
       const endParam = endExclusive.toISOString().slice(0, 10);
       const params = { start: currentStartDate, end: endParam };
+      const safeFetch = async (label: string, fn: () => Promise<any>): Promise<any[]> => {
+        try { const r = await fn(); return Array.isArray(r) ? r : []; }
+        catch (e: any) { console.warn(`[Home] ranking: falha ao buscar ${label}:`, e?.message || e); return []; }
+      };
       const [emitidos, assinados, protocolados, ganhos, perdidos] = await Promise.all([
-        fetchEmitidos(params), fetchAssinados(params), fetchProtocolados(params), fetchGanhos(params), fetchPerdidos(params),
+        // Cada métrica falha isoladamente: um endpoint com erro não zera o ranking inteiro
+        safeFetch('emitidos', () => fetchEmitidos(params)),
+        safeFetch('assinados', () => fetchAssinados(params)),
+        safeFetch('protocolados', () => fetchProtocolados(params)),
+        safeFetch('ganhos', () => fetchGanhos(params)),
+        safeFetch('perdidos', () => fetchPerdidos(params)),
       ]);
       const metricsMap: Record<string, { emitidos: number; assinados: number; protocolados: number; ganhos: number; perdidos: number }> = {};
       const aggregate = (data: any[], key: keyof typeof metricsMap[string]) => {
@@ -1000,7 +1025,7 @@ export default function Home() {
     const { equipeApi, colaboradorApi, colaboradorIdApi } = getChartFilterParams();
     const fetchWeeklyDetailed = async () => {
       try {
-        const { start, end } = getCurrentWeekDatesUTC();
+        const { start, end } = getPerformanceWeekRangeUTC(period, currentStartDate);
         const produtoApi = filters.produto === "Todos" ? undefined : filters.produto;
 
         const [leadsRaw, assinadosRaw, ganhosRaw] = await Promise.all([
@@ -1020,7 +1045,10 @@ export default function Home() {
         const assinadosData = filterByUnitIfNeeded(assinadosRaw || []);
         const ganhosData = filterByUnitIfNeeded(ganhosRaw || []);
 
-        const weekdays = ['Seg','Ter','Qua','Qui','Sex'];
+        // Dias úteis na ordem da semana exibida (pode começar em qualquer dia no período manual)
+        const dayNames = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+        const weekdays: string[] = [];
+        { const d0 = parseUTCDate(start); for (let i = 0; i < 7; i++) { const d = new Date(d0); d.setUTCDate(d0.getUTCDate() + i); const wd = d.getUTCDay(); if (wd !== 0 && wd !== 6) weekdays.push(dayNames[wd]); } }
         const leadsMap = new Map<string, number>(), assinadosMap = new Map<string, number>(), ganhosMap = new Map<string, number>(), dateMap = new Map<string, string>();
 
         const aggregate = (data: any[], map: Map<string, number>, useLeadsTotal = false) => {
@@ -1057,7 +1085,7 @@ export default function Home() {
     };
     fetchWeeklyDetailed();
     return () => { cancelled = true; };
-  }, [isSpecialGroup, filters, getChartFilterParams, filterByUnitIfNeeded]);
+  }, [isSpecialGroup, period, currentStartDate, filters, getChartFilterParams, filterByUnitIfNeeded]);
 
   // ============================================================
   // GRÁFICO: Produção Diária
