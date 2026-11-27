@@ -285,6 +285,11 @@ class AccessControl {
     ) {
       return this.LEVELS.ASSESSOR;
     }
+    // Supervisores em FULL_ACCESS têm as páginas liberadas
+    // para visualização como no nível COORDENADOR.
+    if (effectiveLevel === this.LEVELS.SUPERVISAO) {
+      return this.LEVELS.COORDENADOR;
+    }
   }
 
   return effectiveLevel;
