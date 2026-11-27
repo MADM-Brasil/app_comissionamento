@@ -400,6 +400,9 @@ export function getFunctionalAccessLevel(user?: User | null): Level {
     ) {
       return LEVELS.ASSESSOR;
     }
+    if (effectiveLevel === LEVELS.SUPERVISAO) {
+      return LEVELS.COORDENADOR;
+    }
   }
 
   return effectiveLevel;
